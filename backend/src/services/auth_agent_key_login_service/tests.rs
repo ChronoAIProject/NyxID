@@ -141,7 +141,16 @@ async fn approve(
     ip: Option<&str>,
 ) -> AppResult<()> {
     super::approve(
-        db, encryption, hmac_key, actor, user_code, selection, expires_at, ip, None,
+        db,
+        encryption,
+        hmac_key,
+        actor,
+        user_code,
+        selection,
+        expires_at,
+        ip,
+        None,
+        crate::services::session_authority::DerivedMfaAuthority::new(false, false),
     )
     .await
 }

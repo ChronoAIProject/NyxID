@@ -30,6 +30,7 @@ async fn exercise_identity(
         .unwrap();
     let actor_id = uuid::Uuid::new_v4().to_string();
     let mut actor = test_user(&actor_id, UserType::Person);
+    actor.profile_config.security.skip_mfa_for_approved_sign_ins = false;
     let password = format!("Test-1!{}", uuid::Uuid::new_v4());
     actor.password_hash = Some(crate::crypto::password::hash_password(&password).unwrap());
     let email = actor.email.clone();

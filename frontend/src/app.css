@@ -1089,3 +1089,42 @@ html.theme-dark .assistant-halo--visible {
     transition: none;
   }
 }
+
+/* Only the edge hiding more content fades. A short eased top fade avoids
+   dimming the first readable lines; masks inherit every surface/theme color. */
+[data-scroll-fade],
+[data-chat-index-rail] {
+  --scroll-fade-top: 0px;
+  --scroll-fade-bottom: 0px;
+  --scroll-fade-left: 0px;
+  --scroll-fade-right: 0px;
+  mask-image:
+    linear-gradient(to bottom,
+      transparent, rgb(0 0 0 / 65%) calc(var(--scroll-fade-top) * .4),
+      black var(--scroll-fade-top),
+      black calc(100% - var(--scroll-fade-bottom)), transparent),
+    linear-gradient(to right,
+      transparent, black var(--scroll-fade-left),
+      black calc(100% - var(--scroll-fade-right)), transparent);
+  mask-composite: intersect;
+}
+[data-scroll-edges~="top"] { --scroll-fade-top: 20px; }
+[data-scroll-edges~="bottom"] { --scroll-fade-bottom: 28px; }
+[data-scroll-edges~="left"] { --scroll-fade-left: 20px; }
+[data-scroll-edges~="right"] { --scroll-fade-right: 20px; }
+
+[data-chat-index-rail] {
+  mask-image: linear-gradient(to bottom,
+    transparent, rgb(0 0 0 / 20%) calc(var(--scroll-fade-top) * .4),
+    black var(--scroll-fade-top),
+    black calc(100% - var(--scroll-fade-bottom)),
+    rgb(0 0 0 / 20%) calc(100% - var(--scroll-fade-bottom) * .4), transparent);
+}
+[data-chat-index-rail][data-scroll-edges~="top"] { --scroll-fade-top: min(64px, 20%); }
+[data-chat-index-rail][data-scroll-edges~="bottom"] { --scroll-fade-bottom: min(64px, 20%); }
+
+@media (min-width: 768px) {
+  [data-chat-content-layout]:has([data-chat-index-rail]) {
+    --chat-index-width: calc(var(--spacing) * 7);
+  }
+}

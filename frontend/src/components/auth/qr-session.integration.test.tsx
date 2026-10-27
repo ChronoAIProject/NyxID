@@ -31,6 +31,7 @@ const profile = {
   email_verified: true,
 };
 beforeEach(() => {
+  window.history.replaceState({}, "", "/login");
   localStorage.clear();
   useConsentStore.getState().bindAccount(null);
   useAuthStore.setState({
@@ -79,6 +80,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  window.history.replaceState({}, "", "/");
   vi.unstubAllGlobals();
   useAuthStore.setState(initial);
 });
@@ -163,6 +165,102 @@ it("still renders the TOTP gate for password authentication", async () => {
     await screen.findByRole("heading", { name: "MFA verification" }),
   ).toBeInTheDocument();
   expect(screen.queryByText("All sign-in options")).not.toBeInTheDocument();
+});
+
+async function renderLoginChallenge(cookieChallenge: boolean, returnTo?: string) {
+  const params = new URLSearchParams();
+  if (cookieChallenge) params.set("mfa", "required");
+  if (returnTo) params.set("return_to", returnTo);
+  window.history.replaceState({}, "", `/login${params.size ? `?${params}` : ""}`);
+  if (!cookieChallenge) {
+    await useAuthStore.getState().login("qr@example.com", "password");
+  }
+  const root = createRootRoute();
+  const login = createRoute({
+    path: "/login",
+    getParentRoute: () => root,
+    component: LoginPage,
+  });
+  const assistant = createRoute({
+    path: "/assistant",
+    getParentRoute: () => root,
+    component: () => <div>Authenticated destination</div>,
+  });
+  const router = createRouter({
+    routeTree: root.addChildren([login, assistant]),
+    history: createMemoryHistory({ initialEntries: ["/login"] }),
+  });
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  await act(() => router.load());
+  await screen.findByRole("heading", { name: "MFA verification" });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Continue with the NyxID app" }),
+  );
+  await screen.findByText("ABCD-EFGH");
+  return router;
+}
+
+it.each([false, true])(
+  "offers QR from the real login MFA screen and completes app approval (cookie challenge: %s)",
+  async (cookieChallenge) => {
+    const router = await renderLoginChallenge(cookieChallenge);
+    expect(screen.queryByRole("heading", { name: "MFA verification" })).not.toBeInTheDocument();
+    await waitFor(() => expect(callsTo("/users/me")).toHaveLength(1), { timeout: 3000 });
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    expect(router.state.location.pathname).toBe("/login");
+    if (!cookieChallenge) {
+      expect(useAuthStore.getState().mfaRequired).toBe(true);
+    }
+    await act(async () => {
+      completeProfile(new Response(JSON.stringify(profile)));
+    });
+    await screen.findByText("Authenticated destination");
+    expect(router.state.location.pathname).toBe("/assistant");
+    expect(useAuthStore.getState()).toMatchObject({
+      isAuthenticated: true,
+      mfaRequired: false,
+      mfaToken: null,
+    });
+    expect(callsTo("/auth/device/poll-web")).toHaveLength(1);
+    expect(callsTo("/auth/mfa/verify")).toHaveLength(0);
+  },
+);
+
+it.each([false, true])(
+  "returns from QR to the existing MFA challenge without clearing it (cookie challenge: %s)",
+  async (cookieChallenge) => {
+    await renderLoginChallenge(cookieChallenge);
+    await userEvent.click(screen.getByRole("button", { name: "Back to all sign-in options" }));
+    expect(screen.getByRole("heading", { name: "MFA verification" })).toBeInTheDocument();
+    expect(screen.queryByText("ABCD-EFGH")).not.toBeInTheDocument();
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    if (!cookieChallenge) {
+      expect(useAuthStore.getState()).toMatchObject({
+        mfaRequired: true,
+        mfaToken: "pending-password-mfa",
+      });
+    }
+    expect(callsTo("/auth/mfa/cancel")).toHaveLength(0);
+  },
+);
+
+it("preserves the trusted return URL when switching from social MFA to QR", async () => {
+  const returnTo = `${window.location.origin}/oauth/authorize?state=resume`;
+  const assign = vi.spyOn(window.location, "assign").mockImplementation(() => undefined);
+  try {
+    await renderLoginChallenge(true, returnTo);
+    await waitFor(() => expect(callsTo("/users/me")).toHaveLength(1), { timeout: 3000 });
+    await act(async () => {
+      completeProfile(new Response(JSON.stringify(profile)));
+    });
+    await waitFor(() => expect(assign).toHaveBeenCalledWith(returnTo));
+  } finally {
+    assign.mockRestore();
+  }
 });
 
 async function renderQr() {

@@ -236,7 +236,7 @@ export async function openLatestToolActivity(page: Page): Promise<void> {
  */
 export function conversationRow(page: Page, title: string) {
   return page
-    .getByRole("navigation")
+    .getByRole("navigation", { name: "Agents and conversations" })
     .getByRole("button", { name: title, exact: true });
 }
 

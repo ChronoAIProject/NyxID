@@ -3,6 +3,7 @@ import { Check, RotateCcw, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ChatWidthControl, ComposerHeightControl } from "@/components/assistant/chat-width-control";
 import { useResolvedTheme } from "@/hooks/use-theme";
 import {
   CONTRAST_CHECKS,
@@ -425,6 +426,22 @@ export function DisplaySettings() {
               Reset display settings
             </Button>
           </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Chat layout</CardTitle>
+          <CardDescription>
+            Applies to all chats in this browser, including NyxBot, specialists, and groups. Dragging a chat&apos;s resize handles updates these settings too.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <SettingRow title="Chat content width" description="Maximum width for messages and the composer. Smaller screens fit automatically.">
+            <ChatWidthControl />
+          </SettingRow>
+          <SettingRow title="Maximum composer height" description="How tall the text area can grow before scrolling. Short drafts stay compact. The composer always fits below the header and within the visible screen.">
+            <ComposerHeightControl />
+          </SettingRow>
         </CardContent>
       </Card>
       <SidebarSettings />

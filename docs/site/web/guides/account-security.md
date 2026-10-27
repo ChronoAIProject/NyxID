@@ -37,7 +37,7 @@ without this second step. Email/password sign-in on mobile still requires MFA. C
 unavailable; each recovery code is single-use.
 
 Devices signed in before the MFA enforcement rollout keep working until their
-normal session expiry or revocation. A new sign-in on another device still needs
+normal session expiry or revocation. Unless you enable the app sign-in preference below, a new sign-in on another device still needs
 MFA: when approving a device, issuing a login code, or connecting the CLI, an
 older session may ask you to **Verify this session**. Enter your authenticator
 or a single-use recovery code; NyxID then retries the action without signing
@@ -48,19 +48,43 @@ for your account; otherwise it shows the verification requirement.
 
 Choose **Continue with the NyxID app** on the login page, then scan the QR code
 with a phone that is already signed in to NyxID and approve the request.
-An older or mobile-exempt session may need **Verify this session** before it can
-approve. The approved browser session inherits that verified authority, so
-NyxID does not ask for a second authenticator code after approval. Scanning the QR code alone
-does not approve a sign-in.
+This option is also available on the MFA verification screen after password or
+social sign-in. Returning from the QR panel keeps your existing MFA challenge
+available if you prefer to enter a code.
+**Skip MFA for NyxID app sign-ins** is on by default. An already signed-in phone or
+browser can approve QR or typed sign-in codes without an extra authenticator
+prompt. With the setting off, an older or mobile-exempt session may need
+**Verify this session** first. A verified approval already carries its MFA
+verification to the receiving browser. Scanning alone never approves a sign-in.
 
 If approval succeeds but your account cannot load, choose **Retry loading
 account**. NyxID retries the account lookup using the delivered browser session;
 it does not redeem the QR code a second time. Sign-in completes after that lookup
 succeeds.
 
-**Settings → Security → Two-Factor Authentication** shows **Skip MFA for NyxID
-app sign-ins** as **Always enabled**. This also applies when the app verifies
-your identity while you approve another device's login request.
+Open **Settings → Security → Two-Factor Authentication** to change **Skip MFA
+for NyxID app sign-ins**. Turn it off to require MFA when an older or mobile
+session approves a QR or typed sign-in code. Turning it back on may ask you to
+verify the current session when MFA is enabled. Accounts without MFA can save
+either choice; it takes effect when two-factor authentication is on. The saved
+preference covers browser QR login, device account and Agent Key login, and app
+verification while approving another device. QR scans and typed request codes
+use the same policy.
+
+Anyone with access to your signed-in app or browser can use this preference to
+approve another sign-in without TOTP, including phone sessions created during
+the mobile MFA rollout. Review each request and approve only codes shown on your
+own screen. With mobile MFA off, someone holding your social first factor can
+sign in to the mobile app and use it to approve web QR login by default. Turning
+this switch off closes that path. Password/social web sign-in and ordinary
+one-time login-code creation still use their usual MFA requirements.
+
+Turning the switch off requires no extra MFA and blocks outstanding approvals
+that relied on the exception. Turning it back on cannot revive those approvals.
+Completed sessions remain signed in until their expiry or revocation; use
+**Sign out other sessions** to remove them. Disabling two-factor authentication
+preserves this preference and invalidates pending bypass approvals. Older servers
+show a disabled switch until updated.
 
 ### Disable MFA
 

@@ -261,9 +261,11 @@ policies, provider permissions and service availability still apply at execution
    configured Google, GitHub and Apple providers, the NyxID app, and email/password
    when enabled. Password and its configured NyxID MFA verification stay inline.
    Social providers return to this request with tab-local hints and handle their
-   own authentication challenges, matching ordinary social login. They do not
-   trigger an additional NyxID authenticator challenge. The app verifies identity
-   through an existing first-party human session without another MFA prompt.
+   own authentication challenges, matching ordinary social login. Password and
+   social identity require NyxID MFA when enrolled. App verification uses an
+   existing first-party human session: verified parents retain their assurance;
+   unverified legacy/mobile-exempt parents may skip the extra prompt only with
+   the account's approved-sign-in preference enabled.
    The original request expiry keeps running throughout verification.
 3. **Only for this request** creates an opaque, HttpOnly browser proof accepted
    exclusively by `/api/v1/auth/approval`. It is bound to the actual request ID,
@@ -423,3 +425,42 @@ credential identity and scopes remain equal.
 - Unchanged installed scanner: `mobile/src/features/auth/__fixtures__/installed-deviceUserCode.ts.txt`
   from `78cb26b3^`, exercised by `installedScanner.test.ts`. This proves source/parser
   compatibility, not physical-iPhone behavior.
+
+## MFA skip for app-approved sign-ins
+
+`PUT /api/v1/users/me/security` accepts only
+`{"skip_mfa_for_approved_sign_ins": true|false}` from a first-party human.
+`GET /users/me` exposes that boolean in `profile_config.security`. Absent policy
+is on, including accounts created before this preference existed. Only an explicit
+false disables it. Turning it back on for an MFA-enabled account requires a live
+verified session; disabling requires no step-up. Accounts without MFA can save
+either choice. Disabling MFA preserves the preference and rotates its revision.
+
+This covers legacy and v2 account QR login, v2 Agent Key grants and bound browser
+handoffs, request-only/persistent app identity, and dedicated Agent Key login.
+The server cannot distinguish a QR scan from a manually typed request code.
+Approval remains explicit. Sid-less bearers cannot use the exception. Password
+and social identity, ordinary login-code issuance/redemption and unrelated
+credential derivation stay strict.
+
+Skipped factors remain `mfa_assured: false`. Delivered account sessions carry
+`mfa_exemption: approved_sign_in_policy`; they authenticate and refresh while
+retaining their actual assurance. Exempt grants/proofs carry a server-authored
+`mfa_policy_revision`. Every exempt approval and final delivery writes the live
+user policy in the same transaction as its claim. Turning off rotates the
+revision, so neither concurrent delivery nor off/on can revive old authority.
+Denied undelivered sessions/refresh tokens and child credentials are revoked;
+delivery ciphertext is cleared and cleanup is audited. Completed sessions retain
+normal expiry/revocation; turning off prevents further exempt derivation.
+
+Missing revisions use a reserved nil UUID generation without a migration. The
+transaction fence accepts an absent boolean as on and always rejects explicit
+false. The first preference change or MFA-disable revision invalidates nil-stamped
+grants. Audits distinguish default policy use with `policy_default: true`.
+
+Use a coordinated traffic cutover to a fully upgraded backend fleet before
+publishing the frontend. Default-on approvals immediately write the new exemption;
+old replicas cannot deserialize it and may return 500 during a mixed-fleet rollout. Before a backend rollback,
+revoke every session matching `mfa_exemption: "approved_sign_in_policy"` and drain
+outstanding exempt grants/proofs. Old readers ignore grant revision fields and
+fail closed for unverified approval authority.

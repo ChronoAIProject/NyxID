@@ -39,7 +39,7 @@ const unexpectedRequests: string[] = [];
 beforeEach(() => {
   Object.assign(securityUser, { mfa_enabled: false, social_provider: null, has_password: true });
   mockDisable.mockReset().mockResolvedValue(undefined);
-  useAuthStore.setState({ user: { id: "owner", email: "reader@example.com" } as User });
+  useAuthStore.setState({ user: { id: "owner", email: "reader@example.com", mfa_enabled: true, profile_config: { security: { skip_mfa_for_approved_sign_ins: false }, onboarding: { ai_services_completed_at: null } } } as User });
   unexpectedRequests.length = 0;
   transport.mockReset().mockImplementation(async (url, options) => {
     const headers = { "Content-Type": "application/json" };
@@ -148,24 +148,122 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(screen.getByRole("button", { name: "Change Password" })).toBeDisabled();
     });
 
-    it.each([false, true])(
-      "shows QR MFA verification as automatic when TOTP is %s",
-      async (mfa_enabled) => {
-        useAuthStore.setState({
-          user: { ...useAuthStore.getState().user!, mfa_enabled },
-        });
-        await open(route, "security");
-        expect(
-          screen.getByText("Skip MFA for NyxID app sign-ins"),
-        ).toBeInTheDocument();
-        expect(screen.getByText("Always enabled")).toBeInTheDocument();
-        expect(
-          screen.getByRole("switch", {
-            name: "Toggle two-factor authentication",
-          }),
-        ).toHaveAttribute("aria-checked", String(mfa_enabled));
-      },
-    );
+    it("saves the QR MFA preference when TOTP is enabled", async () => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
+        ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
+        : original(url, options));
+      await open(route, "security");
+      const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      await userEvent.click(toggle);
+      expect(screen.getByRole("dialog")).toHaveTextContent("Anyone with access to your signed-in NyxID app");
+      await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(transport.mock.calls.some(([url]) => url === "/api/v1/users/me/security")).toBe(false);
+      await userEvent.click(toggle);
+      await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+      expect(transport).toHaveBeenCalledWith("/api/v1/users/me/security", expect.objectContaining({
+        method: "PUT", body: JSON.stringify({ skip_mfa_for_approved_sign_ins: true }),
+      }));
+      await userEvent.click(toggle);
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("shows the resolved default on and saves an explicit opt-out", async () => {
+      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, profile_config: { security: { skip_mfa_for_approved_sign_ins: true } } } as User });
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
+        ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
+        : original(url, options));
+      await open(route, "security");
+      const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
+      expect(toggle).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByText(/Enabled by default/)).toBeInTheDocument();
+      await userEvent.click(toggle);
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+      expect(transport).toHaveBeenCalledWith("/api/v1/users/me/security", expect.objectContaining({
+        method: "PUT", body: JSON.stringify({ skip_mfa_for_approved_sign_ins: false }),
+      }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("saves either choice without two-factor authentication", async () => {
+      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, mfa_enabled: false } });
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
+        ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
+        : original(url, options));
+      await open(route, "security");
+      const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
+      expect(toggle).toBeEnabled();
+      expect(screen.getByText(/Takes effect when two-factor authentication is on/)).toBeInTheDocument();
+      await userEvent.click(toggle);
+      await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+      await userEvent.click(toggle);
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+      expect(screen.queryByRole("region", { name: "Verify this session" })).not.toBeInTheDocument();
+    });
+
+    it("keeps the saved value and shows a failed save", async () => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
+        ? new Response(JSON.stringify({ error: "unavailable", error_code: 1000, message: "Try again later" }), { status: 503 })
+        : original(url, options));
+      await open(route, "security");
+      await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
+      await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Try again later");
+      expect(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" })).toHaveAttribute("aria-checked", "false");
+    });
+
+    it("verifies the session once and retries enabling", async () => {
+      let attempts = 0;
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => {
+        if (url === "/api/v1/users/me/security") {
+          attempts += 1;
+          if (attempts === 1) return new Response(JSON.stringify({ error: "mfa_step_up_required", error_code: 2003, message: "Verify this session to enable" }), { status: 403 });
+          return new Response(String(options?.body), { headers: { "Content-Type": "application/json" } });
+        }
+        if (url === "/api/v1/auth/mfa/step-up") return new Response("{}");
+        return original(url, options);
+      });
+      await open(route, "security");
+      await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
+      await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
+      const verify = await screen.findByRole("region", { name: "Verify this session" });
+      await userEvent.type(within(verify).getByRole("textbox"), "123456");
+      await userEvent.click(within(verify).getByRole("button", { name: "Verify & continue" }));
+      await waitFor(() => expect(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" })).toHaveAttribute("aria-checked", "true"));
+      expect(attempts).toBe(2);
+    });
+
+    it("disables the unsupported setting for older servers", async () => {
+      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, profile_config: undefined } });
+      await open(route, "security");
+      expect(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" })).toBeDisabled();
+      expect(screen.queryByText("Always enabled")).not.toBeInTheDocument();
+    });
+
+    it("does not apply a pending save to a replacement account", async () => {
+      let finish!: (response: Response) => void;
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
+        ? new Promise<Response>((resolve) => { finish = resolve; })
+        : original(url, options));
+      await open(route, "security");
+      await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
+      await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
+      await waitFor(() => expect(finish).toBeDefined());
+      expect(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" })).toBeDisabled();
+      act(() => useAuthStore.setState({ user: { ...useAuthStore.getState().user!, id: "replacement" } }));
+      await act(async () => finish(new Response(JSON.stringify({ skip_mfa_for_approved_sign_ins: true }))));
+      expect(useAuthStore.getState().user?.id).toBe("replacement");
+      expect(useAuthStore.getState().user?.profile_config?.security?.skip_mfa_for_approved_sign_ins).toBe(false);
+    });
 
     it.each([
       { social_provider: null, has_password: false },

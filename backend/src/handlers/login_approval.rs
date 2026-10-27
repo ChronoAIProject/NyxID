@@ -239,7 +239,12 @@ async fn complete_identity(
             return Err(error);
         }
     };
-    if actor.mfa_enabled && !trusted_authentication {
+    if actor.mfa_enabled
+        && !trusted_authentication
+        && app_request
+            .and_then(|r| r.mfa_policy_revision.as_ref())
+            .is_none()
+    {
         if let Some(completion) = completion.take() {
             completion.abort().await?;
         }
@@ -268,7 +273,7 @@ async fn complete_identity(
             trusted_authentication,
             &ip,
             ua.as_deref(),
-            app_request.map(|request| request.id.as_str()),
+            app_request,
             transaction,
         )
         .await?;
@@ -295,6 +300,18 @@ async fn complete_identity(
             if let Some(mut transaction) = ordinary_transaction {
                 transaction.abort_transaction().await?;
             }
+            if matches!(error, AppError::AuthDeviceCodeDenied)
+                && let Some(request) = app_request
+                && let Some(revision) = request.mfa_policy_revision.as_deref()
+            {
+                crate::services::approved_sign_in_policy::deny_undelivered(
+                    &state.db,
+                    crate::models::auth_device_code::COLLECTION_NAME,
+                    &request.id,
+                    revision,
+                )
+                .await?;
+            }
             return Err(error);
         }
     };
@@ -311,7 +328,8 @@ async fn complete_identity(
         "login_request_identity_verified".into(),
         Some(
             serde_json::json!({"request_id": row.request_id, "keep_signed_in": row.keep_signed_in,
-                "method": method, "mfa_verified": row.mfa_verified}),
+                "method": method, "mfa_verified": row.mfa_verified, "mfa_policy": row.mfa_policy_revision.as_ref().map(|_| "approved_sign_in"),
+                "policy_default": row.mfa_policy_revision.as_deref() == Some(crate::services::approved_sign_in_policy::DEFAULT_REVISION)}),
         ),
         Some(ip),
         ua,
@@ -528,10 +546,16 @@ pub async fn approve(
         return Err(service::invalid());
     }
     let actor = service::user(&state.db, &row).await?;
-    let authority = crate::services::session_authority::DerivedMfaAuthority::new(
+    let mut authority = crate::services::session_authority::DerivedMfaAuthority::new(
         actor.mfa_enabled,
         row.mfa_verified,
     );
+    authority.app_policy_revision = row
+        .mfa_policy_revision
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| service::invalid())?;
     let ip = limit(&state, &headers, addr, Some(&actor.id)).await?;
     let ua = extract_user_agent(&headers);
     let expiry = body
@@ -557,6 +581,7 @@ pub async fn approve(
                 expiry,
                 Some(&ip),
                 ua.as_deref(),
+                authority,
             )
             .await
         }

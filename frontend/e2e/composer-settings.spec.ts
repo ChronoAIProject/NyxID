@@ -296,7 +296,8 @@ for (const width of [1280, 320]) {
     await expect(trigger).toHaveText("Auto");
     await trigger.click();
     const menu = page.getByRole("menu", { name: "Thinking and permissions" });
-    await expect(menu.getByRole("menuitem")).toHaveCount(1);
+    await expect(menu.getByRole("menuitem")).toHaveCount(2);
+    await expect(menu.getByRole("menuitem", { name: "Voice settings", exact: true })).toBeVisible();
     await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toHaveCount(0);
     await expect(
       menu.getByRole("menuitem", { name: /^Permissions/ }),

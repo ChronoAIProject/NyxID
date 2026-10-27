@@ -446,7 +446,6 @@ pub async fn approve(
 ) -> AppResult<PrivateJson<DecisionResponse>> {
     let result = async {
         let ip = decision_limit(&state, &user, &headers, addr, "approve").await?;
-        crate::services::session_authority::require_derived_mfa(user.derived_mfa_authority())?;
         let expiry = body
             .credential_expires_at
             .as_deref()
@@ -462,6 +461,7 @@ pub async fn approve(
             expiry,
             Some(&ip),
             user_agent(&headers).as_deref(),
+            user.derived_mfa_authority(),
         )
         .await?;
         Ok(private_json(DecisionResponse { ok: true }))

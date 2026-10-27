@@ -399,10 +399,12 @@ function GroupTranscript({
     <div
       ref={scrollRef}
       onScroll={handleScroll}
+      data-chat-transcript=""
+      data-scroll-fade=""
       className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6"
     >
       <div
-        className="mx-auto flex min-h-full w-full max-w-[758px] flex-col gap-4 pt-4"
+        className="mx-auto flex min-h-full w-full max-w-[var(--chat-content-width,758px)] flex-col gap-4 pt-4"
         style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
       >
         {hasOlder ? (
@@ -498,8 +500,8 @@ function GroupHeader({
   );
   const working = group.working_agent_ids.length;
   return (
-    <div className="shrink-0 px-4 pt-3 sm:px-6">
-      <div className="mx-auto w-full max-w-[758px] space-y-1.5">
+    <div className="shrink-0 px-4 pt-3 sm:px-6" style={{ width: "calc(100% - var(--assistant-content-inset, 0px))" }}>
+      <div className="mx-auto w-full max-w-[var(--chat-content-width,758px)] space-y-1.5">
         <div className="flex items-center gap-3">
           <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">
             {group.name}
@@ -813,6 +815,7 @@ export function NyxAgentGroupPage({
 
   return (
     <AssistantShell
+      resizableContent
       title={group?.name ?? "Group"}
       headerActions={<NyxBotSettingsButton />}
       sidebar={

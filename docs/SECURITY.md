@@ -678,11 +678,46 @@ Social challenge creation retains the live active-person/MFA account fence and d
 
 Completed sessions distinguish verified, explicit unverified, legacy (absent/null assurance), and mobile-exempt authority through shared session policy. Cookie/bearer auth, first-party refresh and MCP fallback accept legacy and mobile-exempt devices until expiry/revocation. Only explicit `mfa_assured: false` without an exemption is rejected for an MFA account; rejection atomically revokes that session, refreshes and MCP fallback and audits once. Every new session serializes explicit assurance. Legacy sessions retain their fixed 30-day expiry. Sid-less first-party JWTs were issued only by legacy code and remain usable for their token lifetime. On first refresh of a sid-less nil-client token, a transaction binds the active token to one explicitly classified `legacy_migration` session with a fixed 30-day lifetime; rotation and retries reuse it. This ends the rolling grandfathered chain and brings revocation/sign-out-others under ordinary session controls. Parent-less legacy MCP fallback for MFA accounts expires at `created_at + SESSION_TTL_SECS` (30 days), even when its idle expiry has renewed; rejection removes the row, slots and notifications with one audit. Non-MFA MCP fallback retains its historical lifetime.
 
-Third-party OAuth authorize/consent is SSO from existing IdP authority and accepts legacy/mobile-exempt sessions. Account management, such as API-key management, is also not a NyxID sign-in derivation. A new NyxID sign-in derived from an existing device requires verified authority for an MFA account.
+Third-party OAuth authorize/consent is SSO from existing IdP authority and accepts legacy/mobile-exempt sessions. Account management, such as API-key management, is also not a NyxID sign-in derivation. A new NyxID sign-in derived from an existing device requires verified authority for an MFA account unless the scoped app-approved sign-in exception below is on.
 
-Existing-device exemptions never authorize a new device for MFA accounts. Device approvals (account and Agent Key), poll-web delivery, login codes/handoffs, CLI tokens, keep-signed-in approvals and app identity approvals require verified authority. Authentication carries the already-loaded live account MFA policy and exact session assurance into a shared pure derivation guard, preserving the user-read count (including MCP). Current approvers receive HTTP 403 / `2003 mfa_step_up_required`, preserving their session. `POST /api/v1/auth/mfa/step-up` accepts `{ "code": "..." }` from a first-party human cookie or bearer with `sid`; API keys, service accounts, delegated/relay and OAuth-client tokens receive the standard denial. The login verifier supplies its shared per-account 10-attempt/300-second rate budget, TOTP replay protection, recovery consumption and account-generation fence. Session upgrade, exemption removal and metadata-only `mfa_step_up` audit commit in that transaction. Wrong/replayed codes return 400; accounts without MFA return 400. Web prompts retry the original action after success. Mobile shows that prompt only when `/users/me` capabilities include the flag; otherwise it directs the user to the NyxID website to verify and approve or create a login code. Request/account changes discard pending retries. No prompt auto-approves a sign-in.
+Existing-device exemptions by themselves never authorize a new device for MFA accounts. The app-approved sign-in preference below can permit explicit QR/manual-code approvals and their bound deliveries. Ordinary login-code minting, account code redemption and CLI token derivation still require verified authority. Authentication carries the already-loaded live account MFA policy and exact session assurance into a shared pure derivation guard, preserving the user-read count (including MCP). Current approvers receive HTTP 403 / `2003 mfa_step_up_required`, preserving their session. `POST /api/v1/auth/mfa/step-up` accepts `{ "code": "..." }` from a first-party human cookie or bearer with `sid`; API keys, service accounts, delegated/relay and OAuth-client tokens receive the standard denial. The login verifier supplies its shared per-account 10-attempt/300-second rate budget, TOTP replay protection, recovery consumption and account-generation fence. Session upgrade, exemption removal and metadata-only `mfa_step_up` audit commit in that transaction. Wrong/replayed codes return 400; accounts without MFA return 400. Web prompts retry the original action after success. Mobile shows that prompt only when `/users/me` capabilities include the flag; otherwise it directs the user to the NyxID website to verify and approve or create a login code. Request/account changes discard pending retries. No prompt auto-approves a sign-in.
 
 Rollout requires no environment variables or startup cutoff. The flag defaults off in production and tests. Existing devices keep working until normal expiry; enrollment still verifies the current identified session and transactionally signs out every other session/refresh/MCP fallback. #1970 is unreleased and is not part of v0.73.0. Production replicas at v0.73.0 or earlier never enforced session assurance, so no production replica rejects legacy sessions during this upgrade. Sessions issued by v0.73.0 replicas during a mixed rollout, including MFA-less web social sign-ins, lack assurance and upgraded replicas treat them as existing devices. Rolling back to v0.73.0 removes social MFA enforcement. Only environments that ran unreleased #1970 builds have rejecting replicas to drain. Deploy all replicas before enabling mobile MFA or deploying the step-up web UI. In-flight device codes, login codes and login approvals written by old replicas without assurance continue to fail closed; retry those sign-ins. Device delivery and browser handoff creation revalidate the persisted approval proof independently of whether its prepared session is legacy. This rollout does not backfill assurance or upgrade a legacy record into verified authority.
+
+### App-approved sign-in MFA preference
+
+The per-person **Skip MFA for NyxID app sign-ins** setting defaults on, including
+accounts without a stored preference. Only an explicit off disables it. Turning
+it back on with MFA enrolled requires a verified, identified first-party session;
+without MFA either value may be saved. A
+signed-in human can then explicitly approve QR or typed sign-in requests without
+additional TOTP from a legacy/mobile-exempt parent. Review only codes shown on
+your own screen: possession of that phone/browser session is sufficient to
+approve another login while the setting is on. API keys, service accounts,
+delegated clients and sid-less bearers cannot invoke the exception.
+
+The exception is scoped to device/Agent Key sign-in approval and app identity
+verification. Ordinary password/social MFA and standalone login-code issuance
+remain strict. Sessions preserve real MFA evidence: policy-exempt sessions have
+`mfa_assured: false` and an explicit `approved_sign_in_policy` exemption. Every
+exempt grant/proof binds the policy revision and approval/final delivery write
+fences commit with claims. Disabling blocks pending exempt grants even after
+re-enabling; completed sessions keep their fixed expiry and can be revoked.
+MFA disable preserves the choice and rotates the revision to invalidate pending
+proofs. Changes, policy cleanup and default-driven bypass use are audited.
+
+With default-off `auth:mobile-mfa`, a social first factor can establish a
+mobile-exempt session and then approve a web QR sign-in without NyxID TOTP by
+default. Turning this setting off closes that derivation path; password/social
+web login and unrelated credential issuance retain their MFA checks.
+
+Use a coordinated traffic cutover to a fully upgraded backend fleet. Default-on
+approvals write this exemption immediately; old replicas cannot deserialize it
+and may return 500 during a mixed-fleet rollout. Before
+rolling back to an older backend, revoke sessions with
+`mfa_exemption: "approved_sign_in_policy"` and drain pending exempt grants/proofs.
+See [device login](DEVICE_LOGIN_PROTOCOL.md#mfa-skip-for-app-approved-sign-ins).
+
 
 ### Cookie Security
 

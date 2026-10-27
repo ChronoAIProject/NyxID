@@ -4,8 +4,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::{
-    auth_agent_key_login_service as agent, auth_device_service as device, auth_service,
-    token_service,
+    approved_sign_in_policy as app_policy, auth_agent_key_login_service as agent,
+    auth_device_service as device, auth_service, token_service,
 };
 use crate::{
     crypto::token::{constant_time_eq, generate_random_token, hash_token},
@@ -64,6 +64,7 @@ pub async fn begin(
     let (request_id, expires_at) = request_binding(db, key, flow, &code).await?;
     let secret = Zeroizing::new(generate_random_token());
     let row = LoginApproval {
+        mfa_policy_revision: None,
         id: Uuid::new_v4().to_string(),
         browser_hash: hash_token(&secret),
         flow,
@@ -115,7 +116,9 @@ pub async fn user(db: &Database, row: &LoginApproval) -> AppResult<User> {
         .await?
         .ok_or_else(invalid)?;
     auth_service::ensure_person_user(&user)?;
-    if row.verified && !super::session_authority::may_derive(user.mfa_enabled, row.mfa_verified) {
+    if row.verified
+        && !app_policy::permits(&user, row.mfa_verified, row.mfa_policy_revision.as_deref())
+    {
         return Err(invalid());
     }
     Ok(user)
@@ -189,13 +192,23 @@ pub(crate) async fn verify_identity_in_transaction(
     mfa_verified: bool,
     ip: &str,
     user_agent: Option<&str>,
-    app_request_id: Option<&str>,
+    app_request: Option<&AuthDeviceCode>,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<(LoginApproval, Option<token_service::IssuedSession>)> {
-    if let Some(id) = app_request_id {
+    let revision = app_request.and_then(|request| request.mfa_policy_revision.as_deref());
+    app_policy::fence(
+        db,
+        row.user_id.as_deref().ok_or_else(invalid)?,
+        revision,
+        session,
+    )
+    .await?;
+    if let Some(request) = app_request {
+        let id = &request.id;
         let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
                     doc! {"_id": id, "login_approval_id": &row.id, "approved_user_id": &row.user_id,
                         "status": "approved", "approved_session_id": null,
+                        "mfa_policy_revision": revision, "mfa_assured": mfa_verified,
                         "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
                     doc! {"$set": {"status": "delivered", "delivered_at": mongodb::bson::DateTime::now(),
                         "purge_at": mongodb::bson::DateTime::from_chrono(Utc::now() + Duration::days(1))}})
@@ -206,20 +219,20 @@ pub(crate) async fn verify_identity_in_transaction(
     }
     let verified = db.collection::<LoginApproval>(COLLECTION_NAME).find_one_and_update(
                 doc! {"_id": &row.id, "user_id": &row.user_id, "verified": false, "closed": false, "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
-                doc! {"$set": {"verified": true, "mfa_verified": mfa_verified}})
+                doc! {"$set": {"verified": true, "mfa_verified": mfa_verified, "mfa_policy_revision": revision}})
                 .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(invalid)?;
     let browser = if verified.keep_signed_in {
-        Some(
-            token_service::create_session_with_transaction_and_assurance(
-                db,
-                verified.user_id.as_deref().ok_or_else(invalid)?,
-                Some(ip),
-                user_agent,
-                Some(&mut *session),
-                mfa_verified,
-            )
-            .await?,
+        let browser = token_service::create_session_with_transaction_and_mfa_authority(
+            db,
+            verified.user_id.as_deref().ok_or_else(invalid)?,
+            Some(ip),
+            user_agent,
+            Some(&mut *session),
+            mfa_verified,
+            revision.map(|_| crate::models::session::MfaExemption::ApprovedSignInPolicy),
         )
+        .await?;
+        Some(browser)
     } else {
         None
     };
@@ -257,6 +270,8 @@ pub async fn approve_app_identity(
     request: &AuthDeviceCode,
     input: &device::ApproveInput,
     mfa_assured: bool,
+    revision: Option<&str>,
+    authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
     let id = request.login_approval_id.as_deref().ok_or_else(invalid)?;
     let approval = db
@@ -271,23 +286,37 @@ pub async fn approve_app_identity(
         .await?
         .ok_or_else(invalid)?;
     auth_service::ensure_person_user(&actor)?;
-    if !super::session_authority::may_derive(actor.mfa_enabled, mfa_assured) {
+    if !app_policy::permits(&actor, mfa_assured, revision) {
         return Err(AppError::MfaStepUpRequired);
     }
-    let result = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
-        doc! {"_id": &request.id, "status": "pending", "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
-        doc! {"$set": {"status": "approved", "approved_user_id": &actor.id,
-            "approved_at": mongodb::bson::DateTime::now(), "mfa_assured": mfa_assured,
-            "approver_ip_hmac": input.approver_ip.as_deref().map(|ip| device::hmac_hex(key, ip.as_bytes()))}})
-        .await?;
-    if result.modified_count != 1 {
-        return Err(AppError::AuthDeviceCodeAlreadyDelivered);
-    }
+    let context = (
+        db.clone(),
+        request.clone(),
+        actor.id.clone(),
+        revision.map(str::to_owned),
+        input.clone(),
+        Zeroizing::new(key.to_vec()),
+    );
+    super::transaction_service::run_db_only(db, &context, move |tx, c| Box::pin(async move {
+        let (db, request, actor, revision, input, key) = c;
+        app_policy::fence_approval(db, actor, authority, revision.as_deref(), tx).await?;
+        let result = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
+            doc! {"_id": &request.id, "status": "pending", "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
+            doc! {"$set": {"status": "approved", "approved_user_id": actor,
+                "approved_at": mongodb::bson::DateTime::now(), "mfa_assured": mfa_assured,
+                "mfa_policy_revision": revision,
+                "approver_ip_hmac": input.approver_ip.as_deref().map(|ip| device::hmac_hex(key, ip.as_bytes()))}})
+            .session(&mut *tx).await?;
+        if result.modified_count != 1 { return Err(AppError::AuthDeviceCodeAlreadyDelivered); }
+        Ok(())
+    })).await?;
     super::audit_service::log_async(
         db.clone(),
         Some(actor.id),
         "login_request_app_identity_approved".into(),
-        Some(serde_json::json!({"request_id": request.id, "approval_id": id})),
+        Some(
+            serde_json::json!({"request_id": request.id, "approval_id": id, "mfa_policy": revision.map(|_| "approved_sign_in"), "policy_default": revision == Some(app_policy::DEFAULT_REVISION)}),
+        ),
         input.approver_ip.clone(),
         input.approver_user_agent.clone(),
         None,
@@ -323,9 +352,12 @@ pub async fn app_identity(
         .find_one(doc! {"_id": &request.approved_user_id, "is_active": true})
         .await?
         .ok_or_else(invalid)?;
-    if !super::session_authority::may_derive(actor.mfa_enabled, request.mfa_assured) {
+    if request.mfa_policy_revision.is_none()
+        && !super::session_authority::may_derive(actor.mfa_enabled, request.mfa_assured)
+    {
         return Err(invalid());
     }
+    device::require_delivery_mfa(db, &request).await?;
     let row = if row.user_id.as_deref() == Some(&actor.id) && !row.verified {
         row.clone()
     } else {

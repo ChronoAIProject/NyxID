@@ -25,9 +25,59 @@ pub struct OnboardingStateResponse {
 /// User-scoped config / preferences surfaced on `GET /users/me`.
 #[derive(Debug, Serialize)]
 pub struct ProfileConfigResponse {
+    pub security: SecurityPreferencesResponse,
     pub services_view: Option<ServiceViewResponse>,
     pub service_views: Option<ServiceViewsResponse>,
     pub onboarding: OnboardingStateResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SecurityPreferencesResponse {
+    pub skip_mfa_for_approved_sign_ins: bool,
+}
+
+impl Default for SecurityPreferencesResponse {
+    fn default() -> Self {
+        crate::models::user::SecurityPreferences::default().into()
+    }
+}
+
+impl From<crate::models::user::SecurityPreferences> for SecurityPreferencesResponse {
+    fn from(value: crate::models::user::SecurityPreferences) -> Self {
+        Self {
+            skip_mfa_for_approved_sign_ins: value.skip_mfa_for_approved_sign_ins,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveSecurityPreferencesRequest {
+    pub skip_mfa_for_approved_sign_ins: bool,
+}
+
+pub async fn save_security_preferences(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<SaveSecurityPreferencesRequest>,
+) -> AppResult<Json<SecurityPreferencesResponse>> {
+    super::login_client_context::require_first_party_human(&user)?;
+    let actor = crate::services::audit_service::AuditActor {
+        user_id: user.user_id.to_string(),
+        ip_address: user.ip_address.clone(),
+        user_agent: user.user_agent.clone(),
+        api_key_id: None,
+        api_key_name: None,
+    };
+    let policy = crate::services::approved_sign_in_policy::save(
+        &state.db,
+        &actor.user_id,
+        body.skip_mfa_for_approved_sign_ins,
+        user.derived_mfa_authority(),
+        &actor,
+    )
+    .await?;
+    Ok(Json(policy.into()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +434,7 @@ pub async fn get_me(
         updated_at: user_model.updated_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
         profile_config: ProfileConfigResponse {
+            security: user_model.profile_config.security.into(),
             services_view: user_model.profile_config.services_view.map(Into::into),
             service_views: user_model.profile_config.service_views.map(Into::into),
             onboarding: OnboardingStateResponse {
@@ -1168,6 +1219,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
             profile_config: ProfileConfigResponse {
+                security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
                 onboarding: OnboardingStateResponse {
@@ -1228,6 +1280,7 @@ mod tests {
             updated_at: "2025-06-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
                 onboarding: OnboardingStateResponse {
@@ -1279,6 +1332,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:01Z".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
                 onboarding: OnboardingStateResponse {
@@ -1331,6 +1385,7 @@ mod tests {
     #[test]
     fn profile_config_response_serialization() {
         let resp = ProfileConfigResponse {
+            security: SecurityPreferencesResponse::default(),
             services_view: None,
             service_views: None,
             onboarding: OnboardingStateResponse {
@@ -1476,6 +1531,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
                 onboarding: OnboardingStateResponse {

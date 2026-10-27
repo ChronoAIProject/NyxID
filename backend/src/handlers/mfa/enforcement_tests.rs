@@ -21,10 +21,9 @@ async fn fixture(name: &str) -> (AppState, String) {
         db.clone(),
     ));
     let id = uuid::Uuid::new_v4().to_string();
-    db.collection::<User>(USERS)
-        .insert_one(test_user(&id, UserType::Person))
-        .await
-        .unwrap();
+    let mut user = test_user(&id, UserType::Person);
+    user.profile_config.security.skip_mfa_for_approved_sign_ins = false;
+    db.collection::<User>(USERS).insert_one(user).await.unwrap();
     (state, id)
 }
 
@@ -1655,3 +1654,5 @@ async fn inactive_user_cannot_reach_derived_mfa_guard_or_mint_tokens() {
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+mod approved_sign_in_policy;

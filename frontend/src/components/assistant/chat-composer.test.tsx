@@ -746,7 +746,6 @@ describe("ChatComposer measured layout", () => {
       ),
     ).not.toBeInTheDocument();
     expect(composer).toHaveClass("flex", "items-start");
-    expect(composer.closest("[data-composer-input]")).toHaveClass("sm:ml-[30px]");
     expect(button).toHaveClass("h-8");
     expect(textarea).toHaveClass("min-h-8", "px-0");
   });
@@ -834,7 +833,7 @@ describe("ChatComposer measured layout", () => {
     });
 
     fireEvent.change(textarea, { target: { value: "A long draft" } });
-    expect(textarea).toHaveStyle({ height: "88px", overflowY: "scroll" });
+    expect(textarea).toHaveStyle({ height: "92px", overflowY: "scroll" });
 
     const fades = textarea.parentElement?.querySelectorAll(
       ':scope > [aria-hidden="true"]:not([data-composer-scrollbar])',

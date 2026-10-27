@@ -19,6 +19,10 @@ vi.mock("@/components/auth/mfa-verify-form", () => ({
   ),
 }));
 
+vi.mock("@/components/auth/web-device-login", () => ({
+  WebDeviceLogin: () => <div>Continue with the NyxID app</div>,
+}));
+
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (selector: (s: { mfaRequired: boolean }) => unknown) =>
     selector({ mfaRequired: storeState.mfaRequired }),
