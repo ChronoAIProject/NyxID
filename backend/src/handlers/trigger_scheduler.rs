@@ -290,7 +290,11 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         }
         return deliver_existing(state, job, &run, &trigger).await;
     };
-    schedules::continuation::ready(&state.db, schedules::continuation::enabled()).await?;
+    if schedules::continuation::requires_v2(run.continuation_protocol_version)
+        || trigger.continuation_protocol_version >= 2
+    {
+        schedules::continuation::ready(&state.db, schedules::continuation::enabled()).await?;
+    }
     let agent = match team::agent(&state.db, &run.user_id, agent_id).await {
         Ok(agent) if agent.destroyed_at.is_none() => agent,
         Ok(_) | Err(AppError::NotFound(_)) => {
@@ -481,6 +485,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         attachment_ids: Vec::new(),
         group_request_id: None,
         group_attachments: Vec::new(),
+        automation_parent: None,
         trigger: Some(schedules::TurnClaim {
             trigger_updated_at: trigger.updated_at,
             continuation,
@@ -1144,7 +1149,11 @@ pub(crate) async fn webhook(
     else {
         return Err(AppError::TriggerDeliveryUnsupported);
     };
-    schedules::continuation::ready(&state.db, schedules::continuation::enabled()).await?;
+    if schedules::continuation::requires_v2(run.continuation_protocol_version)
+        || trigger.continuation_protocol_version >= 2
+    {
+        schedules::continuation::ready(&state.db, schedules::continuation::enabled()).await?;
+    }
     let agent = team::agent(&state.db, &run.user_id, agent_id).await?;
     let policy =
         thread_policy.unwrap_or_else(|| schedules::default_thread_policy(trigger.source, &agent));

@@ -2812,6 +2812,7 @@ pub async fn consume_settled_events(
     owner: &str,
     conversation_id: &str,
     agent_ids: &[String],
+    run_id: Option<&str>,
 ) -> AppResult<()> {
     if agent_ids.is_empty() {
         return Ok(());
@@ -2821,6 +2822,7 @@ pub async fn consume_settled_events(
             doc! {"_id": conversation_id, "user_id": owner},
             doc! {"$pull": {"pending_events": {
                 "kind": "subagent_settled", "agent_id": {"$in": agent_ids},
+                "trigger_run_id": run_id,
             }}},
         )
         .await?;

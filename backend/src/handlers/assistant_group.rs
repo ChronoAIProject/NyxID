@@ -325,6 +325,7 @@ async fn run_member(
             &state.db, owner, &group.id, since,
         )
         .await?,
+        automation_parent: None,
         trigger: None,
         conversation_id: thread.as_ref().map(|row| row.id.clone()),
         text: engine::excerpt(

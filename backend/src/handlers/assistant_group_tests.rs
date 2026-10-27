@@ -1468,6 +1468,7 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
             attachment_ids: Vec::new(),
             group_request_id: None,
             group_attachments: Vec::new(),
+            automation_parent: None,
             trigger: None,
             conversation_id: None,
             text: "[user]: @researcher summarize".into(),

@@ -3990,6 +3990,7 @@ async fn invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_re
 }
 
 include!("trigger_scheduler_completion_tests.rs");
+include!("trigger_scheduler_feedback_tests.rs");
 
 mod acceptance {
     use super::*;

@@ -13,6 +13,15 @@ pub fn enabled() -> bool {
     std::env::var("AUTOMATION_CONTINUATION_V2_ENABLED").is_ok_and(|v| v == "true")
 }
 
+/// Automation wakeups have their own finite budget. The chat event-streak
+/// preference must not disable an explicitly scheduled workflow.
+pub const AUTOMATION_CONTINUATION_LIMIT: u32 = 32;
+
+/// Flag-off preserves legacy ingress; persisted v2 still requires readiness.
+pub fn requires_v2(protocol: u32) -> bool {
+    enabled() || protocol >= 2
+}
+
 pub async fn ready(db: &Database, flag: bool) -> AppResult<()> {
     if !flag
         || db
@@ -91,6 +100,11 @@ pub async fn source(
         })
     {
         return Ok(Some("event"));
+    }
+    if db.collection::<Document>(crate::models::assistant_direct_handoff::COLLECTION_NAME)
+        .find_one(doc! {"user_id":&run.user_id,"run_id":&run.id,"parent_thread_id":thread,"state":"pending"})
+        .projection(doc! {"_id":1}).session(&mut *session).await?.is_some() {
+        return Ok(Some("specialist"));
     }
     if db.collection::<Document>(GROUPS).find_one(doc! {"user_id": &run.user_id, "followers": {"$elemMatch": {"conversation_id": thread, "trigger_run_id": &run.id}}}).projection(doc! {"_id":1}).session(session).await?.is_some() {
         return Ok(Some("group"));
@@ -443,18 +457,8 @@ pub(crate) async fn migrate_run_in_session(
             "automation_migration_trigger_unavailable".into(),
         ));
     }
-    let settings = db
-        .collection::<crate::models::assistant_settings::AssistantSettings>(
-            crate::models::assistant_settings::COLLECTION_NAME,
-        )
-        .find_one(doc! {"_id": &run.user_id})
-        .session(&mut *session)
-        .await?
-        .unwrap_or_else(|| {
-            crate::models::assistant_settings::AssistantSettings::defaults(&run.user_id)
-        });
     run.continuation_protocol_version = 2;
-    run.continuation_limit = settings.max_auto_continuations.clamp(0, 32) as u32;
+    run.continuation_limit = AUTOMATION_CONTINUATION_LIMIT;
     run.coordinator_deadline = Some(
         run.coordinator_deadline
             .unwrap_or(run.deadline + Duration::hours(1))
@@ -612,7 +616,8 @@ async fn renew_migration(db: &Database, fence: &str, session: &mut ClientSession
 pub async fn rollback_ready(db: &Database) -> AppResult<bool> {
     Ok(db.collection::<Document>(RUNS).find_one(doc!{"continuation_protocol_version":2,"outcome":{"$in":["pending","started","waiting"]}}).projection(doc!{"_id":1}).await?.is_none()
         && db.collection::<Document>(THREADS).find_one(doc!{"pending_events.trigger_run_id":{"$type":"string"}}).projection(doc!{"_id":1}).await?.is_none()
-        && db.collection::<Document>(GROUPS).find_one(doc!{"followers.trigger_run_id":{"$type":"string"}}).projection(doc!{"_id":1}).await?.is_none())
+        && db.collection::<Document>(GROUPS).find_one(doc!{"followers.trigger_run_id":{"$type":"string"}}).projection(doc!{"_id":1}).await?.is_none()
+        && db.collection::<Document>(crate::models::assistant_direct_handoff::COLLECTION_NAME).find_one(doc!{"state":"pending"}).projection(doc!{"_id":1}).await?.is_none())
 }
 
 pub async fn cleanup_in_session(
@@ -626,6 +631,13 @@ pub async fn cleanup_in_session(
     if let Some(thread) = &run.thread_id {
         db.collection::<Document>(THREADS).update_one(doc!{"_id":thread,"user_id":&run.user_id},doc!{"$pull":{"pending_events":{"trigger_run_id":&run.id},"coordinator_run_ids":&run.id}}).session(&mut *session).await?;
     }
+    db.collection::<Document>(crate::models::assistant_direct_handoff::COLLECTION_NAME)
+        .update_many(
+            doc! {"user_id":&run.user_id,"run_id":&run.id,"state":"pending"},
+            doc! {"$set":{"state":"cancelled"}},
+        )
+        .session(&mut *session)
+        .await?;
     db.collection::<Document>(GROUPS)
         .update_many(
             doc! {"user_id":&run.user_id,"followers.trigger_run_id":&run.id},
@@ -636,29 +648,104 @@ pub async fn cleanup_in_session(
     Ok(())
 }
 
+/// An active turn owns only its own run. An idle Stop selects the current
+/// waiting set inside the transaction, never from a pre-transaction snapshot.
 pub async fn cancel_thread(db: &Database, row: &AssistantConversation) -> AppResult<()> {
-    if row.coordinator_run_ids.is_empty() {
-        return Ok(());
-    }
     let work_db = db.clone();
-    let owner = row.user_id.clone();
-    let thread = row.id.clone();
-    let ids = row.coordinator_run_ids.clone();
+    let saved = row.clone();
     let mut session = db.client().start_session().await?;
-    let runs=session.start_transaction().and_run2(async move |session| {
-        let result:AppResult<Vec<TriggerRun>>=async {
-            // Writing this thread fences a continuation racing Stop. Its run and
-            // event cannot commit after the cancellation's snapshot.
-            work_db.collection::<Document>(THREADS).update_one(doc!{"_id":&thread,"user_id":&owner},doc!{"$pull":{"coordinator_run_ids":{"$in":&ids}}}).session(&mut *session).await?;
-            let mut finished=Vec::new();
-            for id in &ids {
-                if let Some(run)=super::finish_update(&work_db,doc!{"_id":id,"user_id":&owner,"thread_id":&thread,"outcome":{"$in":["waiting","started"]}},RunOutcome::Failed,Some("cancelled"),"",session).await? {finished.push(run);}
-            }
-            Ok(finished)
-        }.await;transactions::transaction_result(result)
-    }).await.map_err(transactions::map_transaction_error)?;
+    let runs = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<Vec<TriggerRun>> = Box::pin(async {
+                let mut filter = doc! {"_id":&saved.id,"user_id":&saved.user_id};
+                if let Some(turn) = &saved.active_turn {
+                    filter.insert("active_turn.turn_id", &turn.turn_id);
+                    filter.insert("active_turn.stop_requested", true);
+                } else {
+                    filter.insert("active_turn", bson::Bson::Null);
+                }
+                // Real write serializes both idle membership and exact active-turn
+                // ownership against admission, registration, and completion.
+                let Some(current) = work_db
+                    .collection::<AssistantConversation>(THREADS)
+                    .find_one_and_update(filter, doc! {"$inc":{"automation_handoff_version":1_i64}})
+                    .session(&mut *session)
+                    .await?
+                else {
+                    return Ok(Vec::new());
+                };
+                let ids = match &current.active_turn {
+                    Some(turn) => turn.trigger_run_id.iter().cloned().collect(),
+                    None => current.coordinator_run_ids,
+                };
+                let mut finished = Vec::new();
+                for id in ids {
+                    if let Some(run) = super::finish_update(
+                        &work_db,
+                        doc! {
+                            "_id":id,"user_id":&saved.user_id,"thread_id":&saved.id,
+                            "outcome":{"$in":["waiting","started"]},
+                        },
+                        RunOutcome::Failed,
+                        Some("cancelled"),
+                        "",
+                        session,
+                    )
+                    .await?
+                    {
+                        finished.push(run);
+                    }
+                }
+                Ok(finished)
+            })
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
     for run in runs {
         super::finish_record(db, &run).await?;
+    }
+    Ok(())
+}
+
+/// Deletion has conversation-wide scope, unlike Stop of an unrelated turn.
+/// Called before the thread is removed, in the deletion transaction itself.
+pub async fn delete_thread_in_session(
+    db: &Database,
+    owner: &str,
+    thread: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    db.collection::<Document>(THREADS)
+        .update_one(
+            doc! {"_id":thread,"user_id":owner},
+            doc! {"$inc":{"automation_handoff_version":1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    let mut cursor = db
+        .collection::<TriggerRun>(RUNS)
+        .find(doc! {
+            "user_id":owner,"thread_id":thread,"outcome":{"$in":["pending","started","waiting"]},
+        })
+        .session(&mut *session)
+        .await?;
+    let runs: Vec<TriggerRun> = cursor.stream(&mut *session).try_collect().await?;
+    for run in runs {
+        if let Some(finished) = super::finish_update(
+            db,
+            doc! {"_id":&run.id,"outcome":{"$in":["pending","started","waiting"]}},
+            RunOutcome::Failed,
+            Some("thread_deleted"),
+            "",
+            session,
+        )
+        .await?
+        {
+            super::finish_record_with_session(db, &finished, Some(&mut *session)).await?;
+        }
     }
     Ok(())
 }

@@ -248,7 +248,8 @@ export const runSchema = z.object({
   duration_ms: z.number().nullable(),
   attempts: z.number().int().nonnegative().nullish(),
   capacity_wait_ms: z.number().nonnegative().nullish(),
-  wait_kind: z.enum(["confirmation", "coordinator"]).nullish(),
+  // New server wait sources must not make the entire history unreadable.
+  wait_kind: z.string().nullish(),
   coordinator_deadline: instant.nullish(),
   continuation_count: z.number().int().nonnegative().optional(),
   continuation_limit: z.number().int().nonnegative().optional(),

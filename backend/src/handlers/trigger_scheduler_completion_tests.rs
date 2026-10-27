@@ -131,7 +131,16 @@ async fn completion_queue(
 #[tokio::test]
 async fn automation_v2_completion_barrier_claim_restart_and_selective_drain() {
     let (state, _, server) = setup("auto2040_barrier").await;
+    // The ordinary event-loop limit must not disable one real automation
+    // group wait/resume. Its finite allowance belongs to the persisted run.
+    state.db.collection::<Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .update_one(doc! {"_id":OWNER},doc! {"$set":{"max_auto_continuations":0},"$setOnInsert":{"updated_at":schedules::date(Utc::now())}})
+        .upsert(true).await.unwrap();
     let (trigger, run, row) = completion_coordinator(&state).await;
+    assert_eq!(
+        run.continuation_limit,
+        continuation_v2::AUTOMATION_CONTINUATION_LIMIT
+    );
     let group = completion_group(&state, &row, &run).await;
     // Queue before the coordinator has settled: this is the historical race.
     let (claims, _) = completion_groups::claim_followers_if_quiet(&state.db, OWNER, &group.id)
@@ -171,6 +180,7 @@ async fn automation_v2_completion_barrier_claim_restart_and_selective_drain() {
     let waiting = completion_load(&state, &run.id).await;
     assert_eq!(waiting.outcome, RunOutcome::Waiting);
     assert_eq!(waiting.wait_kind, Some(RunWaitKind::Coordinator));
+    assert_eq!(waiting.continuation_count, 0);
     assert!(!waiting.terminal_result_recorded);
     assert!(!waiting.result_claimed);
     assert!(waiting.finished_at.is_none());
