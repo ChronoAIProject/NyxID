@@ -21,7 +21,9 @@ regression coverage gap, not a required production hardening defect.
 
 `SOURCE_REVIEW_COMPLETE` is recorded for the exact `493b5c2` implementation.
 `LOCAL_VALIDATION_COMPLETE` remains pending only the narrow rebuild/test of the
-retained regression and the affected required formatting/Clippy checks. No
+retained regression and the affected required formatting/Clippy checks. The
+`ASTRA_IMPLEMENTATION_APPROVED` marker remains pending both that narrow local
+validation and the applicable live/combined ticket gates listed below. No
 Cargo, compiler, direct-binary, fmt or Clippy command was started or queued
 during this review because Automation owns the backend window. The candidate
 11-file source manifest including the test-only follow-up is

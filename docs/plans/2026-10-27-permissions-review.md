@@ -219,8 +219,10 @@ regression coverage gap, not a production hardening defect.
 
 **SOURCE_REVIEW_COMPLETE** is supported for `493b5c2`. The new test-only
 follow-up has passed `git diff --check`, but **LOCAL_VALIDATION_COMPLETE** is
-pending the narrow rebuild/test and affected required fmt/Clippy checks. No
-backend command was started or queued because Automation owns the window.
+pending the narrow rebuild/test and affected required fmt/Clippy checks.
+`ASTRA_IMPLEMENTATION_APPROVED` remains pending both that local validation and
+the applicable live/combined ticket gates. No backend command was started or
+queued because Automation owns the window.
 
 Candidate manifest including the uncommitted test-only follow-up:
 `/tmp/nyxid-permissions-r3-review-source-manifest.sha256`, SHA-256

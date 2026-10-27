@@ -778,18 +778,17 @@
     "F-005": {
       "source": "Astra personal exact-commit review",
       "valid": true,
-      "state": "SOURCE_HARDENING_VALIDATION_PENDING",
-      "severity": "contract/test coverage hardening; no demonstrated production bypass",
-      "finding": "The committed predicate already rejected an absent or non-string x-codex-turn-metadata. The valid gap was no seven-field replacement-key regression and an implicit allowed-key set.",
-      "resolution": "Same Sol explicitly requires the seven allowed keys and scalar turn metadata, preserving the 1-128-byte ASCII identifier bounds, 1024-byte UTF-8 metadata bound and 2048-byte sorted compact UTF-8 object bound; the new regression removes the required metadata key and inserts unknown while retaining seven fields.",
-      "evidence": "git diff --check exit 0; backend validation is pending coordinator window and must be bound to a new exact commit.",
+      "state": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_PENDING",
+      "severity": "negative regression coverage gap; no production defect",
+      "finding": "The committed predicate already enforces the exact closed set through seven-field cardinality, six required valid identifier strings and the required scalar x-codex-turn-metadata key. The valid gap was the missing seven-field replacement-key regression.",
+      "resolution": "Same Sol removed the redundant production refactor and retained only the six-line test regression that removes x-codex-turn-metadata, inserts unknown and retains seven fields; existing negative classifier and exact change-approval assertions remain the behavioral checks.",
+      "evidence": "SOURCE_REVIEW_COMPLETE for 493b5c2; git diff --check exit 0; narrow backend validation remains pending the coordinator window.",
       "changed_files": [
-        "backend/src/services/assistant_service_execution/request_identity.rs",
         "backend/src/services/assistant_service_execution_permissions_tests.rs"
       ],
-      "source_manifest": "/tmp/nyxid-permissions-r3-metadata-keys-source-manifest.sha256",
-      "source_manifest_sha256": "124d6095bb8a744fbca2f57ed9ebf1d4b9ad82da85d1c88502e88b7028b37e3f",
-      "astra_approval": "NOT_GRANTED"
+      "source_manifest": "/tmp/nyxid-permissions-r3-review-source-manifest.sha256",
+      "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+      "astra_approval": "SOURCE_REVIEW_COMPLETE; ASTRA_IMPLEMENTATION_APPROVED remains pending narrow local validation and applicable live/combined ticket gates"
     },
     "astra_exact_commit_review": {
       "state": "SOURCE_REVIEW_COMPLETE",
