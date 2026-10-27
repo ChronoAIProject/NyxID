@@ -28,6 +28,8 @@ concurrency:
 jobs:
   prune:
     runs-on: ubuntu-24.04
+    env:
+      CACHE_SOFT_CAP_GB: '40'
     # Run trusted main code only; never consume an upstream artifact or PR code.
     if: github.ref == 'refs/heads/main'
     timeout-minutes: 10

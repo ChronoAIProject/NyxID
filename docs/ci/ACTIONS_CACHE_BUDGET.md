@@ -1,115 +1,85 @@
-# Actions cache budget
+# Actions cache retention
 
-The release cache keys in `release.yml` and `release-cache.yml` are unchanged.
-Their four `v0-rust-dist-*` entries need room in GitHub's **10 GiB** repository
-quota (10.737 GB in decimal units). The existing daily release-cache workflow
-refreshes their access time. Ordinary CI retains compiled dependency caches;
-this change does not switch jobs to registry-only Rust caching.
+GitHub's repository Actions cache limit is now **100 GB**. The maintenance job
+keeps usable cache generations for fast CI and releases, while bounding families
+whose restore keys move forward. It does not combine build lanes or reduce the
+artifacts used by Rust or release builds. The release cache keys in
+`release.yml` and `release-cache.yml` remain unchanged.
 
-## Measured inventory, 2026-10-27
-
-Command:
+The script reads the inventory produced by:
 
 ```sh
-gh cache list --repo ChronoAIProject/NyxID --limit 100 --sort size_in_bytes \
+gh cache list --repo ChronoAIProject/NyxID --limit 10000 \
   --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt
 ```
 
-The snapshot contained **83 entries, 10.188 GB (9.489 GiB)**:
+It is a dry run unless `--apply` is supplied. Only the trusted main-branch
+maintenance workflow passes `--apply`; it supplies `CACHE_SOFT_CAP_GB=40`.
+The soft cap is an alert, not an eviction target: the script never deletes a
+newest usable entry to reach it. A command-line `--soft-cap-gb` overrides the
+environment value for local reports.
 
-| Category | GB |
-| --- | ---: |
-| Ordinary Rust CI | 7.228 |
-| Dist, Linux only (both macOS entries evicted) | 1.443 |
-| BuildKit blobs/indexes | 1.323 |
-| Node caches and coverage reports | 0.195 |
+## Retention rules
 
-Cache sizes per job, in decimal MB:
+- **Release dist** (`v0-rust-dist-<target>-<os>-<arch>-<hash>-<hash>`): group by
+  target. Keep the newest main-ref generation for every target. Delete older main
+  generations only when that newer main entry exists. Release saves are expected
+  to be main-only; any non-main dist copy is removable. A sole newest main entry
+  is always protected.
+- **Node caches** (`node-cache-<os>-<arch>-<manager>-<lockhash>`): the lockfile
+  hash identifies the exact job cache, so main entries are never removed. A
+  non-main entry is removable only when an entry with the identical full key
+  exists on main. This preserves separate frontend npm, SDK npm and mobile pnpm
+  caches; obsolete main lockfile generations are left to GitHub's seven-day
+  unused-cache eviction.
+- **Backend coverage baselines** (`coverage-backend-base-v2-<sha>-<fingerprint>`):
+  remove non-main copies. On main, retain the union of the newest 30 entries and
+  every entry created in the last 14 days. This preserves exact-base-SHA lookup
+  coverage while bounding old generations.
+- **Known Rust lanes** keep the newest main generation and remove older or
+  non-main copies only after that main replacement exists. Billing and wizard
+  lanes share their current backend/CLI replacements as configured in the script.
+- **Retired Docker BuildKit blobs/indexes** are removable because Docker jobs now
+  import and export the per-platform registry cache. No workflow restores these
+  GitHub Actions cache records.
+- **Unknown families** are left to GitHub's own unused-cache eviction. The script
+  never guesses at a new restore key.
 
-| Cache lane | Measured MB | New writer / sharing |
-| --- | ---: | --- |
-| CLI test | 793.0 | CLI test; wizard restores this cache |
-| Backend tests | 781.9 | Ordinary backend build; billing restores this cache |
-| Billing smoke | 770.5 + 769.7 | No separate writer |
-| Wizard freshness | 716.1 | No separate writer |
-| Clippy | 518.3 | Main only, separate analysis cache |
-| Features, AWS | 725.3 + 724.9 | Main only, one environment generation |
-| Features, GCP | 707.6 | Main only |
-| Features, both | 750.9* | Main only; remains separate from individual features |
-| CLI coverage | 720.8 | Main only, separate instrumented cache |
-| Backend coverage | 786.8* | Main only, separate instrumented cache |
-| Backend image inputs | 623.4* | Main only, separate release-profile cache |
-| Permissions | 373.7* | Main only; keep both check and test artifacts |
+The report prints before and retained totals for each recognized family and an
+`unknown` bucket. It emits a warning when retained bytes exceed the 40 GB soft
+cap (or the selected cap); it still retains every newest entry.
 
-`*` Already evicted at inventory time; sizes come from the restored-cache byte
-counts in Publish Images run **40507925449**, jobs **122202039122**,
-**122202038988**, **122202039004**, and **122202038594**, respectively. Do not
-mistake an evicted cache for zero steady-state storage.
+## Current inventory and dry-run procedure
 
-The `index-machine-pr` records on main, tag and PR refs identify Machine
-Container E2E as the remaining large GHA writer. Backend Image Inputs uses
-rust-cache, not BuildKit. Docker smoke jobs and Publish Images import only the
-published per-architecture registry caches. Publish Images exports registry
-`mode=max` caches. No GHA import remains: maintenance removes indexes and blobs
-in separate operations, so a concurrent GHA reader could otherwise observe an
-index whose blobs have already been removed.
-
-Merge PR #2061 first: it owns removal of the backend smoke GHA export (alongside
-the Cargo jobs build argument). This branch removes the remaining imports and
-the machine smoke export, without duplicating #2061's export-removal change.
-After rebasing onto #2061, no workflow imports or exports BuildKit GHA caches.
-
-## Changes and estimated steady state
-
-The ordinary-CI composite removes unused runner toolchains before rust-cache:
-that action hashes every installed compiler. Logs show the same pinned 1.98.1
-compiler alongside either unused 1.99.0 or 1.99.1, producing duplicate keys.
-The cache step also normalizes scheduling/stack environment values; actual
-build concurrency is unchanged. Compiler version, RUSTFLAGS, profile values,
-manifest requirements and third-party lock contents remain in the cache key.
-
-Only main writes caches. Billing and wizard are read-only consumers of their
-compatible backend/CLI cache, so they cannot win an immutable-cache race with
-an incomplete dependency subset. Different feature combinations, release,
-Clippy, and instrumented builds keep their own caches. All ordinary-CI debug
-builds retain file/line information (`line-tables-only`) without full variable
-and type debug information; production/release profiles are unchanged. Pinned
-taiki-e installs supply nextest/llvm-cov, so their executables are not duplicated
-inside every dependency cache (`cache-bin: false`).
-
-At the old per-lane sizes, retaining all ten unique live lanes would cost
-**6.782 GB**, plus about **0.2–0.3 GB** for Node and tiny reports. Removing tool
-executables and reducing the remaining full-debug builds is expected to save
-at least **0.35 GB**: forecast **6.3–6.7 GB total ordinary cache**, leaving
-**4.0–4.4 GB** for dist. This is an estimate, not a measured post-change result;
-confirm it after the first main cache fills. The four release caches are
-expected to fit in that reserve; their current Linux pair uses 1.443 GB.
-
-The maintenance workflow reports actual non-dist bytes and warns below a
-**4 GB** reserve. It never evicts a live CI lane to make a forecast appear true.
-If the forecast is exceeded, use the reported lane sizes to adjust storage;
-do not disable target caching and silently turn regular CI into cold builds.
-
-## Retention and rollout
-
-`cache-maintenance.yml` runs trusted main code when cache configuration changes,
-after CI/Publish Images, on a six-hour schedule, or manually. It removes retired
-BuildKit entries, redundant
-billing/wizard caches once their main replacement exists, non-main Rust copies
-once main has a replacement, and older generations of each known CI lane.
-It always retains the newest main generation. Unknown cache families and every
-`v0-rust-dist-*` entry are protected. No PR artifact or code is executed by the
-maintenance workflow. A dry run is the script's default:
+The previous 2026-10-27 inventory had 83 entries and 10.188 GB, before the
+repository limit was raised. The new live inventory should be measured before
+each review:
 
 ```sh
-python3 .github/scripts/cache_budget.py caches.json --repo ChronoAIProject/NyxID
+gh cache list --repo ChronoAIProject/NyxID --limit 10000 \
+  --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt > /tmp/caches.json
+python3 .github/scripts/cache_budget.py /tmp/caches.json \
+  --repo ChronoAIProject/NyxID --soft-cap-gb 40
 ```
 
-On the measured snapshot, the dry run selects **71 entries / 4.303 GB** for
-removal, leaving **5.885 GB total**, including both surviving dist caches.
-That snapshot lacks four live CI lanes, so it is not the steady-state estimate.
-No repository caches were deleted during implementation. After merge, the
-scheduled maintenance removes retired entries, ordinary CI fills the stable
-keys once, and the existing release-cache workflow rebuilds missing macOS
-entries. Changing the ordinary debug profile causes one initial dependency
-rebuild; subsequent jobs reuse it without extra compile work.
+The 2026-10-28 review snapshot contained 27 entries and 10.265 GB. The dry run
+selected six non-main duplicate Node/coverage entries totaling **454.1 MB** and
+retained **9.810 GB**, including 2.985 GB of dist caches and 6.550 GB of Rust
+lanes. All main Node caches and dist caches were retained; the soft-cap warning
+did not fire.
+
+The output lists every planned deletion with its cache id, size, ref, key and
+reason.
+Review it before enabling `--apply`; no cache deletion is part of normal code
+review or local testing.
+
+The maintenance workflow runs after main CI or Publish Images completes, every
+six hours, when its trusted configuration changes, or manually. Its concurrency
+group prevents overlapping delete passes. A pass is intentionally non-atomic:
+all Docker GHA readers were removed before this cleanup was introduced, so an
+index cannot be restored while its blobs are being retired.
+
+The tests cover newest-per-target dist retention, non-main dist cleanup, node
+family retention, coverage newest-30 plus 14-day retention, known Rust lanes,
+Docker retirement, unknown-family protection, malformed-date conservatism and
+soft-cap warning behavior.
