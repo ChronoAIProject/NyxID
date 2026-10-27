@@ -774,3 +774,47 @@ fn raw_inference_is_conservative_about_state_and_provider_effects() {
     assert!(!stateless_inference("/v1/responses", &missing_storage));
     assert!(!stateless_inference("/v1/responses", &json!([])));
 }
+
+#[test]
+fn guest_1995_codex_correlation_metadata_is_stateless_but_provider_handles_are_not() {
+    // Captured Codex 0.160.1 fields, as forwarded by NyxAgent's normal bridge.
+    let body = json!({"model":"model","store":false,"input":"hello","stream":true,
+        "include":["reasoning.encrypted_content"],"prompt_cache_key":"varies-by-session",
+        "client_metadata":{"root_turn_id":"turn","session_id":"session","thread_id":"thread",
+            "turn_id":"turn","x-codex-installation-id":"installation",
+            "x-codex-turn-metadata":"{\"thread_id\":\"client-correlation\"}","x-codex-window-id":"window"}});
+    assert!(stateless_model_transport("v1/responses", &body));
+    assert!(
+        !stateless_inference("v1/responses", &body),
+        "owner classification stays legacy"
+    );
+    let unchanged = body.clone();
+    assert!(stateless_model_transport("v1/responses", &body));
+    assert_eq!(body, unchanged, "classification never mutates the request");
+    assert!(!stateless_model_transport("v1/chat/completions", &body));
+    for metadata in [
+        json!({"conversation":"conv_provider"}),
+        json!({"thread_id":{"id":"thread_provider"}}),
+        json!({"thread_id":["thread_provider"]}),
+        json!({"x-codex-turn-metadata":"x".repeat(8193)}),
+        json!("arbitrary"),
+        json!(null),
+    ] {
+        let mut bad = body.clone();
+        bad["client_metadata"] = metadata;
+        assert!(!stateless_model_transport("v1/responses", &bad));
+    }
+    for handle in [
+        "thread_id",
+        "conversation",
+        "previous_response_id",
+        "file_id",
+    ] {
+        let mut bad = body.clone();
+        bad[handle] = json!("provider-resource");
+        assert!(!stateless_model_transport("v1/responses", &bad));
+        let mut bad = body.clone();
+        bad["input"] = json!([{(handle):"provider-resource"}]);
+        assert!(!stateless_model_transport("v1/responses", &bad));
+    }
+}

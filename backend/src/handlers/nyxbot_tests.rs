@@ -20,6 +20,9 @@ mod release_tests;
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
 
+#[path = "nyxbot_guest_model_tests.rs"]
+mod guest_model_tests;
+
 const LEGACY_PROVENANCE: crate::services::nyxbot_watch_service::ReportProvenance =
     crate::services::nyxbot_watch_service::ReportProvenance::LEGACY;
 const OWNER: &str = "12345678-1234-4123-8123-1234567890ab";

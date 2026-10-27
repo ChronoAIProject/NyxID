@@ -92,6 +92,15 @@ async fn model_call(
 fn exact_model_requests() -> Vec<(&'static str, Value)> {
     vec![
         (
+            "responses",
+            // The metadata-aware guest route contract must not turn this
+            // existing owner request into read-class/fungible model consent.
+            json!({"model":"m","store":false,"input":"account context",
+                "client_metadata":{"root_turn_id":"root","session_id":"session",
+                    "thread_id":"thread","turn_id":"turn","x-codex-installation-id":"installation",
+                    "x-codex-turn-metadata":"{\"sandbox_mode\":\"read-only\"}","x-codex-window-id":"window"}}),
+        ),
+        (
             "responses/compact",
             json!({"model":"m","input":"account context"}),
         ),
@@ -519,7 +528,7 @@ async fn org_owned_specialist_model_transport_keeps_only_the_implicit_scope_exce
         assert_eq!(status, 200, "{path}: {result}");
     }
     let sent = provider.received_requests().await.unwrap().len();
-    assert_eq!(sent, 7);
+    assert_eq!(sent, exact_model_requests().len() + 1);
     // This inference catalog does not authorize arbitrary provider resources.
     let (status, refusal) = model_call(
         &f,

@@ -105,17 +105,28 @@ pub(super) async fn require(
         .find_one(doc! {"_id":&chat.agent_id,"user_id":&chat.user_id,"destroyed_at":null})
         .await?
         .ok_or(AppError::GuestModelRouteRequired)?;
-    if agent.owner_model_route.as_deref()
-        != Some(&route(db, chat, &row.model, connection, target, operation).await?)
+    if let Some(bound) = row.owner_model_route.as_deref().or_else(|| {
+        agent
+            .owner_model_route
+            .as_deref()
+            .filter(|bound| bound.profile == row.model)
+    }) {
+        if bound == &route(db, chat, &row.model, connection, target, operation).await? {
+            return Ok(());
+        }
+    } else if super::guest_model_defaults::matches(
+        db, chat, &row.model, connection, target, operation,
+    )
+    .await?
     {
-        return Err(AppError::GuestModelRouteRequired);
+        return Ok(());
     }
-    Ok(())
+    Err(AppError::GuestModelRouteRequired)
 }
 
-/// Only the normal owner model admission may establish this route. Old rows
-/// without a binding fail closed for guests; they never learn from a guest's
-/// first callback. One bounded route per agent also covers its channel threads.
+/// Only normal owner model admission establishes a route. Each thread retains
+/// its exact owner-established route; matching agent profiles also establish
+/// the shared default for new threads. Guests never learn from their callback.
 pub(super) async fn remember_owner(
     db: &Database,
     chat: &acks::ChatAuthority,
@@ -147,13 +158,12 @@ pub(super) async fn remember_owner(
     else {
         return Ok(());
     };
-    // An owner can use another profile in a private thread without changing
-    // the agent's configured route for guest channels.
-    if agent.model != row.model {
-        return Ok(());
-    }
+    // Preserve deliberate per-thread profiles and legacy channel defaults.
+    // A different profile establishes only this thread's route, not the agent's.
     let bound = route(db, chat, &row.model, connection, target, operation).await?;
-    if agent.owner_model_route.as_deref() == Some(&bound) {
+    if row.owner_model_route.as_deref() == Some(&bound)
+        && (agent.model != row.model || agent.owner_model_route.as_deref() == Some(&bound))
+    {
         return Ok(());
     }
     let value = bson::to_bson(&bound)
@@ -166,7 +176,7 @@ pub(super) async fn remember_owner(
                 doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,"agent_id":&chat.agent_id,
                     "credential_api_key_id":&chat.api_key_id,"model":profile,"active_turn.turn_id":&chat.turn_id,
                     "guest_turn":false,"active_turn.stop_requested":false},
-                doc! {"$inc":{"owner_model_route_fence":1_i64}}).session(&mut *tx).await?;
+                doc! {"$inc":{"owner_model_route_fence":1_i64},"$set":{"owner_model_route":value}}).session(&mut *tx).await?;
             if live.matched_count != 1 { return Err(AppError::AssistantTurnRequired); }
             let mut filter = agent_filter.clone();
             filter.insert("model", profile);

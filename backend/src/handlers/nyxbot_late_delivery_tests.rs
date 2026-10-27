@@ -836,3 +836,39 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
             .any(|message| message.text.contains(notice::TEXT))
     );
 }
+
+#[tokio::test]
+async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery() {
+    const SAFE: &str = "This assistant isn't available to guests yet.";
+    for streamed in [true, false] {
+        let f = fixture("guest_1995_channel_refusal").await;
+        settled(&f, false).await;
+        f.state.db.collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+            .update_one(doc!{"conversation_id":f.event.conversation_id.as_deref(),"turn_id":f.event.turn_id.as_deref(),"role":"assistant"},
+                doc!{"$set":{"text":"","status":"failed","error_code":"guest_model_route_required"}}).await.unwrap();
+        if streamed {
+            let (sender, receiver) = broadcast::channel(8);
+            sender.send(json!({"event":"turn.completed","status":"failed","error":{"code":"guest_model_route_required"}})).unwrap();
+            let response = late_delivery::provider_stream(
+                f.state.clone(),
+                f.event.id.clone(),
+                "response".into(),
+                json!({"type":"response.created"}),
+                receiver,
+                Utc::now(),
+            );
+            let text = body_text(response).await;
+            assert!(text.contains(SAFE));
+            assert!(!text.contains("response.failed"));
+            assert_eq!(status(&f).await, "streamed");
+        } else {
+            delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+            late_delivery::sweep(&f.state).await.unwrap();
+            let requests = sends(&f).await;
+            assert_eq!(requests.len(), 1);
+            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(body["text"], SAFE);
+        }
+        assert!(engine::TurnError::new("guest_model_route_required").message == SAFE);
+    }
+}

@@ -1171,6 +1171,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        owner_model_route: None,
         invocation_controlled: false,
         credential_invocation_id: None,
         platform_thread: None,
@@ -7229,4 +7230,44 @@ async fn checking_notice_is_fenced_by_stop_replacement_settlement_and_capacity_n
     let app_row = stale_test_row(now);
     assert!(notice::destination(&app_row).is_none());
     db.drop().await.unwrap();
+}
+
+#[test]
+fn guest_1995_route_refusal_copy_requires_current_exact_failure_evidence() {
+    use crate::models::assistant_conversation::ModelRefusal;
+    use crate::services::assistant_model_observer::attribute;
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    let turn = row.active_turn.as_mut().unwrap();
+    let error = TurnError::new("turn_failed");
+    turn.model_attempt_id = Some("current".into());
+    turn.model_refusal = Some(ModelRefusal {
+        code: "guest_model_route_required".into(),
+        attempt_id: "current".into(),
+        at: now,
+        http_status: Some(403),
+        error_code: Some(9000),
+    });
+    let mapped = attribute(&error, turn, now);
+    assert_eq!(mapped.code, "guest_model_route_required");
+    assert_eq!(
+        mapped.message,
+        "This assistant isn't available to guests yet."
+    );
+    assert_eq!(mapped.upstream_code.as_deref(), Some("turn_failed"));
+    assert_eq!(
+        attribute(&error, turn, now + chrono::Duration::seconds(121)).code,
+        error.code
+    );
+    turn.model_attribution_uncertain = true;
+    assert_eq!(attribute(&error, turn, now).code, error.code);
+    turn.model_attribution_uncertain = false;
+    turn.model_attempt_id = Some("newer".into());
+    assert_eq!(attribute(&error, turn, now).code, error.code);
+    turn.model_attempt_id = Some("current".into());
+    turn.model_refusal.as_mut().unwrap().http_status = None;
+    assert_eq!(attribute(&error, turn, now).code, error.code);
+    turn.model_refusal.as_mut().unwrap().http_status = Some(403);
+    turn.model_refusal.as_mut().unwrap().error_code = Some(0);
+    assert_eq!(attribute(&error, turn, now).code, error.code);
 }

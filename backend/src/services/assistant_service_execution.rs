@@ -40,6 +40,7 @@ mod authority;
 pub use authority::connection_binding;
 mod availability;
 mod guest_model;
+mod guest_model_defaults;
 mod http;
 mod receipts;
 mod request_identity;
@@ -52,8 +53,8 @@ pub use availability::{NodeFailureEvidence, observe_transport};
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
 use request_identity::selection_fingerprint;
-pub(crate) use request_identity::stateless_inference;
 pub use request_identity::{bind_headers, http_operation};
+pub(crate) use request_identity::{stateless_inference, stateless_model_transport};
 pub use resolution::resolve_implicit_for_request;
 #[cfg(test)]
 use selection::owner_selector;

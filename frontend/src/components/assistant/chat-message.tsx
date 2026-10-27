@@ -356,6 +356,9 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
   return (
     <details className="mt-2 text-11 text-text-tertiary">
       <summary className="cursor-pointer">Details</summary>
+      {failure?.source === "nyxid" && failure.code === "guest_model_route_required" ? (
+        <p className="mt-1">Send one message to this agent as its owner using its configured model to record the route for guest replies.</p>
+      ) : null}
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
         <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
         <dt>stage</dt>
