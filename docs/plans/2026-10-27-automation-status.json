@@ -54,7 +54,7 @@
   "remaining_acceptance": [
     "Compile and execute the drafted Rust fixtures and focused regressions after coordinator clearance through the shared-window handoff",
     "Complete open acceptance-matrix evidence, including webhook migration and performance measurements",
-    "Run required cargo clippy --all-targets --all-features -- -D warnings after focused tests",
+    "Run cargo clippy --config <shared-resource-profile> --manifest-path backend/Cargo.toml --all-targets -- -D warnings after focused tests and verify actual argv",
     "Astra personal complete-diff review with zero unresolved findings",
     "Resolve all Astra findings including nits through the same Sol session",
     "Record ASTRA_IMPLEMENTATION_APPROVED only for the exact final accepted commit"

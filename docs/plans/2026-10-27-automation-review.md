@@ -265,7 +265,7 @@ CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=
 CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid trigger_scheduler::tests -- --nocapture
 CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid assistant_group::tests -- --nocapture
 CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid async_service_operation -- --nocapture
-CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' clippy --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo clippy --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' --manifest-path backend/Cargo.toml --all-targets -- -D warnings
 ```
 
 After the first focused results, run the remaining applicable ordinary-event,
@@ -576,3 +576,12 @@ verified provider `codex`, model `gpt-6.1-sol`, `x_high` effort, `full-access`
 mode, and provider session `01a17b03-c43f-74f3-b98c-beb00d71c256` at
 `2026-10-27T03:58:24Z`. The provider session identifier is recorded separately
 from the Heca session identifier; no session replacement was inferred.
+
+## Coordinator Cargo policy correction
+
+The frozen plan SHA is unchanged. For the eventual shared backend window, built-in
+Cargo test/build/check commands use `cargo --config <shared-resource-profile>
+<subcommand>`. Clippy uses the coordinator-verified argv:
+`cargo clippy --config <shared-resource-profile> --manifest-path backend/Cargo.toml
+--all-targets -- -D warnings`. This stream has not started or queued either form;
+actual process arguments will be checked in the clippy evidence before approval.
