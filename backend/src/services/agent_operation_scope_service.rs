@@ -654,6 +654,23 @@ pub async fn options(
     owner: &str,
     agent_id: &str,
 ) -> AppResult<Vec<ServiceOptions>> {
+    options_for(db, owner, agent_id, false).await
+}
+
+pub async fn guest_options(
+    db: &Database,
+    owner: &str,
+    agent_id: &str,
+) -> AppResult<Vec<ServiceOptions>> {
+    options_for(db, owner, agent_id, true).await
+}
+
+async fn options_for(
+    db: &Database,
+    owner: &str,
+    agent_id: &str,
+    guests: bool,
+) -> AppResult<Vec<ServiceOptions>> {
     let mut agent = team::live_specialist(db, owner, agent_id).await?;
     super::org_agent_service::require_maintain(db, owner, &agent).await?;
     if agent.user_id != owner {
@@ -662,6 +679,10 @@ pub async fn options(
             .grants
             .service_ids
             .retain(|id| acl.allows_resource(id));
+    }
+    if guests {
+        agent.operation_scopes = agent.guest_operation_scopes.clone();
+        agent.operation_scope_revisions = agent.guest_operation_scope_revisions.clone();
     }
     // Management reads durable rows, including offline services. Loading the
     // execution catalog here would fetch remote specs and hide offline grants.
@@ -682,7 +703,7 @@ pub async fn options(
     }
     let service_ids = agent.grants.service_ids.clone();
     let platform_ids = agent.grants.platform_service_ids.clone();
-    Box::pin(build_options(
+    let mut options = Box::pin(build_options(
         db,
         &instances,
         &service_ids,
@@ -690,7 +711,13 @@ pub async fn options(
         &agent.operation_scopes,
         |service| revision(&agent, service),
     ))
-    .await
+    .await?;
+    if guests {
+        for service in &mut options {
+            service.allows_explicit_rules = false;
+        }
+    }
+    Ok(options)
 }
 
 async fn build_options(
@@ -774,6 +801,8 @@ async fn build_options(
                 catalog_contract: true,
                 destructive: marks.destructive,
                 changes_existing: marks.changes_existing,
+                append_only: marks.append_only,
+                append_only_query: marks.append_only_query,
                 ..Default::default()
             };
             let method = reqwest::Method::from_bytes(endpoint.method.as_bytes())
@@ -833,6 +862,7 @@ async fn build_options(
 /// and webhook limits are turn authority, not a property of the scope. Other
 /// keys carry only their operation scope, which `authorize` enforces, and
 /// acquire no database reads here.
+#[allow(clippy::too_many_arguments)]
 pub async fn check_non_mcp_context(
     db: &Database,
     auth: &crate::mw::auth::AuthUser,
@@ -841,6 +871,7 @@ pub async fn check_non_mcp_context(
     catalog: Option<&str>,
     method: &str,
     path: Option<&CanonicalPath>,
+    request: GuestHttpContext<'_>,
 ) -> AppResult<bool> {
     if let Some(chat) = auth.assistant_chat.as_deref() {
         return check_non_mcp_chat_context(
@@ -851,6 +882,7 @@ pub async fn check_non_mcp_context(
             catalog,
             method,
             path,
+            request,
         )
         .await;
     }
@@ -894,7 +926,17 @@ pub async fn check_non_mcp_key_context(
             "Specialist operation authority requires a live conversation".into(),
         ));
     };
-    check_non_mcp_chat_context(db, &chat, scopes, service, catalog, method, Some(path)).await
+    check_non_mcp_chat_context(
+        db,
+        &chat,
+        scopes,
+        service,
+        catalog,
+        method,
+        Some(path),
+        Default::default(),
+    )
+    .await
 }
 
 /// Whether an assistant key's live conversation is a guest turn. Used where
@@ -912,6 +954,7 @@ pub async fn key_is_guest(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn check_non_mcp_chat_context(
     db: &Database,
     chat: &super::assistant_acknowledgement_service::ChatAuthority,
@@ -920,6 +963,7 @@ async fn check_non_mcp_chat_context(
     catalog: Option<&str>,
     method: &str,
     path: Option<&CanonicalPath>,
+    request: GuestHttpContext<'_>,
 ) -> AppResult<bool> {
     use crate::models::assistant_agent::GuestAccess;
     let method_value = reqwest::Method::from_bytes(method.as_bytes())
@@ -946,19 +990,50 @@ async fn check_non_mcp_chat_context(
             }
         }
     }
+    // Guest effects use the live contract, including conditional append
+    // attestations, rather than an older scope's cached effect snapshot.
+    if chat.guest {
+        matched = None;
+    }
     let effect_limited = chat.guest || chat.confirmation_policy.is_some();
     let effects = match matched {
         Some(effects) => effects,
         // Unscoped services keep their guest and webhook limits: classify from
         // the stored endpoint contract, or conservatively from the method.
         None if effect_limited => {
-            Box::pin(unscoped_effects(db, service, catalog, &method_value, path)).await?
+            Box::pin(raw_effects(
+                db,
+                service,
+                catalog,
+                &method_value,
+                path,
+                request.query,
+                chat.guest,
+            ))
+            .await?
         }
         None => mcp_service::operation_effects(&method_value, Default::default()),
     };
     let (reads, uses, destructive) = (effects.reads, effects.uses, effects.destructive);
     if chat.guest {
         let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
+        if is_scoped(&agent.guest_operation_scopes, service, catalog) {
+            let path = path.ok_or_else(|| {
+                AppError::ApiKeyScopeForbidden(
+                    "Guest operation limits require a concrete HTTP operation".into(),
+                )
+            })?;
+            authorize(
+                &agent.guest_operation_scopes,
+                service,
+                catalog,
+                None,
+                method,
+                path,
+                false,
+                request.websocket,
+            )?;
+        }
         let access = agent
             .guest_access
             .get(service)
@@ -988,7 +1063,7 @@ async fn check_non_mcp_chat_context(
     Ok(chat.guest)
 }
 
-fn intersect_effects(
+pub(crate) fn intersect_effects(
     current: Option<mcp_service::OperationEffects>,
     next: mcp_service::OperationEffects,
 ) -> mcp_service::OperationEffects {
@@ -1011,6 +1086,35 @@ pub(crate) async fn unscoped_effects(
     catalog: Option<&str>,
     method: &reqwest::Method,
     path: Option<&CanonicalPath>,
+    query: Option<&str>,
+) -> AppResult<mcp_service::OperationEffects> {
+    Box::pin(raw_effects(
+        db, service, catalog, method, path, query, false,
+    ))
+    .await
+}
+
+/// Generic MCP and raw guest requests share concrete-route classification.
+/// Compiled markers survive missing endpoint rows or a generic spec fallback.
+pub(crate) async fn unscoped_guest_effects(
+    db: &Database,
+    service: &str,
+    catalog: Option<&str>,
+    method: &reqwest::Method,
+    path: Option<&CanonicalPath>,
+    query: Option<&str>,
+) -> AppResult<mcp_service::OperationEffects> {
+    Box::pin(raw_effects(db, service, catalog, method, path, query, true)).await
+}
+
+async fn raw_effects(
+    db: &Database,
+    service: &str,
+    catalog: Option<&str>,
+    method: &reqwest::Method,
+    path: Option<&CanonicalPath>,
+    query: Option<&str>,
+    compiled_floor: bool,
 ) -> AppResult<mcp_service::OperationEffects> {
     let fallback = mcp_service::operation_effects(method, Default::default());
     let Some(path) = path else {
@@ -1031,7 +1135,7 @@ pub(crate) async fn unscoped_effects(
                 .is_ok_and(|rule| proxy_authorization::rule_matches(&rule, method.as_str(), path))
         })
         .collect();
-    if candidates.is_empty() {
+    if candidates.is_empty() && !compiled_floor {
         return Ok(fallback);
     }
     let catalog_slug = db
@@ -1041,6 +1145,54 @@ pub(crate) async fn unscoped_effects(
         .await?
         .and_then(|row| row.get_str("slug").ok().map(str::to_owned));
     let mut effects = None;
+    if compiled_floor
+        && let Some(slug) = catalog_slug.as_deref()
+        && let Some(spec) = super::catalog_spec_registry::spec_for_slug(slug)
+    {
+        let verb = method.as_str().to_ascii_lowercase();
+        for (template, item) in spec["paths"].as_object().into_iter().flatten() {
+            let Some(operation) = item.get(&verb) else {
+                continue;
+            };
+            let Ok(rule) = proxy_authorization::rule_from_endpoint(
+                method.as_str(),
+                template,
+                operation.get("parameters"),
+            ) else {
+                continue;
+            };
+            if !proxy_authorization::rule_matches(&rule, method.as_str(), path) {
+                continue;
+            }
+            let marks =
+                super::catalog_spec_registry::operation_marks(slug, method.as_str(), template, "");
+            let risk = operation["x-aevatar-tool"]["readOnly"]
+                .as_bool()
+                .map(|read| {
+                    if read {
+                        crate::models::service_endpoint::EndpointRisk::Read
+                    } else {
+                        crate::models::service_endpoint::EndpointRisk::Write
+                    }
+                });
+            effects = Some(intersect_effects(
+                effects,
+                mcp_service::operation_effects(
+                    method,
+                    mcp_service::McpDurableEndpointMetadata {
+                        catalog_contract: true,
+                        risk,
+                        destructive: marks.destructive,
+                        changes_existing: marks.changes_existing,
+                        append_only: marks.append_only
+                            && mcp_service::append_query_allowed(marks.append_only_query, query),
+                        append_only_query: marks.append_only_query,
+                        ..Default::default()
+                    },
+                ),
+            ));
+        }
+    }
     for endpoint in candidates {
         let marks = catalog_slug
             .as_deref()
@@ -1062,6 +1214,9 @@ pub(crate) async fn unscoped_effects(
                     catalog_contract: true,
                     destructive: marks.destructive,
                     changes_existing: marks.changes_existing,
+                    append_only: marks.append_only
+                        && mcp_service::append_query_allowed(marks.append_only_query, query),
+                    append_only_query: marks.append_only_query,
                     ..Default::default()
                 },
             ),
@@ -1550,4 +1705,149 @@ pub async fn set_key(
     )
     .await?;
     Ok((updated, next))
+}
+
+/// New configuration is enabled only after every replica can enforce it. Saved
+/// restrictions are always enforced, including while this flag is disabled.
+pub async fn require_guest_configuration_enabled(db: &Database, actor: &str) -> AppResult<()> {
+    if !super::feature_flag_service::personal_flag_enabled(
+        db,
+        actor,
+        super::feature_flag_service::GUEST_OPERATION_SCOPES_FLAG_KEY,
+    )
+    .await?
+    {
+        return Err(AppError::ValidationError(
+            "Guest operation configuration is not enabled yet. Existing guest limits still apply."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn apply_guest_selection(
+    db: &Database,
+    actor: &str,
+    agent: &mut AssistantAgent,
+    service: &str,
+    selection: &OperationSelection,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    require_guest_configuration_enabled(db, actor).await?;
+    // Resource constraints are a separate design. This API cannot create them
+    // accidentally, or use explicit paths to bypass catalog operation identity.
+    if !selection.rules.is_empty() || !selection.inputs.is_empty() {
+        return Err(AppError::ValidationError(
+            "Guest operations must use catalog endpoint IDs without value rules".into(),
+        ));
+    }
+    let current_revision = agent
+        .guest_operation_scope_revisions
+        .get(service)
+        .copied()
+        .unwrap_or(0);
+    let holder = Holder {
+        service_ids: &agent.grants.service_ids,
+        platform_service_ids: &agent.grants.platform_service_ids,
+        revision: current_revision,
+    };
+    let scope = Box::pin(compile_for(db, &holder, service, selection, session)).await?;
+    ensure_reviewed(selection, scope.as_ref())?;
+    let next = current_revision
+        .checked_add(1)
+        .ok_or_else(|| AppError::Conflict("Guest scope revision exhausted".into()))?;
+    if let Some(mut scope) = scope {
+        scope.revision = next;
+        agent
+            .guest_operation_scopes
+            .insert(service.to_owned(), scope);
+    } else {
+        agent.guest_operation_scopes.remove(service);
+    }
+    agent
+        .guest_operation_scope_revisions
+        .insert(service.to_owned(), next);
+    Ok(())
+}
+
+/// Discovery is advisory; execution rechecks the live agent separately. This
+/// has no database cost on owner/ordinary requests, or outside guest discovery.
+pub async fn filter_guest_catalog(
+    db: &Database,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+    services: &mut Vec<mcp_service::McpToolService>,
+) -> AppResult<()> {
+    let Some(chat) = chat.filter(|chat| chat.guest) else {
+        return Ok(());
+    };
+    if chat.is_orchestrator() {
+        services.clear();
+        return Ok(());
+    }
+    // Fail closed without failing discovery: a guest of a missing or destroyed
+    // agent sees no tools, while the rest of tools/list still answers.
+    let agent = match team::agent(db, &chat.user_id, &chat.agent_id).await {
+        Ok(agent) => agent,
+        Err(AppError::NotFound(_)) => {
+            services.clear();
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    filter_catalog(&agent.guest_operation_scopes, services);
+    for service in services.iter_mut() {
+        // A generic tool's advertised POST is the MCP envelope, not the
+        // downstream verb. Only execution can classify its concrete request.
+        if service.is_generic_proxy {
+            continue;
+        }
+        let access = guest_level(&agent, &service.service_id, mcp_catalog_id(service));
+        service.endpoints.retain(|endpoint| {
+            let Ok(method) = reqwest::Method::from_bytes(endpoint.method.as_bytes()) else {
+                return false;
+            };
+            let effects = mcp_service::operation_effects(
+                &method,
+                service
+                    .durable_endpoint_metadata
+                    .get(&endpoint.endpoint_id)
+                    .copied()
+                    .unwrap_or_default(),
+            );
+            guest_level_allows(access, effects)
+        });
+    }
+    services.retain(|service| !service.endpoints.is_empty());
+    Ok(())
+}
+
+pub fn guest_level(
+    agent: &AssistantAgent,
+    service: &str,
+    catalog: Option<&str>,
+) -> crate::models::assistant_agent::GuestAccess {
+    agent
+        .guest_access
+        .get(service)
+        .or_else(|| catalog.and_then(|id| agent.guest_access.get(id)))
+        .copied()
+        .unwrap_or_default()
+}
+
+pub fn guest_level_allows(
+    access: crate::models::assistant_agent::GuestAccess,
+    effects: mcp_service::OperationEffects,
+) -> bool {
+    use crate::models::assistant_agent::GuestAccess;
+    match access {
+        GuestAccess::All => true,
+        GuestAccess::Use => effects.uses,
+        GuestAccess::Read => effects.reads && effects.uses,
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct GuestHttpContext<'a> {
+    pub query: Option<&'a str>,
+    pub websocket: bool,
 }

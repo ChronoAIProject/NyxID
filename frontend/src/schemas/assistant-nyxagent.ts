@@ -146,6 +146,20 @@ export const nyxAgentRecoverySchema = z.object({
   attachments: z.array(z.string()),
 });
 export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
+const nyxAgentFailureReasonSchema = z.object({
+  source: z.string(),
+  stage: z.string(),
+  code: z.string(),
+  http_status: z.number().int().nullish(),
+  nyxid_error_code: z.number().int().nullish(),
+});
+export type NyxAgentFailureReason = z.infer<typeof nyxAgentFailureReasonSchema>;
+const turnMetadataSchema = z.object({
+  attempts: z.number().int().nonnegative().nullish(),
+  capacity_wait_ms: z.number().nonnegative().nullish(),
+  failure_reason: nyxAgentFailureReasonSchema.nullish(),
+  channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
+});
 export const nyxAgentMessageSchema = z.object({
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
@@ -160,7 +174,7 @@ export const nyxAgentMessageSchema = z.object({
   status: z.enum(["completed", "failed"]),
   error_code: z.string().nullable(),
   upstream_error_code: z.string().nullable().optional(),
-  turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(), channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish() }).nullish(),
+  turn_metadata: turnMetadataSchema.nullish(),
   error_detail: z.object({
     attempts: z.number().int().nonnegative().nullish(),
     capacity_wait_ms: z.number().nonnegative().nullish(),
@@ -308,7 +322,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.completed"),
     turn_id: z.string(),
     status: z.enum(["completed", "failed", "cancelled"]),
-    turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(), channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish() }).nullish(),
+    turn_metadata: turnMetadataSchema.nullish(),
     error: z.object({
       attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(),
       code: z.string(), message: z.string(), upstream_error_code: z.string().nullish(),

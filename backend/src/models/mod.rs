@@ -231,3 +231,5 @@ pub mod oauth_delegation_authority;
 pub mod platform_help;
 
 pub mod nyxbot_gateway_release;
+
+pub mod discord_gateway;

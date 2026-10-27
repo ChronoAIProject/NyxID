@@ -58,6 +58,7 @@ function cookieRewrite(proxyRes: import("http").IncomingMessage) {
 const proxyTarget = {
   target: backendUrl,
   changeOrigin: true,
+  ws: true,
   // Vite's proxy sets agent=false, so an environment proxy needs an explicit agent.
   agent: process.env.NODE_USE_ENV_PROXY === "1" && backendUrl.startsWith("https:")
     ? new https.Agent({ proxyEnv: process.env })
@@ -66,6 +67,9 @@ const proxyTarget = {
   configure: (proxy: any) => {
     // Proxy agents can send headers before proxyReq; rewrite before request creation.
     proxy.on("start", originRewrite)
+    proxy.on("proxyReqWs", (request: import("http").ClientRequest, incoming: import("http").IncomingMessage) => {
+      if (incoming.headers.origin) request.setHeader("Origin", expectedOrigin)
+    })
     proxy.on("proxyRes", cookieRewrite)
   },
 }

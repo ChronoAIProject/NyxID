@@ -39,11 +39,14 @@ pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
     "assistant:operation-scopes",
+    "assistant:guest-operation-scopes",
     "assistant:machine-capabilities",
     "assistant:machine-contexts",
     "assistant:live-turn-gate",
     PLATFORM_POLICY,
     "approval:required-web-v1",
+    // Older transport writers do not wait for relay sockets before remote setup.
+    "channel:discord-gateway",
 ];
 const MAX_AGE_SECS: i64 = 45;
 

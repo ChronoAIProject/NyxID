@@ -96,6 +96,14 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
         label="Last inbound"
         value={`${when(d.last_inbound_at)}${d.last_inbound_source ? ` (${d.last_inbound_source})` : ""}`}
       />
+      {data.platform === "discord" && (
+        <Row
+          label="Last NyxID relay Gateway state"
+          value={d.discord_gateway
+            ? `${d.discord_gateway.state}${d.discord_gateway.reason ? ` (${d.discord_gateway.reason})` : ""}, reported ${when(d.discord_gateway.updated_at)}`
+            : "No local connection recorded. Relay chat requires channel:discord-gateway and Discord Message Content Intent. Gateway-hosted bots use the Agent Event Gateway connection."}
+        />
+      )}
       <Row label="Last reply sent" value={when(d.last_outbound_at)} />
       {outbound && <Row label="Last reply error" value={outbound} />}
       {webhook && <Row label="Last webhook error" value={webhook} />}

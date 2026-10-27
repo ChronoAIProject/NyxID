@@ -42,6 +42,8 @@ pub struct ChannelBotSubscriptionState {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_gateway: Option<super::discord_gateway::DiscordGatewayStatus>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub last_inbound_at: Option<DateTime<Utc>>,
     #[serde(default)]

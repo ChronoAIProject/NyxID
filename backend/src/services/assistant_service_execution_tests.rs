@@ -573,6 +573,35 @@ async fn automatic_receipts_require_clean_successful_completion() {
 }
 
 #[test]
+fn owner_selector_accepts_inline_requests_and_bounds_only_the_reference() {
+    for input in [
+        "/service connection continue the search",
+        "/service connection\nContinue the search",
+        "/service\tconnection\tcontinue the search",
+        "/service  connection \r\nContinue the search",
+    ] {
+        assert_eq!(owner_selector(input), Some("connection"), "{input:?}");
+    }
+    let longest = "a".repeat(128);
+    assert_eq!(
+        owner_selector(&format!("/service {longest} {}", "request ".repeat(100))),
+        Some(longest.as_str())
+    );
+    for input in [
+        "/service".to_owned(),
+        "/service \t".to_owned(),
+        "/service\nconnection".to_owned(),
+        "/service-other connection".to_owned(),
+        " /service connection".to_owned(),
+        "> /service connection".to_owned(),
+        "Quoted\n/service connection".to_owned(),
+        format!("/service {} continue", "a".repeat(129)),
+    ] {
+        assert_eq!(owner_selector(&input), None, "{input:?}");
+    }
+}
+
+#[test]
 fn selector_is_leading_exact_and_header_binding_excludes_only_control_metadata() {
     assert_eq!(
         owner_selector("/service connection\nDo work"),
@@ -633,6 +662,92 @@ fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves
     assert!(pool != execution_projection_digest(&target, false));
 }
 
+#[tokio::test]
+async fn guest_1995_route_binding_uses_durable_credential_identity() {
+    use crate::services::user_api_key_service::{CreateApiKeyParams, create_api_key};
+    let f = orchestrator_fixture("guest_1995_durable_route").await;
+    let id = connection(&f, &f.owner, "model-route", None).await;
+    let credential = create_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        CreateApiKeyParams {
+            label: "model route",
+            credential_type: "bearer",
+            credential: "test-only-model-key",
+            access_token: None,
+            refresh_token: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "active",
+            source: None,
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state.db.collection::<Document>("user_services").update_one(doc! {"_id":&id},
+        doc! {"$set":{"api_key_id":&credential.id,"auth_method":"bearer","credential_binding":"user"}}).await.unwrap();
+    let mut target = target(&f, &id).await;
+    let operation = json!({"kind":"raw_inference","model":"test","input_admission":"first-turn"});
+    let bound = guest_model::route(
+        &f.state.db,
+        &f.chat,
+        &f.row.model,
+        Some(&id),
+        &target,
+        &operation,
+    )
+    .await
+    .unwrap();
+    let mut next_chat = f.chat.clone();
+    next_chat.api_key_id = Uuid::new_v4().to_string();
+    let mut next_operation = operation.clone();
+    next_operation["input_admission"] = json!("next-turn");
+    // A different replica/turn must not depend on held credential MACs or
+    // ephemeral refreshed token bytes. Explicit replacement advances the epoch.
+    target.credential = "refreshed-token".to_owned().into();
+    let next = guest_model::route(
+        &f.state.db,
+        &next_chat,
+        &f.row.model,
+        Some(&id),
+        &target,
+        &next_operation,
+    )
+    .await
+    .unwrap();
+    assert!(bound == next);
+    f.state
+        .db
+        .collection::<Document>("user_api_keys")
+        .update_one(
+            doc! {"_id":&credential.id},
+            doc! {"$inc":{"credential_epoch":1_i64}},
+        )
+        .await
+        .unwrap();
+    let replaced = guest_model::route(
+        &f.state.db,
+        &next_chat,
+        &f.row.model,
+        Some(&id),
+        &target,
+        &next_operation,
+    )
+    .await
+    .unwrap();
+    assert!(
+        bound != replaced,
+        "credential replacement requires owner establishment"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
 #[test]
 fn raw_inference_is_conservative_about_state_and_provider_effects() {
     let good = json!({"model":"test", "input":"hello", "store":false,
@@ -658,4 +773,48 @@ fn raw_inference_is_conservative_about_state_and_provider_effects() {
     missing_storage.as_object_mut().unwrap().remove("store");
     assert!(!stateless_inference("/v1/responses", &missing_storage));
     assert!(!stateless_inference("/v1/responses", &json!([])));
+}
+
+#[test]
+fn guest_1995_codex_correlation_metadata_is_stateless_but_provider_handles_are_not() {
+    // Captured Codex 0.160.1 fields, as forwarded by NyxAgent's normal bridge.
+    let body = json!({"model":"model","store":false,"input":"hello","stream":true,
+        "include":["reasoning.encrypted_content"],"prompt_cache_key":"varies-by-session",
+        "client_metadata":{"root_turn_id":"turn","session_id":"session","thread_id":"thread",
+            "turn_id":"turn","x-codex-installation-id":"installation",
+            "x-codex-turn-metadata":"{\"thread_id\":\"client-correlation\"}","x-codex-window-id":"window"}});
+    assert!(stateless_model_transport("v1/responses", &body));
+    assert!(
+        !stateless_inference("v1/responses", &body),
+        "owner classification stays legacy"
+    );
+    let unchanged = body.clone();
+    assert!(stateless_model_transport("v1/responses", &body));
+    assert_eq!(body, unchanged, "classification never mutates the request");
+    assert!(!stateless_model_transport("v1/chat/completions", &body));
+    for metadata in [
+        json!({"conversation":"conv_provider"}),
+        json!({"thread_id":{"id":"thread_provider"}}),
+        json!({"thread_id":["thread_provider"]}),
+        json!({"x-codex-turn-metadata":"x".repeat(8193)}),
+        json!("arbitrary"),
+        json!(null),
+    ] {
+        let mut bad = body.clone();
+        bad["client_metadata"] = metadata;
+        assert!(!stateless_model_transport("v1/responses", &bad));
+    }
+    for handle in [
+        "thread_id",
+        "conversation",
+        "previous_response_id",
+        "file_id",
+    ] {
+        let mut bad = body.clone();
+        bad[handle] = json!("provider-resource");
+        assert!(!stateless_model_transport("v1/responses", &bad));
+        let mut bad = body.clone();
+        bad["input"] = json!([{(handle):"provider-resource"}]);
+        assert!(!stateless_model_transport("v1/responses", &bad));
+    }
 }

@@ -481,6 +481,11 @@ async fn authorize_operation(
             catalog_id,
             method,
             Some(&path),
+            // Match the owner-scope check above: both adapters open a WebSocket.
+            super::super::agent_operation_scope_service::GuestHttpContext {
+                query: None,
+                websocket: true,
+            },
         ),
     )
     .await?;
@@ -524,5 +529,142 @@ pub fn duration_billing<'a>(
         Ok(billing)
     } else {
         Err(AppError::VoiceProviderUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        models::{
+            assistant_agent::AgentGrants,
+            service_endpoint::{COLLECTION_NAME as ENDPOINTS, ServiceEndpoint},
+        },
+        services::{
+            agent_operation_scope_service as scopes, assistant_authority_tests::direct_fixture,
+            assistant_team_service as team, feature_flag_service as flags,
+            proxy_authorization::CanonicalPath,
+        },
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    #[tokio::test]
+    async fn guest_voice_operation_selection_refuses_websockets() {
+        let f = Box::pin(direct_fixture("guest_voice_websocket_scope")).await;
+        flags::set_platform_override(
+            &f.state.db,
+            flags::GUEST_OPERATION_SCOPES_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        // Voice admission already excludes guests. Exercise the lower-level
+        // operation check directly so it must independently retain WS semantics.
+        let mut owner_auth = f.auth.clone();
+        owner_auth.assistant_chat = Some(Arc::new(f.chat.clone()));
+        let owner = InferenceAuthority(owner_auth);
+        let mut guest_auth = owner.0.clone();
+        Arc::make_mut(guest_auth.assistant_chat.as_mut().unwrap()).guest = true;
+        let guest = InferenceAuthority(guest_auth);
+        assert!(guest.0.assistant_operation_scopes.is_empty());
+
+        for slug in ["llm-openai", "llm-xai"] {
+            let mut service = crate::test_utils::test_auto_connected_catalog_service();
+            service.slug = slug.into();
+            service.inference = crate::services::inference_service::default_inference(slug);
+            f.state
+                .db
+                .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            let endpoints = [
+                crate::test_utils::test_service_endpoint(
+                    &service.id,
+                    "live",
+                    "POST",
+                    "/live/sessions",
+                ),
+                crate::test_utils::test_service_endpoint(
+                    &service.id,
+                    "realtime",
+                    "GET",
+                    "/realtime",
+                ),
+            ];
+            f.state
+                .db
+                .collection::<ServiceEndpoint>(ENDPOINTS)
+                .insert_many(&endpoints)
+                .await
+                .unwrap();
+            team::set_grants(
+                &f.state.db,
+                &f.owner,
+                &f.chat.agent_id,
+                team::GrantChange::Add(AgentGrants {
+                    platform_service_ids: vec![service.id.clone()],
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+            team::set_grants(
+                &f.state.db,
+                &f.owner,
+                &f.chat.agent_id,
+                team::GrantChange::GuestOperations {
+                    base: Box::new(team::GrantChange::Guests(BTreeMap::new())),
+                    selections: BTreeMap::from([(
+                        service.id.clone(),
+                        serde_json::from_value(serde_json::json!({
+                            "expected_revision": 0,
+                            "endpoint_ids": endpoints.iter().map(|e| &e.id).collect::<Vec<_>>()
+                        }))
+                        .unwrap(),
+                    )]),
+                },
+            )
+            .await
+            .unwrap();
+            for dictation in [false, true] {
+                let (method, path) = if slug == "llm-xai" || dictation {
+                    ("GET", "/realtime")
+                } else {
+                    ("POST", "/live/sessions")
+                };
+                // The same HTTP operation is selected and permitted by the
+                // guest level. Only the voice transport's WS bit must refuse it.
+                let path = CanonicalPath::from_mcp_literal(path).unwrap();
+                assert!(
+                    scopes::check_non_mcp_context(
+                        &f.state.db,
+                        &guest.0,
+                        false,
+                        &service.id,
+                        Some(&service.id),
+                        method,
+                        Some(&path),
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap()
+                );
+                authorize_operation(&f.state.db, &owner, &service, None, dictation)
+                    .await
+                    .unwrap();
+                let error = authorize_operation(&f.state.db, &guest, &service, None, dictation)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, AppError::ApiKeyScopeForbidden(ref message)
+                    if message.starts_with("Specialist operation scope denied this call")),
+                    "{slug}, dictation={dictation}: {error}"
+                );
+            }
+        }
+        f.state.db.drop().await.unwrap();
     }
 }

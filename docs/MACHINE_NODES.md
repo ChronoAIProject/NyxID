@@ -582,6 +582,9 @@ logging to a website and then hand back the control to nyxbot".
   - NyxID relays them to the owner's browser over an authenticated WebSocket
     under `/assistant/nyxagent/...` (human-only, owner-only; add it to
     `delegated_read_denied_path` if it is a GET upgrade).
+    The web viewer uses the frontend's same-origin `/api/v1/` WebSocket proxy,
+    preserving session cookies and the page's `connect-src 'self'` policy.
+    `node_ws_url` is companion ingress and must not select the human viewer host.
   - Cross-replica: follow the existing browser SSH terminal (`/ssh/{id}/terminal`)
     and node dispatch patterns, so the browser and the node can be on different
     replicas.

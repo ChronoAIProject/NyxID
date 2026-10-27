@@ -2137,6 +2137,7 @@ pub async fn delete_service(
 
     let now = Utc::now();
     let authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -3405,6 +3406,7 @@ pub(crate) async fn update_service_inner(
         set_doc.insert("tools_credential_frozen", true);
     }
     let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -3741,6 +3743,7 @@ pub async fn resync_service_identity(
     let outcome = catalog_identity_service::force_resync(
         &state.db,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -3971,6 +3974,7 @@ pub async fn update_redirect_uris(
         &state.db,
         &service,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -4043,6 +4047,7 @@ pub async fn regenerate_oidc_secret(
     crate::services::catalog_mutation_service::commit_oidc_update(
         &state.db, &service,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user).is_ok(),
@@ -7725,7 +7730,11 @@ async fn validate_service_icon_url(state: &AppState, value: &str) -> AppResult<(
     if value.is_empty() {
         return Ok(());
     }
-    let id = crate::services::catalog_icon_service::asset_id(&state.config.base_url, value)?;
+    let id = crate::services::catalog_icon_service::asset_id_with_aliases(
+        &state.config.base_url,
+        &state.config.domain_aliases.base_urls,
+        value,
+    )?;
     crate::services::catalog_icon_service::require_asset(&state.db, id, None).await
 }
 

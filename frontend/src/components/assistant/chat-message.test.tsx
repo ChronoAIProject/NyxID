@@ -338,6 +338,7 @@ describe("canonical chat presentation", () => {
           error: "Stopped responding",
           errorDetail: {
             stage: "no_progress",
+            failureReason: { source: "nyxid", stage: "model_proxy", code: "api_key_scope_forbidden", http_status: 403, nyxid_error_code: 9000 },
             upstreamCode: "turn_failed",
             httpStatus: 503,
             upstreamRequestId: "req-1",
@@ -350,14 +351,27 @@ describe("canonical chat presentation", () => {
       />,
     );
     fireEvent.click(screen.getByText("Details"));
-    for (const value of ["turn_failed", "no_progress", "503", "turn-1", "resp_1", "req-1", "2"]) {
+    for (const value of ["turn_failed", "no_progress", "503", "turn-1", "resp_1", "req-1", "2", "nyxid / model_proxy / api_key_scope_forbidden / HTTP 403 / NyxID 9000"]) {
       expect(screen.getByText(value)).toBeInTheDocument();
     }
     expect(
       within(screen.getByText("Details").closest("details")!).getByRole("time"),
     ).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
     fireEvent.click(screen.getByRole("button", { name: "Copy diagnostic ID" }));
-    expect(writeText).toHaveBeenCalledWith("turn turn-1 / upstream turn_failed / response resp_1 / request req-1");
+    expect(writeText).toHaveBeenCalledWith("turn turn-1 / upstream turn_failed / cause nyxid / model_proxy / api_key_scope_forbidden / HTTP 403 / NyxID 9000 / response resp_1 / request req-1");
+  });
+
+  it("explains a missing guest model route only in the owner's diagnostic details", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error",
+      error: "This assistant isn't available to guests yet.",
+      errorDetail: { stage: "stream", turnId: "turn-guest", continuations: 0, failureReason: {
+        source: "nyxid", stage: "model_proxy", code: "guest_model_route_required",
+        http_status: 403, nyxid_error_code: 9000,
+      } },
+    }} />);
+    expect(screen.getByText("This assistant isn't available to guests yet.")).toBeVisible();
+    fireEvent.click(screen.getByText("Details"));
+    expect(screen.getByText("Send one message to this agent as its owner using its configured model to record the route for guest replies.")).toBeVisible();
   });
 
   it("shows thinking treatment only for a content-free streaming message", () => {

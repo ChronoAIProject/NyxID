@@ -1232,7 +1232,8 @@ mod tests {
                     None,
                     None
                 )
-                .await,
+                .await
+                .map_err(AppError::into_refresh_source),
                 Err(AppError::Unauthorized(_))
             ));
         }

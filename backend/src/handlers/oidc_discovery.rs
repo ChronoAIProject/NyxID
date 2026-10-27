@@ -37,6 +37,7 @@ pub async fn openid_configuration(State(state): State<AppState>) -> Json<serde_j
 
     Json(serde_json::json!({
         "issuer": state.config.jwt_issuer,
+        "nyxid_api_origins": state.config.accepted_base_urls().collect::<Vec<_>>(),
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
         "pushed_authorization_request_endpoint": format!("{base}/oauth/par"),
@@ -122,10 +123,18 @@ pub async fn oauth_authorization_server_metadata(
 /// where to authenticate (NyxID's OAuth endpoints) before connecting.
 pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<serde_json::Value> {
     let base = &state.config.base_url;
+    // An issuer pinned to a configured API alias must still be the discovery
+    // identity (RFC 8414), even while the resource uses the new canonical base.
+    // Preserve the existing base for unrelated/custom issuers and unset aliases.
+    let authorization_server = state
+        .config
+        .accepted_base_urls()
+        .find(|origin| *origin == state.config.jwt_issuer)
+        .unwrap_or(base);
 
     Json(serde_json::json!({
         "resource": format!("{base}/mcp"),
-        "authorization_servers": [base],
+        "authorization_servers": [authorization_server],
         // Aligned with DEFAULT_MCP_ALLOWED_SCOPES (NyxID#1222/#1226): clients
         // use this list to decide which scopes to request.
         "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy", "machine", "offline_access"],
@@ -287,6 +296,34 @@ mod tests {
                 "protected-resource metadata missing MCP default scope: {scope}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn domain_alias_discovery_keeps_pinned_issuer_and_advertises_api_origins() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.base_url = "https://new.example".into();
+        state.config.jwt_issuer = "https://old.example".into();
+        state.config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        state.config.domain_aliases.frontend_urls = vec!["https://old-app.example".into()];
+        let axum::Json(value) = openid_configuration(State(state.clone())).await;
+        assert_eq!(value["issuer"], "https://old.example");
+        assert_eq!(value["token_endpoint"], "https://new.example/oauth/token");
+        assert_eq!(
+            value["nyxid_api_origins"],
+            serde_json::json!(["https://new.example", "https://old.example"])
+        );
+        let axum::Json(resource) = oauth_protected_resource(State(state.clone())).await;
+        assert_eq!(resource["resource"], "https://new.example/mcp");
+        assert_eq!(
+            resource["authorization_servers"],
+            serde_json::json!(["https://old.example"])
+        );
+        state.config.domain_aliases.base_urls.clear();
+        let axum::Json(resource) = oauth_protected_resource(State(state)).await;
+        assert_eq!(
+            resource["authorization_servers"],
+            serde_json::json!(["https://new.example"])
+        );
     }
 
     #[tokio::test]

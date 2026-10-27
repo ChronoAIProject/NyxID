@@ -298,6 +298,7 @@ mod tests {
             .await
             .unwrap();
         Authority {
+            catalog_base_aliases: Vec::new(),
             catalog_base_url: "http://localhost:3001".into(),
             actor: actor.clone(),
             first_party_human: true,

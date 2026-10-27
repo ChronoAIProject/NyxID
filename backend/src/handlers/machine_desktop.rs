@@ -862,6 +862,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn machine_desktop_full_router_cookie_upgrade_relays_legacy_frames() {
+        use crate::services::{machine_integration_tests as machines, token_service};
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        let mut f = Box::pin(
+            crate::services::assistant_authority_tests::orchestrator_fixture(
+                "machine_desktop_cookie_stream",
+            ),
+        )
+        .await;
+        let node = machines::node(&f, &f.owner).await;
+        assert_eq!(node.machine.as_ref().unwrap().version, 1);
+        let (peer, mut requests) = machines::peer(&f, &node, json!({"streaming":true})).await;
+        let session = token_service::create_session(&f.state.db, &f.owner, None, None)
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        f.state.config.frontend_url = format!("http://{address}");
+        // Companion ingress and the cookie-authenticated web origin differ.
+        f.state.config.base_url = "https://api.example.test".into();
+        let (public, private) = crate::routes::build_router_with_state(f.state.clone());
+        let app = public.merge(private).with_state(f.state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let url = format!(
+            "ws://{address}/api/v1/assistant/nyxagent/machines/{}/desktop",
+            node.id
+        );
+        let cookie = format!("nyx_session={}", session.session_token);
+        for (cookie, origin, expected) in [
+            (None, f.state.config.frontend_url.as_str(), 401),
+            (Some(cookie.as_str()), "https://untrusted.example", 403),
+        ] {
+            let mut request = url.clone().into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("origin", origin.parse().unwrap());
+            if let Some(cookie) = cookie {
+                request
+                    .headers_mut()
+                    .insert("cookie", cookie.parse().unwrap());
+            }
+            match connect_async(request).await {
+                Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                    assert_eq!(response.status().as_u16(), expected);
+                }
+                _ => panic!("desktop admission did not refuse the unauthorized upgrade"),
+            }
+        }
+        let mut request = url.into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("origin", f.state.config.frontend_url.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("cookie", cookie.parse().unwrap());
+        let (mut socket, response) = connect_async(request).await.unwrap();
+        assert_eq!(response.status().as_u16(), 101);
+        let connected = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let connected: Value = serde_json::from_str(connected.to_text().unwrap()).unwrap();
+        assert_eq!(connected["type"], "connected");
+        let open = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(open.operation, Operation::DesktopOpen);
+        assert_eq!(open.version, 1);
+        assert!(open.authority.is_none());
+        assert_eq!(open.parameters["display"], "secure");
+        assert!(open.parameters["context_id"].is_null());
+        let frame = Frame {
+            kind: Kind::Desktop,
+            end: false,
+            id: Uuid::parse_str(connected["session_id"].as_str().unwrap()).unwrap(),
+            sequence: 1,
+            // Synthetic transport bytes, never screen content.
+            bytes: &[1, 2, 3],
+        };
+        let encoded = frame.encode().unwrap();
+        f.state
+            .node_ws_manager
+            .deliver_desktop_frame(&node.id, &frame, &encoded);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let ClientMessage::Binary(bytes) = socket.next().await.unwrap().unwrap() {
+                    assert_eq!(bytes.as_ref(), encoded.as_slice());
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let _ = socket.close(None).await;
+        server.abort();
+        peer.abort();
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn machine_desktop_upgrade_requires_owner_human_and_same_origin() {
         let f = crate::services::assistant_authority_tests::orchestrator_fixture(
             "machine_desktop_browser_authority",

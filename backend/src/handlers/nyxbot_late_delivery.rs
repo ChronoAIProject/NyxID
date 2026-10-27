@@ -134,6 +134,10 @@ pub(super) fn provider_stream(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
+                        Err(code) if code == "guest_model_route_required" => {
+                            let text = engine::TurnError::new(&code).message;
+                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
+                        },
                         Err(code) => yield json!({"type": "response.failed", "response": {
                             "id": &response_id, "status": "failed",
                             "error": {"code": identifier(&code), "message": "NyxBot could not finish this turn."}}}),

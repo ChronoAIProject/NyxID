@@ -2649,6 +2649,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::machine_access::request_context),
         )
         .route(
+            "/nyxagent/agents/{id}/guest-operations",
+            get(handlers::assistant_team::guest_operations),
+        )
+        .route(
+            "/nyxagent/agents/{id}/guest-operations/{service_id}",
+            axum::routing::put(handlers::assistant_team::set_guest_operations),
+        )
+        .route(
             "/nyxagent/agents/{id}/operations",
             get(handlers::assistant_team::agent_operations),
         )
@@ -3487,6 +3495,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ))
     } else {
         private
+    };
+
+    let (public_oauth, private) = if let Some(state) = router_state.as_ref() {
+        let layer =
+            middleware::from_fn_with_state(state.clone(), crate::mw::cookie_domain::middleware);
+        (public_oauth.layer(layer.clone()), private.layer(layer))
+    } else {
+        (public_oauth, private)
     };
 
     (

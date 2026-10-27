@@ -51,6 +51,49 @@ pub(crate) async fn process_inbound_messages(
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
     messages: &[crate::services::channel_platform::InboundMessage],
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    process_messages(state, bot, adapter, messages, None).await
+}
+
+pub(crate) async fn process_discord_gateway_message(
+    state: &AppState,
+    bot: &crate::models::channel_bot::ChannelBot,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    inbound: &super::channel_platform::InboundMessage,
+    fence: &super::discord_gateway::Fence,
+    facts: &crate::models::channel_thread::ChannelThreadFacts,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    if bot.id != fence.bot.id
+        || bot.user_id != fence.bot.user_id
+        || !super::channel_thread_service::valid_facts(facts, inbound)
+        || facts
+            .discord_gateway
+            .as_ref()
+            .is_none_or(|d| d.version != 1 || d.bot_id != bot.platform_bot_id)
+    {
+        return Err(Box::new(crate::errors::AppError::ValidationError(
+            "Discord Gateway facts do not match the source".into(),
+        )));
+    }
+    process_messages(
+        InboundDeps::from(state),
+        bot,
+        adapter,
+        std::slice::from_ref(inbound),
+        Some((fence, facts)),
+    )
+    .await
+}
+
+async fn process_messages(
+    state: InboundDeps<'_>,
+    bot: &crate::models::channel_bot::ChannelBot,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    messages: &[super::channel_platform::InboundMessage],
+    gateway: Option<(
+        &super::discord_gateway::Fence,
+        &crate::models::channel_thread::ChannelThreadFacts,
+    )>,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     if messages.is_empty() {
         return Ok(true);
     }
@@ -97,7 +140,11 @@ pub(crate) async fn process_inbound_messages(
         // Liveness is stamped once per batch, only after billing admitted the
         // delivery; a diagnostics write failure never blocks processing.
         if !stamped {
-            super::channel_bot_service::record_inbound_success(state.db, bot).await;
+            if let Some((fence, _)) = gateway {
+                fence.record_inbound(state.db).await?;
+            } else {
+                super::channel_bot_service::record_inbound_success(state.db, bot).await;
+            }
             stamped = true;
         }
         if adapter.dedup_inbound_by_platform_message_id()
@@ -161,9 +208,11 @@ pub(crate) async fn process_inbound_messages(
             &uuid::Uuid::new_v4().to_string(),
         );
         metadata.activity = activity.clone();
-        // Additive facts are dormant by default and limited to direct NyxBot
-        // routes. Metadata failure must not change legacy message delivery.
-        if !notification {
+        // Socket-derived Discord facts accompany every admitted route. Other
+        // adapters retain the existing flag-gated direct NyxBot projection.
+        if let Some((_, facts)) = gateway {
+            metadata.thread_context = Some(facts.clone());
+        } else if !notification {
             match super::channel_thread_service::inbound_facts(
                 state.db,
                 bot,
@@ -182,7 +231,9 @@ pub(crate) async fn process_inbound_messages(
             metadata.thread_id = None;
             metadata.content_type = "unknown".into();
         }
-        let stored = if adapter.atomic_inbound_admission() {
+        let stored = if let Some((fence, _)) = gateway {
+            super::channel_admission_service::store_discord(state.db, metadata, fence).await
+        } else if adapter.atomic_inbound_admission() {
             super::channel_admission_service::store(state.db, metadata).await
         } else {
             super::channel_admission_service::store_current_owner(state.db, metadata).await
@@ -392,6 +443,11 @@ pub(crate) async fn process_inbound_messages(
             continue;
         }
         super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
+        if let Some((fence, _)) = gateway
+            && !fence.current(state.db).await?
+        {
+            return Ok(false);
+        }
         let delivery = channel_relay_service::forward_to_agent(
             state.http_client,
             state.config,

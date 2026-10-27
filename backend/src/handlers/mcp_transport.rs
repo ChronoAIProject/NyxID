@@ -2176,6 +2176,16 @@ async fn handle_tools_list(
         return rpc_error(request.id.clone(), -32603, "Failed to load tools");
     }
 
+    if let Err(error) = crate::services::agent_operation_scope_service::filter_guest_catalog(
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await
+    {
+        tracing::warn!(code = error.error_code(), "Failed to filter guest tools");
+        return rpc_error(request.id.clone(), -32603, "Failed to load tools");
+    }
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth.assistant_operation_scopes,
         &mut services,
@@ -3783,8 +3793,10 @@ fn guest_tool_refusal(
 /// runs only reads (GET, HEAD, OPTIONS, or a POST its stored catalog contract
 /// marks read-only), `use` (the default) reads, creates and acts but never
 /// changes or removes what exists (PUT, PATCH and DELETE by default, a POST
-/// or PUT as NyxID's `x-nyxid-changes-existing` says, never an operation
-/// marked `x-aevatar-tool.destructive`), `all` everything the specialist may.
+/// or PUT as NyxID's `x-nyxid-changes-existing` says). A compiled append-only
+/// POST attestation may permit use despite `x-aevatar-tool.destructive`;
+/// its query conditions still apply. `all` permits everything the specialist
+/// may do. Guest-only selections intersect every level, including `all`.
 /// A guest call never carries a method override. The agent's key already
 /// holds only its granted services, and operations behind the owner's
 /// approval are refused later (`authorize_mcp_operation`) at every level.
@@ -3804,11 +3816,17 @@ async fn guest_service_refusal(
     else {
         return Some(guest_refused(request_id));
     };
-    let access = agent
-        .guest_access
-        .get(&service.service_id)
-        .copied()
-        .unwrap_or_default();
+    if prepared
+        .authorize_agent_operations(&agent.guest_operation_scopes, service, endpoint)
+        .is_err()
+    {
+        return Some(guest_refused(request_id));
+    }
+    let access = crate::services::agent_operation_scope_service::guest_level(
+        &agent,
+        &service.service_id,
+        crate::services::agent_operation_scope_service::mcp_catalog_id(service),
+    );
     let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)
@@ -3826,7 +3844,33 @@ async fn guest_service_refusal(
             true,
         ));
     }
-    let effects = mcp_service::operation_effects(prepared.method(), metadata);
+    let mut effects = prepared.guest_effects(metadata);
+    if service.is_generic_proxy
+        && (crate::services::agent_operation_scope_service::mcp_catalog_id(service).is_some()
+            || matches!(&service.source, mcp_service::McpToolSource::Platform { .. }))
+    {
+        let Ok(path) = prepared.canonical_path() else {
+            return Some(guest_refused(request_id));
+        };
+        let Ok(concrete) = Box::pin(
+            crate::services::agent_operation_scope_service::unscoped_guest_effects(
+                &state.db,
+                &service.service_id,
+                crate::services::agent_operation_scope_service::mcp_catalog_id(service),
+                prepared.method(),
+                Some(&path),
+                prepared.query(),
+            ),
+        )
+        .await
+        else {
+            return Some(guest_refused(request_id));
+        };
+        effects = crate::services::agent_operation_scope_service::intersect_effects(
+            Some(effects),
+            concrete,
+        );
+    }
     let reads = effects.reads;
     let uses = effects.uses;
     let allowed = match access {
@@ -4915,6 +4959,12 @@ async fn load_all_services_for_meta_tools(
     )
     .await?;
     crate::services::lark_attachment_tool::filter_discovery(
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await?;
+    crate::services::agent_operation_scope_service::filter_guest_catalog(
         &state.db,
         auth.chat.as_ref(),
         &mut services,

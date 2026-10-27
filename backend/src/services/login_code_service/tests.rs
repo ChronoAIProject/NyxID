@@ -426,7 +426,8 @@ async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotatio
                 None,
                 None
             )
-            .await,
+            .await
+            .map_err(AppError::into_refresh_source),
             Err(AppError::Unauthorized(message)) if message == "Session expired or revoked"
         ));
         assert_eq!(

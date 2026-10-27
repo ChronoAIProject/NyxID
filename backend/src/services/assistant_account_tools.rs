@@ -276,9 +276,10 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
         .endpoints
         .extend(super::assistant_team_tools::agent_endpoints());
     // Gated authoring is appended only by the actor-aware discovery helper.
-    service
-        .endpoints
-        .retain(|e| e.name != super::assistant_skill_authoring::TOOL_NAME);
+    service.endpoints.retain(|e| {
+        e.name != super::assistant_skill_authoring::TOOL_NAME
+            && (!chat.guest || e.name != "task_status")
+    });
     service
 }
 

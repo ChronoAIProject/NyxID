@@ -160,11 +160,14 @@ pub fn apply_operation_effects(
 /// and the same closed, stateless request contract used for assistant consent.
 /// Provider storage, resource handles, hosted effects and unknown extensions
 /// retain method classification. Service names never establish this authority.
+/// Only live guest model transport recognizes Codex correlation metadata here;
+/// owner approval verbs retain their pre-extension behavior.
 pub fn apply_inference_contract(
     descriptor: &mut OperationDescriptor,
     service: &crate::models::downstream_service::DownstreamService,
     body: Option<&[u8]>,
     method_override: bool,
+    guest_model: bool,
 ) {
     // An override makes even a GET/HEAD ambiguous. This also covers the LLM
     // path, which derives its initial verb directly from the HTTP method.
@@ -180,10 +183,14 @@ pub fn apply_inference_contract(
         && body
             .and_then(|bytes| serde_json::from_slice(bytes).ok())
             .is_some_and(|body| {
-                crate::services::assistant_service_execution::stateless_inference(
-                    descriptor.resource.as_deref().unwrap_or_default(),
-                    &body,
-                )
+                let path = descriptor.resource.as_deref().unwrap_or_default();
+                if guest_model {
+                    crate::services::assistant_service_execution::stateless_model_transport(
+                        path, &body,
+                    )
+                } else {
+                    crate::services::assistant_service_execution::stateless_inference(path, &body)
+                }
             })
     {
         descriptor.verb = ApprovalVerb::Read;
@@ -442,6 +449,41 @@ mod tests {
     }
 
     #[test]
+    fn owner_1995_codex_metadata_preserves_owner_approval_verbs() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.inference = Some(
+            serde_json::from_value(serde_json::json!({"wire_protocol":"openai_responses"}))
+                .unwrap(),
+        );
+        let body = serde_json::to_vec(
+            &serde_json::json!({"model":"m","store":false,"input":"hello",
+            "client_metadata":{"thread_id":"correlation","turn_id":"turn"}}),
+        )
+        .unwrap();
+        for llm in [false, true] {
+            for (guest, method_override, expected) in [
+                (false, false, ApprovalVerb::Write),
+                (true, false, ApprovalVerb::Read),
+                (true, true, ApprovalVerb::Write),
+            ] {
+                let mut descriptor = if llm {
+                    build_llm_descriptor("POST", "responses", Some(&body))
+                } else {
+                    build_http_descriptor("POST", "responses", Some(&body))
+                };
+                apply_inference_contract(
+                    &mut descriptor,
+                    &service,
+                    Some(&body),
+                    method_override,
+                    guest,
+                );
+                assert_eq!(descriptor.verb, expected);
+            }
+        }
+    }
+
+    #[test]
     fn llm_method_overrides_never_retain_read_approval_classification() {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         for inference in [false, true] {
@@ -455,13 +497,13 @@ mod tests {
                 });
             for method in ["GET", "HEAD", "OPTIONS"] {
                 let mut descriptor = build_llm_descriptor(method, "/v1/models", None);
-                apply_inference_contract(&mut descriptor, &service, None, false);
+                apply_inference_contract(&mut descriptor, &service, None, false, false);
                 assert_eq!(descriptor.verb, ApprovalVerb::Read);
-                apply_inference_contract(&mut descriptor, &service, None, true);
+                apply_inference_contract(&mut descriptor, &service, None, true, false);
                 assert_eq!(descriptor.verb, ApprovalVerb::Write);
             }
             let mut descriptor = build_llm_descriptor("DELETE", "/v1/files/item", None);
-            apply_inference_contract(&mut descriptor, &service, None, true);
+            apply_inference_contract(&mut descriptor, &service, None, true, false);
             assert_eq!(descriptor.verb, ApprovalVerb::Destructive);
         }
     }

@@ -171,6 +171,12 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
         "verify"
     };
     Some(match code {
+        "discord_event_webhooks_wrong_endpoint" => advice("verify", "Move the callback URL from Event Webhooks to General Information > Interactions Endpoint URL. Event Webhooks do not deliver ordinary bot chat messages. For ordinary chat, enable channel:discord-gateway in NyxID and Message Content Intent in Discord.".into()),
+        "discord_gateway_intents_required" => advice("verify", "Enable Message Content Intent in Discord Developer Portal > Bot > Privileged Gateway Intents (verified apps need approval). NyxID retries automatically within five minutes.".into()),
+        "discord_gateway_invalid_token" | "discord_gateway_identity_mismatch" => advice("reconnect", "Replace this Discord bot's token in NyxID with the token for the same bot. The Gateway session will restart automatically.".into()),
+        "discord_gateway_capacity" => advice("contact_admin", "Discord ingress capacity is full on this replica. Another replica can claim this bot; add capacity if it keeps waiting.".into()),
+        "discord_gateway_sharding_required" => advice("contact_admin", "This Discord bot requires sharding, which this bounded single-session ingress does not support.".into()),
+        code if code.starts_with("discord_gateway_") => advice("verify", "Discord Gateway ingress is unavailable or reconnecting. NyxID retries automatically. Check the Gateway status, bot token, channel permissions and privileged Message Content Intent.".into()),
         codes::BILLING_SUSPENDED => advice(
             "enable_billing",
             "NyxID billing stopped this channel. Restore credits or the service's billing configuration, then select Verify.".into(),
@@ -221,6 +227,13 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
 
 /// The single recovery recommendation used by health, audit and notices.
 pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
+    if let Some(code) = facts
+        .failure_reason
+        .filter(|code| code.starts_with("discord_"))
+        && let Some(found) = for_code(code, facts, false)
+    {
+        return found;
+    }
     if facts.gateway {
         return advice(
             "gateway",

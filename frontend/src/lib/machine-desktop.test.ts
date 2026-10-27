@@ -32,12 +32,12 @@ describe("desktop transport and input", () => {
     expect(desktopKey("Escape")).toBe("ESC");
     expect(desktopKey("PageDown")).toBe("PAGEDOWN");
     expect(
-      desktopUrl("node", "thread", "https://nyxid.example/api/v1/nodes/ws"),
+      desktopUrl("node", "thread"),
     ).toBe(
-      "wss://nyxid.example/api/v1/assistant/nyxagent/machines/node/desktop?conversation_id=thread",
+      `${window.location.origin.replace(/^http/, "ws")}/api/v1/assistant/nyxagent/machines/node/desktop?conversation_id=thread`,
     );
     expect(
-      desktopUrl("node", "thread", "https://nyxid.example/api/v1/nodes/ws", "secure", "ctx-1"),
+      desktopUrl("node", "thread", "secure", "ctx-1"),
     ).toContain("context_id=ctx-1");
   });
 });
