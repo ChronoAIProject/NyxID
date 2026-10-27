@@ -213,3 +213,35 @@ coordinator hold. This candidate identity is deliberately separate from the
 status file's historical `current_commit` base and from any later
 documentation-only review/status commit. Astra's exact-commit source review is
 still in progress; `ASTRA_IMPLEMENTATION_APPROVED` is not recorded.
+
+## Astra exact-candidate source review pass — 2026-10-27
+
+I personally reread the candidate at
+`9886d2620d69ec456f3c1fd814ec12aa972ee2cc` and its surrounding contracts after
+the implementation candidate was created. The pass covered the operation-scoped
+Sandbox status/result worker and version fence; canonical source identity and
+bounded result parsing; encrypted pending rows and BSON-size enforcement;
+materialization, completion-event binding, idempotent delivery association and
+owner/message recovery; retention, cancellation, erasure and encrypted-record
+migration; the private attachment HTTP response and range policy; MCP/native
+action dispatch and acknowledgement gates; and the frontend metadata mapper,
+preview/decode fallback, download and recovery card.
+
+The source remains consistent with the approved provenance contract: only a
+server-admitted original Web user watch can carry `artifact_mode`; consumption
+requires its exact server-created completion event and original user message;
+trigger, channel, voice, invocation and group paths do not receive that marker;
+recovery selects only the saved owner/message association and never accepts a
+client-selected lineage or submits a new execution. The lifecycle `version` is
+used only as a status/result consistency fence, while content identity remains
+operation/verified-metadata/decoded-byte based. The effective expiry remains the
+minimum persisted source/watch/normal-retention deadline, and the shared byte
+reservation stays attached through decode, encryption, transaction persistence
+and HTTP egress.
+
+This pass found no additional concrete source finding, including low-risk
+review nits. It does not claim compilation, Rust test execution, combined
+automation acceptance or live Sandbox-to-Web acceptance. The coordinator's
+explicit Artifacts Cargo hold remains active, and
+`ASTRA_IMPLEMENTATION_APPROVED` remains unset pending backend evidence and the
+open acceptance gates.
