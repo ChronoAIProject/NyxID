@@ -737,6 +737,10 @@ npm run build
 
 ## Health Checks and Monitoring
 
+Publish Images may reuse successful CI jobs from an identical pull-request
+merge tree on `main`; see [Main publish gate reuse](ci/MAIN_GATE_REUSE.md).
+Any uncertainty runs the complete release gate.
+
 ### Health Endpoint
 
 ```bash

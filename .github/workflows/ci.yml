@@ -24,6 +24,20 @@ on:
         type: boolean
         default: false
         required: false
+      reuse-pr-run:
+        description: >-
+          JSON decision from the publish workflow. When force-all is true,
+          listed top-level jobs were already successful on an identical PR or
+          main tree and may be skipped. An empty or false decision runs the
+          complete gate.
+        type: string
+        default: '{"reuse":false,"jobs":[]}'
+        required: false
+      reuse-jobs:
+        description: JSON array of top-level job IDs eligible for reuse.
+        type: string
+        default: '[]'
+        required: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -252,6 +266,8 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'workflow-permissions'))
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
@@ -268,7 +284,9 @@ jobs:
   permissions-test:
     name: Google Permissions
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.permissions == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'permissions-test')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.permissions == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -287,7 +305,9 @@ jobs:
   cursor-plugin-validate:
     name: Cursor Plugin Validate
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cursor_plugin == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'cursor-plugin-validate')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cursor_plugin == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -301,7 +321,9 @@ jobs:
     permissions:
       contents: read
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.codex_plugin == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'codex-plugin-validate')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.codex_plugin == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -320,6 +342,8 @@ jobs:
       contents: read
     needs: changes
     runs-on: ubuntu-latest
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'claude-plugin-validate'))
     env:
       CLAUDE_CODE_VERSION: 2.1.284
       PACKAGE_CHANGED: ${{ inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true' }}
@@ -349,7 +373,9 @@ jobs:
     permissions:
       contents: read
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.oracle_worker == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'oracle-worker-test')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.oracle_worker == 'true')
     runs-on: ubuntu-latest
     # Cold Chromium dependency downloads need room alongside the browser suite.
     timeout-minutes: 30
@@ -375,7 +401,9 @@ jobs:
   rust-fmt:
     name: Rust Format
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'rust-fmt')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -390,7 +418,9 @@ jobs:
   rust-clippy:
     name: Rust Clippy
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'rust-clippy')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
     # Workspace all-target analysis exhausted 16 GiB RAM + 3 GiB swap.
     # Retain every target while bounding simultaneous compiler memory use.
@@ -421,7 +451,9 @@ jobs:
   backend-test:
     name: Backend Test
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'backend-test')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     uses: ./.github/workflows/backend-tests.yml
 
   # Keep the standalone test-profile build and smoke assertion. It exercises
@@ -429,7 +461,9 @@ jobs:
   backend-billing-smoke:
     name: Backend Billing Smoke
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'backend-billing-smoke')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # Same test-binary compile as backend-test; see the note there.
@@ -471,7 +505,9 @@ jobs:
   backend-image-inputs:
     name: Backend Image Inputs
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'backend-image-inputs')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -538,7 +574,9 @@ jobs:
     permissions:
       contents: read
       attestations: read
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'machine-container')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true')
     runs-on: ubuntu-latest
     # Cold desktop package downloads can consume the former 45-minute budget.
     timeout-minutes: 90
@@ -590,7 +628,9 @@ jobs:
   cli-test:
     name: CLI Test
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'cli-test')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -638,7 +678,9 @@ jobs:
   rust-features:
     name: Rust Features (${{ matrix.features }})
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'rust-features')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -684,7 +726,9 @@ jobs:
   frontend:
     name: Frontend
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'frontend')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -707,7 +751,9 @@ jobs:
   mobile:
     name: Mobile
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.mobile == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'mobile')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.mobile == 'true')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -750,7 +796,9 @@ jobs:
   wizard-bundle-freshness:
     name: CLI Wizard Bundle Freshness
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.wizard == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'wizard-bundle-freshness')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.wizard == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -771,7 +819,9 @@ jobs:
   sdk:
     name: SDK Build
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.sdk == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'sdk')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.sdk == 'true')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -822,7 +872,9 @@ jobs:
     name: Coverage (Backend)
     needs: changes
     # Publish exact-commit baselines on rollup tips and full publish gates.
-    if: inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'coverage-backend')) &&
+      (inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     uses: ./.github/workflows/backend-tests.yml
     with:
       coverage: true
@@ -941,7 +993,9 @@ jobs:
   coverage-cli:
     name: Coverage (CLI)
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'coverage-cli')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -1014,7 +1068,9 @@ jobs:
   coverage-frontend:
     name: Coverage (Frontend)
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true'
+    if: >-
+      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'coverage-frontend')) &&
+      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1155,10 +1211,11 @@ jobs:
   #
   # Branch protection / required-checks rules should require ONLY this job by
   # name (`CI Pipeline`). Conditional jobs above may legitimately be skipped
-  # (e.g. a docs-only PR), and listing them individually as required would
-  # leave PRs stuck pending. This job runs unconditionally (`if: always()`)
-  # and treats `success` and `skipped` as OK; `failure` or `cancelled` in
-  # any upstream job fails the gate.
+  # (e.g. a docs-only PR or an identical successful publish-run reuse), and
+  # listing them individually as required would leave PRs stuck pending. This
+  # job runs unconditionally (`if: always()`) and treats `success` and
+  # `skipped` as OK; `failure` or `cancelled` in any upstream job fails the
+  # gate.
   #
   # Reference: https://devopsdirective.com/posts/2025/08/github-actions-required-checks-for-conditional-jobs/
   # ---------------------------------------------------------------------------
@@ -1191,6 +1248,29 @@ jobs:
       - coverage-frontend
     runs-on: ubuntu-latest
     steps:
+      - name: Report reused and main-run jobs
+        env:
+          REUSE: ${{ inputs.reuse-pr-run }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          try:
+              payload = json.loads(os.environ["REUSE"])
+          except (KeyError, TypeError, ValueError):
+              payload = {"reuse": False, "reason": "invalid_reuse_input", "jobs": []}
+          reused = payload.get("jobs") or []
+          candidates = payload.get("candidates") or []
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as out:
+              out.write("## CI gate coverage\n")
+              out.write(f"- Reuse decision: **{payload.get('reuse', False)}** ({payload.get('reason', 'unknown')})\n")
+              out.write(f"- Reused run: `{payload.get('run_id') or 'none'}`; current tree `{payload.get('current_tree') or 'unknown'}`; tested tree `{payload.get('tested_tree') or 'unknown'}`\n")
+              out.write("- Reused top-level jobs: " + (", ".join(f"`{job}`" for job in reused) or "none") + "\n")
+              out.write("- Main-run candidates: " + (", ".join(f"`{job}`" for job in candidates if job not in reused) or "none") + "\n")
+          PY
       - name: Verify all jobs succeeded or were skipped intentionally
         env:
           # NOTE: `coverage-comment` is intentionally NOT gated here -- it is an
