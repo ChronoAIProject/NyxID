@@ -1440,12 +1440,15 @@ async fn telegram_new_creation_webhook_completes_without_consent_or_browser_conn
     let completion = sent
         .iter()
         .filter_map(|request| request.body_json::<Value>().ok())
-        .find(|body| {
-            body["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("Setup is complete"))
-        })
+        .find(|body| body["reply_markup"]["inline_keyboard"][0][0]["text"] == "Open your bot")
         .expect("automatic connection should direct the creator to the new bot");
+    let text = completion["text"].as_str().unwrap();
+    assert!(text.contains("@CustomerBot is registered and connected to NyxID."));
+    assert!(text.contains("An AI agent must be linked before it can reply."));
+    assert!(text.contains("return to that setup to finish or check the link"));
+    assert!(text.contains("If no setup is in progress and no agent is linked"));
+    assert!(text.contains("send a message to verify the first reply"));
+    assert!(!text.contains("Setup is complete"));
     assert_eq!(completion["chat_id"], 700);
     assert_eq!(
         completion["reply_markup"]["inline_keyboard"][0][0],
