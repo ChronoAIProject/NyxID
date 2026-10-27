@@ -101,11 +101,8 @@ impl TelegramNewService<'_> {
             .find_one(Self::prompt_filter(captured))
             .await?
         else {
-            return Ok(());
+            return self.reply_if_request_expired(token, user, captured).await;
         };
-        if !self.owner_still_authorized(&request).await? {
-            return Ok(());
-        }
         let retry_rejected_instructions = request.prompt_delivery.as_ref().is_some_and(|attempt| {
             attempt.update_id == update_id
                 && attempt.phase == PromptPhase::Instructions
@@ -124,6 +121,9 @@ impl TelegramNewService<'_> {
         }) {
             return Ok(());
         }
+        if !self.owner_still_authorized(&request).await? {
+            return self.reply_to_closed_setup(token, user, &request).await;
+        }
         let attempt = PromptDelivery {
             attempt_id: uuid::Uuid::new_v4().to_string(),
             update_id,
@@ -133,8 +133,13 @@ impl TelegramNewService<'_> {
             completed_at: None,
             diagnostic: None,
         };
-        if !self.claim_prompt(&request, &attempt).await? {
-            return Ok(());
+        match self.claim_prompt(&request, &attempt).await {
+            Ok(true) => {}
+            Ok(false) => return self.reply_if_request_expired(token, user, &request).await,
+            Err(AppError::Conflict(_) | AppError::Forbidden(_) | AppError::NotFound(_)) => {
+                return self.reply_to_closed_setup(token, user, &request).await;
+            }
+            Err(error) => return Err(error),
         }
         let mut text = creation_message(&request);
         if request.auto_connect
@@ -151,16 +156,16 @@ impl TelegramNewService<'_> {
             .await
         {
             Ok(Some(started)) => started,
-            Ok(None)
-            | Err(AppError::Conflict(_) | AppError::Forbidden(_) | AppError::NotFound(_)) => {
-                return Ok(());
+            Ok(None) => return self.reply_if_request_expired(token, user, &request).await,
+            Err(AppError::Conflict(_) | AppError::Forbidden(_) | AppError::NotFound(_)) => {
+                return self.reply_to_closed_setup(token, user, &request).await;
             }
             Err(error) => return Err(error),
         };
         if !prompt_dispatch_has_budget(phase_started_at, Utc::now()) {
             return Ok(());
         }
-        let instructions = self.api.send_prompt(token, json!({"chat_id": user, "text": format!("{text}\n\nIf no Create bot button appears, send /start to try again."), "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}})).await;
+        let instructions = self.api.send_prompt(token, json!({"chat_id": user, "text": format!("{text}\n\nIf no Create bot button appears, update Telegram to the latest version, then send /start to try again."), "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}})).await;
         if let Err(diagnostic) = instructions {
             self.set_prompt_outcome(
                 &request,
@@ -177,14 +182,22 @@ impl TelegramNewService<'_> {
                 Err(diagnostic.app_error())
             };
         }
-        // Mark keyboard dispatch durably before the effect. A metadata failure
-        // after accepted instructions must be acknowledged, never blindly replayed.
+        // Mark keyboard dispatch durably before the effect. The exact attempt
+        // boundary prevents redelivery from replaying accepted instructions;
+        // persistent database failures still propagate after bounded retries.
         let phase_started_at = self
             .prepare_prompt_dispatch(&request, &attempt, PromptPhase::Keyboard)
             .await;
-        let Ok(Some(phase_started_at)) = phase_started_at else {
-            tracing::warn!(request_id = %request.id, "Telegram keyboard dispatch withheld after live fence check");
-            return Ok(());
+        let phase_started_at = match phase_started_at {
+            Ok(Some(started)) => started,
+            Ok(None) => return self.reply_if_request_expired(token, user, &request).await,
+            Err(AppError::Conflict(_) | AppError::Forbidden(_) | AppError::NotFound(_)) => {
+                tracing::warn!(request_id = %request.id, "Telegram keyboard dispatch withheld after live fence check");
+                return self.reply_to_closed_setup(token, user, &request).await;
+            }
+            // No provider effect occurs inside the retryable transaction. A
+            // persistent DB failure remains visible to Telegram after retries.
+            Err(error) => return Err(error),
         };
         if !prompt_dispatch_has_budget(phase_started_at, Utc::now()) {
             return Ok(());
@@ -209,6 +222,10 @@ impl TelegramNewService<'_> {
         request: &TelegramBotRequest,
         attempt: &PromptDelivery,
     ) -> AppResult<bool> {
+        super::super::transaction_service::run_db_only(
+            self.db,
+            &(self, request, attempt),
+            |session, (service, request, attempt)| Box::pin(async move {
         let mut filter = Self::prompt_filter(request);
         filter.insert("prompt_update_boundary", request.prompt_update_boundary);
         filter.insert(
@@ -234,36 +251,21 @@ impl TelegramNewService<'_> {
                     .map_err(|_| AppError::Internal("Invalid prompt outcome".into()))?,
             );
         }
-        let mut session = self.db.client().start_session().await?;
-        session.start_transaction().await?;
-        let admission: AppResult<_> = async {
-        self.fence_prompt_owner(request, &mut session).await?;
+        service.fence_prompt_owner(request, session).await?;
         if request.creation_context.is_some() && request.setup_authority.is_none() {
-            self.fence_creation_context(request, &mut session).await?;
+            service.fence_creation_context(request, session).await?;
         }
         super::super::platform_provisioning_service::fence_request(
-            self.db,
+            service.db,
             request,
             false,
-            &mut session,
+            session,
         )
         .await?;
-        let claimed = self.db.collection::<bson::Document>(REQUESTS).update_one(filter, doc! {"$set": {"prompt_delivery": bson::to_bson(attempt).map_err(|_| AppError::Internal("Invalid prompt metadata".into()))?, "prompt_update_boundary": attempt.update_id}}).session(&mut session).await?;
-            Ok::<_, AppError>(claimed)
-        }.await;
-        let claimed = match admission {
-            Ok(claimed) => claimed,
-            Err(AppError::Conflict(_) | AppError::Forbidden(_) | AppError::NotFound(_)) => {
-                session.abort_transaction().await?;
-                return Ok(false);
-            }
-            Err(error) => {
-                session.abort_transaction().await?;
-                return Err(error);
-            }
-        };
-        session.commit_transaction().await?;
-        Ok(claimed.modified_count == 1)
+        let claimed = service.db.collection::<bson::Document>(REQUESTS).update_one(filter, doc! {"$set": {"prompt_delivery": bson::to_bson(attempt).map_err(|_| AppError::Internal("Invalid prompt metadata".into()))?, "prompt_update_boundary": attempt.update_id}}).session(session).await?;
+                Ok(claimed.modified_count == 1)
+            }),
+        ).await
     }
 
     /// Renew the phase lease immediately before dispatch, without reviving an
@@ -275,15 +277,16 @@ impl TelegramNewService<'_> {
         attempt: &PromptDelivery,
         phase: PromptPhase,
     ) -> AppResult<Option<chrono::DateTime<Utc>>> {
-        let mut session = self.db.client().start_session().await?;
-        session.start_transaction().await?;
-        let admitted: AppResult<_> = async {
-            self.fence_prompt_owner(request, &mut session).await?;
+        super::super::transaction_service::run_db_only(
+            self.db,
+            &(self, request, attempt, phase),
+            |session, (service, request, attempt, phase)| Box::pin(async move {
+            service.fence_prompt_owner(request, session).await?;
             if request.creation_context.is_some() && request.setup_authority.is_none() {
-                self.fence_creation_context(request, &mut session).await?;
+                service.fence_creation_context(request, session).await?;
             }
             super::super::platform_provisioning_service::fence_request(
-                self.db, request, false, &mut session,
+                service.db, request, false, session,
             ).await?;
             let started_at = Utc::now();
             let mut filter = Self::prompt_filter(request);
@@ -293,25 +296,15 @@ impl TelegramNewService<'_> {
             filter.insert("prompt_delivery.attempted_at", doc! {
                 "$gt": bson::DateTime::from_chrono(started_at - Duration::seconds(PROMPT_HORIZON_SECS))
             });
-            let saved = self.db.collection::<bson::Document>(REQUESTS).update_one(filter, doc! {
+            let saved = service.db.collection::<bson::Document>(REQUESTS).update_one(filter, doc! {
                 "$set": {
                     "prompt_delivery.phase": bson::to_bson(&phase).map_err(|_| AppError::Internal("Invalid prompt phase".into()))?,
                     "prompt_delivery.attempted_at": bson::DateTime::from_chrono(started_at)
                 }
-            }).session(&mut session).await?;
+            }).session(session).await?;
             Ok((saved.matched_count == 1).then_some(started_at))
-        }.await;
-        // Preserve the distinction between deliberate guard closures and DB or
-        // commit errors. Callers must not ACK a mapped transient commit conflict.
-        let prepared = match admitted {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                session.abort_transaction().await?;
-                return Err(error);
-            }
-        };
-        session.commit_transaction().await?;
-        Ok(prepared)
+            }),
+        ).await
     }
 
     async fn set_prompt_outcome(
@@ -329,20 +322,21 @@ impl TelegramNewService<'_> {
         let mut filter = Self::prompt_filter(request);
         filter.insert("prompt_delivery.attempt_id", &attempt.attempt_id);
         filter.insert("prompt_delivery.outcome", "sending");
-        let result: AppResult<_> = async {
-            let mut session = self.db.client().start_session().await?;
-            session.start_transaction().await?;
-            self.fence_prompt_owner(request, &mut session).await?;
-            super::super::platform_provisioning_service::fence_request(self.db, request, false, &mut session).await?;
-            let saved = self.db.collection::<bson::Document>(REQUESTS).update_one(filter, doc! {"$set": {
+        let result = super::super::transaction_service::run_db_only(
+            self.db,
+            &(self, request, filter, phase, outcome, diagnostic),
+            |session, (service, request, filter, phase, outcome, diagnostic)| Box::pin(async move {
+            service.fence_prompt_owner(request, session).await?;
+            super::super::platform_provisioning_service::fence_request(service.db, request, false, session).await?;
+            let saved = service.db.collection::<bson::Document>(REQUESTS).update_one(filter.clone(), doc! {"$set": {
                 "prompt_delivery.phase": bson::to_bson(&phase).map_err(|_| AppError::Internal("Invalid prompt phase".into()))?,
                 "prompt_delivery.outcome": bson::to_bson(&outcome).map_err(|_| AppError::Internal("Invalid prompt outcome".into()))?,
                 "prompt_delivery.completed_at": bson::DateTime::now(),
                 "prompt_delivery.diagnostic": bson::to_bson(&diagnostic).map_err(|_| AppError::Internal("Invalid prompt diagnostic".into()))?
-            }}).session(&mut session).await?;
-            session.commit_transaction().await?;
-            Ok::<_, AppError>(saved)
-        }.await;
+            }}).session(session).await?;
+                Ok(saved)
+            }),
+        ).await;
         if result.is_err() {
             tracing::warn!(request_id = %request.id, "Telegram prompt outcome write failed; dispatch remains unconfirmed");
         }

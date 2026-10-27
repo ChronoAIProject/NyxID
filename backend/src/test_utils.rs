@@ -2142,7 +2142,10 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
 
 /// Build an `AppState` with a caller-provided config for pure handler tests.
 pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .redirect(crate::services::telegram_new_api::app_redirect_policy())
+        .build()
+        .unwrap();
     let jwt_keys = cached_test_jwt_keys();
     let billing = Arc::new(crate::services::billing::BillingService::new(
         db.clone(),

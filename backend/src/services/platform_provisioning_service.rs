@@ -1281,12 +1281,21 @@ mod tests {
             Some(700)
         );
         assert!(service.creation_link(&f.owner, &request.id).await.is_err());
+        let sent = f.server.received_requests().await.unwrap();
+        assert!(sent.iter().any(|request| {
+            request.url.path().ends_with("/sendMessage")
+                && request.body_json::<serde_json::Value>().unwrap()["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("update Telegram to the latest version"))
+        }));
         let mut projection = service.get(&f.owner, &request.id).await.unwrap();
         projection.auto_connect = true;
         projection.creation_context =
             Some(crate::models::telegram_bot_request::CreationContext::Standalone);
         assert!(
-            !crate::handlers::telegram_new::RequestResponse::from(projection)
+            !crate::handlers::telegram_new::projected_request(&f.state, projection)
+                .await
+                .unwrap()
                 .can_open_creation_form
         );
         assert!(

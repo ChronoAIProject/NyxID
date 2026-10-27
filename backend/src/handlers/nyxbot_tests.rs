@@ -6544,7 +6544,7 @@ async fn hosted_watch_reports_gateway_configuration_separately_from_outage() {
             .await
             .unwrap_err();
         assert!(matches!(&tool_error, AppError::ValidationError(message)
-            if message == gateway_error_guidance(expected)));
+            if message == &format!("{expected}: {}", gateway_error_guidance(expected))));
         assert!(!tool_error.to_string().contains("SENTINEL"));
         let tool_posts = gateway
             .received_requests()
@@ -6562,6 +6562,31 @@ async fn hosted_watch_reports_gateway_configuration_separately_from_outage() {
             gateway.received_requests().await.unwrap().is_empty(),
             status.is_none()
         );
+        // CLI/mobile consume this same HTTP envelope; the MCP tool above also
+        // retains the bounded code alongside guidance, without upstream prose.
+        let error = connect(&state, OWNER, Some(&home.id), &bot_id, &agent)
+            .await
+            .unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let envelope: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(envelope["error"], "validation_error");
+        assert_eq!(
+            envelope["message"],
+            format!(
+                "Validation error: {expected}: {}",
+                gateway_error_guidance(expected)
+            )
+        );
+        assert!(!envelope.to_string().contains("SENTINEL"));
+        let http_posts = gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "POST" && r.url.path() == "/channels")
+            .count();
+        assert_eq!(http_posts, tool_posts + usize::from(status.is_some()));
         upstream.abort();
     }
 }

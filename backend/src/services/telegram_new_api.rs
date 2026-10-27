@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use std::{sync::LazyLock, time::Duration};
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 use crate::errors::{AppError, AppResult};
@@ -7,14 +7,28 @@ pub use crate::models::telegram_bot_request::{
     TelegramDiagnostic, TelegramFailure, TelegramReason,
 };
 
-// A token is part of the URL. Never forward it to a redirect destination.
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .expect("Telegram HTTP client")
-});
+/// Preserve ordinary reqwest redirect behavior, but never redirect an ORIGINAL
+/// Bot API request: /bot{nonempty credential}/{single nonempty method}. The
+/// original URL (previous[0]) determines the policy, including local API fixtures;
+/// an ordinary request redirected toward a Bot-shaped URL keeps ordinary policy.
+pub fn app_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let telegram = attempt.previous().first().is_some_and(|url| {
+            let mut segments = url.path().split('/');
+            segments.next() == Some("")
+                && segments
+                    .next()
+                    .is_some_and(|segment| segment.starts_with("bot") && segment.len() > 3)
+                && segments.next().is_some_and(|segment| !segment.is_empty())
+                && segments.next().is_none()
+        });
+        if telegram {
+            attempt.stop()
+        } else {
+            reqwest::redirect::Policy::limited(10).redirect(attempt)
+        }
+    })
+}
 pub const CALL_TIMEOUT_SECS: u64 = 20;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -73,7 +87,8 @@ impl<'a> TelegramApi<'a> {
         method: &str,
         input: Value,
     ) -> Result<Value, TelegramDiagnostic> {
-        let mut response = HTTP
+        let mut response = self
+            .http
             .post(format!("{}/bot{token}/{method}", self.base_url))
             .timeout(Duration::from_secs(CALL_TIMEOUT_SECS))
             .json(&input)
@@ -223,7 +238,10 @@ mod tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
         let server = MockServer::start().await;
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .redirect(app_redirect_policy())
+            .build()
+            .unwrap();
         let base = server.uri();
         let api = TelegramApi {
             http: &client,
@@ -310,29 +328,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telegram_new_redirects_never_forward_credentials() {
+    async fn telegram_new_injected_app_client_preserves_headers_and_refuses_307_308() {
         let server = MockServer::start().await;
         let target = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(307)
-                    .insert_header("Location", format!("{}/leak", target.uri())),
-            )
-            .mount(&server)
-            .await;
-        let client = reqwest::Client::new();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-telegram-fixture-client", "configured".parse().unwrap());
+        let client = reqwest::Client::builder()
+            .redirect(app_redirect_policy())
+            .default_headers(headers)
+            .build()
+            .unwrap();
         let base = server.uri();
         let api = TelegramApi {
             http: &client,
             base_url: &base,
         };
-        let diagnostic = api
-            .send_prompt("TOKEN-SENTINEL", json!({"text":"PRIVATE-SENTINEL"}))
-            .await
-            .unwrap_err();
-        assert_eq!(diagnostic.http_status, Some(307));
-        assert_eq!(diagnostic.failure, TelegramFailure::HttpRejected);
-        assert!(target.received_requests().await.unwrap().is_empty());
+        for status in [307, 308] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("Location", format!("{}/leak", target.uri())),
+                )
+                .mount(&server)
+                .await;
+            let diagnostic = api
+                .send_prompt("TOKEN-SENTINEL", json!({"text":"PRIVATE-SENTINEL"}))
+                .await
+                .unwrap_err();
+            assert_eq!(diagnostic.http_status, Some(status));
+            assert_eq!(diagnostic.failure, TelegramFailure::HttpRejected);
+            assert!(target.received_requests().await.unwrap().is_empty());
+            let source = server.received_requests().await.unwrap();
+            assert_eq!(source.len(), 1);
+            assert_eq!(
+                source[0].headers.get("x-telegram-fixture-client").unwrap(),
+                "configured"
+            );
+        }
+        // The ORIGINAL path governs redirects. Ordinary traffic still follows
+        // redirects even when an intermediate path happens to look like Bot API.
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/botordinary/method", target.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(wiremock::matchers::path("/botordinary/method"))
+            .respond_with(
+                ResponseTemplate::new(308)
+                    .insert_header("Location", format!("{}/ordinary-final", target.uri())),
+            )
+            .mount(&target)
+            .await;
+        Mock::given(wiremock::matchers::path("/ordinary-final"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ordinary response"))
+            .mount(&target)
+            .await;
+        let response = client.get(format!("{base}/ordinary")).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "ordinary response");
+        assert_eq!(target.received_requests().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -346,7 +404,10 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .redirect(app_redirect_policy())
+            .build()
+            .unwrap();
         let base = server.uri();
         let api = TelegramApi {
             http: &client,

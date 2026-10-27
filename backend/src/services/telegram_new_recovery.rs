@@ -73,10 +73,42 @@ impl TelegramNewService<'_> {
         }
     }
 
+    async fn creation_context_row(
+        &self,
+        collection: &str,
+        filter: bson::Document,
+        fence_field: &str,
+        fence: bool,
+        session: &mut ClientSession,
+    ) -> AppResult<bool> {
+        let rows = self.db.collection::<bson::Document>(collection);
+        if fence {
+            Ok(rows
+                .update_one(filter, doc! {"$inc": {fence_field: 1_i64}})
+                .session(session)
+                .await?
+                .matched_count
+                == 1)
+        } else {
+            Ok(rows.find_one(filter).session(session).await?.is_some())
+        }
+    }
+
     pub(super) async fn fence_creation_context(
         &self,
         request: &TelegramBotRequest,
         session: &mut ClientSession,
+    ) -> AppResult<()> {
+        self.check_creation_context(request, session, true).await
+    }
+
+    /// The read-only projection uses the exact same predicates as issuance.
+    /// Its answer is advisory; only the real-write transaction admits an effect.
+    async fn check_creation_context(
+        &self,
+        request: &TelegramBotRequest,
+        session: &mut ClientSession,
+        fence: bool,
     ) -> AppResult<()> {
         use crate::models::{channel_connect_link as links, nyxbot_channel as watches};
         match request.creation_context.as_ref().ok_or_else(unavailable)? {
@@ -87,14 +119,14 @@ impl TelegramNewService<'_> {
                 link_created_at,
                 watch,
             } => {
-                let saved = self.db.collection::<bson::Document>(links::COLLECTION_NAME).update_one(
+                let saved = self.creation_context_row(links::COLLECTION_NAME,
                     doc! {"_id": link_id, "user_id": &request.owner_user_id, "created_by_user_id": link_created_by_user_id,
                         "platform": "telegram-new", "telegram_request_id": &request.id, "label": &request.label,
                         "created_at": bson::DateTime::from_chrono(*link_created_at), "status": "pending", "bot_id": null, "connection_id": null,
-                        "expires_at": {"$gt": bson::DateTime::now()}},
-                    doc! {"$inc": {"manager_delivery_fence": 1_i64}},
-                ).session(&mut *session).await?;
-                if saved.matched_count != 1 {
+                        "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(super::super::channel_connect_link_service::GRACE_SECONDS))}},
+                    "manager_delivery_fence", fence, session,
+                ).await?;
+                if !saved {
                     return Err(unavailable());
                 }
                 let Some(watch) = watch else {
@@ -128,19 +160,22 @@ impl TelegramNewService<'_> {
                     return Err(unavailable());
                 }
                 let saved = self
-                    .db
-                    .collection::<bson::Document>(watches::WATCHES_COLLECTION_NAME)
-                    .update_one(filter, doc! {"$inc": {"telegram_creation_fence": 1_i64}})
-                    .session(&mut *session)
+                    .creation_context_row(
+                        watches::WATCHES_COLLECTION_NAME,
+                        filter,
+                        "telegram_creation_fence",
+                        fence,
+                        session,
+                    )
                     .await?;
-                if saved.matched_count != 1 {
+                if !saved {
                     return Err(unavailable());
                 }
                 let agent = watch.agent_id.as_deref().ok_or_else(unavailable)?;
-                let saved = self.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(
-                    doc! {"_id": agent, "user_id": &request.owner_user_id, "destroyed_at": null}, doc! {"$inc": {"telegram_creation_fence": 1_i64}},
-                ).session(&mut *session).await?;
-                if saved.matched_count != 1 {
+                let saved = self.creation_context_row(crate::models::assistant_agent::COLLECTION_NAME,
+                    doc! {"_id": agent, "user_id": &request.owner_user_id, "destroyed_at": null},
+                    "telegram_creation_fence", fence, session).await?;
+                if !saved {
                     return Err(unavailable());
                 }
                 // Hidden member threads are valid sources. Validate their existing
@@ -158,22 +193,99 @@ impl TelegramNewService<'_> {
                     .ok_or_else(unavailable)?;
                 if let Ok(group) = source.get_str("group_id") {
                     let source_agent = source.get_str("agent_id").map_err(|_| unavailable())?;
-                    let saved = self.db.collection::<bson::Document>(crate::models::assistant_group::COLLECTION_NAME).update_one(
-                        doc! {"_id": group, "user_id": &request.owner_user_id, "member_agent_ids": source_agent}, doc! {"$inc": {"telegram_creation_fence": 1_i64}},
-                    ).session(&mut *session).await?;
-                    if saved.matched_count != 1 {
+                    let saved = self.creation_context_row(crate::models::assistant_group::COLLECTION_NAME,
+                        doc! {"_id": group, "user_id": &request.owner_user_id, "member_agent_ids": source_agent},
+                        "telegram_creation_fence", fence, session).await?;
+                    if !saved {
                         return Err(unavailable());
                     }
                 }
-                let saved = self.db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(
+                let saved = self.creation_context_row(crate::models::assistant_conversation::COLLECTION_NAME,
                     doc! {"_id": &watch.conversation_id, "user_id": &request.owner_user_id, "group_id": source.get("group_id").cloned().unwrap_or(bson::Bson::Null), "agent_id": source.get("agent_id").cloned().unwrap_or(bson::Bson::Null)},
-                    doc! {"$inc": {"telegram_creation_fence": 1_i64}},
-                ).session(&mut *session).await?;
-                if saved.matched_count != 1 {
+                    "telegram_creation_fence", fence, session,
+                ).await?;
+                if !saved {
                     return Err(unavailable());
                 }
                 Ok(())
             }
+        }
+    }
+
+    pub async fn can_open_creation_form(&self, request: &TelegramBotRequest) -> AppResult<bool> {
+        if !request.auto_connect
+            || request.setup_authority.is_some()
+            || request.creation_context.is_none()
+            || !request.active
+            || request.status != Status::WaitingBot
+            || request.expires_at <= Utc::now()
+            || request.telegram_user_id.is_none()
+            || request.start_update_id.is_none()
+            || request.telegram_bot_id.is_some()
+            || request.bot_username.is_some()
+            || !self.owner_still_authorized(request).await?
+        {
+            return Ok(false);
+        }
+        let mut session = self.db.client().start_session().await?;
+        session
+            .start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .await?;
+        let result: AppResult<()> = async {
+            let mut request_filter = Self::prompt_filter(request);
+            request_filter.insert(
+                "creation_context",
+                bson::to_bson(&request.creation_context).map_err(|_| unavailable())?,
+            );
+            request_filter.insert("auto_connect", true);
+            request_filter.insert("setup_authority", bson::Bson::Null);
+            request_filter.insert("bot_username", bson::Bson::Null);
+            if self
+                .db
+                .collection::<bson::Document>(REQUESTS)
+                .find_one(request_filter)
+                .session(&mut session)
+                .await?
+                .is_none()
+            {
+                return Err(unavailable());
+            }
+            let mut filter = super::super::telegram_manager_registry::filter(
+                &request.manager_bot_id.to_string(),
+            );
+            filter.insert("fields.observation_id", &request.observation_id);
+            filter.insert("fields.webhook_ready", "true");
+            let manager = self
+                .db
+                .collection::<crate::models::platform_credential::PlatformCredential>(
+                    crate::models::platform_credential::COLLECTION_NAME,
+                )
+                .find_one(filter)
+                .session(&mut session)
+                .await?
+                .ok_or_else(unavailable)?;
+            if !manager.secrets.contains_key("manager_bot_token") {
+                return Err(unavailable());
+            }
+            native_creation_url(
+                manager
+                    .fields
+                    .get("manager_username")
+                    .ok_or_else(unavailable)?,
+                &request.label,
+            )?;
+            self.check_creation_context(request, &mut session, false)
+                .await
+        }
+        .await;
+        session.abort_transaction().await?;
+        match result {
+            Ok(()) => Ok(true),
+            Err(AppError::Conflict(_) | AppError::Forbidden(_) | AppError::NotFound(_)) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
         }
     }
 

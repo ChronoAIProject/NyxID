@@ -20,8 +20,20 @@ use crate::models::channel_connect_link::{
 
 const TOKEN_PREFIX: &str = "nyx_bcl_";
 const CLAIM_SECONDS: i64 = 120;
-const GRACE_SECONDS: i64 = 1800;
+pub(super) const GRACE_SECONDS: i64 = 1800;
 const MAX_CYCLES: u32 = 5;
+
+/// Once setup pins a provider/request identity, reconciliation permits this
+/// bounded completion grace. Creation admission must use the same deadline.
+pub fn effective_deadline(link: &Link) -> chrono::DateTime<Utc> {
+    let pinned =
+        link.bot_id.is_some() || link.connection_id.is_some() || link.telegram_request_id.is_some();
+    link.expires_at + Duration::seconds(if pinned { GRACE_SECONDS } else { 0 })
+}
+
+pub(super) fn pinned_deadline(nominal: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    nominal + Duration::seconds(GRACE_SECONDS)
+}
 
 pub struct CreateInput {
     pub owner: String,
@@ -471,6 +483,12 @@ pub async fn insert_telegram_request(
                 created_at: watch.created_at, expires_at: watch.expires_at,
             }));
             let mut inserted = request.clone();
+            // Only NEW hosted requests receive the already-established pinned
+            // link grace. Never renew an existing request's stored authority.
+            inserted.expires_at = pinned_deadline(claim.link.expires_at);
+            if let Some(watch) = &snapshot {
+                inserted.expires_at = inserted.expires_at.min(watch.expires_at);
+            }
             inserted.creation_context = Some(CreationContext::Hosted { link_id: claim.link.id.clone(), link_created_by_user_id: claim.link.created_by_user_id.clone(), link_created_at: claim.link.created_at, watch: snapshot });
             db.collection::<crate::models::telegram_bot_request::TelegramBotRequest>(crate::models::telegram_bot_request::COLLECTION_NAME).insert_one(&inserted).session(session).await?;
             Ok(())
@@ -693,9 +711,7 @@ pub async fn reconcile(db: &Database, link: &Link) -> AppResult<()> {
             }
         }
     }
-    let pinned =
-        link.bot_id.is_some() || link.connection_id.is_some() || link.telegram_request_id.is_some();
-    let deadline = link.expires_at + Duration::seconds(if pinned { GRACE_SECONDS } else { 0 });
+    let deadline = effective_deadline(link);
     if now >= deadline {
         let mut filter = doc! {"_id": &link.id, "status": "pending", "bot_id": &link.bot_id, "connection_id": &link.connection_id, "telegram_request_id": &link.telegram_request_id};
         filter.extend(claim_free(now));

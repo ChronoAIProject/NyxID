@@ -14,7 +14,9 @@ export function TelegramPromptStatus({ request, pending, recovering, onRecover, 
   const outcome = delivery?.outcome;
   const text = request.status === "waiting_telegram"
     ? "Open Telegram and press Start to link this setup to your Telegram account."
-    : outcome === "sending"
+    : !delivery
+      ? "Delivery details were not recorded for this setup. Continue in Telegram to create your bot."
+      : outcome === "sending"
       ? "Sending the creation instructions and button to Telegram…"
       : outcome === "rejected"
         ? "Telegram rejected the creation message. NyxID has not yet confirmed bot creation."

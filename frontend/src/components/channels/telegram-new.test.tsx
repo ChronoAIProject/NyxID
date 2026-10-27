@@ -430,7 +430,8 @@ it.each(["unmount", "account switch"])("discards recovery after %s", async (chan
 it("legacy metadata absence preserves handoff and never grants recovery", async () => {
   mockGet.mockResolvedValue(configuration({ ...request, status: "waiting_bot" }));
   setup();
-  expect(await screen.findByText(/Delivery of the Create bot message is unconfirmed/)).toBeInTheDocument();
+  expect(await screen.findByText(/Delivery details were not recorded for this setup/)).toBeInTheDocument();
+  expect(screen.queryByText(/Delivery of the Create bot message is unconfirmed/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Open creation form" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Reopen Telegram" })).toBeEnabled();
 });

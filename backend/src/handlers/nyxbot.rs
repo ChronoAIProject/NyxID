@@ -463,7 +463,9 @@ pub async fn connect(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
-    connect_inner(state, owner, source_conversation_id, bot_id, agent, true).await
+    connect_inner(state, owner, source_conversation_id, bot_id, agent, true)
+        .await
+        .map_err(present_gateway_error)
 }
 
 async fn connect_inner(
@@ -1581,14 +1583,7 @@ pub(crate) async fn connect_tool(
 ) -> AppResult<(Value, bool)> {
     connect_tool_inner(state, owner, source_conversation_id, bot_id, agent, true)
         .await
-        .map_err(|error| {
-            let guidance = gateway_error_guidance(error_code(&error));
-            if guidance.is_empty() {
-                error
-            } else {
-                AppError::ValidationError(guidance.to_owned())
-            }
-        })
+        .map_err(present_gateway_error)
 }
 
 async fn connect_tool_inner(
@@ -2273,6 +2268,18 @@ async fn connect_link_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<
     }
     settle_and_wake(state, watch, "connection_finished", text, None).await?;
     Ok(())
+}
+
+/// Human-facing HTTP/tool boundaries retain the stable diagnostic code and add
+/// bounded guidance. Internal watch/row paths continue to classify bare codes.
+fn present_gateway_error(error: AppError) -> AppError {
+    let code = error_code(&error);
+    let guidance = gateway_error_guidance(code);
+    if guidance.is_empty() {
+        error
+    } else {
+        AppError::ValidationError(format!("{code}: {guidance}"))
+    }
 }
 
 fn gateway_error_guidance(code: &str) -> &'static str {

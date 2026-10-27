@@ -217,7 +217,9 @@ async fn telegram_new_nonstandard_http_status_keeps_request_dto_bounded_and_reco
             diagnostic.failure,
             crate::models::telegram_bot_request::TelegramFailure::HttpRejected
         );
-        let response = crate::handlers::telegram_new::RequestResponse::from(saved);
+        let response = crate::handlers::telegram_new::projected_request(&state, saved)
+            .await
+            .unwrap();
         assert!(response.can_open_creation_form);
         assert_eq!(
             response.prompt_delivery.as_ref().unwrap().outcome,
@@ -490,6 +492,16 @@ async fn hosted_request(
     server: &MockServer,
     group: bool,
 ) -> (TelegramBotRequest, String, String) {
+    hosted_request_timed(state, actor, server, group, None).await
+}
+
+async fn hosted_request_timed(
+    state: &crate::AppState,
+    actor: &str,
+    server: &MockServer,
+    group: bool,
+    deadlines: Option<(i64, i64)>,
+) -> (TelegramBotRequest, String, String) {
     use super::super::channel_connect_link_service as links;
     use crate::models::nyxbot_channel::{NyxbotWatch, WATCHES_COLLECTION_NAME};
     let created = links::create(
@@ -531,7 +543,7 @@ async fn hosted_request(
         trigger_prefill: None,
         checked_at: None,
         created_at: now,
-        expires_at: now + Duration::minutes(30),
+        expires_at: now + Duration::seconds(deadlines.map_or(1800, |(_, watch)| watch)),
     };
     state
         .db
@@ -562,9 +574,23 @@ async fn hosted_request(
             .await
             .unwrap();
     }
-    let claim = links::claim(&state.db, actor, &created.token, "telegram")
+    let mut claim = links::claim(&state.db, actor, &created.token, "telegram")
         .await
         .unwrap();
+    if let Some((link_remaining, _)) = deadlines {
+        // Simulate elapsed time after the claim pinned this link, without a
+        // sleep or changing its creator/source/claim authority.
+        claim.link.expires_at = now + Duration::seconds(link_remaining);
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_connect_link::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &claim.link.id},
+                doc! {"$set": {"expires_at": bson::DateTime::from_chrono(claim.link.expires_at)}},
+            )
+            .await
+            .unwrap();
+    }
     let base = server.uri();
     let service = service(state, &base);
     let (request, launch) = service
@@ -818,11 +844,22 @@ async fn telegram_new_hosted_recovery_refuses_deleted_replaced_or_retargeted_aut
             0,
             "{change}"
         );
-        assert_eq!(
-            server.received_requests().await.unwrap().len(),
-            before,
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), before + 1, "{change}");
+        let refusal = sent[before].body_json::<Value>().unwrap();
+        assert!(
+            refusal["text"]
+                .as_str()
+                .unwrap()
+                .contains("setup is no longer available"),
             "{change}"
         );
+        assert!(
+            !refusal["text"].as_str().unwrap().contains("expired"),
+            "{change}"
+        );
+        assert_eq!(refusal["reply_markup"]["remove_keyboard"], true);
+        assert!(refusal["reply_markup"]["keyboard"].is_null());
     }
 }
 
@@ -859,7 +896,18 @@ async fn telegram_new_watch_revocation_between_instructions_and_keyboard_stops_d
             .unwrap();
     });
     outcome.unwrap();
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(
+        sent[1].body_json::<Value>().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("setup is no longer available")
+    );
+    assert!(
+        sent.iter()
+            .all(|r| r.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_null())
+    );
     let saved = service.get(&actor, &request.id).await.unwrap();
     assert_eq!(saved.status, Status::WaitingBot);
     assert_ne!(
@@ -896,7 +944,16 @@ async fn telegram_new_closed_hosted_authority_is_acked_but_database_admission_er
             StatusCode::OK
         );
     }
-    assert_eq!(server.received_requests().await.unwrap().len(), before);
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), before + 3);
+    assert!(sent[before..].iter().all(|r| {
+        let body = r.body_json::<Value>().unwrap();
+        body["text"]
+            .as_str()
+            .unwrap()
+            .contains("setup is no longer available")
+            && body["reply_markup"]["keyboard"].is_null()
+    }));
     // A real collection validator rejects the pre-dispatch metadata write. It
     // must remain retryable, unlike a deliberately closed capability.
     state
@@ -920,7 +977,7 @@ async fn telegram_new_closed_hosted_authority_is_acked_but_database_admission_er
         matches!(result, Err(crate::errors::AppError::DatabaseError(_))),
         "{result:?}"
     );
-    assert_eq!(server.received_requests().await.unwrap().len(), before);
+    assert_eq!(server.received_requests().await.unwrap().len(), before + 3);
 }
 
 #[tokio::test]
@@ -1306,4 +1363,548 @@ async fn telegram_new_org_hosted_creator_and_initiating_admin_remain_distinct() 
             if demoted { None } else { Some(900) }
         );
     }
+}
+
+#[tokio::test]
+async fn telegram_new_hosted_grace_uses_effective_minimum_for_prompt_recovery_and_creation() {
+    for (link_remaining, watch_remaining) in [(-60, 120), (-1700, 600)] {
+        let (state, actor, server) = fixture().await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let headers = headers(&state).await;
+        let (request, start, _) = hosted_request_timed(
+            &state,
+            &actor,
+            &server,
+            false,
+            Some((link_remaining, watch_remaining)),
+        )
+        .await;
+        let link = super::super::channel_connect_link_service::get(&state.db, &request.id)
+            .await
+            .unwrap();
+        let Some(CreationContext::Hosted {
+            watch: Some(watch), ..
+        }) = &request.creation_context
+        else {
+            panic!("missing hosted snapshot")
+        };
+        assert!(link.expires_at < Utc::now());
+        assert_eq!(
+            request.expires_at,
+            super::super::channel_connect_link_service::effective_deadline(&link)
+                .min(watch.expires_at)
+        );
+        webhook(&service, &headers, command(&start, 10)).await;
+        let bound = service.get(&actor, &request.id).await.unwrap();
+        assert!(
+            crate::handlers::telegram_new::projected_request(&state, bound)
+                .await
+                .unwrap()
+                .can_open_creation_form
+        );
+        service.creation_link(&actor, &request.id).await.unwrap();
+        webhook(&service, &headers, command("/start", 11)).await;
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 4);
+        assert_eq!(
+            sent.iter()
+                .filter(|r| r.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array())
+                .count(),
+            2
+        );
+        let mut created = message(json!({"managed_bot_created":{"bot":bot()}}));
+        created["update_id"] = json!(12);
+        webhook(&service, &headers, created).await;
+        let saved = service.get(&actor, &request.id).await.unwrap();
+        assert_eq!(saved.status, Status::Ready);
+        assert_eq!(saved.telegram_bot_id, Some(900));
+        assert_eq!(saved.start_update_id, Some(10));
+        assert_eq!(saved.expires_at, request.expires_at);
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::telegram_bot_claim::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn telegram_new_existing_hosted_request_keeps_earlier_stored_deadline() {
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let headers = headers(&state).await;
+    let (request, start, _) =
+        hosted_request_timed(&state, &actor, &server, false, Some((60, 2400))).await;
+    // Model a context-bearing request inserted by the previous binary with its
+    // original 15-minute deadline. New link grace must not renew that authority.
+    let earlier = bson::DateTime::from_chrono(Utc::now() + Duration::minutes(15));
+    assert!(earlier.to_chrono() < request.expires_at);
+    state
+        .db
+        .collection::<bson::Document>(REQUESTS)
+        .update_one(
+            doc! {"_id": &request.id},
+            doc! {"$set": {"expires_at": earlier}},
+        )
+        .await
+        .unwrap();
+    webhook(&service, &headers, command(&start, 10)).await;
+    service.creation_link(&actor, &request.id).await.unwrap();
+    webhook(&service, &headers, command("/start", 11)).await;
+    let mut created = message(json!({"managed_bot_created":{"bot":bot()}}));
+    created["update_id"] = json!(12);
+    webhook(&service, &headers, created).await;
+    let saved = service.get(&actor, &request.id).await.unwrap();
+    assert_eq!(saved.status, Status::Ready);
+    assert_eq!(saved.telegram_bot_id, Some(900));
+    assert_eq!(saved.expires_at, earlier.to_chrono());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_expired_start_replies_and_owner_projection_never_offers_recovery() {
+    for bound in [false, true] {
+        let (state, actor, server) = fixture().await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let headers = headers(&state).await;
+        let (request, start, _) =
+            hosted_request_timed(&state, &actor, &server, false, Some((-60, 120))).await;
+        if bound {
+            webhook(&service, &headers, command(&start, 10)).await;
+        }
+        // Move the established effective deadline into the past, as in the
+        // existing expiry fixtures; no wall-clock sleeps or authority renewal.
+        state.db.collection::<bson::Document>(REQUESTS).update_one(doc! {"_id":&request.id},
+            doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+        let before = server.received_requests().await.unwrap().len();
+        webhook(&service, &headers, command(&start, 11)).await;
+        if bound {
+            webhook(&service, &headers, command("/start", 12)).await;
+        }
+        let saved = service.get(&actor, &request.id).await.unwrap();
+        assert_eq!(saved.status, Status::Expired);
+        assert!(!saved.active);
+        assert!(
+            !crate::handlers::telegram_new::projected_request(&state, saved)
+                .await
+                .unwrap()
+                .can_open_creation_form
+        );
+        assert!(service.creation_link(&actor, &request.id).await.is_err());
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len() - before, if bound { 2 } else { 1 });
+        for reply in &sent[before..] {
+            let body = reply.body_json::<Value>().unwrap();
+            assert!(body["text"].as_str().unwrap().contains("setup has expired"));
+            assert_eq!(body["reply_markup"]["remove_keyboard"], true);
+            assert!(body["reply_markup"]["keyboard"].is_null());
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(BOTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn telegram_new_recovery_projection_checks_live_context_without_issuance_writes() {
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let headers = headers(&state).await;
+    let (request, start, watch_id) = hosted_request(&state, &actor, &server, true).await;
+    webhook(&service, &headers, command(&start, 10)).await;
+    let saved = service.get(&actor, &request.id).await.unwrap();
+    let before = state
+        .db
+        .collection::<bson::Document>(REQUESTS)
+        .find_one(doc! {"_id":&request.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::handlers::telegram_new::projected_request(&state, saved.clone())
+            .await
+            .unwrap()
+            .can_open_creation_form
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(REQUESTS)
+            .find_one(doc! {"_id":&request.id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    for change in ["revision", "ready", "cancelled", "context"] {
+        let update = match change {
+            "revision" => doc! {"$inc":{"revision":1_i64}},
+            "ready" => doc! {"$set":{"status":"ready","telegram_bot_id":900_i64}},
+            "cancelled" => doc! {"$set":{"status":"cancelled","active":false}},
+            "context" => doc! {"$set":{"creation_context":{"kind":"standalone"}}},
+            _ => unreachable!(),
+        };
+        state
+            .db
+            .collection::<bson::Document>(REQUESTS)
+            .update_one(doc! {"_id":&request.id}, update)
+            .await
+            .unwrap();
+        assert!(
+            !crate::handlers::telegram_new::projected_request(&state, saved.clone())
+                .await
+                .unwrap()
+                .can_open_creation_form,
+            "{change}"
+        );
+        state
+            .db
+            .collection::<bson::Document>(REQUESTS)
+            .replace_one(doc! {"_id":&request.id}, before.clone())
+            .await
+            .unwrap();
+    }
+    state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME)
+        .delete_one(doc! {"_id":watch_id})
+        .await
+        .unwrap();
+    assert!(
+        !crate::handlers::telegram_new::projected_request(&state, saved)
+            .await
+            .unwrap()
+            .can_open_creation_form
+    );
+    assert!(service.creation_link(&actor, &request.id).await.is_err());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_concurrent_owners_each_receive_one_creation_keyboard() {
+    let (state, first, server) = fixture().await;
+    let second = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&second, crate::models::user::UserType::Person))
+        .await
+        .unwrap();
+    let base = server.uri();
+    let service = service(&state, &base);
+    let headers = headers(&state).await;
+    let (first_request, first_start) = start_request(&state, &first, &server).await;
+    let (second_request, second_start) = start_request(&state, &second, &server).await;
+    let first_update = serde_json::to_vec(&command(&first_start, 10)).unwrap();
+    let mut second_update = command(&second_start, 11);
+    second_update["message"]["from"]["id"] = json!(701);
+    second_update["message"]["chat"]["id"] = json!(701);
+    let second_update = serde_json::to_vec(&second_update).unwrap();
+    let (first_result, second_result) = tokio::join!(
+        service.webhook(&headers, &first_update),
+        service.webhook(&headers, &second_update)
+    );
+    first_result.unwrap();
+    second_result.unwrap();
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 4);
+    for (actor, request, sender, update) in [
+        (&first, first_request, 700, 10),
+        (&second, second_request, 701, 11),
+    ] {
+        let messages: Vec<Value> = sent
+            .iter()
+            .map(|r| r.body_json::<Value>().unwrap())
+            .filter(|body| body["chat_id"] == sender)
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0]["reply_markup"].is_null());
+        assert!(messages[1]["reply_markup"]["keyboard"][0][0]["request_managed_bot"].is_object());
+        let saved = service.get(actor, &request.id).await.unwrap();
+        assert_eq!(saved.start_update_id, Some(update));
+        assert_eq!(saved.prompt_update_boundary, Some(update));
+        assert_eq!(saved.revision, request.revision + 1);
+        assert_eq!(
+            saved.prompt_delivery.unwrap().outcome,
+            PromptOutcome::Accepted
+        );
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_pre_keyboard_manager_write_conflict_retries_without_replaying_instructions() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    let armed = Arc::new(AtomicBool::new(false));
+    let injected = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+    let target = Arc::new(Mutex::new(None::<(String, String)>));
+    let statement = Arc::new(Mutex::new(None::<i32>));
+    let observer = EventHandler::callback({
+        let (armed, injected, failed, target, statement) = (
+            armed.clone(),
+            injected.clone(),
+            failed.clone(),
+            target.clone(),
+            statement.clone(),
+        );
+        move |event| match event {
+            CommandEvent::Started(event)
+                if event.command_name == "update"
+                    && event.command.get_str("update") == Ok(CREDENTIALS)
+                    && event.command.get_bool("autocommit") == Ok(false) =>
+            {
+                let Some((database, manager_id)) = target.lock().unwrap().clone() else {
+                    return;
+                };
+                if event.db != database {
+                    return;
+                }
+                let update = event.command.get_array("updates").unwrap()[0]
+                    .as_document()
+                    .unwrap();
+                let query = update.get_document("q").unwrap();
+                if query.get_str("fields.manager_bot_id") != Ok("100")
+                    || query.get_str("fields.observation_id") != Ok("test-observation")
+                    || !armed.swap(false, Ordering::SeqCst)
+                {
+                    return;
+                }
+                *statement.lock().unwrap() = Some(event.request_id);
+                // The transaction has already real-write-fenced its actor, so
+                // its snapshot predates this independent manager write. Complete
+                // it BEFORE dispatching this statement to force MongoDB112.
+                let worker = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let result = runtime.block_on(async {
+                        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                            let uri = std::env::var("NYXID_TEST_DATABASE_URL")
+                                .expect("explicit isolated Mongo URI required");
+                            let mut options = mongodb::options::ClientOptions::parse(uri).await?;
+                            options.server_selection_timeout =
+                                Some(std::time::Duration::from_secs(2));
+                            options.connect_timeout = Some(std::time::Duration::from_secs(2));
+                            let client = mongodb::Client::with_options(options)?;
+                            client
+                                .database(&database)
+                                .collection::<bson::Document>(CREDENTIALS)
+                                .update_one(
+                                    doc! {"_id":manager_id},
+                                    doc! {"$inc":{"telegram_creation_fence":1_i64}},
+                                )
+                                .await
+                        })
+                        .await
+                    });
+                    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+                    let Ok(Ok(write)) = result else {
+                        panic!("bounded independent manager collision write failed")
+                    };
+                    assert_eq!(write.modified_count, 1);
+                });
+                assert!(worker.join().is_ok(), "manager collision worker failed");
+                injected.fetch_add(1, Ordering::SeqCst);
+            }
+            CommandEvent::Failed(event) if *statement.lock().unwrap() == Some(event.request_id) => {
+                assert!(event.failure.contains_label("TransientTransactionError"));
+                assert!(
+                    matches!(event.failure.kind.as_ref(), mongodb::error::ErrorKind::Command(error) if error.code == 112)
+                );
+                failed.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+    });
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "telegram_keyboard_collision",
+        observer,
+    )
+    .await;
+    let (state, actor, server) = fixture_with_database(db).await;
+    let manager = state
+        .db
+        .collection::<bson::Document>(CREDENTIALS)
+        .find_one(doc! {"provider":"telegram-new"})
+        .await
+        .unwrap()
+        .unwrap();
+    *target.lock().unwrap() = Some((
+        state.db.name().to_owned(),
+        manager.get_str("_id").unwrap().to_owned(),
+    ));
+    let base = server.uri();
+    let service = service(&state, &base);
+    let headers = headers(&state).await;
+    let (request, start) = start_request(&state, &actor, &server).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{MANAGER}/sendMessage")))
+        .and(|r: &wiremock::Request| {
+            r.body_json::<Value>()
+                .unwrap()
+                .get("reply_markup")
+                .is_none()
+        })
+        .respond_with(move |_: &wiremock::Request| {
+            armed.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":50}}))
+        })
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    webhook(&service, &headers, command(&start, 10)).await;
+    assert_eq!(injected.load(Ordering::SeqCst), 1);
+    assert_eq!(failed.load(Ordering::SeqCst), 1);
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].body_json::<Value>().unwrap()["reply_markup"].is_null());
+    assert!(sent[1].body_json::<Value>().unwrap()["reply_markup"]["keyboard"][0][0]["request_managed_bot"].is_object());
+    let saved = service.get(&actor, &request.id).await.unwrap();
+    assert_eq!(saved.start_update_id, Some(10));
+    assert_eq!(saved.prompt_update_boundary, Some(10));
+    assert_eq!(saved.revision, request.revision + 1);
+    assert_eq!(
+        saved.prompt_delivery.unwrap().outcome,
+        PromptOutcome::Accepted
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_expired_history_does_not_intercept_newer_setup_or_platform_routing() {
+    use crate::models::platform_bot_config::{PlatformBotConfig, PlatformExecutionProfile};
+
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let headers = headers(&state).await;
+    let (request, start) = start_request(&state, &actor, &server).await;
+    let mut old = request.clone();
+    old.id = uuid::Uuid::new_v4().to_string();
+    old.created_at -= Duration::hours(1);
+    old.expires_at = Utc::now() - Duration::minutes(30);
+    old.status = Status::Expired;
+    old.active = false;
+    old.telegram_user_id = Some(700);
+    old.challenge_hash = "old-expired-fixture-hash".into();
+    state
+        .db
+        .collection::<TelegramBotRequest>(REQUESTS)
+        .insert_one(&old)
+        .await
+        .unwrap();
+    webhook(&service, &headers, command(&start, 10)).await;
+    for (status, active) in [
+        (Status::WaitingBot, true),
+        (Status::Connected, false),
+        (Status::Cancelled, false),
+    ] {
+        state
+            .db
+            .collection::<bson::Document>(REQUESTS)
+            .update_one(
+                doc! {"_id":&request.id},
+                doc! {"$set":{"status":bson::to_bson(&status).unwrap(),"active":active}},
+            )
+            .await
+            .unwrap();
+        let before = server.received_requests().await.unwrap().len();
+        webhook(&service, &headers, command("/start", 11 + before as i64)).await;
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), before + 2);
+        assert!(sent[before..].iter().all(|r| {
+            !r.body_json::<Value>().unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("expired")
+        }));
+        assert!(
+            sent[before + 1].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
+        );
+    }
+    // An established opted-in manager retains its platform route even when the
+    // latest bound historical setup itself is expired.
+    state
+        .db
+        .collection::<bson::Document>(REQUESTS)
+        .delete_one(doc! {"_id":&request.id})
+        .await
+        .unwrap();
+    let manager = register_manager_channel(&state, &actor, &server).await;
+    let funding_owner = super::super::org_service::create_org_user(
+        &state.db,
+        "Platform routing fixture",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let now = Utc::now();
+    let profile = PlatformBotConfig {
+        id: uuid::Uuid::new_v4().to_string(),
+        channel_bot_id: manager.id.clone(),
+        manager_bot_id: "100".into(),
+        identity_version: None,
+        native_entry: None,
+        observation_id: "test-observation".into(),
+        execution_profile: PlatformExecutionProfile::PlatformOnboarding,
+        generation: 1,
+        enabled: true,
+        guide: None,
+        funding_owner_user_id: funding_owner.id,
+        configured_by: actor.clone(),
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+    };
+    state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .update_one(
+            doc! {"_id":&manager.id},
+            doc! {"$set":{"platform_profile_id":&profile.id}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME)
+        .insert_one(&profile)
+        .await
+        .unwrap();
+    let before = server.received_requests().await.unwrap().len();
+    let routed = service
+        .webhook(
+            &headers,
+            &serde_json::to_vec(&command("/start", 100)).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("existing platform route");
+    assert_eq!(routed.0.id, manager.id);
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+    state.db.drop().await.unwrap();
 }

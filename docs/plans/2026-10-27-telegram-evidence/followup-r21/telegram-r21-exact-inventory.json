@@ -1,9 +1,0 @@
-{
-  "total_tests": 10472,
-  "exact_counts": {
-    "services::telegram_new_tests::telegram_new_creation_webhook_completes_without_consent_or_browser_connect": 1,
-    "services::nyxbot_channel_query_service::tests::current_channels_rank_live_then_latest_before_limiting_and_order_ties": 1
-  },
-  "listing_summary": "10472 tests, 0 benchmarks",
-  "binary_identity": ".tmp/telegram-test-binary-r21-identity.json"
-}

@@ -521,6 +521,7 @@ async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyb
         assert!(text.contains("Personal account:"));
         assert!(text.contains("https://app.nyxid.test"));
         assert!(text.contains("Open the same creation form"));
+        assert!(text.contains("update Telegram to the latest version"));
         assert!(!text.contains(&challenge));
         let keyboard = replies[1].body_json::<Value>().unwrap();
         assert_eq!(keyboard["chat_id"], 700);

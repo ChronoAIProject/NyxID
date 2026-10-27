@@ -102,16 +102,9 @@ impl From<TelegramBotRequest> for RequestResponse {
             request.status,
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
         );
-        let can_open_creation_form = request.active
-            && request.auto_connect
-            && request.setup_authority.is_none()
-            && request.creation_context.is_some()
-            && request.status == Status::WaitingBot
-            && request.expires_at > chrono::Utc::now()
-            && request.telegram_user_id.is_some()
-            && request.start_update_id.is_some()
-            && request.telegram_bot_id.is_none()
-            && request.bot_username.is_none();
+        // Live hosted context cannot be established by a request-only conversion.
+        // HTTP responses opt in through projected_request below.
+        let can_open_creation_form = false;
         let prompt_delivery = request.prompt_delivery.map(|prompt| {
             use crate::models::telegram_bot_request::PromptOutcome;
             let outcome = if prompt.outcome == PromptOutcome::Sending
@@ -161,6 +154,16 @@ impl From<TelegramBotRequest> for RequestResponse {
             bot_username: request.bot_username.filter(|_| approved),
         }
     }
+}
+
+pub(crate) async fn projected_request(
+    state: &AppState,
+    request: TelegramBotRequest,
+) -> AppResult<RequestResponse> {
+    let eligible = service(state).can_open_creation_form(&request).await?;
+    let mut response = RequestResponse::from(request);
+    response.can_open_creation_form = eligible;
+    Ok(response)
 }
 
 #[derive(Serialize)]
@@ -250,7 +253,7 @@ pub async fn redeem_claim(
     Ok((
         StatusCode::ACCEPTED,
         private_headers(),
-        Json(request.into()),
+        Json(projected_request(&state, request).await?),
     ))
 }
 
@@ -278,7 +281,10 @@ pub async fn configuration(
         Json(ConfigurationResponse {
             available,
             manager_username: row.and_then(|row| row.fields.get("manager_username").cloned()),
-            request: request.map(Into::into),
+            request: match request {
+                Some(request) => Some(projected_request(&state, request).await?),
+                None => None,
+            },
         }),
     ))
 }
@@ -305,7 +311,7 @@ pub async fn begin(
     Ok((
         private_headers(),
         Json(LaunchResponse {
-            request: request.into(),
+            request: projected_request(&state, request).await?,
             launch_url,
         }),
     ))
@@ -319,7 +325,7 @@ pub async fn get(
     let actor = human(&auth)?;
     Ok((
         private_headers(),
-        Json(service(&state).get(&actor, &id).await?.into()),
+        Json(projected_request(&state, service(&state).get(&actor, &id).await?).await?),
     ))
 }
 
@@ -334,7 +340,7 @@ pub async fn launch(
     Ok((
         private_headers(),
         Json(LaunchResponse {
-            request: service(&state).get(&actor, &id).await?.into(),
+            request: projected_request(&state, service(&state).get(&actor, &id).await?).await?,
             launch_url,
         }),
     ))
@@ -363,7 +369,7 @@ pub async fn creation_link(
     Ok((
         private_headers(),
         Json(CreationLinkResponse {
-            request: request.into(),
+            request: projected_request(&state, request).await?,
             creation_url,
         }),
     ))
@@ -406,7 +412,10 @@ pub async fn connect(
             ),
         );
     }
-    Ok((private_headers(), Json(request.into())))
+    Ok((
+        private_headers(),
+        Json(projected_request(&state, request).await?),
+    ))
 }
 
 pub async fn webhook(
