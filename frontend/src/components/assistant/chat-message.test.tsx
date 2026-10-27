@@ -364,7 +364,7 @@ describe("canonical chat presentation", () => {
   it("explains a missing guest model route only in the owner's diagnostic details", () => {
     render(<ChatMessageBubble message={{ ...BASE, status: "error",
       error: "This assistant isn't available to guests yet.",
-      errorDetail: { stage: "stream", failureReason: {
+      errorDetail: { stage: "stream", turnId: "turn-guest", continuations: 0, failureReason: {
         source: "nyxid", stage: "model_proxy", code: "guest_model_route_required",
         http_status: 403, nyxid_error_code: 9000,
       } },
