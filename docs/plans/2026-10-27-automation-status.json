@@ -4,28 +4,41 @@
   "branch": "fix/automation-completion-2040",
   "worktree_id": "01a17a96-a01b-7f10-a98b-646d494dc1d5",
   "plan_path": "docs/plans/2026-10-27-automation-implementation.md",
-  "plan_revision": 2,
-  "plan_sha256": "0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4",
-  "frozen_plan_path": "docs/plans/2026-10-27-automation-implementation.freeze-0633146f.md",
+  "plan_revision": 3,
+  "plan_sha256": "5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7",
+  "frozen_plan_path": "docs/plans/2026-10-27-automation-implementation.freeze-5e3469b2.md",
+  "historical_plan_sha256": "0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4",
+  "historical_frozen_plan_path": "docs/plans/2026-10-27-automation-implementation.freeze-0633146f.md",
   "current_commit": "55249c7b5",
+  "user_amendment": "SUPERSEDES Opus plan and final implementation gates; pure Astra-Sol workflow authorized.",
   "opus": {
     "agent_id": "01a17aa2-d74e-7151-9efa-b40638c3befb",
     "provider": "claude",
     "model": "claude-opus-5-5",
     "effort": "xhigh",
     "mode": "default",
-    "gate": "open_provider_authentication",
+    "gate": "SUPERSEDED_BY_USER",
+    "historical_failures": [
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+      "401 OAuth access token has expired. Re-authenticate to continue."
+    ],
     "notify_on_finish": true
+  },
+  "astra_plan": {
+    "agent_id": "01a17a9b-50b4-7e41-bb3b-dcbbf6204ad3",
+    "gate": "ASTRA_PLAN_APPROVED",
+    "approved_sha256": "5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7",
+    "assessment": "Coordinator findings resolved; owner-wide continuation budget charged atomically with per-run continuation limit."
   },
   "sol": null,
   "astra_review": "not_started",
-  "final_opus_review": "not_started",
+  "final_opus_review": "SUPERSEDED_BY_USER",
   "remaining_acceptance": [
-    "Exact plan SHA receives PLAN_APPROVED from Opus",
-    "Create required GPT-6.1-Sol implementer after plan approval",
+    "Create and verify exactly one GPT-6.1-Sol implementer",
     "Implement and verify every acceptance-matrix row",
     "Astra personal code review with zero unresolved findings",
-    "Opus IMPLEMENTATION_APPROVED for exact final commit"
+    "Resolve all Astra findings including nits through the same Sol session",
+    "Record ASTRA_IMPLEMENTATION_APPROVED for the exact final commit"
   ],
   "ledger_path": "docs/plans/2026-10-27-automation-review.md"
 }

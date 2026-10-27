@@ -107,7 +107,16 @@ continues to contain IDs, timing, outcome and bounded reason codes only.
   same fenced update that changes `waiting -> started`; a claim at the limit
   records `continuation_limit_exceeded` and never starts a model turn. This is the
   spend/turn bound for scheduled continuations when ordinary event-hour and streak
-  guards are not charged. The bound is immutable for the run and survives restart.
+  guards are not charged. Continuation claims also consume the existing persisted
+  owner trigger budget: the same `trigger_run_budgets` hourly/daily counters and
+  `trigger_runs_per_hour`/`trigger_runs_per_day` limits are checked and incremented
+  atomically with the continuation claim. This closes the owner-wide multiplication
+  gap across many concurrent runs while retaining the per-run cap. If an owner
+  budget is exhausted, the run remains waiting and its work item is scheduled for
+  the next UTC hour/day boundary (whichever limit reset is earliest) while its
+  coordinator deadline remains authoritative; if the deadline or per-run limit is
+  reached, the run records the corresponding truthful terminal reason and does not
+  start a model turn. The bound is immutable for the run and survives restart.
 * Add `mark_coordinator_waiting`, fenced by run ID, current turn ID and outcome
   `started`, to atomically set `outcome=waiting`, the discriminator, reason
   `coordinator_pending`, clear acknowledgement IDs, and make the run work item
@@ -192,10 +201,12 @@ continues to contain IDs, timing, outcome and bounded reason codes only.
   path. Such turns set `ActiveTurn.trigger_run_id`, skip the generic
   `EVENT_TURNS_PER_HOUR` admission and `MAX_EVENT_STREAK` increment, and retain
   the existing owner pool, trigger overlap, trigger-generation and lease fences
-  plus the persisted per-run continuation allowance above. Normal unbound event
-  turns retain both generic guards. A continuation that cannot claim its allowance
-  is durably failed with `continuation_limit_exceeded` and its event is not
-  executed.
+  plus the persisted per-run continuation allowance above. They also use the existing
+  owner-level trigger hourly/daily budget transaction described above; a temporary
+  owner-budget miss leaves the event and waiting run queued for the next reset, while
+  a deadline or immutable per-run limit records a truthful terminal reason. Normal
+  unbound event turns retain both generic guards. A continuation that cannot claim
+  its allowance is never executed.
 * `after_turn` then reaches `trigger_scheduler::settled` through the existing
   trigger-run hook. A coordinator event turn does not deliver a terminal automation
   result until the completion barrier passes.
@@ -266,10 +277,13 @@ continues to contain IDs, timing, outcome and bounded reason codes only.
 * **Busy thread/pool:** `wake` leaves the event and run waiting; the existing queued
   sweep and owner pool retry it. No event budget is charged until an actual
   continuation admission succeeds.
-* **Loop/rate guards:** scheduled/webhook continuations use the run's budget and
-  completion deadline; ordinary event guards remain unchanged. A run that reaches
-  its completion bound fails with `coordinator_timeout` and the run history records
-  the reason.
+* **Loop/rate guards:** scheduled/webhook continuations use both the immutable
+  per-run allowance and the existing owner trigger hourly/daily budget, plus the
+  completion deadline; ordinary event guards remain unchanged. A temporary owner
+  budget miss is retried at the next reset while within the deadline. A run that
+  reaches its completion bound fails with `coordinator_timeout`, and an exhausted
+  per-run allowance records `continuation_limit_exceeded`; the run history records
+  the exact reason.
 * **Crash/restart:** a claimed work lease expires; the scheduler or group sweep
   reclaims it. A follower claimed before a process crash remains in retry state. A
   committed event is deduplicated on replay. A committed trigger turn is fenced by
@@ -369,4 +383,16 @@ terminal while it ignores the new binding fields.
   test, not a comment alone.
 * UI text and history must explain waiting/blocked states without exposing internal
   event or run payloads.
+
+## User workflow amendment and Astra plan sign-off
+
+The user explicitly superseded the earlier Opus plan and implementation gates with
+the pure Astra-Sol workflow. The historical Opus reviewer ID and authentication
+failures remain recorded in the review ledger as `SUPERSEDED_BY_USER`; they are not
+treated as approval. Astra personally assessed the coordinator findings and this
+revision's owner-budget correction. The exact active plan SHA is recorded in the
+status and review ledger as `ASTRA_PLAN_APPROVED`; implementation proceeds through
+the single required Heca GPT-6.1-Sol session in this worktree. The earlier frozen
+snapshot `freeze-0633146f.md` remains immutable historical evidence; this revision
+receives its own frozen snapshot before implementation starts.
 

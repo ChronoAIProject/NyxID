@@ -2,9 +2,10 @@
 
 Workstream: `automation`  
 Plan: [`2026-10-27-automation-implementation.md`](2026-10-27-automation-implementation.md)  
-Plan revision: 2  
-Plan SHA-256: `0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4`  
-Frozen snapshot: [`2026-10-27-automation-implementation.freeze-0633146f.md`](2026-10-27-automation-implementation.freeze-0633146f.md) (same SHA; read-only)  
+Plan revision: 3  
+Plan SHA-256: `5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7`  
+Frozen snapshot: [`2026-10-27-automation-implementation.freeze-5e3469b2.md`](2026-10-27-automation-implementation.freeze-5e3469b2.md) (same SHA; read-only)  
+Historical frozen snapshot: [`2026-10-27-automation-implementation.freeze-0633146f.md`](2026-10-27-automation-implementation.freeze-0633146f.md), SHA `0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4`  
 Base commit: `b1dd6548ade04ec4f0051203e1353796331c7f87`  
 Branch: `fix/automation-completion-2040`
 
@@ -12,48 +13,78 @@ Branch: `fix/automation-completion-2040`
 
 | Gate | Agent | Exact input | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| Plan review | Claude Opus 5.5 (`01a17aa2-d74e-7151-9efa-b40638c3befb`, provider `claude`, model `claude-opus-5-5`, effort `xhigh`, mode `default`) | Frozen plan revision 2, SHA `0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147cb5bc2741cbbfb96d4` | **OPEN** | Two read-only prompts for prior plan bytes were sent with `notify_on_finish=true`; both runs failed before review with provider errors `Failed to authenticate: OAuth session expired and could not be refreshed` and `401 OAuth access token has expired. Re-authenticate to continue.` Heca activity sequences 1–10. The coordinator verified the current file SHA and shared status; this immutable snapshot is now the exact Opus input. No `PLAN_APPROVED` or `PLAN_CHANGES_REQUIRED` marker exists. |
-| Implementation | GPT-6.1-Sol | Exact approved plan | **NOT STARTED** | Creation is forbidden until Opus returns `PLAN_APPROVED` for the exact plan SHA. |
-| Astra code review | GPT-6-Astra PM | Final implementation commit | **NOT STARTED** | No implementation exists. |
-| Final implementation review | Same Claude Opus 5.5 session | Exact final commit | **NOT STARTED** | Depends on implementation and Astra zero-finding review. |
+| Historical Opus plan review | Claude Opus 5.5 (`01a17aa2-d74e-7151-9efa-b40638c3befb`, provider `claude`, model `claude-opus-5-5`, effort `xhigh`, mode `default`) | Historical revision 2, SHA `0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4` | **SUPERSEDED_BY_USER** | Two read-only prompts were sent with `notify_on_finish=true`; both failed before review with `Failed to authenticate: OAuth session expired and could not be refreshed` and `401 OAuth access token has expired. Re-authenticate to continue.` Heca activity sequences 1–10. No approval was inferred. The reviewer ID and failures remain historical evidence; do not resume or retry it under the amendment. |
+| Astra plan assessment | GPT-6-Astra PM (`01a17a9b-50b4-7e41-bb3b-dcbbf6204ad3`) | Active revision 3, SHA `5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7`, frozen at `freeze-5e3469b2.md` | **ASTRA_PLAN_APPROVED** | Astra personally re-read the charter, prepared plan, coordinator findings, relevant scheduler/group/event source, and shared ownership boundary. The amendment records the user's pure Astra-Sol workflow and closes the owner-wide continuation-budget gap by charging continuation claims against the existing persisted hourly/daily trigger budget atomically with the per-run continuation claim. |
+| Implementation | GPT-6.1-Sol | Exact Astra-approved revision 3 plan | **NOT STARTED** | The single required Sol session will be created only after this ledger/status revision is committed and the Heca settings are verified. |
+| Astra implementation review | GPT-6-Astra PM | Exact final implementation commit | **NOT STARTED** | Astra will read the complete diff and relevant surrounding code, run the acceptance matrix, and resolve every valid finding including nits through the same Sol session. |
+| Historical Opus final implementation review | Same Claude Opus 5.5 session | Exact final commit | **SUPERSEDED_BY_USER** | The user explicitly removed the Opus final gate. This is not an approval and the historical reviewer will not be resumed. |
 
-The plan gate is intentionally still open. The authentication failure is an external provider dependency; it is not treated as approval, and no model substitution is permitted. The same persistent Opus agent will be retried after authentication recovers.
+The user's amendment supersedes both earlier Opus requirements. Claude authentication is
+therefore no longer a dependency, but the failed historical attempts remain recorded and
+are not converted into approval. The active workflow is Astra plan sign-off, one Heca Sol
+implementation session, and Astra's complete personal implementation review.
 
 ## Findings
 
-No substantive Opus findings have been returned because the reviewer has not authenticated. The provider failure itself remains an open gate dependency.
+No substantive Opus findings were returned because the reviewer never authenticated.
+The provider failures remain historical evidence only.
 
-### Coordinator pre-review findings resolved in plan revision 2
+### Coordinator findings and Astra resolutions
 
-| Finding | Resolution in revision 2 | Acceptance evidence required |
+| Finding | Resolution in active revision 3 | Acceptance evidence required |
 | --- | --- | --- |
-| Trigger continuations bypassed the existing hourly/daily run budget and generic event guards without a persisted spend bound. | Each run snapshots `continuation_limit` from `max_auto_continuations`; a fenced claim increments `continuation_count`, and the limit produces `continuation_limit_exceeded` without starting a turn. | Scheduler/continuation tests cover restart, duplicate claims, limit exhaustion, and truthful terminal reason. |
-| Optional fields alone do not make old binaries refuse v2 events. | The repo has no authoritative replica/version registry, so the plan now makes `AUTOMATION_CONTINUATION_V2_ENABLED` an explicit operator drain assertion. The runbook pauses dispatch, stops all scheduler workers, waits two lease intervals, verifies no `trigger_work` leases, runs fenced `trigger_schedule::migrate_continuation_v2`, starts only upgraded workers, then enables v2; the durable `trigger_migrations/continuation-v2` marker gates scheduler admission; rollback drains v2 work first. Follower claims also carry a lease/fence and trigger followers are never evicted by capacity slices. | The readiness harness exercises the real all-worker lease-expiry, migration-marker, follower-claim/capacity, and flag-off checks. It does not claim automatic old-process detection. |
-| Deterministic event IDs could collide across runs. | Event identity now includes group, conversation, trigger run (or legacy marker), follower `since_seq`, and upper group sequence. | Cross-run duplicate/out-of-order tests assert distinct IDs and one event per exact run. |
-| Completion could race with handoff creation, active turns, terminal/stale runs, or user stop. | Added exact run/turn/work predicates and explicit race cases; terminal cleanup drops stale handoffs and never transfers them to a later run. | Integration tests exercise each interleaving and assert one of exact wait or terminal cleanup. |
+| Trigger continuations bypassed the existing hourly/daily run budget and generic event guards without a persisted spend bound. | Each run snapshots an immutable `continuation_limit` from `max_auto_continuations`, capped at 32, and fenced claims increment `continuation_count`. Astra identified the remaining owner-wide gap and amended the plan so every trigger-bound continuation also checks and increments the existing persisted `trigger_run_budgets` hourly/daily counters atomically. A temporary owner-budget miss leaves the run/event waiting until the next UTC reset; deadline and per-run exhaustion produce truthful terminal reasons. | Scheduler/continuation tests cover restart, duplicate claims, per-run limit, owner hourly/daily exhaustion, reset retry, deadline expiry, and truthful outcomes. |
+| Optional fields alone do not make old binaries refuse v2 events. | The repository has no authoritative replica/version registry. `AUTOMATION_CONTINUATION_V2_ENABLED` is therefore an explicit operator drain assertion: pause schedule and webhook admission, stop all scheduler workers, wait two `LEASE_SECONDS` intervals, verify no active `trigger_work` lease, run fenced `migrate_continuation_v2`, start only upgraded workers, then enable the flag. The durable `trigger_migrations/continuation-v2` marker gates admission; rollback drains v2 work first. Existing schedules, confirmation cards, and ambiguous waits are classified explicitly. | Readiness harness exercises real lease expiry, migration marker, flag-off refusal, existing schedule/webhook migration, confirmation preservation, ambiguous-wait failure, and rollback drain. It does not claim automatic old-process detection. |
+| Deterministic event IDs could collide across runs. | Event identity includes group ID, conversation ID, trigger run or legacy marker, follower `since_seq`, and upper group sequence. | Cross-run duplicate/out-of-order tests assert distinct IDs and one event per exact run. |
+| Completion could race with handoff creation, active turns, terminal/stale runs, or user Stop. | Exact run/turn/work predicates, durable follower claims, selective drain, and terminal cleanup cover handoff-before-wait, active coordinator turn, terminal/stale run, and post-Stop interleavings. | Integration tests assert each race converges to one exact wait/continuation or terminal cleanup, never later-run consumption or duplication. |
 
-## Shared runtime contract proposed for coordinator review
+## Astra personal assessment
 
-The plan proposes additive, server-derived continuation fields and semantics:
+Astra checked the prepared root-cause evidence against `trigger_scheduler::settle_result`,
+`trigger_schedule::admit_turn`, group follower registration/quiet notification,
+`append_events_in_session`, and `assistant_team::wake`. The proposed ownership boundary is
+preserved: automation owns trigger run identity, waiting state, follower/event binding,
+continuation admission, and selective wake; permissions owns bounded stateless
+`request_identity` client metadata and leaves proxy marker/classification ownership
+unchanged. No permissions or artifacts branch is imported.
 
-- `TriggerRun`: a serde-defaulted coordinator-work wait discriminator, source, and bounded deadline.
-- `TriggerRun`: persisted `continuation_count`, immutable `continuation_limit`, and
-  `continuation_protocol_version` for bounded spend and rollout fencing.
-- `GroupFollower`: optional `trigger_run_id` plus durable notification claim/sequence state.
-- `AgentEvent`: optional `trigger_run_id` and deterministic event identity for replay-safe delivery.
-- `ChatAuthority`: server-derived optional `trigger_run_id` propagated from the active trigger turn.
-- `TurnClaim`/`TurnStart`: an exact continuation claim for `origin: event` turns, with trigger run/work/lease fencing.
-- `assistant_team::wake`: trigger-aware selective event draining; unrelated events remain queued.
-- Activation: `AUTOMATION_CONTINUATION_V2_ENABLED` is an operator drain assertion;
-  the runbook and readiness harness pause dispatch, stop old workers, verify lease
-  expiry, migrate existing active schedules/runs, and drain v2 work before rollback.
+The only concrete plan defect found during this assessment was the owner-wide spend hole
+created by skipping the owner trigger budget on continuation claims. Revision 3 closes it
+with an atomic reuse of the existing budget document and explicit reset/deadline behavior.
+The per-run immutable allowance remains as a second fence. Existing generic event-hour and
+streak guards remain unchanged for ordinary unbound event turns; only exact trigger-bound
+continuations use the trigger-specific path.
 
-These changes preserve legacy rows through optional/defaulted fields and keep normal event guards unchanged. The coordinator and sibling PMs must review changed signatures before implementation.
+## Shared runtime contract
+
+The active plan proposes additive, server-derived fields and semantics:
+
+- `TriggerRun`: coordinator-work wait discriminator/source/deadline, persisted
+  `continuation_count`, immutable `continuation_limit`, and
+  `continuation_protocol_version`.
+- `GroupFollower`: optional `trigger_run_id` plus durable notification claim/sequence
+  state, with trigger-bound followers non-evictable under capacity pressure.
+- `AgentEvent`: optional `trigger_run_id` and continuation protocol version with
+  deterministic replay-safe identity.
+- `ChatAuthority`: server-derived `trigger_run_id` propagated from the active trigger turn.
+- `TurnClaim`/`TurnStart`: exact trigger continuation claim for `origin: event` turns,
+  including run/work/lease fencing.
+- `assistant_team::wake`: trigger-aware selective event draining; unrelated events remain
+  queued for ordinary wake logic.
+- Activation: `AUTOMATION_CONTINUATION_V2_ENABLED` is an operator drain assertion with
+  migration-marker fencing, existing schedule/webhook migration, and rollback drain.
+
+These are additive compatibility changes. The coordinator and permissions PM have been
+notified of the boundary; neither sibling branch is imported.
 
 ## Acceptance items remaining
 
-- Obtain `PLAN_APPROVED` for the exact plan SHA from the required Opus session.
-- Create exactly one Sol implementer with the required provider/model/effort/mode and exact worktree.
-- Implement the plan and record executable evidence for every acceptance-matrix row.
-- Perform Astra's complete diff/code review; resolve every finding, including nits.
-- Obtain `IMPLEMENTATION_APPROVED` from the same Opus session for the exact final commit.
+- Create and verify exactly one GPT-6.1-Sol implementer in this worktree.
+- Implement every acceptance-matrix row from the approved revision 3 plan.
+- Astra personally reviews the complete implementation diff and surrounding code.
+- Resolve every Astra finding, including low-risk issues and nits, through the same Sol
+  session and re-run affected checks.
+- Record `ASTRA_IMPLEMENTATION_APPROVED` only for the exact final commit after acceptance
+  evidence and required checks pass.
+- Keep any missing live client/destination/production evidence explicitly OPEN; it must not
+  be replaced by a caveat or treated as completed.
