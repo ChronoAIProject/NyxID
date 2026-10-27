@@ -176,7 +176,7 @@
       "account_authentication_status": "not determined; no live navigation attempted"
     },
     "personal_source_inspection": {
-      "status": "SOURCE_REVIEW_COMPLETE_source_only_no_compile_or_execution_claim",
+      "status": "SOURCE_REVIEW_COMPLETE",
       "scope": [
         "A-003 snapshot comparison precedes pending persistence; exact operation and canonical byte identity preserved",
         "Recovery policy and generated attachment availability use the transaction session and write fences",
@@ -215,7 +215,8 @@
       "legacy_route_regression": {
         "state": "REVERTED_AND_VERIFIED",
         "evidence": "assistant_uploads.rs remains SHA-256 a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83; thread_image continues uploads::chat_bytes and attachment/range behavior."
-      }
+      },
+      "execution_claim": "No backend compilation, test, check or Clippy execution is claimed; held regressions are prepared only."
     },
     "sol_runtime_settings_latest": {
       "agent_id": "01a17afe-64ad-7ed1-bd1f-8b75d719d9f9",
