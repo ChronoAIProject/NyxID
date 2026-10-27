@@ -701,8 +701,8 @@ These adapters use the existing authenticated async-watch executor, two-hour
 deadline, quotas, billing and live authority checks. They add no user-controlled
 polling URL or new cancellation API. Guest calls retain their ordinary tool
 response without registering a CMA watch. Card metadata allows only bounded
-identifiers and known status/phase values, and history excludes encrypted
-results. CMA watch metadata has a 30-day TTL; result encryption and the four-hour
-payload deadline remain the same as other watches. The
+identifiers, validated browser links, and known status/phase values; history
+excludes encrypted results. CMA watch metadata has a 30-day TTL; result encryption
+and the four-hour payload deadline remain the same as other watches. The
 [frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
 placement and refresh behavior.
