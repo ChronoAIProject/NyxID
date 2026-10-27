@@ -25,6 +25,7 @@ const afterReset = "2026-09-17T00:00:02Z";
 
 it.each([
   ["turn_lost", "interrupted"], ["assistant_unavailable", "could not complete"],
+  ["guest_model_route_required", "isn't available to guests yet"],
   ["internal_error", "NyxBot hit an internal error on this turn. Check which actions completed before retrying."],
   ["first_byte_timeout", "did not start"], ["invalid_stream", "ended unexpectedly"],
   ["output_too_large", "response limit"], ["nyxid_error", "authorize"],

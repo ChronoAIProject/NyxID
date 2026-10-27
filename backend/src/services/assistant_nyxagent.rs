@@ -2042,6 +2042,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            owner_model_route: None,
             invocation_controlled: false,
             credential_invocation_id: None,
             platform_thread: platform.map(|origin| origin.thread.clone()),
@@ -3347,7 +3348,7 @@ pub async fn change_model(
     }
     let updated = db.collection::<AssistantConversation>(CONVERSATIONS).find_one_and_update(
         doc! {"_id": id, "user_id": user_id, "active_turn": bson::Bson::Null},
-        doc! {"$set": {"model": model, "nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::now(), "context_reset_reason": "model_changed"}},
+        doc! {"$set": {"model": model, "owner_model_route": bson::Bson::Null, "nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::now(), "context_reset_reason": "model_changed"}},
     ).return_document(ReturnDocument::After).await?.ok_or(AppError::AssistantTurnActive)?;
     Ok((current.model, updated))
 }
@@ -6127,6 +6128,10 @@ impl TurnError {
             "nyxid_error" => (
                 "nyxid_error",
                 "NyxID could not authorize the assistant operation.",
+            ),
+            "guest_model_route_required" => (
+                "guest_model_route_required",
+                "This assistant isn't available to guests yet.",
             ),
             "first_byte_timeout" => (
                 "first_byte_timeout",

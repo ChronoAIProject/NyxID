@@ -498,6 +498,10 @@ pub struct AssistantConversation {
     #[serde(default)]
     pub title_source: TitleSource,
     pub model: String,
+    /// Exact route admitted by an owner on this thread, including legacy channel
+    /// threads whose profile differs from the agent default. Never browser input.
+    #[serde(default)]
+    pub owner_model_route: Option<Box<super::assistant_agent::OwnerModelRoute>>,
     #[serde(default)]
     pub access_mode: AccessMode,
     pub nyxagent_session_id: Option<String>,

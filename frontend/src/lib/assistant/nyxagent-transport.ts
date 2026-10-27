@@ -139,6 +139,7 @@ export function storedError(code: string | null, capacityWaitMs?: number | null)
   if (code === "first_byte_timeout") return "The assistant did not start responding in time. Try again.";
   if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
   if (code === "output_too_large") return "The assistant reached its response limit.";
+  if (code === "guest_model_route_required") return "This assistant isn't available to guests yet.";
   if (code === "nyxid_error") return "NyxID could not authorize the assistant operation.";
   if (code === "stale_response") return "The assistant context changed. Start a new turn.";
   if (code === "context_unavailable") return "The assistant context could not be restored. Try a new turn.";

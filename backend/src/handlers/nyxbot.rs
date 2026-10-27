@@ -3030,7 +3030,9 @@ async fn start_chat_turn(
             crate::services::assistant_profile_routing::model_for(
                 &state.db,
                 crate::services::assistant_profile_routing::RouteRole::Channel,
-                engine::DEFAULT_MODEL,
+                &crate::services::assistant_team_service::agent(&state.db, &row.user_id, &agent_id)
+                    .await?
+                    .model,
             )
             .await,
         ),
