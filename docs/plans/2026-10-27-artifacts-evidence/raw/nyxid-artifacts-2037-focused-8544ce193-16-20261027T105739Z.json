@@ -1,0 +1,59 @@
+{
+  "label": "focused-8544ce193-16",
+  "started_utc": "20261027T105739Z",
+  "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts",
+  "source_head": "8544ce1934251e3bc1abd223014af8c76375397d",
+  "source_digest_sha256": "b571a3cb781a45de2ae0a8518917c6f98d0c8e78d4ac4634b37d52c0157346dc",
+  "argv": [
+    "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "services::generated_artifacts::tests::conversation_delete_removes_encrypted_pending_artifacts_and_saved_associations",
+    "--exact",
+    "--test-threads=1",
+    "--nocapture"
+  ],
+  "env": {
+    "CARGO_TARGET_DIR": "/Users/chronoai/Desktop/projects/nyxid/target",
+    "CARGO_BUILD_JOBS": "2",
+    "NYXID_TEST_DATABASE_URL": "mongodb://127.0.0.1:29237/?replicaSet=artifacts2037",
+    "RUST_TEST_THREADS": "1",
+    "RUST_MIN_STACK": null
+  },
+  "nofile": [
+    65536,
+    9223372036854775807
+  ],
+  "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-16-20261027T105739Z.log",
+  "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-16-20261027T105739Z.argv.log",
+  "minimum_free_bytes": 2147483648,
+  "disk_free_before": 17048498176,
+  "pid": 57434,
+  "lowest_free_bytes": 17048457216,
+  "exit_code": 0,
+  "disk_guard_stopped": false,
+  "finished_utc": "2026-10-27T10:57:41.308084+00:00",
+  "disk_free_after": 17048338432,
+  "executable_identity": {
+    "source_head": "8544ce1934251e3bc1abd223014af8c76375397d",
+    "source_digest_sha256": "b571a3cb781a45de2ae0a8518917c6f98d0c8e78d4ac4634b37d52c0157346dc",
+    "compile_metadata": "/tmp/nyxid-artifacts-2037-compile-8544ce193-20261027T104256Z.json",
+    "compile_exit_code": 0,
+    "binary": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "binary_size_bytes": 749708848,
+    "binary_sha256": "58a90e02f55dbba3dc925ca23f85e6ec2050a105b1a932b737c58c34ed46600b",
+    "binary_mtime_utc": "2026-10-27T10:52:53.787730+00:00",
+    "recorded_utc": "2026-10-27T10:53:10.424360+00:00",
+    "resource_config": {
+      "path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+      "recorded_utc": "2026-10-27T10:44:51.514136+00:00"
+    }
+  },
+  "executable_identity_record": "/tmp/nyxid-artifacts-2037-compile-8544ce193-20261027T104256Z.binary.json",
+  "selection": "services::generated_artifacts::tests::conversation_delete_removes_encrypted_pending_artifacts_and_saved_associations",
+  "approved_order_number": 16,
+  "binary_sha256_verified": "58a90e02f55dbba3dc925ca23f85e6ec2050a105b1a932b737c58c34ed46600b",
+  "default_stack": true,
+  "wrapper_exit_code": 0,
+  "exactly_one_test_passed": true,
+  "source_matches_compiled_identity": true
+}

@@ -1,0 +1,55 @@
+{
+  "label": "diagnostic-03-stack32m",
+  "started_utc": "20261027T101525Z",
+  "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts",
+  "source_head": "2af22082eed47bdcea0e6cbcfa73bef79af8f3fe",
+  "source_digest_sha256": "4f70a0087f5088c02467d4049a1e6d30e245eb669c5c3452e40f374c5735f539",
+  "argv": [
+    "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable",
+    "--exact",
+    "--test-threads=1",
+    "--nocapture"
+  ],
+  "env": {
+    "CARGO_TARGET_DIR": "/Users/chronoai/Desktop/projects/nyxid/target",
+    "CARGO_BUILD_JOBS": "2",
+    "NYXID_TEST_DATABASE_URL": "mongodb://127.0.0.1:29237/?replicaSet=artifacts2037",
+    "RUST_TEST_THREADS": "1",
+    "RUST_MIN_STACK": "33554432"
+  },
+  "nofile": [
+    65536,
+    9223372036854775807
+  ],
+  "log": "/tmp/nyxid-artifacts-2037-diagnostic-03-stack32m-20261027T101525Z.log",
+  "argv_log": "/tmp/nyxid-artifacts-2037-diagnostic-03-stack32m-20261027T101525Z.argv.log",
+  "minimum_free_bytes": 2147483648,
+  "disk_free_before": 17598259200,
+  "pid": 51451,
+  "lowest_free_bytes": 17594953728,
+  "exit_code": 101,
+  "disk_guard_stopped": false,
+  "finished_utc": "2026-10-27T10:15:31.622954+00:00",
+  "disk_free_after": 17592958976,
+  "diagnostic_only": true,
+  "original_failure_metadata": "/tmp/nyxid-artifacts-2037-regression-03-20261027T100914Z.json",
+  "executable_identity": {
+    "source_head": "2af22082eed47bdcea0e6cbcfa73bef79af8f3fe",
+    "source_digest_sha256": "4f70a0087f5088c02467d4049a1e6d30e245eb669c5c3452e40f374c5735f539",
+    "compile_metadata": "/tmp/nyxid-artifacts-2037-compile-2af22082e-20261027T095431Z.json",
+    "compile_exit_code": 0,
+    "binary": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "binary_size_bytes": 759350848,
+    "binary_sha256": "53469c34800cb44fc929701bc8fcc15bedcd3c6f84ded9f04f6b22980c9473ec",
+    "binary_mtime_utc": "2026-10-27T10:04:22.401479+00:00",
+    "recorded_utc": "2026-10-27T10:04:48.276463+00:00"
+  },
+  "executable_identity_record": "/tmp/nyxid-artifacts-2037-compile-2af22082e-20261027T095431Z.binary.json",
+  "binary_sha256_verified": "53469c34800cb44fc929701bc8fcc15bedcd3c6f84ded9f04f6b22980c9473ec",
+  "binary_matches_original": true,
+  "selection": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable",
+  "wrapper_exit_code": 101,
+  "source_matches_compiled_identity": true,
+  "diagnostic_outcome": "No stack overflow; underlying recovery conflict at generated_artifact_delivery_tests.rs:244; exit 101"
+}

@@ -1,0 +1,18 @@
+{
+  "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+  "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+  "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
+  "legacy_assistant_uploads_sha256": "a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83",
+  "resource_config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+  "evidence_count": 94,
+  "credential_fields_removed": [
+    "authorization",
+    "cookie",
+    "password",
+    "api_key",
+    "access_token",
+    "refresh_token",
+    "private_key"
+  ],
+  "database_endpoint": "mongodb://127.0.0.1:29237/?replicaSet=artifacts2037 (no userinfo or credential)"
+}

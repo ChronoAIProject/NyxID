@@ -140,4 +140,37 @@ The current-tip router/process-stream/lifecycle batch passed all four exact filt
 
 The ticket remains **BLOCKED**, and `ASTRA_IMPLEMENTATION_APPROVED` remains unset, solely because combined Automation–Artifacts rows I-01–I-05 and I-07 and the authorized live Sandbox-to-originating-Web journey have not been demonstrated. I-06 is owned by Permissions/Automation and is excluded from this Artifacts verdict.
 
+## Combined source and evidence archive update — 2026-10-27
+
+The exact integration test commit is `ed2c6a52ea5a20205b92c1da45d9c84fc1edbc80`,
+parent `b1d627eca05d4227f6cd94655f17dccb313fb96e`, in the separate integration
+checkout. Astra read the complete test-only diff and verified `git diff --check`;
+no Cargo compile, integration test, or Clippy execution is claimed. The four
+source tests cover I-01/I-02 exact trigger-versus-Web event selection and one
+materialization, I-03 run cleanup plus independent-run preservation and
+conversation Stop fencing, and I-04 refusal for trigger, unrelated-event,
+channel, and voice provenance. The fixture uses real transactions and engine
+admission, fails closed without the required isolated database and continuation
+flag, writes the migration marker, uses distinct operation identities, and
+checks no materialization, no recovery side effect, no provider resubmission,
+and preservation of independent work. Astra found no concrete shared-boundary
+source incompatibility. I-05 and I-07 remain unexecuted and are still required.
+
+The coordinator's later local source composition `427ca78b8` retained the
+Telegram source/docs `b67ad9d81` and current-main `49f5a61214f6a29485471adea8185763e5ef424d`.
+The three conflicts were additive only (`assistant_nyxagent.rs`,
+`feature_flag_service.rs`, and `docs/chat/09-nyxbot-orchestrator.md`); both
+response structs, both flag registrations, and both documentation sections
+remain present. No runtime logic was authored by conflict resolution, and no
+combined execution evidence exists for the composed tip.
+
+The standalone evidence packet is archived at
+`docs/plans/2026-10-27-artifacts-evidence/`. Its 99 indexed records and
+derivatives pass `shasum -a 256 -c SHA256SUMS`; the checksum index SHA-256 is
+`054a4e2fefe8a03df06abc6f9d92bf405c8da21c0cb8a3749ba76a3f3e7a8725`. The
+archive preserves source digest `350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33`,
+rebuilt binary SHA-256 `2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce`,
+and the no-credential-shaped-values scan with documented false positives. This
+is evidence durability bookkeeping and does not change the BLOCKED verdict.
+
 This report records that the exclusive Artifacts validation window is quiescent after local validation; it does not alter the source candidate. No merge, deployment, production send, or issue closure is authorized.

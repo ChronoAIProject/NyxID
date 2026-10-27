@@ -1,0 +1,53 @@
+{
+  "label": "regression-03-90f4c75a2",
+  "started_utc": "20261027T103320Z",
+  "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts",
+  "source_head": "90f4c75a2a39470d12261fd08e2d6cde7e429579",
+  "source_digest_sha256": "edb7849f451c7006043562acba3278e82c9471a5d50c8959b92a10affaa93ed6",
+  "argv": [
+    "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable",
+    "--exact",
+    "--test-threads=1",
+    "--nocapture"
+  ],
+  "env": {
+    "CARGO_TARGET_DIR": "/Users/chronoai/Desktop/projects/nyxid/target",
+    "CARGO_BUILD_JOBS": "2",
+    "NYXID_TEST_DATABASE_URL": "mongodb://127.0.0.1:29237/?replicaSet=artifacts2037",
+    "RUST_TEST_THREADS": "1",
+    "RUST_MIN_STACK": null
+  },
+  "nofile": [
+    65536,
+    9223372036854775807
+  ],
+  "log": "/tmp/nyxid-artifacts-2037-regression-03-90f4c75a2-20261027T103320Z.log",
+  "argv_log": "/tmp/nyxid-artifacts-2037-regression-03-90f4c75a2-20261027T103320Z.argv.log",
+  "minimum_free_bytes": 2147483648,
+  "disk_free_before": 16524693504,
+  "pid": 54368,
+  "lowest_free_bytes": 16521633792,
+  "exit_code": 0,
+  "disk_guard_stopped": false,
+  "finished_utc": "2026-10-27T10:33:33.075855+00:00",
+  "disk_free_after": 16517648384,
+  "executable_identity": {
+    "source_head": "90f4c75a2a39470d12261fd08e2d6cde7e429579",
+    "source_digest_sha256": "edb7849f451c7006043562acba3278e82c9471a5d50c8959b92a10affaa93ed6",
+    "compile_metadata": "/tmp/nyxid-artifacts-2037-compile-90f4c75a2-20261027T102255Z.json",
+    "compile_exit_code": 0,
+    "binary": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "binary_size_bytes": 754774560,
+    "binary_sha256": "8b10dea3b03527a74f2f6cd0941be3b4bf0aafd36642a1566ee7ec1803636b92",
+    "binary_mtime_utc": "2026-10-27T10:32:54.107289+00:00",
+    "recorded_utc": "2026-10-27T10:33:14.854640+00:00"
+  },
+  "executable_identity_record": "/tmp/nyxid-artifacts-2037-compile-90f4c75a2-20261027T102255Z.binary.json",
+  "binary_sha256_verified": "8b10dea3b03527a74f2f6cd0941be3b4bf0aafd36642a1566ee7ec1803636b92",
+  "selection": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable",
+  "wrapper_exit_code": 0,
+  "exactly_one_test_passed": true,
+  "source_matches_compiled_identity": true,
+  "default_stack": true
+}

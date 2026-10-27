@@ -1,0 +1,107 @@
+{
+  "verified_utc": "2026-10-27T11:28:16.549456+00:00",
+  "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+  "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+  "tree_clean": true,
+  "executable_identity_record": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.binary.json",
+  "executable_identity": {
+    "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+    "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+    "compile_metadata": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.json",
+    "compile_exit_code": 0,
+    "binary": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "binary_size_bytes": 749708848,
+    "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
+    "binary_mtime_utc": "2026-10-27T11:20:10.689228+00:00",
+    "recorded_utc": "2026-10-27T11:20:38.475343+00:00",
+    "resource_config": {
+      "path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3"
+    }
+  },
+  "resource_config": {
+    "path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+    "sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+    "unchanged": true
+  },
+  "preflight_record": "/tmp/nyxid-artifacts-2037-3a2c9c996.preflight.json",
+  "legacy_assistant_uploads_sha256": "a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83",
+  "remaining_owned_processes": [],
+  "all_requested_argv_verified": true,
+  "no_disk_guard": true,
+  "minimum_free_gib": 12.01272964477539,
+  "results": [
+    {
+      "step": "compile",
+      "exit_code": 0,
+      "duration": "9m 47s",
+      "metadata": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.argv.log",
+      "argv": [
+        "cargo",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "test",
+        "--manifest-path",
+        "backend/Cargo.toml",
+        "generated_artifacts",
+        "--no-run"
+      ],
+      "owned_process_group": 59020,
+      "minimum_free_gib": 12.01272964477539,
+      "disk_free_before_gib": 15.875282287597656,
+      "disk_free_after_gib": 14.864505767822266,
+      "disk_guard_stopped": false,
+      "remaining_owned_processes": []
+    },
+    {
+      "step": "malformed_status_regression",
+      "exit_code": 0,
+      "duration": "7.63s",
+      "metadata": "/tmp/nyxid-artifacts-2037-regression-malformed-3a2c9c996-20261027T112046Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-regression-malformed-3a2c9c996-20261027T112046Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-regression-malformed-3a2c9c996-20261027T112046Z.argv.log",
+      "argv": [
+        "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_malformed_status_is_terminal_before_or_after_result_fetch",
+        "--exact",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "owned_process_group": 60202,
+      "minimum_free_gib": 14.85982894897461,
+      "disk_free_before_gib": 14.863346099853516,
+      "disk_free_after_gib": 14.858200073242188,
+      "disk_guard_stopped": false,
+      "remaining_owned_processes": []
+    },
+    {
+      "step": "clippy",
+      "exit_code": 0,
+      "duration": "6m 07s",
+      "metadata": "/tmp/nyxid-artifacts-2037-clippy-3a2c9c996-20261027T112121Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-clippy-3a2c9c996-20261027T112121Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-clippy-3a2c9c996-20261027T112121Z.argv.log",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "--manifest-path",
+        "backend/Cargo.toml",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "owned_process_group": 60279,
+      "minimum_free_gib": 13.857719421386719,
+      "disk_free_before_gib": 14.857086181640625,
+      "disk_free_after_gib": 15.864910125732422,
+      "disk_guard_stopped": false,
+      "remaining_owned_processes": []
+    }
+  ],
+  "scope": "Only required rebuild, exact malformed-status regression, and all-target warnings-denied Clippy; no source/docs changes or other Cargo jobs."
+}

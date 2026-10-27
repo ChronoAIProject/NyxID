@@ -385,3 +385,69 @@ The prior warnings-denied run on `8544ce193` failed with the concrete `clippy::c
 All validation used `CARGO_BUILD_JOBS=2`, the shared target, nofile 65536, one test thread and the isolated Mongo replica. The owned below-2-GiB guard never triggered; lowest sampled free space was 12.013 GiB during rebuild and 13.858 GiB during Clippy. All owned Cargo/rustc/clippy process groups exited and no validation command remains queued. `assistant_uploads.rs` remains SHA-256 `a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83`.
 
 **State:** `SOURCE_REVIEW_COMPLETE` and `LOCAL_VALIDATION_COMPLETE` for exact source tip `3a2c9c996a756ed4f58673c122a6d4775f0e66b7`. `ASTRA_IMPLEMENTATION_APPROVED` remains unset because the combined Automation–Artifacts rows I-01–I-05 and I-07 and the authorized live Sandbox-to-originating-Web journey remain open. The ticket verdict remains `BLOCKED`.
+
+## Combined integration source checkpoint — read-only Astra assessment — 2026-10-27
+
+The coordinator supplied a committed integration test source at
+`/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-workstream-integration`.
+I personally read the exact `ed2c6a52ea5a20205b92c1da45d9c84fc1edbc80` diff
+against merge checkpoint `b1d627eca05d4227f6cd94655f17dccb313fb96e`, including
+the nested registration in `backend/src/handlers/generated_artifact_delivery_tests.rs`
+and the complete
+`backend/src/handlers/automation_artifact_integration_tests.rs` source. The
+test-only commit is clean and `git diff --check` passes; no Cargo compile, test,
+or Clippy result is claimed.
+
+The four committed tests are:
+
+- `combined_i01_i02_trigger_selects_exact_run_then_web_materializes_once`
+- `combined_i03_run_cleanup_preserves_web_and_independent_run`
+- `combined_i03_conversation_stop_fences_blocked_web_and_late_follower`
+- `combined_i04_nonweb_provenance_cannot_recover_or_admit_artifacts`
+
+The source uses the real Mongo fixture, transaction paths, trigger claim and
+`begin_turn` fences, saved Web completion association, exact event selection,
+flag-off drain, run-only and conversation Stop ordering, independent dedicated
+run survival, and non-Web recovery/materialization refusal. The fixture fails
+closed when `NYXID_TEST_DATABASE_URL` or
+`AUTOMATION_CONTINUATION_V2_ENABLED=true` is absent, writes the required
+continuation migration marker, and uses distinct provider operation keys for
+retained watches. The source review found no concrete incompatibility with the
+standalone Artifacts contract or the Automation boundary. I-05 and I-07 are
+still separate applicable acceptance rows and have no integrated execution
+evidence in this checkpoint.
+
+The later local source composition was also read through the coordinator's
+reported `427ca78b8` tip: Telegram source/docs `b67ad9d81` and current main
+`49f5a61214f6a29485471adea8185763e5ef424d` were composed with only the three
+expected additive conflicts in `assistant_nyxagent.rs`,
+`feature_flag_service.rs`, and `docs/chat/09-nyxbot-orchestrator.md`. Both
+response structs, both feature-flag entries/registries, and both documentation
+sections were retained; conflict resolution authored no runtime logic. This
+composition remains source-only and has no Cargo or combined-test result.
+
+**Assessment:** `SOURCE_REVIEW_COMPLETE` for the combined source checkpoint;
+no new source finding. `LOCAL_VALIDATION_COMPLETE` remains scoped to standalone
+Artifacts tip `3a2c9c996…`; integrated local validation is **PENDING**. The
+combined I-01–I-05/I-07 gate and live Sandbox/Web gate remain open, so
+`ASTRA_IMPLEMENTATION_APPROVED` remains unset and the ticket verdict remains
+`BLOCKED`.
+
+## Evidence archive checkpoint — 2026-10-27
+
+The cited standalone logs, runner metadata, actual argv, source/binary identity,
+historical failures, and redacted scan are archived under
+`docs/plans/2026-10-27-artifacts-evidence/`. The archive contains 99 records and
+derivatives (94 raw records, two redacted derivatives, and two source
+identity/manifest files) indexed by `SHA256SUMS`. The current checksum index
+SHA-256 is
+`054a4e2fefe8a03df06abc6f9d92bf405c8da21c0cb8a3749ba76a3f3e7a8725`, and
+`shasum -a 256 -c SHA256SUMS` passes from the archive directory. The preserved
+source digest is
+`350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33` over 1,383
+inputs; the rebuilt binary SHA-256 remains
+`2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce`. The
+credential scan found no credential-shaped values; the four compiler identifier
+matches are documented false positives and fixture marker words are test data.
+This archive is documentation evidence only and does not close any acceptance
+gate.

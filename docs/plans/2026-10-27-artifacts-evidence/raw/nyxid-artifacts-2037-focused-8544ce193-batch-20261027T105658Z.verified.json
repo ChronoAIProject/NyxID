@@ -1,0 +1,147 @@
+{
+  "verified_utc": "2026-10-27T10:58:11.014015+00:00",
+  "batch_metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-batch-20261027T105658Z.json",
+  "source_head": "8544ce1934251e3bc1abd223014af8c76375397d",
+  "binary_sha256": "58a90e02f55dbba3dc925ca23f85e6ec2050a105b1a932b737c58c34ed46600b",
+  "tree_clean": true,
+  "legacy_assistant_uploads_sha256": "a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83",
+  "remaining_owned_processes": [],
+  "all_actual_argv_verified": true,
+  "all_default_stack": true,
+  "no_disk_guard": true,
+  "minimum_free_gib": 15.877613067626953,
+  "results": [
+    {
+      "order": 4,
+      "selection": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_worker_rejects_expired_changed_and_unavailable_sources",
+      "duration_seconds": 10.78,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-04-20261027T105658Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-04-20261027T105658Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-04-20261027T105658Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.892791748046875
+    },
+    {
+      "order": 5,
+      "selection": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_worker_reserves_shared_budget_before_result_body_and_releases_on_cancel",
+      "duration_seconds": 2.65,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-05-20261027T105711Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-05-20261027T105711Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-05-20261027T105711Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.891456604003906
+    },
+    {
+      "order": 7,
+      "selection": "services::generated_artifacts::tests::maximum_encrypted_pending_document_fits_bson_and_rejects_oversize",
+      "duration_seconds": 1.86,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-07-20261027T105716Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-07-20261027T105716Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-07-20261027T105716Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.890213012695312
+    },
+    {
+      "order": 8,
+      "selection": "services::generated_artifacts::tests::generated_artifacts_materialize_history_owner_http_ranges_recovery_and_retention",
+      "duration_seconds": 0.58,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-08-20261027T105718Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-08-20261027T105718Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-08-20261027T105718Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.89023208618164
+    },
+    {
+      "order": 9,
+      "selection": "services::generated_artifacts::tests::generated_artifacts_exact_event_binding_cancellation_capacity_and_recovery",
+      "duration_seconds": 0.52,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-09-20261027T105721Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-09-20261027T105721Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-09-20261027T105721Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.88946533203125
+    },
+    {
+      "order": 10,
+      "selection": "services::generated_artifacts::tests::generated_artifacts_expiry_and_stale_lease_cannot_publish_or_relabel",
+      "duration_seconds": 0.45,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-10-20261027T105723Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-10-20261027T105723Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-10-20261027T105723Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.888984680175781
+    },
+    {
+      "order": 11,
+      "selection": "services::generated_artifacts::tests::generated_artifact_worker_reservation_spans_persist_and_releases_on_error",
+      "duration_seconds": 0.44,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-11-20261027T105726Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-11-20261027T105726Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-11-20261027T105726Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.8887939453125
+    },
+    {
+      "order": 12,
+      "selection": "services::generated_artifacts::tests::owner_http_preserves_legacy_document_upload_and_image_contracts",
+      "duration_seconds": 0.41,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-12-20261027T105728Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-12-20261027T105728Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-12-20261027T105728Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.888557434082031
+    },
+    {
+      "order": 13,
+      "selection": "services::generated_artifacts::tests::delivery_expiry_uses_effective_attachment_retention_and_recovery_checks_live_policy",
+      "duration_seconds": 0.48,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-13-20261027T105731Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-13-20261027T105731Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-13-20261027T105731Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.887889862060547
+    },
+    {
+      "order": 14,
+      "selection": "services::generated_artifacts::tests::generated_artifact_admission_abort_keeps_pending_bytes_and_rolls_back_retention_and_association",
+      "duration_seconds": 0.35,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-14-20261027T105734Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-14-20261027T105734Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-14-20261027T105734Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.887672424316406
+    },
+    {
+      "order": 15,
+      "selection": "services::generated_artifacts::tests::generated_artifact_new_operation_has_new_identity_and_failed_result_preserves_old_bytes",
+      "duration_seconds": 0.52,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-15-20261027T105736Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-15-20261027T105736Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-15-20261027T105736Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.887535095214844
+    },
+    {
+      "order": 16,
+      "selection": "services::generated_artifacts::tests::conversation_delete_removes_encrypted_pending_artifacts_and_saved_associations",
+      "duration_seconds": 0.36,
+      "exit_code": 0,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-16-20261027T105739Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-16-20261027T105739Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-16-20261027T105739Z.argv.log",
+      "actual_argv_verified": true,
+      "minimum_free_gib": 15.877613067626953
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "preflight": {
+    "recorded_utc": "2026-10-27T11:10:24.308344+00:00",
+    "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+    "config_path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+    "config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+    "config_contents": "# Local workstream build policy for the disk-constrained shared target.\n# Built-in commands: cargo --config <absolute-path> test/build/check ...\n# External Clippy wrapper: cargo clippy --config <absolute-path> ...\n# Placing --config before clippy drops it before the wrapper Cargo child.\n# Only backend debug information and incremental caching change.\n# Optimization, debug assertions, overflow checks, dependencies and test scope\n# retain their manifest/profile defaults. This file does not change releases.\n\n[profile.dev.package.nyxid]\ndebug = 0\nincremental = false\n\n[profile.test.package.nyxid]\ndebug = 0\nincremental = false\n",
+    "nofile": [
+      65536,
+      9223372036854775807
+    ],
+    "inherited_build_environment": {
+      "RUSTFLAGS": null,
+      "CARGO_ENCODED_RUSTFLAGS": null,
+      "RUSTC_WRAPPER": null,
+      "RUSTC_WORKSPACE_WRAPPER": null,
+      "CARGO_INCREMENTAL": null,
+      "RUST_MIN_STACK": null,
+      "CARGO_PROFILE_DEV_DEBUG": null,
+      "CARGO_PROFILE_TEST_DEBUG": null,
+      "CARGO_PROFILE_DEV_INCREMENTAL": null,
+      "CARGO_PROFILE_TEST_INCREMENTAL": null
+    },
+    "guard_wrapper_sha256": "6e7945768ecc76434d3969f36715823cf2fff41d4f16dfeb484c78a04251cecd"
+  },
+  "config_sha256_after_compile": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+  "unchanged": true
+}

@@ -1,0 +1,767 @@
+{
+  "original_crash_report": "/Users/chronoai/Library/Logs/DiagnosticReports/nyxid_server-a7bf57b9c4cb166a-2026-10-27-180940.ips",
+  "pid": 50570,
+  "captureTime": "2026-10-27 18:09:17.4152 +0800",
+  "exception": {
+    "codes": "0x0000000000000002, 0x000000016b4d3660",
+    "message": "Could not determine thread index for stack guard region",
+    "rawCodes": [
+      2,
+      6095189600
+    ],
+    "type": "EXC_BAD_ACCESS",
+    "signal": "SIGABRT",
+    "subtype": "KERN_PROTECTION_FAILURE at 0x000000016b4d3660"
+  },
+  "frames": [
+    {
+      "index": 0,
+      "imageOffset": 38320,
+      "symbol": "__pthread_kill",
+      "symbolLocation": 8,
+      "imageIndex": 1
+    },
+    {
+      "index": 1,
+      "imageOffset": 26760,
+      "symbol": "pthread_kill",
+      "symbolLocation": 296,
+      "imageIndex": 5
+    },
+    {
+      "index": 2,
+      "imageOffset": 497744,
+      "symbol": "abort",
+      "symbolLocation": 124,
+      "imageIndex": 6
+    },
+    {
+      "index": 3,
+      "imageOffset": 369496384,
+      "symbol": "_RNvNtNtNtCsaLOjE9VYtxK_3std3sys3pal4unix14abort_internal",
+      "symbolLocation": 12,
+      "imageIndex": 0
+    },
+    {
+      "index": 4,
+      "imageOffset": 369495744,
+      "symbol": "_RNvNtCsaLOjE9VYtxK_3std7process5abort",
+      "symbolLocation": 12,
+      "imageIndex": 0
+    },
+    {
+      "index": 5,
+      "imageOffset": 368560404,
+      "symbol": "_RNvNtNtNtNtNtCsaLOjE9VYtxK_3std3sys3pal4unix14stack_overflow3imp14signal_handler",
+      "symbolLocation": 644,
+      "imageIndex": 0
+    },
+    {
+      "index": 6,
+      "imageOffset": 14180,
+      "symbol": "_sigtramp",
+      "symbolLocation": 56,
+      "imageIndex": 7
+    },
+    {
+      "index": 7,
+      "imageOffset": 355633056,
+      "symbol": "bson::extjson::models::_::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$bson..extjson..models..BinaryBody$GT$::serialize::h3f207b91185cb3c8",
+      "symbolLocation": 312,
+      "imageIndex": 0
+    },
+    {
+      "index": 8,
+      "imageOffset": 355633056,
+      "symbol": "bson::extjson::models::_::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$bson..extjson..models..BinaryBody$GT$::serialize::h3f207b91185cb3c8",
+      "symbolLocation": 312,
+      "imageIndex": 0
+    },
+    {
+      "index": 9,
+      "imageOffset": 355660208,
+      "symbol": "_$LT$$RF$mut$u20$bson..ser..raw..value_serializer..ValueSerializer$u20$as$u20$serde_core..ser..SerializeStruct$GT$::serialize_field::h24cbbac25d0d46a4",
+      "symbolLocation": 2368,
+      "imageIndex": 0
+    },
+    {
+      "index": 10,
+      "imageOffset": 356076076,
+      "symbol": "_$LT$bson..ser..raw..StructSerializer$u20$as$u20$serde_core..ser..SerializeStruct$GT$::serialize_field::hd4daa6e8944d14ea",
+      "symbolLocation": 164,
+      "imageIndex": 0
+    },
+    {
+      "index": 11,
+      "imageOffset": 356173916,
+      "symbol": "bson::ser::serde::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$bson..binary..Binary$GT$::serialize::h416e1588a21a361e",
+      "symbolLocation": 620,
+      "imageIndex": 0
+    },
+    {
+      "index": 12,
+      "imageOffset": 356389332,
+      "symbol": "bson::ser::serde::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$bson..bson..Bson$GT$::serialize::h2251808defa50595",
+      "symbolLocation": 644,
+      "imageIndex": 0
+    },
+    {
+      "index": 13,
+      "imageOffset": 356292168,
+      "symbol": "_$LT$bson..ser..raw..document_serializer..DocumentSerializer$u20$as$u20$serde_core..ser..SerializeMap$GT$::serialize_value::h0a9935825e070e1f",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 14,
+      "imageOffset": 356300656,
+      "symbol": "serde_core::ser::SerializeMap::serialize_entry::hc76bd5f843994391",
+      "symbolLocation": 148,
+      "imageIndex": 0
+    },
+    {
+      "index": 15,
+      "imageOffset": 356305984,
+      "symbol": "bson::ser::serde::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$bson..document..Document$GT$::serialize::h5cbfdf5cfa51af35",
+      "symbolLocation": 444,
+      "imageIndex": 0
+    },
+    {
+      "index": 16,
+      "imageOffset": 355395796,
+      "symbol": "_$LT$$RF$mut$u20$bson..ser..raw..Serializer$u20$as$u20$serde_core..ser..Serializer$GT$::serialize_some::h813f8e2557735792",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 17,
+      "imageOffset": 351759324,
+      "symbol": "serde_core::ser::impls::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$core..option..Option$LT$T$GT$$GT$::serialize::h1a83cf61a7075c50",
+      "symbolLocation": 84,
+      "imageIndex": 0
+    },
+    {
+      "index": 18,
+      "imageOffset": 350133336,
+      "symbol": "_$LT$bson..ser..raw..document_serializer..DocumentSerializer$u20$as$u20$serde_core..ser..SerializeMap$GT$::serialize_value::h0f2a2f4b7c425289",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 19,
+      "imageOffset": 350172780,
+      "symbol": "serde_core::ser::SerializeMap::serialize_entry::h988cc2c543434754",
+      "symbolLocation": 152,
+      "imageIndex": 0
+    },
+    {
+      "index": 20,
+      "imageOffset": 354314540,
+      "symbol": "mongodb::cmap::conn::command::_::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$mongodb..cmap..conn..command..Command$GT$::serialize::h54b1dfa0599cc059",
+      "symbolLocation": 664,
+      "imageIndex": 0
+    },
+    {
+      "index": 21,
+      "imageOffset": 350689828,
+      "symbol": "bson::ser::to_vec::h4a009e95b2a745be",
+      "symbolLocation": 68,
+      "imageIndex": 0
+    },
+    {
+      "index": 22,
+      "imageOffset": 350679892,
+      "symbol": "bson::ser::to_raw_document_buf::h6cc14302c0bd9445",
+      "symbolLocation": 40,
+      "imageIndex": 0
+    },
+    {
+      "index": 23,
+      "imageOffset": 354796648,
+      "symbol": "_$LT$mongodb..cmap..conn..wire..message..Message$u20$as$u20$core..convert..TryFrom$LT$mongodb..cmap..conn..command..Command$GT$$GT$::try_from::h7cf67298351eb0d8",
+      "symbolLocation": 32,
+      "imageIndex": 0
+    },
+    {
+      "index": 24,
+      "imageOffset": 349237620,
+      "symbol": "mongodb::client::executor::_$LT$impl$u20$mongodb..client..Client$GT$::execute_operation_on_connection::_$u7b$$u7b$closure$u7d$$u7d$::h88892449639528bf",
+      "symbolLocation": 1980,
+      "imageIndex": 0
+    },
+    {
+      "index": 25,
+      "imageOffset": 348946128,
+      "symbol": "mongodb::client::executor::_$LT$impl$u20$mongodb..client..Client$GT$::execute_operation_with_retry::_$u7b$$u7b$closure$u7d$$u7d$::h04b0ecab2bd1961b",
+      "symbolLocation": 4872,
+      "imageIndex": 0
+    },
+    {
+      "index": 26,
+      "imageOffset": 349354820,
+      "symbol": "mongodb::client::executor::_$LT$impl$u20$mongodb..client..Client$GT$::execute_operation_with_details_inner::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h2e34112fac61b709",
+      "symbolLocation": 392,
+      "imageIndex": 0
+    },
+    {
+      "index": 27,
+      "imageOffset": 354867248,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h2ec448e7ae62ed4c",
+      "symbolLocation": 64,
+      "imageIndex": 0
+    },
+    {
+      "index": 28,
+      "imageOffset": 349329040,
+      "symbol": "mongodb::client::executor::_$LT$impl$u20$mongodb..client..Client$GT$::execute_operation_with_details_inner::_$u7b$$u7b$closure$u7d$$u7d$::h8118d6d5cf7c8f02",
+      "symbolLocation": 1808,
+      "imageIndex": 0
+    },
+    {
+      "index": 29,
+      "imageOffset": 349126104,
+      "symbol": "mongodb::client::executor::_$LT$impl$u20$mongodb..client..Client$GT$::execute_operation_with_details::_$u7b$$u7b$closure$u7d$$u7d$::h1da2539b9afdaa2f",
+      "symbolLocation": 396,
+      "imageIndex": 0
+    },
+    {
+      "index": 30,
+      "imageOffset": 121049072,
+      "symbol": "mongodb::client::executor::_$LT$impl$u20$mongodb..client..Client$GT$::execute_cursor_operation::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h8787f1f9c3433b1a",
+      "symbolLocation": 440,
+      "imageIndex": 0
+    },
+    {
+      "index": 31,
+      "imageOffset": 297276280,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h2d35e990284224cf",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 32,
+      "imageOffset": 120616380,
+      "symbol": "mongodb::client::executor::_$LT$impl$u20$mongodb..client..Client$GT$::execute_cursor_operation::_$u7b$$u7b$closure$u7d$$u7d$::hb7aa09e852a9de50",
+      "symbolLocation": 428,
+      "imageIndex": 0
+    },
+    {
+      "index": 33,
+      "imageOffset": 300771716,
+      "symbol": "mongodb::action::find::Find$LT$T$GT$::exec_generic::_$u7b$$u7b$closure$u7d$$u7d$::haa44dd4b25d0a43c",
+      "symbolLocation": 1012,
+      "imageIndex": 0
+    },
+    {
+      "index": 34,
+      "imageOffset": 302842912,
+      "symbol": "_$LT$mongodb..action..find..Find$LT$T$GT$$u20$as$u20$core..future..into_future..IntoFuture$GT$::into_future::_$u7b$$u7b$closure$u7d$$u7d$::h2a4f86bd242b3d4b",
+      "symbolLocation": 344,
+      "imageIndex": 0
+    },
+    {
+      "index": 35,
+      "imageOffset": 302761656,
+      "symbol": "_$LT$mongodb..action..find..FindFuture$LT$T$GT$$u20$as$u20$core..future..future..Future$GT$::poll::hcdbeca616b334b8e",
+      "symbolLocation": 60,
+      "imageIndex": 0
+    },
+    {
+      "index": 36,
+      "imageOffset": 303228132,
+      "symbol": "_$LT$mongodb..action..find..FindOne$LT$T$GT$$u20$as$u20$core..future..into_future..IntoFuture$GT$::into_future::_$u7b$$u7b$closure$u7d$$u7d$::h2100f560dfb9b012",
+      "symbolLocation": 1676,
+      "imageIndex": 0
+    },
+    {
+      "index": 37,
+      "imageOffset": 302965940,
+      "symbol": "_$LT$mongodb..action..find..FindOneFuture$LT$T$GT$$u20$as$u20$core..future..future..Future$GT$::poll::hde5cec3264c029bc",
+      "symbolLocation": 60,
+      "imageIndex": 0
+    },
+    {
+      "index": 38,
+      "imageOffset": 314862324,
+      "symbol": "nyxid_server::services::proxy_service::finish_resolution::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::hdeb1f683b070cbc6",
+      "symbolLocation": 2084,
+      "imageIndex": 0
+    },
+    {
+      "index": 39,
+      "imageOffset": 297353040,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::he2c701e98b9a2c40",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 40,
+      "imageOffset": 314855512,
+      "symbol": "nyxid_server::services::proxy_service::finish_resolution::_$u7b$$u7b$closure$u7d$$u7d$::h8778423cca086aaa",
+      "symbolLocation": 1408,
+      "imageIndex": 0
+    },
+    {
+      "index": 41,
+      "imageOffset": 315173436,
+      "symbol": "nyxid_server::services::proxy_service::resolve_proxy_target_by_user_service_id_with_mode::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::he2bb8440bf6c9cdf",
+      "symbolLocation": 4004,
+      "imageIndex": 0
+    },
+    {
+      "index": 42,
+      "imageOffset": 297280856,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h37f7a102723cec43",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 43,
+      "imageOffset": 315169244,
+      "symbol": "nyxid_server::services::proxy_service::resolve_proxy_target_by_user_service_id_with_mode::_$u7b$$u7b$closure$u7d$$u7d$::h2f65512d8c0e4c1e",
+      "symbolLocation": 544,
+      "imageIndex": 0
+    },
+    {
+      "index": 44,
+      "imageOffset": 315132064,
+      "symbol": "nyxid_server::services::proxy_service::resolve_proxy_target_by_user_service_id::_$u7b$$u7b$closure$u7d$$u7d$::h2250fd0b94142bd6",
+      "symbolLocation": 484,
+      "imageIndex": 0
+    },
+    {
+      "index": 45,
+      "imageOffset": 289047324,
+      "symbol": "nyxid_server::services::assistant_service_execution::http::verify_resolved_projected_inner::_$u7b$$u7b$closure$u7d$$u7d$::hf9c80b5532aad59c",
+      "symbolLocation": 1384,
+      "imageIndex": 0
+    },
+    {
+      "index": 46,
+      "imageOffset": 297340952,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::hc6876e6a10b4b00b",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 47,
+      "imageOffset": 318047360,
+      "symbol": "nyxid_server::services::assistant_service_execution::egress::AssistantEgressGuard::revalidate_inner::_$u7b$$u7b$closure$u7d$$u7d$::hc0b4094622f7ccf9",
+      "symbolLocation": 644,
+      "imageIndex": 0
+    },
+    {
+      "index": 48,
+      "imageOffset": 318044300,
+      "symbol": "nyxid_server::services::assistant_service_execution::egress::HttpEgressGuard::revalidate::_$u7b$$u7b$closure$u7d$$u7d$::h9d86d6c050c3ee83",
+      "symbolLocation": 1440,
+      "imageIndex": 0
+    },
+    {
+      "index": 49,
+      "imageOffset": 297340952,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::hc6876e6a10b4b00b",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 50,
+      "imageOffset": 297359272,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::hf1e2d5a1d387269a",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 51,
+      "imageOffset": 315118128,
+      "symbol": "nyxid_server::services::proxy_service::forward_request_with_egress_guard_inner::_$u7b$$u7b$closure$u7d$$u7d$::hc96902048e36d103",
+      "symbolLocation": 21220,
+      "imageIndex": 0
+    },
+    {
+      "index": 52,
+      "imageOffset": 297312528,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h82aed3e887f35761",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 53,
+      "imageOffset": 285159388,
+      "symbol": "nyxid_server::services::mcp_service::execute_tool_resolved_inner::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h34ed3c32f44bb51c",
+      "symbolLocation": 53528,
+      "imageIndex": 0
+    },
+    {
+      "index": 54,
+      "imageOffset": 297306152,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h75ccd2e8a1ffc6a4",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 55,
+      "imageOffset": 285103664,
+      "symbol": "nyxid_server::services::mcp_service::execute_tool_resolved_inner::_$u7b$$u7b$closure$u7d$$u7d$::h3d9abd6d3e69f3f3",
+      "symbolLocation": 17148,
+      "imageIndex": 0
+    },
+    {
+      "index": 56,
+      "imageOffset": 297306152,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h75ccd2e8a1ffc6a4",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 57,
+      "imageOffset": 269415112,
+      "symbol": "nyxid_server::services::service_concurrency_service::Lease::run::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::hb9def6a1dde7873b",
+      "symbolLocation": 620,
+      "imageIndex": 0
+    },
+    {
+      "index": 58,
+      "imageOffset": 215134276,
+      "symbol": "_$LT$core..future..poll_fn..PollFn$LT$F$GT$$u20$as$u20$core..future..future..Future$GT$::poll::hef63721c6101bf97",
+      "symbolLocation": 12,
+      "imageIndex": 0
+    },
+    {
+      "index": 59,
+      "imageOffset": 269402536,
+      "symbol": "nyxid_server::services::service_concurrency_service::Lease::run::_$u7b$$u7b$closure$u7d$$u7d$::h5cf6969de096d970",
+      "symbolLocation": 672,
+      "imageIndex": 0
+    },
+    {
+      "index": 60,
+      "imageOffset": 284974160,
+      "symbol": "nyxid_server::services::mcp_service::execute_tool_resolved::_$u7b$$u7b$closure$u7d$$u7d$::h783b3858fbbef01a",
+      "symbolLocation": 3800,
+      "imageIndex": 0
+    },
+    {
+      "index": 61,
+      "imageOffset": 297306152,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h75ccd2e8a1ffc6a4",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 62,
+      "imageOffset": 297297184,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h5edf092b7723bdbe",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 63,
+      "imageOffset": 284981088,
+      "symbol": "nyxid_server::services::mcp_service::execute_tool_response::_$u7b$$u7b$closure$u7d$$u7d$::h8a85bcd1ae2bca9f",
+      "symbolLocation": 2976,
+      "imageIndex": 0
+    },
+    {
+      "index": 64,
+      "imageOffset": 297308704,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h7aac34489f84d501",
+      "symbolLocation": 44,
+      "imageIndex": 0
+    },
+    {
+      "index": 65,
+      "imageOffset": 102411748,
+      "symbol": "nyxid_server::handlers::mcp_transport::dispatch_service_tool::_$u7b$$u7b$closure$u7d$$u7d$::h373c981c7b8102b1",
+      "symbolLocation": 18708,
+      "imageIndex": 0
+    },
+    {
+      "index": 66,
+      "imageOffset": 335195716,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h4dd0d7a197044058",
+      "symbolLocation": 80,
+      "imageIndex": 0
+    },
+    {
+      "index": 67,
+      "imageOffset": 297327488,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::ha6a3e7364e5c99fe",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 68,
+      "imageOffset": 100772956,
+      "symbol": "nyxid_server::handlers::mcp_transport::dispatch_tools_call::_$u7b$$u7b$closure$u7d$$u7d$::hb3e5cca69b4989e5",
+      "symbolLocation": 13344,
+      "imageIndex": 0
+    },
+    {
+      "index": 69,
+      "imageOffset": 297314472,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h87653b4a46d1401a",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 70,
+      "imageOffset": 216578764,
+      "symbol": "_$LT$tokio..task..task_local..TaskLocalFuture$LT$T$C$F$GT$$u20$as$u20$core..future..future..Future$GT$::poll::_$u7b$$u7b$closure$u7d$$u7d$::hbd9580d2a82f4c00",
+      "symbolLocation": 80,
+      "imageIndex": 0
+    },
+    {
+      "index": 71,
+      "imageOffset": 231357936,
+      "symbol": "tokio::task::task_local::LocalKey$LT$T$GT$::scope_inner::h60decddd65465b9a",
+      "symbolLocation": 268,
+      "imageIndex": 0
+    },
+    {
+      "index": 72,
+      "imageOffset": 216522700,
+      "symbol": "_$LT$tokio..task..task_local..TaskLocalFuture$LT$T$C$F$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h92d9ba26a3e5e9cf",
+      "symbolLocation": 68,
+      "imageIndex": 0
+    },
+    {
+      "index": 73,
+      "imageOffset": 100481536,
+      "symbol": "nyxid_server::handlers::mcp_transport::handle_tools_call::_$u7b$$u7b$closure$u7d$$u7d$::h8e7a2a2ddb13f3a4",
+      "symbolLocation": 7128,
+      "imageIndex": 0
+    },
+    {
+      "index": 74,
+      "imageOffset": 297276640,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h2e87f646684dab75",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 75,
+      "imageOffset": 101010868,
+      "symbol": "nyxid_server::handlers::mcp_transport::chat_authority_tests::direct_call::_$u7b$$u7b$closure$u7d$$u7d$::h1d3d8a5e7b301c06",
+      "symbolLocation": 2160,
+      "imageIndex": 0
+    },
+    {
+      "index": 76,
+      "imageOffset": 101236192,
+      "symbol": "nyxid_server::handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::AsyncFixture::submit::_$u7b$$u7b$closure$u7d$$u7d$::h122470df025e512d",
+      "symbolLocation": 2364,
+      "imageIndex": 0
+    },
+    {
+      "index": 77,
+      "imageOffset": 101508356,
+      "symbol": "nyxid_server::handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable::_$u7b$$u7b$closure$u7d$$u7d$::hae0459d9f4e9321f",
+      "symbolLocation": 1456,
+      "imageIndex": 0
+    },
+    {
+      "index": 78,
+      "imageOffset": 297348120,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::hd5d97dd60d128c8e",
+      "symbolLocation": 36,
+      "imageIndex": 0
+    },
+    {
+      "index": 79,
+      "imageOffset": 297269152,
+      "symbol": "_$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h19eb881f0cc0e430",
+      "symbolLocation": 28,
+      "imageIndex": 0
+    },
+    {
+      "index": 80,
+      "imageOffset": 326604748,
+      "symbol": "tokio::runtime::scheduler::current_thread::CoreGuard::block_on::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h2be4a57b0a014c6c",
+      "symbolLocation": 28,
+      "imageIndex": 0
+    },
+    {
+      "index": 81,
+      "imageOffset": 326599556,
+      "symbol": "tokio::runtime::scheduler::current_thread::CoreGuard::block_on::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h323ca31ba4d9e2ab",
+      "symbolLocation": 208,
+      "imageIndex": 0
+    },
+    {
+      "index": 82,
+      "imageOffset": 326505072,
+      "symbol": "tokio::runtime::scheduler::current_thread::Context::enter::h0e7632bef3a90abd",
+      "symbolLocation": 288,
+      "imageIndex": 0
+    },
+    {
+      "index": 83,
+      "imageOffset": 326578516,
+      "symbol": "tokio::runtime::scheduler::current_thread::CoreGuard::block_on::_$u7b$$u7b$closure$u7d$$u7d$::h7c27c78b0a276a09",
+      "symbolLocation": 388,
+      "imageIndex": 0
+    },
+    {
+      "index": 84,
+      "imageOffset": 326555200,
+      "symbol": "tokio::runtime::scheduler::current_thread::CoreGuard::enter::_$u7b$$u7b$closure$u7d$$u7d$::h93d105212797862b",
+      "symbolLocation": 28,
+      "imageIndex": 0
+    },
+    {
+      "index": 85,
+      "imageOffset": 214846660,
+      "symbol": "tokio::runtime::context::scoped::Scoped$LT$T$GT$::set::hdd7c2def7d2565d6",
+      "symbolLocation": 140,
+      "imageIndex": 0
+    },
+    {
+      "index": 86,
+      "imageOffset": 238096140,
+      "symbol": "tokio::runtime::context::set_scheduler::_$u7b$$u7b$closure$u7d$$u7d$::he43cb4a313b8193f",
+      "symbolLocation": 48,
+      "imageIndex": 0
+    },
+    {
+      "index": 87,
+      "imageOffset": 68917368,
+      "symbol": "std::thread::local::LocalKey$LT$T$GT$::try_with::h01ace1bbfc98934b",
+      "symbolLocation": 172,
+      "imageIndex": 0
+    },
+    {
+      "index": 88,
+      "imageOffset": 68905544,
+      "symbol": "std::thread::local::LocalKey$LT$T$GT$::with::h32f660386beb19a8",
+      "symbolLocation": 16,
+      "imageIndex": 0
+    },
+    {
+      "index": 89,
+      "imageOffset": 238094432,
+      "symbol": "tokio::runtime::context::set_scheduler::ha031d5b9c106f6f4",
+      "symbolLocation": 52,
+      "imageIndex": 0
+    },
+    {
+      "index": 90,
+      "imageOffset": 326547608,
+      "symbol": "tokio::runtime::scheduler::current_thread::CoreGuard::enter::h729059e0b5d0e67f",
+      "symbolLocation": 340,
+      "imageIndex": 0
+    },
+    {
+      "index": 91,
+      "imageOffset": 326556920,
+      "symbol": "tokio::runtime::scheduler::current_thread::CoreGuard::block_on::h7fcb7cf7d74bbb2e",
+      "symbolLocation": 64,
+      "imageIndex": 0
+    },
+    {
+      "index": 92,
+      "imageOffset": 325933840,
+      "symbol": "tokio::runtime::scheduler::current_thread::CurrentThread::block_on::_$u7b$$u7b$closure$u7d$$u7d$::h59f27c73842d3fd6",
+      "symbolLocation": 344,
+      "imageIndex": 0
+    },
+    {
+      "index": 93,
+      "imageOffset": 161873284,
+      "symbol": "tokio::runtime::context::runtime::enter_runtime::h1a8ba24298f28c34",
+      "symbolLocation": 180,
+      "imageIndex": 0
+    },
+    {
+      "index": 94,
+      "imageOffset": 325927436,
+      "symbol": "tokio::runtime::scheduler::current_thread::CurrentThread::block_on::hbc9fa75b99fcd324",
+      "symbolLocation": 108,
+      "imageIndex": 0
+    },
+    {
+      "index": 95,
+      "imageOffset": 198333352,
+      "symbol": "tokio::runtime::runtime::Runtime::block_on_inner::hdaddfe1ed125a2cb",
+      "symbolLocation": 160,
+      "imageIndex": 0
+    },
+    {
+      "index": 96,
+      "imageOffset": 198335244,
+      "symbol": "tokio::runtime::runtime::Runtime::block_on::h3be13c0ce75a8cbb",
+      "symbolLocation": 268,
+      "imageIndex": 0
+    },
+    {
+      "index": 97,
+      "imageOffset": 101506740,
+      "symbol": "nyxid_server::handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable::h8d77f00d17fda572",
+      "symbolLocation": 308,
+      "imageIndex": 0
+    },
+    {
+      "index": 98,
+      "imageOffset": 101506880,
+      "symbol": "nyxid_server::handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable::_$u7b$$u7b$closure$u7d$$u7d$::ha98c1b43b62e9dd7",
+      "symbolLocation": 20,
+      "imageIndex": 0
+    },
+    {
+      "index": 99,
+      "imageOffset": 851504,
+      "symbol": "core::ops::function::FnOnce::call_once::h76f7b595b9933a24",
+      "symbolLocation": 20,
+      "imageIndex": 0
+    },
+    {
+      "index": 100,
+      "imageOffset": 327757892,
+      "symbol": "_RINvCshoVrKSUFjcq_4test28___rust_begin_short_backtraceINtNtCs6sq8b9ugfBC_4core6result6ResultuNtNtCs8dnTdrJsiec_5alloc6string6StringEFEBQ_EB2_",
+      "symbolLocation": 24,
+      "imageIndex": 0
+    },
+    {
+      "index": 101,
+      "imageOffset": 327799404,
+      "symbol": "_RNCNvCshoVrKSUFjcq_4test8run_test0B3_",
+      "symbolLocation": 848,
+      "imageIndex": 0
+    },
+    {
+      "index": 102,
+      "imageOffset": 327785408,
+      "symbol": "_RINvNtNtCsaLOjE9VYtxK_3std3sys9backtrace28___rust_begin_short_backtraceNCNvCshoVrKSUFjcq_4test8run_tests_0uEB1b_",
+      "symbolLocation": 132,
+      "imageIndex": 0
+    },
+    {
+      "index": 103,
+      "imageOffset": 327808324,
+      "symbol": "_RNSNvYNCINvNtNtCsaLOjE9VYtxK_3std6thread9lifecycle15spawn_uncheckedNCNvCshoVrKSUFjcq_4test8run_tests_0uEs_0INtNtNtCs6sq8b9ugfBC_4core3ops8function6FnOnceuE9call_once6vtableB17_",
+      "symbolLocation": 64,
+      "imageIndex": 0
+    },
+    {
+      "index": 104,
+      "imageOffset": 368560828,
+      "symbol": "_RNvNvMs0_NtNtNtCsaLOjE9VYtxK_3std3sys6thread4unixNtB7_6Thread3new12thread_start",
+      "symbolLocation": 408,
+      "imageIndex": 0
+    },
+    {
+      "index": 105,
+      "imageOffset": 27656,
+      "symbol": "_pthread_start",
+      "symbolLocation": 136,
+      "imageIndex": 5
+    },
+    {
+      "index": 106,
+      "imageOffset": 7080,
+      "symbol": "thread_start",
+      "symbolLocation": 8,
+      "imageIndex": 5
+    }
+  ]
+}

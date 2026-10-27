@@ -1,0 +1,233 @@
+{
+  "started_utc": "20261027T105658Z",
+  "source_head": "8544ce1934251e3bc1abd223014af8c76375397d",
+  "source_digest_sha256": "b571a3cb781a45de2ae0a8518917c6f98d0c8e78d4ac4634b37d52c0157346dc",
+  "executable_identity": {
+    "source_head": "8544ce1934251e3bc1abd223014af8c76375397d",
+    "source_digest_sha256": "b571a3cb781a45de2ae0a8518917c6f98d0c8e78d4ac4634b37d52c0157346dc",
+    "compile_metadata": "/tmp/nyxid-artifacts-2037-compile-8544ce193-20261027T104256Z.json",
+    "compile_exit_code": 0,
+    "binary": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "binary_size_bytes": 749708848,
+    "binary_sha256": "58a90e02f55dbba3dc925ca23f85e6ec2050a105b1a932b737c58c34ed46600b",
+    "binary_mtime_utc": "2026-10-27T10:52:53.787730+00:00",
+    "recorded_utc": "2026-10-27T10:53:10.424360+00:00",
+    "resource_config": {
+      "path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+      "recorded_utc": "2026-10-27T10:44:51.514136+00:00"
+    }
+  },
+  "selections": [
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_worker_rejects_expired_changed_and_unavailable_sources",
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_worker_reserves_shared_budget_before_result_body_and_releases_on_cancel",
+    "services::generated_artifacts::tests::maximum_encrypted_pending_document_fits_bson_and_rejects_oversize",
+    "services::generated_artifacts::tests::generated_artifacts_materialize_history_owner_http_ranges_recovery_and_retention",
+    "services::generated_artifacts::tests::generated_artifacts_exact_event_binding_cancellation_capacity_and_recovery",
+    "services::generated_artifacts::tests::generated_artifacts_expiry_and_stale_lease_cannot_publish_or_relabel",
+    "services::generated_artifacts::tests::generated_artifact_worker_reservation_spans_persist_and_releases_on_error",
+    "services::generated_artifacts::tests::owner_http_preserves_legacy_document_upload_and_image_contracts",
+    "services::generated_artifacts::tests::delivery_expiry_uses_effective_attachment_retention_and_recovery_checks_live_policy",
+    "services::generated_artifacts::tests::generated_artifact_admission_abort_keeps_pending_bytes_and_rolls_back_retention_and_association",
+    "services::generated_artifacts::tests::generated_artifact_new_operation_has_new_identity_and_failed_result_preserves_old_bytes",
+    "services::generated_artifacts::tests::conversation_delete_removes_encrypted_pending_artifacts_and_saved_associations"
+  ],
+  "results": [
+    {
+      "selection": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_worker_rejects_expired_changed_and_unavailable_sources",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-04-20261027T105658Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-04-20261027T105658Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-04-20261027T105658Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 4,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17064755200
+    },
+    {
+      "selection": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_worker_reserves_shared_budget_before_result_body_and_releases_on_cancel",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-05-20261027T105711Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-05-20261027T105711Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-05-20261027T105711Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 5,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17063321600
+    },
+    {
+      "selection": "services::generated_artifacts::tests::maximum_encrypted_pending_document_fits_bson_and_rejects_oversize",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-07-20261027T105716Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-07-20261027T105716Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-07-20261027T105716Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 7,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17061986304
+    },
+    {
+      "selection": "services::generated_artifacts::tests::generated_artifacts_materialize_history_owner_http_ranges_recovery_and_retention",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-08-20261027T105718Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-08-20261027T105718Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-08-20261027T105718Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 8,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17062006784
+    },
+    {
+      "selection": "services::generated_artifacts::tests::generated_artifacts_exact_event_binding_cancellation_capacity_and_recovery",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-09-20261027T105721Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-09-20261027T105721Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-09-20261027T105721Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 9,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17061183488
+    },
+    {
+      "selection": "services::generated_artifacts::tests::generated_artifacts_expiry_and_stale_lease_cannot_publish_or_relabel",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-10-20261027T105723Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-10-20261027T105723Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-10-20261027T105723Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 10,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17060667392
+    },
+    {
+      "selection": "services::generated_artifacts::tests::generated_artifact_worker_reservation_spans_persist_and_releases_on_error",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-11-20261027T105726Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-11-20261027T105726Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-11-20261027T105726Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 11,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17060462592
+    },
+    {
+      "selection": "services::generated_artifacts::tests::owner_http_preserves_legacy_document_upload_and_image_contracts",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-12-20261027T105728Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-12-20261027T105728Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-12-20261027T105728Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 12,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17060208640
+    },
+    {
+      "selection": "services::generated_artifacts::tests::delivery_expiry_uses_effective_attachment_retention_and_recovery_checks_live_policy",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-13-20261027T105731Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-13-20261027T105731Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-13-20261027T105731Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 13,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17059491840
+    },
+    {
+      "selection": "services::generated_artifacts::tests::generated_artifact_admission_abort_keeps_pending_bytes_and_rolls_back_retention_and_association",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-14-20261027T105734Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-14-20261027T105734Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-14-20261027T105734Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 14,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17059258368
+    },
+    {
+      "selection": "services::generated_artifacts::tests::generated_artifact_new_operation_has_new_identity_and_failed_result_preserves_old_bytes",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-15-20261027T105736Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-15-20261027T105736Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-15-20261027T105736Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 15,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17059110912
+    },
+    {
+      "selection": "services::generated_artifacts::tests::conversation_delete_removes_encrypted_pending_artifacts_and_saved_associations",
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-8544ce193-16-20261027T105739Z.json",
+      "log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-16-20261027T105739Z.log",
+      "argv_log": "/tmp/nyxid-artifacts-2037-focused-8544ce193-16-20261027T105739Z.argv.log",
+      "exit_code": 0,
+      "wrapper_exit_code": 0,
+      "exactly_one_test_passed": true,
+      "source_matches_compiled_identity": true,
+      "approved_order_number": 16,
+      "disk_guard_stopped": false,
+      "lowest_free_bytes": 17048457216
+    }
+  ],
+  "status": "passed",
+  "approved_order_numbers": [
+    4,
+    5,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16
+  ],
+  "skipped": [
+    {
+      "approved_order_number": 6,
+      "reason": "explicit user instruction: already passed on 2af; skip duplicate",
+      "metadata": "/tmp/nyxid-artifacts-2037-regression-01-20261027T100859Z.json"
+    }
+  ],
+  "carried_forward": [
+    {
+      "approved_order_number": 1,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-90f4c75a2-01-20261027T103720Z.json",
+      "reason": "explicitly reviewed and carried forward; correction changes only malformed test phases"
+    },
+    {
+      "approved_order_number": 2,
+      "metadata": "/tmp/nyxid-artifacts-2037-focused-90f4c75a2-02-20261027T103725Z.json",
+      "reason": "explicitly reviewed and carried forward; correction changes only malformed test phases"
+    },
+    {
+      "approved_order_number": 3,
+      "metadata": "/tmp/nyxid-artifacts-2037-regression-malformed-8544ce193-20261027T105310Z.json",
+      "reason": "current-source pass independently reviewed"
+    }
+  ],
+  "finished_utc": "2026-10-27T10:57:41.330199+00:00"
+}
