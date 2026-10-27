@@ -5,6 +5,41 @@ fn body_digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// Codex correlation metadata is inert text, never provider resource identity.
+/// Keep this contract closed and measure the sorted compact UTF-8 encoding,
+/// including JSON escaping, independently of serde_json's map feature flags.
+fn valid_client_metadata(value: &Value) -> bool {
+    const IDS: &[&str] = &[
+        "root_turn_id",
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "x-codex-installation-id",
+        "x-codex-window-id",
+    ];
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.len() != IDS.len() + 1
+        || !IDS.iter().all(|key| {
+            object.get(*key).and_then(Value::as_str).is_some_and(|id| {
+                (1..=128).contains(&id.len())
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            })
+        })
+        || object
+            .get("x-codex-turn-metadata")
+            .and_then(Value::as_str)
+            .is_none_or(|metadata| metadata.len() > 1024)
+    {
+        return false;
+    }
+    let sorted: std::collections::BTreeMap<_, _> = object.iter().collect();
+    serde_json::to_vec(&sorted).is_ok_and(|bytes| bytes.len() <= 2048)
+}
+
 /// The legacy model transport scope exception includes ordinary generation and
 /// the runtime's exact compaction callback. It grants no account fungibility or
 /// turn consent, and never applies to arbitrary response/file/session routes.
@@ -115,6 +150,7 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         "store",
         "background",
         "metadata",
+        "client_metadata",
         "user",
         "service_tier",
         "include",
@@ -136,6 +172,11 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         || object
             .get("background")
             .is_some_and(|value| value != &Value::Bool(false))
+    {
+        return false;
+    }
+    if let Some(metadata) = object.get("client_metadata")
+        && (path != "responses" || !valid_client_metadata(metadata))
     {
         return false;
     }
@@ -163,10 +204,11 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         }
     }
     let mut executable = body.clone();
-    executable
-        .as_object_mut()
-        .expect("model request")
-        .remove("tools");
+    let executable_object = executable.as_object_mut().expect("model request");
+    executable_object.remove("tools");
+    // Validated scalar correlation IDs (including thread_id) are not handles.
+    // The original bytes still participate in http_operation's body digest.
+    executable_object.remove("client_metadata");
     if handles(&executable) {
         return false;
     }

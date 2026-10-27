@@ -5,6 +5,7 @@ import {
   assignAssistantResponseConversation,
   assistantHttp,
   assistantJson,
+  AssistantHttpError,
 } from "@/lib/assistant/assistant-http";
 import { ApiError } from "@/lib/api-client";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
@@ -24,6 +25,34 @@ const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
 
 describe("assistantHttp", () => {
+  it("preserves the readiness envelope and safe trace with actionable unsaved copy", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: "security_readiness_unavailable", error_code: 12900, message: "private rollout diagnostic",
+    }), { status: 503, headers: { "X-NyxID-Trace-Id": "permissions_trace-2007" } })));
+    const failure = await assistantJson("/assistant/nyxagent/agents/agent/operations/service", {
+      method: "PUT", body: {},
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AssistantHttpError);
+    expect(failure).toMatchObject({ status: 503, errorResponse: { error: "security_readiness_unavailable" }, errorCode: 12900,
+      message: expect.stringContaining("An administrator must complete security rollout readiness") });
+    expect((failure as Error).message).toContain("proposed changes are still unsaved");
+    expect((failure as Error).message).toContain("Trace ID: permissions_trace-2007");
+    expect((failure as Error).message).not.toContain("private rollout diagnostic");
+  });
+
+  it.each([
+    { error: "oauth_authority_unavailable", error_code: 12900 },
+    { error: "security_readiness_unavailable", error_code: "12900" },
+    { error: "security_readiness_unavailable" },
+    { error_code: 12900 },
+    null, [], "malformed", {},
+  ])("keeps generic 503 copy for other or malformed envelopes: %j", async (envelope) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(envelope), { status: 503 })));
+    await expect(assistantJson("/assistant/nyxagent/models")).rejects.toMatchObject({
+      status: 503, message: "NyxBot is temporarily unavailable. Try again shortly.",
+    });
+  });
+
   it("reports malformed successful JSON without forwarding its body", async () => {
     vi.mocked(capture).mockClear();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("private malformed body", { status: 200 })));

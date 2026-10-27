@@ -310,9 +310,16 @@ async fn check_http_projected_inner(
         operation["pool_revision"] = json!(row.config_revision);
     }
     let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
-    let model_transport = !chat.guest
-        && !method_override
-        && super::request_identity::legacy_model_generation(target, method, path, body);
+    let model_generation =
+        super::request_identity::legacy_model_generation(target, method, path, body);
+    // Guest Use/All grants may allow ordinary POSTs. They cannot authorize the
+    // owner's model callback or substitute for its owner turn/consent fences.
+    if chat.guest && model_generation {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Guest turns cannot use owner model callbacks".into(),
+        ));
+    }
+    let model_transport = !method_override && model_generation;
     let stateless = operation["kind"] == "inference";
     let legacy_inference = model_transport && (!chat.turn_live || !stateless);
     if legacy_inference {
