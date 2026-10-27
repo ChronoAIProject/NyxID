@@ -6,7 +6,7 @@ use crate::services::assistant_acknowledgement_service::ChatAuthority;
 pub fn recovery_definition() -> super::super::mcp_service::McpToolDefinition {
     super::super::mcp_service::McpToolDefinition {
         name: "nyx__artifact_delivery".into(),
-        description: "Recover the verified cloud result attached to the immediately preceding assistant reply in this Web conversation. The server selects the saved result; no identifiers or arguments are accepted. Reuses retained bytes without submitting another execution. Only claim delivery after success.".into(),
+        description: "Recover the verified cloud result attached to the latest server-associated assistant reply before this owner request in this Web conversation. The server selects the saved result; no identifiers or arguments are accepted. Reuses retained bytes without submitting another execution. Only claim delivery after success.".into(),
         input_schema: serde_json::json!({"type":"object","properties":{},"additionalProperties":false,"maxProperties":0}),
     }
 }
@@ -23,7 +23,7 @@ pub async fn recover(
 }
 
 /// Natural-language recovery takes no client/model-selected lineage. The live
-/// owner Web turn and the preceding durable assistant message select it.
+/// owner Web turn and latest preceding server-associated assistant message select it.
 pub async fn recover_for_chat(
     db: &Database,
     keys: &EncryptionKeys,
@@ -144,10 +144,26 @@ async fn select_message(
     session: &mut ClientSession,
 ) -> AppResult<String> {
     let (initiating, _) = initiating_message(db, row, chat, session).await?;
-    let source = db.collection::<AssistantMessage>(MESSAGES)
-        .find_one(doc! {"user_id":&row.user_id,"conversation_id":&row.id,"role":"assistant","seq":{"$lt":initiating.seq}})
-        .sort(doc! {"seq":-1}).session(&mut *session).await?.ok_or_else(missing)?;
-    Ok(source.id)
+    // Joining the server-owned association excludes unrelated assistant replies.
+    // Do not filter expiry here: an expired newest result must report expiry,
+    // never silently select older bytes. Confirmation uses the original request.
+    let mut cursor = db.collection::<Document>(MESSAGES).aggregate(vec![
+        doc! {"$match":{"user_id":&row.user_id,"conversation_id":&row.id,"role":"assistant","seq":{"$lt":initiating.seq}}},
+        doc! {"$sort":{"seq":-1}},
+        doc! {"$lookup":{"from":DELIVERIES,"localField":"_id","foreignField":"_id","as":"saved_delivery"}},
+        doc! {"$match":{"saved_delivery":{"$elemMatch":{"user_id":&row.user_id,"conversation_id":&row.id}}}},
+        doc! {"$limit":1},
+        doc! {"$project":{"_id":1}},
+    ]).session(&mut *session).await?;
+    let source = cursor
+        .stream(&mut *session)
+        .try_next()
+        .await?
+        .ok_or_else(missing)?;
+    source
+        .get_str("_id")
+        .map(str::to_owned)
+        .map_err(|_| invalid())
 }
 
 async fn run(

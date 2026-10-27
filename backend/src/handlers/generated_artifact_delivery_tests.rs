@@ -317,7 +317,22 @@ fn check_artifact_chat_recovery<'a>(
     event: &'a crate::models::assistant_conversation::AssistantConversation,
 ) -> futures::future::BoxFuture<'a, ()> {
     Box::pin(async move {
-        // A natural-language turn can recover only the preceding server association.
+        // Unrelated messages do not erase the latest server-owned saved result.
+        let unrelated = engine::begin_turn(
+            &a.f.state.db,
+            &a.f.owner,
+            &user_start(&event.id, "What time is it?"),
+            &a.f.state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        finish(
+            a,
+            &unrelated,
+            "An unrelated answer with no generated files.",
+        )
+        .await;
+        // A natural-language turn selects the latest preceding server association.
         let next = engine::begin_turn(
             &a.f.state.db,
             &a.f.owner,
