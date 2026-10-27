@@ -30,11 +30,20 @@
     "approved_sha256": "5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7",
     "assessment": "Coordinator findings resolved; owner-wide continuation budget charged atomically with per-run continuation limit."
   },
-  "sol": null,
+  "sol": {
+    "agent_id": "01a17b03-c22c-7c50-a038-27bf595a74fd",
+    "session_id": "01a17b03-c22e-7503-ae21-ef4d38050be9",
+    "provider": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "xhigh",
+    "mode": "full-access",
+    "worktree_id": "01a17a96-a01b-7f10-a98b-646d494dc1d5",
+    "notify_on_finish": true,
+    "gate": "IN_PROGRESS"
+  },
   "astra_review": "not_started",
   "final_opus_review": "SUPERSEDED_BY_USER",
   "remaining_acceptance": [
-    "Create and verify exactly one GPT-6.1-Sol implementer",
     "Implement and verify every acceptance-matrix row",
     "Astra personal code review with zero unresolved findings",
     "Resolve all Astra findings including nits through the same Sol session",
