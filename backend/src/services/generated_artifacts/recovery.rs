@@ -160,7 +160,13 @@ async fn run(
     let user = user.to_owned();
     let conversation = conversation.to_owned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    // Pass the borrowed keys through the driver's context API instead of
+    // capturing them in an and_run2 async closure (mongodb's documented HRTB bug).
+    session.start_transaction().and_run(
+        (database, keys, user, conversation, message, chat),
+        |session, context| {
+        let (database, keys, user, conversation, message, chat) = context.clone();
+        Box::pin(async move {
         let operation: AppResult<()> = Box::pin(async {
             super::super::erasure_admission::fence_in_session(&database, &user, session).await?;
             // This write conflicts with Stop, a new turn, and conversation deletion.
@@ -227,5 +233,6 @@ async fn run(
             Ok(())
         }).await;
         transactions::transaction_result(operation)
+        })
     }).await.map_err(transactions::map_transaction_error)
 }

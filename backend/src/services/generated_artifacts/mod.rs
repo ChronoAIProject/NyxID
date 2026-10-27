@@ -240,6 +240,8 @@ pub async fn persist(
     super::credential_record_service::mark_version(&mut versions, keys, "result_encrypted");
     let database = db.clone();
     let watch = w.clone();
+    // The retry callback needs only this owned flag, not the decoded result borrow.
+    let success = result.success;
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<()> = Box::pin(async {
@@ -255,7 +257,7 @@ pub async fn persist(
             }
             database.collection::<Document>(WATCHES).update_one(doc!{"_id":&watch.id,"state":&watch.state,"lease_id":&watch.lease_id},doc!{"$set":{
                 "artifact_result":bson::to_bson(&manifest).map_err(|_|invalid())?,"result_encrypted":bson::to_bson(&Some(&encrypted)).map_err(|_|invalid())?,"secret_context_versions":bson::to_bson(&versions).map_err(|_|invalid())?,
-                "state":"ready","reason":if result.success {"completed"}else{"operation_failed"},"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}}).session(&mut *session).await?;
+                "state":"ready","reason":if success {"completed"}else{"operation_failed"},"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}}).session(&mut *session).await?;
             Ok(())
         }).await; transactions::transaction_result(operation)
     }).await.map_err(transactions::map_transaction_error)
