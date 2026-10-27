@@ -37,11 +37,11 @@ fn cookie_name(id: &str) -> String {
     format!("nyx_approval_{}", id.replace('-', ""))
 }
 fn origin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
-    let expected = url::Url::parse(&state.config.frontend_url)
-        .map_err(|_| service::invalid())?
-        .origin()
-        .ascii_serialization();
-    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(expected.as_str()) {
+    if !headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|origin| state.config.frontend_origin_allowed(origin))
+    {
         return Err(AppError::Forbidden(
             "Request verification must start from NyxID.".into(),
         ));
@@ -728,4 +728,19 @@ pub(super) async fn social_complete(
         url.as_str().parse().map_err(|_| service::invalid())?,
     );
     Ok((StatusCode::FOUND, headers, ()))
+}
+
+#[cfg(test)]
+mod domain_alias_tests {
+    #[tokio::test]
+    async fn domain_alias_browser_origin_gate_is_opt_in() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("origin", "https://old.example".parse().unwrap());
+        assert!(super::origin(&state, &headers).is_err());
+        state.config.domain_aliases.frontend_urls = vec!["https://old.example".into()];
+        assert!(super::origin(&state, &headers).is_ok());
+        headers.insert("origin", "https://old.example.evil".parse().unwrap());
+        assert!(super::origin(&state, &headers).is_err());
+    }
 }

@@ -277,7 +277,45 @@ async fn check_http_projected_inner(
     {
         return Err(AppError::AssistantTurnRequired);
     }
-    let (Some(chat), Some(id)) = (auth.assistant_chat.as_deref(), id) else {
+    let Some(chat) = auth.assistant_chat.as_deref() else {
+        return Ok(Decision {
+            refusal: None,
+            admission: None,
+            automatic: None,
+        });
+    };
+    let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
+    let generation = !method_override
+        && super::request_identity::legacy_model_generation(target, method, path, body);
+    // Separate route identity from admission: Codex metadata remains legacy for
+    // owners, including approval, exact selection and fallback classification.
+    let model_route = (generation && pool.is_none())
+        .then(|| super::request_identity::model_route_operation(target, method, path, query, body))
+        .flatten()
+        .map(|mut route| {
+            bind_headers(&mut route, &projection.headers(target, headers));
+            route
+        });
+    let mut operation = http_operation(target, method, path, query, body);
+    bind_headers(&mut operation, &projection.headers(target, headers));
+    let stateless = operation["kind"] == "inference";
+    let guest_inference = chat.guest && target.service.inference.is_some();
+    if guest_inference {
+        if !chat.turn_live {
+            return Err(AppError::GuestModelRouteRequired);
+        }
+        operation = model_route
+            .clone()
+            .ok_or(AppError::GuestModelRouteRequired)?;
+        super::guest_model::require(&state.db, chat, id, target, &mut operation).await?;
+    }
+    let Some(id) = id else {
+        if !chat.guest
+            && chat.turn_live
+            && let Some(route) = model_route.as_ref()
+        {
+            super::guest_model::remember_owner(&state.db, chat, None, target, route).await?;
+        }
         return Ok(Decision {
             refusal: None,
             admission: None,
@@ -297,8 +335,6 @@ async fn check_http_projected_inner(
         )
         .await?;
     }
-    let mut operation = http_operation(target, method, path, query, body);
-    bind_headers(&mut operation, &projection.headers(target, headers));
     if let Some(pool) = pool {
         operation["pool_id"] = json!(pool);
         let row = state
@@ -309,11 +345,7 @@ async fn check_http_projected_inner(
             .ok_or_else(|| AppError::Conflict("Service pool unavailable".into()))?;
         operation["pool_revision"] = json!(row.config_revision);
     }
-    let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
-    let model_transport = !chat.guest
-        && !method_override
-        && super::request_identity::legacy_model_generation(target, method, path, body);
-    let stateless = operation["kind"] == "inference";
+    let model_transport = !chat.guest && generation;
     let legacy_inference = model_transport && (!chat.turn_live || !stateless);
     if legacy_inference {
         // This only preserves the existing model transport scope exception. It
@@ -421,7 +453,7 @@ async fn check_http_projected_inner(
         owner.unwrap_or(&chat.user_id),
         &operation,
         acks::ActionFacts::of(acks::service_action_class(
-            read || raw_inference || (legacy_inference && stateless),
+            read || raw_inference || guest_inference || (legacy_inference && stateless),
             destructive,
         )),
         acknowledgement,
@@ -453,6 +485,13 @@ async fn check_http_projected_inner(
     }
     if let Some(admission) = decision.admission.as_ref() {
         admission.revalidate(&state.db, id, Some(target)).await?;
+    }
+    if model_transport
+        && chat.turn_live
+        && decision.admission.is_some()
+        && let Some(route) = model_route.as_ref()
+    {
+        super::guest_model::remember_owner(&state.db, chat, Some(id), target, route).await?;
     }
     Ok(decision)
 }

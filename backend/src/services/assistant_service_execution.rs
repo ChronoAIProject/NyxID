@@ -39,6 +39,8 @@ pub use bootstrap::{begin_model_attempt, finish_model_attempt};
 mod authority;
 pub use authority::connection_binding;
 mod availability;
+mod guest_model;
+mod guest_model_defaults;
 mod http;
 mod receipts;
 mod request_identity;
@@ -51,8 +53,8 @@ pub use availability::{NodeFailureEvidence, observe_transport};
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
 use request_identity::selection_fingerprint;
-pub(crate) use request_identity::stateless_inference;
 pub use request_identity::{bind_headers, http_operation};
+pub(crate) use request_identity::{stateless_inference, stateless_model_transport};
 pub use resolution::resolve_implicit_for_request;
 #[cfg(test)]
 use selection::owner_selector;
@@ -405,14 +407,28 @@ async fn check_inner(
             } else {
                 false
             };
-        if same_group
+        if (same_group || selected_id == connection_id)
             && !pool_fallback
             && applies
             && (selected_id != connection_id || !selection_matches(selected, &service, &binding))
         {
+            let (reason, instructions) = match selected_service.as_ref() {
+                None => (
+                    "selected_connection_unavailable",
+                    "The owner already selected this connection, but it is now removed, disabled or inaccessible. Enable or reconnect it in Connections, or restore access. Ask the owner for a replacement only if they want a different account; do not substitute one.",
+                ),
+                Some(_) if selected_id == connection_id => (
+                    "selected_connection_changed",
+                    "The selected connection's identity or confirmed operation binding changed. Ask the owner to review the changed connection before selecting it again. Do not use another account.",
+                ),
+                Some(_) => (
+                    "wrong_connection",
+                    "The owner already selected an exact connection. Use nyx__search_tools with query set to selected_connection_id to find that connection's tool, preserving the operation and arguments. If it cannot be addressed unambiguously, report that limitation. Do not ask the owner to repeat their selection or use another account.",
+                ),
+            };
             return Ok(Decision {
                 refusal: Some(json!({"error":"service_selection_required",
-                    "selected_connection_id":selected_id,"instructions":"Use the owner's exact selected connection for this operation. If it is unavailable, ask the owner to choose a new target."})),
+                    "reason":reason,"selected_connection_id":selected_id,"instructions":instructions})),
                 admission: None,
                 automatic: None,
             });
@@ -567,7 +583,7 @@ async fn check_inner(
             if !equivalent(&service, &candidate, inference) {
                 return Ok(Decision {
                     refusal: Some(json!({"error": "service_target_selection_required",
-                    "proposed_connection_id": connection_id, "instructions": "These connections may access different accounts. Ask the owner to choose the exact target with the connection picker or a leading /service <connection UUID>. Do not replace an account-specific call with another connection."})),
+                    "proposed_connection_id": connection_id, "instructions": "These connections may access different accounts. Ask the owner to start a new message with /service <connection UUID>, followed by their request on the next line. Do not replace an account-specific call with another connection."})),
                     admission: None,
                     automatic: None,
                 });

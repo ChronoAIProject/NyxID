@@ -278,12 +278,111 @@ delegated routes.
 The agent document is the durable source; thread keys mirror it at every turn
 start, rotation and replacement. NyxAgent calls its model through NyxID's proxy
 (`/api/v1/proxy/s/{model service}`, e.g. `chrono-llm-public`, `llm-deepseek`)
-with the thread's own key. The proxy therefore lets a live assistant
+with the thread's own key. During an owner turn, the proxy lets a live assistant
 conversation key (an `assistant_agent_credentials` row, which people cannot
-create) reach any active catalog service with `inference` metadata even outside
+create) reach active catalog services with `inference` metadata even outside
 its grants (`proxy::assistant_model_call`), whether the owner's own row, an org
 row or the catalog row resolves it. Nothing else widens: the key's allowlist,
 inventory, delegation tokens, consent screens and MCP tools stay its grants.
+For a live guest turn, the exception requires an exact server-established
+model route. A normal owner model admission during the engine's active model
+attempt records `owner_model_route` on the thread and, when its profile matches
+the agent's configured profile, on the agent. The thread binding takes precedence;
+an agent default binding applies only to threads of that same profile.
+It pins the catalog ID, saved connection ID (or explicitly catalog-only),
+model/endpoint/query/semantic-header identity, and the resolved execution digest
+with durable credential identity/epoch. Prompts, input-admission tokens,
+process-local fingerprints, refreshed token bytes and thread keys are not route
+identity. A changed route still requires a new owner admission.
+
+For guest route validation and recording an already-admitted owner route,
+Codex's bounded `client_metadata` correlation object is recognized on stateless
+Responses generation: `root_turn_id`, `session_id`, `thread_id`, `turn_id`,
+`x-codex-installation-id`, `x-codex-turn-metadata`, and `x-codex-window-id`, with
+string values of at most 8 KiB. These are client telemetry, not provider-side
+thread handles. NyxAgent's normal bridge forwards this object; its public bridge
+uses a different projection. Previously it made the normal generation classify
+as stateful: owners succeeded through legacy transport without recording a
+route, while guests were refused even with matching profiles. Unknown/nested
+metadata remains refused, and actual provider handles anywhere in executable
+input remain disallowed. Correlation values do not enter route identity. The extended classification is
+not used for owner admission: owner callbacks with `client_metadata` retain
+`legacy_inference`, their exact body identity, approval verb, connection selection
+and fallback behavior. Their route is recorded separately after assistant
+admission, without creating model consent. Ordinary callbacks without this
+extension retain their existing raw-inference behavior. Classification inspects
+a cloned JSON value; the forwarded request body, including `client_metadata`,
+is unchanged.
+
+New channel threads inherit their linked agent's configured profile. Existing
+threads retain their model, including legacy channels created with the global
+`nyxagent/chat` default. Owner replies on those threads establish a thread-local
+route even when the agent's current default differs; they do not overwrite its
+agent-wide default. This fixes successful owner replies that previously skipped
+recording at the `agent.model == conversation.model` gate. Both direct native
+relay and gateway ingress use this same channel admission path: Telegram
+(including telegram-new), Lark/Feishu, Discord, Slack, WhatsApp, X and Aurinko.
+Telegram manager provisioning creates bot routes, not a separate specialist
+turn engine. Its personal manager thread already inherits the agent profile.
+Telnyx/Twilio voice and SMS and ElevenLabs Custom LLM use the same engine with
+`model: None`, inheriting the specialist profile. Personal and organization web
+group member threads do likewise; their authorized participants are not external
+channel guests. An organization bot linked to a person's specialist still
+creates channel guest turns under that person's live authority.
+
+With no recorded route, the server-recorded conversation profile may bootstrap
+only through
+[NyxID's server-owned model routes](../../backend/specs/assistant/model-routes.json).
+New threads inherit the agent's configured profile; existing threads keep their
+configured profile, even when the agent default changes. Neither the request's
+model nor its service selector chooses this mapping. These mirror NyxAgent's checked-in default `config/policy*.json` at
+`0f990f21aa5ac8411f1bec0b6ea55d4ec9c2e894`: chat and research use
+`chrono-llm-public` (`gpt-5.6-sol` / `gpt-6-astra`), and channel uses
+`llm-deepseek` (`deepseek-flash`), all at `responses` (the catalog base URL owns any version prefix). Deployments that customize
+NyxAgent's policy must align this NyxID configuration too. Whenever NyxAgent's
+profile → model/service/path mapping changes, update `model-routes.json` with it.
+Until the map catches up, guests require an owner-recorded route for the new
+mapping; bootstrap refuses mismatches without learning from the callback or
+choosing another service. An owner reply can record the new exact route through
+the unchanged owner admission path, so map drift degrades safely. NyxAgent's model
+listing does not publish the proxy path and is not used as routing authority.
+
+Bootstrap resolves that configured slug through the normal personal/legacy/org
+precedence, without refreshing/decrypting provider credentials or selecting a
+pool. The selected connection must be the same catalog platform/master route,
+with no BYOK, node, per-agent credential override, owner connection headers or
+request-selected destination. Catalog-only calls cannot bypass a normal saved
+connection. No owner consent or durable route is created by a guest callback.
+
+Every path still requires a closed stateless generation endpoint, non-empty
+exact model, no method override/pool, and the current turn's server-written
+`input_admission`. This binds generation rounds to an admitted turn, not literal
+prompt bytes (context and tool results evolve). Saved-connection admissions
+revalidate the route at egress.
+
+An absent, changed or mismatched route returns HTTP 403 / `9000`,
+`guest_model_route_required`. When the exact recent model refusal explains the
+upstream failure, guests receive only “This assistant isn't available to guests
+yet.” in native relay and gateway chat delivery. Phone/SMS adapters deliver
+this same closed local refusal through their normal output; the persisted turn
+remains failed for owner diagnostics. They do not turn arbitrary upstream errors
+into successful replies. Owner history retains the
+sanitized `failure_reason`; Details advises sending an owner message using the
+configured model to record its route. Stale/ambiguous evidence retains the
+existing generic error. The optional agent/thread bindings are additive; an old
+replica may drop the thread binding, in which case new readers use the matching
+agent binding or safe bootstrap, otherwise refuse. No migration widens access.
+The model connection does not need to be a specialist tool grant. Guest service
+limits, explicit approval requirements, platform-key ACLs, billing and concurrency
+still apply. NyxBot guest tool calls remain refused; specialists keep their
+configured per-service guest access. Guest model and allowed service calls use
+the bot/agent owner's thread key and billing principal, never the external
+sender's identity. Platform master usage is person-billed to that owner; owner
+BYOK usage also settles to the agent owner, including granted organization
+connections. Resource access is still checked against the connection's actual
+owner before assigning the guest payer. Owner turns retain existing resource-owner
+billing. Proxy, LLM gateway and MCP apply the same authenticated guest payer rule.
+The owner model path is unchanged.
 
 Legacy settings rows without `access_mode` are read with the Auto default and
 are migrated on settings writes. The retired
@@ -529,7 +628,16 @@ NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent
 `destroy_subagent`, `create_group`, `list_groups`, `post_to_group`,
 `update_group`, `delete_group`, `settings_link`, `channel_bot_setup_link`,
 `connect_channel_bot`, `link_channel_bot`, `list_channel_agents`,
-`disconnect_channel_bot`. Every agent has `remember` and
+`disconnect_channel_bot`. Every agent also has the owner-turn-only, read-only
+`task_status` tool: bounded correlated execution evidence for the acting person's
+other private threads of that same agent (including hidden voice tasks). Guests
+cannot list or call it. It returns thread/turn/request/result IDs, state, last
+completed activity label, bounded settled answer or stable error, and timestamps.
+Stale/absent evidence is unknown; question excerpts must never substantiate progress
+claims. The stable instruction fingerprint includes this rule, so resumed sessions
+receive it too. The tool is not offered to external MCP callers. See
+[the cross-thread contract](09-nyxbot-orchestrator.md#grounded-cross-thread-task-status) for scope
+and limits. Every agent has `remember` and
 `forget` (which refuses obvious credential shapes); its memory notes are
 supplied in each turn's input and are not part of stable instructions. A specialist calling a NyxBot-only tool gets
 `orchestrator_only`. Grants resolve slugs or IDs through the owner's MCP catalog.
@@ -1913,6 +2021,20 @@ Generic copy is “The assistant could not complete this turn. Try again.”;
 `model_interrupted` warns that some actions may already have completed and must
 be checked before retrying. Old rows and old clients remain readable; existing
 failed rows are not backfilled.
+
+Failed turns additionally retain `turn_metadata.failure_reason` in history and
+the terminal event. It contains only `{source,stage,code,http_status,nyxid_error_code}`.
+The model observer starts before scope, approval and concurrency admission, so a
+generic `turn_failed` or `nyxid_error` can identify a rejected NyxID model callback
+as `source: nyxid`, `stage: model_proxy`, with its stable AppError key, HTTP status
+and numeric NyxID code. It uses the same 120-second, latest-attempt and
+non-overlap fences as billing attribution; success clears the refusal. Without
+that evidence, it records only NyxAgent's sanitized error code and stage. Old
+replicas' refusal rows without the new status/code fields use this fallback.
+The owner's Details panel and copied diagnostic ID show the reason, and the
+failure audit/settlement log include the same metadata. Upstream error prose,
+request bodies, prompts, headers and key material are never copied. Reading the
+stored NyxAgent response or exposing its thread credential is unnecessary.
 
 ### Capacity wait visibility and engine diagnostics
 

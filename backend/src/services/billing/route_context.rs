@@ -109,6 +109,20 @@ pub(crate) struct ManagedBillingAdmission {
 }
 
 impl BillingRouteContext {
+    /// Called after normal resource authorization/payer resolution, before
+    /// reservation. External guests consume the agent owner's budget even
+    /// when the granted connection is organization-owned. The chat authority
+    /// comes from the live thread key, never a channel sender or request body.
+    pub(crate) fn with_assistant_payer(
+        mut self,
+        chat: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
+    ) -> Self {
+        if let Some(chat) = chat.filter(|chat| chat.guest) {
+            self.billing_owner_id.clone_from(&chat.user_id);
+        }
+        self
+    }
+
     pub(crate) fn with_assistant_provenance(
         mut self,
         verified: bool,
@@ -421,6 +435,75 @@ mod tests {
     use crate::models::usage_meter::CredentialClass;
     use crate::services::billing::route_context::{BillingRouteContext, NodeIntent};
     use crate::services::billing::route_inventory::BillingIngress;
+
+    #[test]
+    fn guest_1995_payer_is_agent_owner_and_owner_resource_billing_is_unchanged() {
+        use crate::services::assistant_acknowledgement_service::ChatAuthority;
+        let mut chat = ChatAuthority {
+            channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
+            platform_thread: false,
+            platform_origin: None,
+            org_agent_access: None,
+            turn_id: Some("turn".into()),
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "thread".into(),
+            user_id: "actor-1".into(),
+            api_key_id: "api-key-1".into(),
+            role: crate::models::assistant_conversation::AgentRole::Subagent,
+            agent_id: "agent".into(),
+            agent_name: "specialist".into(),
+            guest: false,
+            confirmation_policy: None,
+            report_to: None,
+            with_nyxbot: false,
+        };
+        for credential in [
+            CredentialClass::NyxidManagedMaster,
+            CredentialClass::UserOwned,
+        ] {
+            let resolved = context_for(credential);
+            assert_eq!(
+                resolved.clone().with_assistant_payer(None).billing_owner_id,
+                "owner-1"
+            );
+            chat.guest = false;
+            assert_eq!(
+                resolved
+                    .clone()
+                    .with_assistant_payer(Some(&chat))
+                    .billing_owner_id,
+                "owner-1"
+            );
+            chat.guest = true;
+            for ingress in [
+                BillingIngress::Proxy,
+                BillingIngress::LlmGateway,
+                BillingIngress::LlmProvider,
+                BillingIngress::Mcp,
+            ] {
+                let mut guest = resolved.clone();
+                guest.ingress = ingress;
+                let guest = guest.with_assistant_payer(Some(&chat));
+                let row = crate::services::billing::meter::reserved_row(
+                    &guest,
+                    crate::models::usage_meter::BillingLayer::Platform,
+                    BillingMetric::Requests,
+                    "requests".into(),
+                    None,
+                    None,
+                );
+                assert_eq!(row.billing_owner_id, chat.user_id);
+                assert_eq!(row.actor_user_id, resolved.actor_user_id);
+                assert_eq!(row.credential_class, credential);
+                assert_eq!(row.user_service_id, resolved.user_service_id);
+            }
+        }
+    }
 
     #[test]
     fn nyxbot_provenance_uses_trusted_context_and_keeps_orchestration_separate() {

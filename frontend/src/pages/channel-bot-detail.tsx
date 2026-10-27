@@ -1245,7 +1245,7 @@ export function ChannelBotDetailPage() {
       {Boolean(bot.setup_instructions?.length) && (
         <DetailSection title={`${getPlatform(bot.platform).label} Setup`}>
           <div className="space-y-4 p-5">
-            <CopyableUrlCallout label="Callback URL" url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
+            <CopyableUrlCallout label={bot.platform === "discord" ? "Interactions Endpoint URL" : "Callback URL"} url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
             <ol className="list-decimal space-y-2 pl-4 text-xs text-muted-foreground">
               {bot.setup_instructions?.map((instruction) => <li key={instruction}>{instruction}</li>)}
             </ol>

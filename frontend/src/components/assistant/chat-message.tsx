@@ -337,11 +337,17 @@ function CapacityDetails({ attempts, capacityWaitMs }: { readonly attempts?: num
 
 /** Metadata-only diagnostics of a failed turn, with a copyable ID. */
 function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
+  const failure = detail.failureReason;
+  const failureLabel = failure ? [failure.source, failure.stage, failure.code,
+    failure.http_status != null ? `HTTP ${failure.http_status}` : null,
+    failure.nyxid_error_code != null ? `NyxID ${failure.nyxid_error_code}` : null,
+  ].filter(Boolean).join(" / ") : null;
   const diagnosticId = [
     `turn ${detail.turnId}`,
     detail.attempts != null ? `attempts ${detail.attempts}` : null,
     detail.capacityWaitMs != null ? `capacity_wait_ms ${detail.capacityWaitMs}` : null,
     detail.upstreamCode ? `upstream ${detail.upstreamCode}` : null,
+    failureLabel ? `cause ${failureLabel}` : null,
     detail.responseId ? `response ${detail.responseId}` : null,
     detail.upstreamRequestId ? `request ${detail.upstreamRequestId}` : null,
   ]
@@ -350,10 +356,14 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
   return (
     <details className="mt-2 text-11 text-text-tertiary">
       <summary className="cursor-pointer">Details</summary>
+      {failure?.source === "nyxid" && failure.code === "guest_model_route_required" ? (
+        <p className="mt-1">Send one message to this agent as its owner using its configured model to record the route for guest replies.</p>
+      ) : null}
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
         <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
         <dt>stage</dt>
         <dd>{detail.stage}</dd>
+        {failureLabel ? <><dt>cause</dt><dd>{failureLabel}</dd></> : null}
         {detail.httpStatus != null ? (
           <>
             <dt>http</dt>

@@ -50,6 +50,8 @@ pub enum TelegramTopic {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelThreadFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_gateway: Option<super::discord_gateway::DiscordGatewayFacts>,
     pub telegram_topic: Option<TelegramTopic>,
     pub version: u8,
     pub kind: ThreadKind,

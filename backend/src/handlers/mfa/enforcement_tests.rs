@@ -1639,7 +1639,7 @@ async fn inactive_user_cannot_reach_derived_mfa_guard_or_mint_tokens() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(
         matches!(token_service::refresh_tokens(&state.db, &state.config, &state.jwt_keys,
-        &tokens.refresh_token, None, None).await,
+        &tokens.refresh_token, None, None).await.map_err(AppError::into_refresh_source),
         Err(AppError::Unauthorized(message)) if message.contains("inactive"))
     );
     assert_eq!(

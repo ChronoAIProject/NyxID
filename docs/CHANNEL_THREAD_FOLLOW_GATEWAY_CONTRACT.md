@@ -108,3 +108,12 @@ NyxID reuses existing bounded adapter history with metadata fallback,
 without new scopes. Slack, Discord, Telegram topics/chains, WhatsApp and Aurinko
 need the follow-ups listed in [the parity table](CHANNEL_EVENT_GATEWAY.md#agent-gateway-group-thread-parity).
 X public thread follow remains out of scope.
+
+
+## Discord relay facts
+
+NyxID relay ingress adds `thread_context.discord_gateway` version 1, derived
+from its authenticated Discord session. The facts include structured addressing,
+reply evidence and native thread/parent IDs. They grant no gateway capability
+and make no assumption about gateway-side Discord ingress. The CMA owner owns
+that implementation. See [Discord setup](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).

@@ -1904,10 +1904,70 @@ pub async fn resolve_proxy_target_from_user_service(
     catalog_service_id: Option<&str>,
     execution_context: ProxyExecutionContext<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_from_user_service_with_mode(
+        db,
+        Some(encryption_keys),
+        user_id,
+        slug,
+        catalog_service_id,
+        ProxyCredentialResolution::materialize(execution_context),
+        true,
+    )
+    .await
+}
+
+/// Resolve the configured model slug with the same personal/legacy/org order
+/// as execution, without credential effects or pool selection. Only the guest
+/// default-route gate uses this; ordinary requests retain their existing work.
+pub(crate) async fn read_default_model_authority(
+    db: &mongodb::Database,
+    actor: &str,
+    slug: &str,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_from_user_service_with_mode(
+        db,
+        None,
+        actor,
+        Some(slug),
+        None,
+        ProxyCredentialResolution {
+            resolve_header_values: false,
+            ..ProxyCredentialResolution::read_only_snapshot()
+        },
+        false,
+    )
+    .await
+}
+
+async fn refuse_model_pool(
+    db: &mongodb::Database,
+    owner: &str,
+    slug: Option<&str>,
+) -> AppResult<()> {
+    if let Some(slug) = slug
+        && db
+            .collection::<mongodb::bson::Document>("service_pools")
+            .find_one(doc! {"user_id":owner,"slug":slug,"is_active":true})
+            .await?
+            .is_some()
+    {
+        return Err(AppError::GuestModelRouteRequired);
+    }
+    Ok(())
+}
+
+async fn resolve_proxy_target_from_user_service_with_mode(
+    db: &mongodb::Database,
+    encryption_keys: Option<&EncryptionKeys>,
+    user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+    credential_resolution: ProxyCredentialResolution<'_>,
+    allow_pools: bool,
+) -> AppResult<Option<UserServiceResolution>> {
     // Keep catalog/credential resolution state on the heap; callers combine
     // several of these futures when revalidating delegated execution.
     Box::pin(async move {
-        let credential_resolution = ProxyCredentialResolution::materialize(execution_context);
         // NyxID#974 routing boundary: identical-instance service pools belong
         // here, before `finish_resolution()`, because this function is the
         // authoritative place that preserves personal/legacy/org precedence and
@@ -1920,7 +1980,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     user_id,
                     us,
                     None,
@@ -1930,7 +1990,11 @@ pub async fn resolve_proxy_target_from_user_service(
                 .await?,
             ));
         }
-        if catalog_service_id.is_none()
+        if !allow_pools && catalog_service_id.is_none() {
+            refuse_model_pool(db, user_id, slug).await?;
+        }
+        if allow_pools
+            && catalog_service_id.is_none()
             && let Some((us, pool_selection)) =
                 lookup_service_pool_member(db, user_id, slug).await?
         {
@@ -1945,7 +2009,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     user_id,
                     us,
                     None,
@@ -1959,6 +2023,9 @@ pub async fn resolve_proxy_target_from_user_service(
         // 2. Legacy personal guard. Preserves the invariant that pre-migration
         //    personal connections beat org-shared credentials. See function doc.
         if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
+            if !allow_pools {
+                return Err(AppError::GuestModelRouteRequired);
+            }
             return Ok(None);
         }
 
@@ -1994,6 +2061,10 @@ pub async fn resolve_proxy_target_from_user_service(
             let (org_us, pool_selection) = if let Some(org_us) = org_us {
                 (org_us, None)
             } else if catalog_service_id.is_none() {
+                if !allow_pools {
+                    refuse_model_pool(db, &membership.org_user_id, slug).await?;
+                    continue;
+                }
                 match lookup_service_pool_member(db, &membership.org_user_id, slug).await? {
                     Some((svc, selection)) => (svc, Some(selection)),
                     None => continue,
@@ -2053,7 +2124,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     &membership.org_user_id,
                     org_us,
                     Some(routing),
@@ -2928,6 +2999,15 @@ pub(crate) async fn verify_auto_provision_eligibility(
     Ok(())
 }
 
+// Construct each large future outside its caller's poll frame. Catalog and
+// credential branches must not reserve one another's temporaries while nested
+// assistant authorization is polling a database operation.
+fn box_resolution_future<F: std::future::Future>(
+    make: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<F>> {
+    Box::pin(make())
+}
+
 async fn finish_resolution(
     db: &mongodb::Database,
     encryption_keys: Option<&EncryptionKeys>,
@@ -2944,14 +3024,14 @@ async fn finish_resolution(
     let header_record = user_service.id.clone();
     let header_owner = user_service.user_id.clone();
     let header_catalog = user_service.catalog_service_id.clone();
-    let mut resolution = Box::pin(async move {
+    let mut resolution = box_resolution_future(|| async move {
 
     let materialize_credentials = credential_resolution.materialize_credentials;
     let connection_expiry_notifier = credential_resolution.connection_expiry_notifier;
     let platform_user_rate_limit = credential_resolution.platform_user_rate_limit;
     // For auto-provisioned services, verify the catalog entry is still eligible
     // before allowing the proxy request through.
-    verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
+    box_resolution_future(|| verify_auto_provision_eligibility(db, &user_service, effective_owner_id)).await?;
 
     // Load the endpoint
     let endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
@@ -2974,11 +3054,11 @@ async fn finish_resolution(
     // this bounded local decode and never provider credential effects.
     let catalog_default_headers: Vec<DefaultRequestHeader> = Vec::new();
     let catalog_proxy_authorization =
-        load_catalog_proxy_authorization_for_user_service(db, &user_service).await?;
+        box_resolution_future(|| load_catalog_proxy_authorization_for_user_service(db, &user_service)).await?;
     let (catalog_billing, catalog_service_slug) =
-        load_catalog_metering_for_user_service(db, &user_service).await;
+        box_resolution_future(|| load_catalog_metering_for_user_service(db, &user_service)).await;
     let catalog_ws_frame_injections =
-        load_catalog_ws_frame_injections_for_user_service(db, &user_service).await?;
+        box_resolution_future(|| load_catalog_ws_frame_injections_for_user_service(db, &user_service)).await?;
     let effective_ws_frame_injections = if user_service.ws_frame_injections.is_empty() {
         catalog_ws_frame_injections
     } else {
@@ -2993,7 +3073,7 @@ async fn finish_resolution(
         || (catalog_proxy_authorization.no_auth_platform_service
             && catalog_proxy_authorization.platform_key_configured)
     {
-        let catalog_service = load_catalog_service_for_user_service(db, &user_service).await?;
+        let catalog_service = box_resolution_future(|| load_catalog_service_for_user_service(db, &user_service)).await?;
         let no_auth = super::platform_key_service::no_auth_platform_service(&catalog_service);
         if !no_auth && !super::platform_key_service::has_platform_key(&catalog_service) {
             return Err(AppError::NotFound(
@@ -3009,14 +3089,14 @@ async fn finish_resolution(
         let (auth_method, auth_key_name) = if no_auth {
             ("none".into(), String::new())
         } else {
-            super::platform_key_service::effective_auth(db, &catalog_service).await?
+            box_resolution_future(|| super::platform_key_service::effective_auth(db, &catalog_service)).await?
         };
         let actor = EffectiveActor::from_user_id(effective_owner_id);
         let authorized = if no_auth {
-            super::platform_key_service::require(db, &catalog_service, effective_owner_id).await?;
+            box_resolution_future(|| super::platform_key_service::require(db, &catalog_service, effective_owner_id)).await?;
             None
         } else {
-            Some(authorize_master_credential(db, &catalog_service, &actor).await?)
+            Some(box_resolution_future(|| authorize_master_credential(db, &catalog_service, &actor)).await?)
         };
         let credential = if let Some(authorized) = authorized.filter(|_| materialize_credentials) {
             crate::mw::rate_limit::enforce_platform_user_limit(
@@ -3149,18 +3229,19 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
-    super::ifttt_oauth_service::validate_credential_route(
+    box_resolution_future(|| super::ifttt_oauth_service::validate_credential_route(
         db, api_key.provider_config_id.as_deref(), &user_service.auth_method,
         &endpoint.url, user_service.node_id.as_deref(),
-    ).await?;
+    )).await?;
     let api_key = if materialize_credentials {
-        maybe_refresh_provider_backed_api_key(
+        let keys = encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?;
+        box_resolution_future(|| maybe_refresh_provider_backed_api_key(
             db,
-            encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?,
+            keys,
             effective_owner_id,
             api_key,
             connection_expiry_notifier,
-        )
+        ))
         .await?
     } else {
         api_key

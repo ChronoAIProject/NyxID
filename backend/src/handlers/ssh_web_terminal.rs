@@ -168,35 +168,38 @@ pub async fn ssh_web_terminal(
     )
     .await?;
 
+    // Keep session state off the upgrade and lease polling frames.
     Ok(ws
-        .on_upgrade(move |socket| async move {
-            let work = async {
-                handle_web_terminal(
-                    state,
-                    auth_user,
-                    service_id,
-                    auth_context.service_slug,
-                    ssh_svc,
-                    principal,
-                    auth_context.mode,
-                    cols,
-                    rows,
-                    socket,
-                    session_guard,
-                    client_meta,
-                    tele,
-                    auth_context.owner_user_id,
-                    billing_egress_permit,
-                    session_admission,
-                )
-                .await;
-                Ok(())
-            };
-            if let Some(lease) = concurrency {
-                let _ = lease.run(work).await;
-            } else {
-                let _ = work.await;
-            }
+        .on_upgrade(move |socket| {
+            Box::pin(async move {
+                let work = Box::pin(async {
+                    handle_web_terminal(
+                        state,
+                        auth_user,
+                        service_id,
+                        auth_context.service_slug,
+                        ssh_svc,
+                        principal,
+                        auth_context.mode,
+                        cols,
+                        rows,
+                        socket,
+                        session_guard,
+                        client_meta,
+                        tele,
+                        auth_context.owner_user_id,
+                        billing_egress_permit,
+                        session_admission,
+                    )
+                    .await;
+                    Ok(())
+                });
+                if let Some(lease) = concurrency {
+                    let _ = lease.run(work).await;
+                } else {
+                    let _ = work.await;
+                }
+            })
         })
         .into_response())
 }

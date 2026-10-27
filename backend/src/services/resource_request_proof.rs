@@ -260,7 +260,7 @@ pub async fn introspect(
     let decoding = state.jwt_keys.decoding_key(token).map_err(|_| refused())?;
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_audience(&[service_id]);
-    validation.set_issuer(&[&state.config.jwt_issuer]);
+    validation.set_issuer(&state.config.accepted_jwt_issuers());
     validation.leeway = 0;
     let claims = decode::<Claims>(token, decoding, &validation)
         .map_err(|_| refused())?

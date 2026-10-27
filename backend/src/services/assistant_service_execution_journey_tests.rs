@@ -107,6 +107,385 @@ fn request(id: Option<&str>, text: &str, ack: Option<&str>) -> engine::TurnReque
     }
 }
 
+async fn github_search_named(f: &Fixture, name: &str) -> Value {
+    use tower::ServiceExt;
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, router) = crate::routes::build_router();
+    // Match the server's request task without retaining the fixture's polling
+    // frame. Abandoning this helper still cancels the request.
+    let response = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+        router.with_state(f.state.clone()).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("x-api-key", key.raw_key.as_str())
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":name,"arguments":{"q":"nyxid in:name"}}})
+                    .to_string(),
+                ))
+                .unwrap(),
+        ),
+    ))
+    .await
+    .unwrap()
+    .unwrap();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert!(body.get("error").is_none(), "{body}");
+    body["result"].clone()
+}
+
+async fn github_fixture() -> (Fixture, String, String, MockServer, MockServer) {
+    let f = orchestrator_fixture("github_inline_selection_2022").await;
+    let mut catalog = test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "api-github".into();
+    catalog.name = "GitHub".into();
+    catalog.requires_user_credential = true;
+    let catalog_id = catalog.id.clone();
+    f.state
+        .db
+        .collection("downstream_services")
+        .insert_one(catalog)
+        .await
+        .unwrap();
+    let mut operation = test_utils::test_service_endpoint(
+        &catalog_id,
+        "search_repositories",
+        "GET",
+        "/search/repositories",
+    );
+    operation.parameters =
+        Some(json!([{"name":"q","in":"query","required":true,"schema":{"type":"string"}}]));
+    f.state
+        .db
+        .collection("service_endpoints")
+        .insert_one(operation)
+        .await
+        .unwrap();
+    let chosen_server = MockServer::start().await;
+    let other_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path("/search/repositories"))
+        .and(wiremock::matchers::query_param("q", "nyxid in:name"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"total_count":1,"items":[{"name":"NyxID"}]})),
+        )
+        .mount(&chosen_server)
+        .await;
+    let chosen = super::compaction::compact_connection(
+        &f,
+        &f.owner,
+        &catalog_id,
+        "api-github",
+        &chosen_server.uri(),
+    )
+    .await;
+    let other = super::compaction::compact_connection(
+        &f,
+        &f.owner,
+        &catalog_id,
+        "github-other",
+        &other_server.uri(),
+    )
+    .await;
+    f.state.db.collection::<Document>("service_preferences").insert_one(doc! {
+        "_id":&f.owner,"ordered":[&other,&chosen],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+    }).await.unwrap();
+    (f, chosen, other, chosen_server, other_server)
+}
+
+async fn github_search(f: &Fixture) -> Value {
+    github_search_named(f, "api-github__search_repositories").await
+}
+
+#[tokio::test]
+async fn github_owner_inline_service_selection_unblocks_retried_mcp_search() {
+    let (f, chosen, _, chosen_server, other_server) = github_fixture().await;
+    let refused = github_search(&f).await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    let refusal: Value =
+        serde_json::from_str(refused["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        refusal["error"], "service_target_selection_required",
+        "{refusal}"
+    );
+    assert_eq!(refusal["proposed_connection_id"], chosen);
+    assert!(chosen_server.received_requests().await.unwrap().is_empty());
+    settled(
+        &f,
+        &f.row,
+        &engine::TurnResult {
+            text: "Choose a connection".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await;
+    let row = engine::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &request(
+            Some(&f.row.id),
+            &format!(
+                "/service {} continue the search",
+                refusal["proposed_connection_id"].as_str().unwrap()
+            ),
+            None,
+        ),
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let retried = github_search(&f).await;
+    assert_eq!(
+        retried["isError"], false,
+        "owner selection must unblock the same tool: {retried}"
+    );
+    assert_eq!(chosen_server.received_requests().await.unwrap().len(), 1);
+    assert!(other_server.received_requests().await.unwrap().is_empty());
+    // Every subsequent tool round and automatic continuation uses this choice.
+    // Simulate selection metadata aging past the old 35-minute TTL while a
+    // continuation keeps the logical turn live. The account must stay pinned.
+    let selection = f.state.db.collection::<Document>(COLLECTION).find_one(
+        doc! {"kind":"selection","conversation_id":&row.id,"turn_id":&row.active_turn.as_ref().unwrap().turn_id},
+    ).await.unwrap().unwrap();
+    let aged = selection.get_datetime("expires_at").unwrap().to_chrono() - Duration::minutes(36);
+    f.state
+        .db
+        .collection::<Document>(COLLECTION)
+        .update_one(
+            doc! {"_id":selection.get_str("_id").unwrap()},
+            doc! {"$set":{"expires_at":bson::DateTime::from_chrono(aged)}},
+        )
+        .await
+        .unwrap();
+    let (sender, _) = tokio::sync::broadcast::channel(8);
+    let mut events = runtime::Events {
+        sender,
+        checkpoint: None,
+        cursor: 0,
+        reset_notified: false,
+    };
+    let mut continuations = crate::services::assistant_continuation::Continuations::new(2);
+    assert!(
+        runtime::continue_turn(
+            &f.state,
+            &row,
+            &mut events,
+            &mut continuations,
+            Some("conv_1234567890abcdef1234567890abcdef"),
+            &engine::TurnError::new("tool_budget_exhausted"),
+            "Searching repositories"
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(github_search(&f).await["isError"], false);
+    let wrong = github_search_named(&f, "github-other__search_repositories").await;
+    assert_eq!(wrong["isError"], true, "{wrong}");
+    let refusal: Value =
+        serde_json::from_str(wrong["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(refusal["reason"], "wrong_connection");
+    assert_eq!(refusal["selected_connection_id"], chosen);
+    assert!(
+        refusal["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Do not ask the owner to repeat")
+    );
+    assert_eq!(chosen_server.received_requests().await.unwrap().len(), 2);
+    assert!(other_server.received_requests().await.unwrap().is_empty());
+    settled(
+        &f,
+        &row,
+        &engine::TurnResult {
+            text: "Found NyxID".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await;
+    engine::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &request(Some(&row.id), "A new request without a selection", None),
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(github_search(&f).await["isError"], true);
+    assert_eq!(chosen_server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn github_owner_newline_picker_selection_unblocks_mcp_search() {
+    let (f, chosen, _, chosen_server, other_server) = github_fixture().await;
+    settled(
+        &f,
+        &f.row,
+        &engine::TurnResult {
+            text: "Choose".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await;
+    engine::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &request(
+            Some(&f.row.id),
+            &format!("/service {chosen}\nContinue"),
+            None,
+        ),
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(github_search(&f).await["isError"], false);
+    assert_eq!(chosen_server.received_requests().await.unwrap().len(), 1);
+    assert!(other_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn github_owner_channel_selection_uses_original_message_not_sender_prefix() {
+    use crate::models::assistant_conversation::TurnOrigin;
+    let (f, chosen, _, chosen_server, other_server) = github_fixture().await;
+    settled(
+        &f,
+        &f.row,
+        &engine::TurnResult {
+            text: "Choose".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await;
+    let input = format!("/service {chosen} continue the search");
+    let mut start = engine::TurnStart::from(&request(
+        Some(&f.row.id),
+        &format!("Calvin (owner): {input}"),
+        None,
+    ));
+    start.origin = TurnOrigin::Channel;
+    start.question = Some(input);
+    engine::begin_turn(&f.state.db, &f.owner, &start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(github_search(&f).await["isError"], false);
+    assert_eq!(chosen_server.received_requests().await.unwrap().len(), 1);
+    assert!(other_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_owner_service_selection_has_actionable_reason_without_admitting_turn() {
+    let (f, chosen, _, chosen_server, other_server) = github_fixture().await;
+    settled(
+        &f,
+        &f.row,
+        &engine::TurnResult {
+            text: "Choose".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await;
+    f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(doc! {"_id":&chosen}, doc! {"$set":{"is_active":false}})
+        .await
+        .unwrap();
+    for (text, reason) in [
+        ("/service".to_owned(), "invalid_selector"),
+        (
+            format!("/service {} continue", "a".repeat(129)),
+            "invalid_selector",
+        ),
+        (
+            format!("/service {} continue", Uuid::new_v4()),
+            "connection_unavailable",
+        ),
+        (format!("/service {chosen} continue"), "connection_disabled"),
+    ] {
+        let error = engine::begin_turn(
+            &f.state.db,
+            &f.owner,
+            &request(Some(&f.row.id), &text, None),
+            &f.state.encryption_keys,
+        )
+        .await
+        .expect_err("invalid selection must not become an ordinary unselected turn");
+        let response = error.response_body();
+        assert_eq!(response.error, "validation_error");
+        assert_eq!(response.details.as_ref().unwrap()["reason"], reason);
+        assert!(!response.message.contains("connection picker"));
+        assert!(
+            engine::get(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+    }
+    assert!(chosen_server.received_requests().await.unwrap().is_empty());
+    assert!(other_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn service_selection_does_not_promote_guest_event_or_question_metadata() {
+    use crate::models::assistant_conversation::TurnOrigin;
+    let f = orchestrator_fixture("untrusted_selection_2022").await;
+    let id = connection(&f, &f.owner, "github", None).await;
+    for (origin, guest, text) in [
+        (TurnOrigin::Channel, true, format!("/service {id}\nRead")),
+        (TurnOrigin::Event, false, format!("/service {id}\nRead")),
+        (
+            TurnOrigin::User,
+            false,
+            "Quoted /service command".to_owned(),
+        ),
+    ] {
+        let mut start = engine::TurnStart::from(&request(Some(&f.row.id), &text, None));
+        start.origin = origin;
+        start.guest = guest;
+        start.question = Some(format!("/service {id}\nRead"));
+        let mut session = f.state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        bind_owner_selection(&f.state.db, &mut session, &f.row, &start, &text)
+            .await
+            .unwrap();
+        assert!(
+            f.state
+                .db
+                .collection::<Document>(COLLECTION)
+                .find_one(doc! {"conversation_id":&f.row.id,"kind":"selection"})
+                .session(&mut session)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        session.abort_transaction().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn actual_new_and_rotated_key_turns_capture_selection_and_reset() {
     let f = orchestrator_fixture("selection_transactions").await;

@@ -789,9 +789,18 @@ async fn agent_key_operation_scopes_save_fence_revisions_and_reach_auth() {
     );
     // Ordinary keys pass the conversation checks without a live conversation.
     assert!(
-        !check_non_mcp_context(&db, &auth, true, &service, None, "GET", Some(&path))
-            .await
-            .unwrap()
+        !check_non_mcp_context(
+            &db,
+            &auth,
+            true,
+            &service,
+            None,
+            "GET",
+            Some(&path),
+            Default::default()
+        )
+        .await
+        .unwrap()
     );
 
     crate::test_utils::set_agent_operation_scopes_enabled(&db, &owner, true).await;
@@ -946,7 +955,17 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
         let service = service.clone();
         async move {
             let path = CanonicalPath::from_mcp_literal(path).unwrap();
-            check_non_mcp_context(&db, &auth, false, &service, None, method, Some(&path)).await
+            check_non_mcp_context(
+                &db,
+                &auth,
+                false,
+                &service,
+                None,
+                method,
+                Some(&path),
+                Default::default(),
+            )
+            .await
         }
     };
     assert!(

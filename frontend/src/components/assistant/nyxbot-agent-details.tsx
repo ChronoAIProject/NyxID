@@ -738,6 +738,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       {agent.can_maintain !== false ? (
         <>
           <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
+          {agent.owner_kind !== "org" ? <AgentOperationScopes agentId={agent.id} disabled={readOnly} guests /> : null}
           <MachineCapabilities agentId={agent.id} disabled={readOnly} />
         </>
       ) : null}

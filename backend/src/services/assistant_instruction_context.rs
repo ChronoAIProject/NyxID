@@ -59,7 +59,12 @@ impl Prepared {
         history: &[AssistantMessage],
         guidance: &str,
     ) -> AppResult<Self> {
-        let stable = engine::base_prompt(row, agent) + guidance + PROTOCOL;
+        let owner_guidance = if row.guest_turn {
+            ""
+        } else {
+            super::assistant_task_status::GUIDANCE
+        };
+        let stable = engine::base_prompt(row, agent) + guidance + owner_guidance + PROTOCOL;
         let fingerprint = audit_service::keyed_fingerprint(Some(key), DOMAIN, stable.as_bytes())
             .ok_or_else(|| AppError::Internal("Instruction fingerprint unavailable".into()))?;
         let previous = row.nyxagent_instruction_binding.as_ref().filter(|binding| {

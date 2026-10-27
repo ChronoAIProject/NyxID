@@ -2042,6 +2042,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            owner_model_route: None,
             invocation_controlled: false,
             credential_invocation_id: None,
             platform_thread: platform.map(|origin| origin.thread.clone()),
@@ -3347,7 +3348,7 @@ pub async fn change_model(
     }
     let updated = db.collection::<AssistantConversation>(CONVERSATIONS).find_one_and_update(
         doc! {"_id": id, "user_id": user_id, "active_turn": bson::Bson::Null},
-        doc! {"$set": {"model": model, "nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::now(), "context_reset_reason": "model_changed"}},
+        doc! {"$set": {"model": model, "owner_model_route": bson::Bson::Null, "nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::now(), "context_reset_reason": "model_changed"}},
     ).return_document(ReturnDocument::After).await?.ok_or(AppError::AssistantTurnActive)?;
     Ok((current.model, updated))
 }
@@ -3599,6 +3600,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
                             }));
@@ -3646,7 +3648,9 @@ async fn finish_turn_inner(
                     |turn| super::assistant_model_observer::attribute(&error, turn, Utc::now()),
                 ));
                 let turn = current.active_turn.as_ref().expect("matched turn");
-                let turn_metadata = super::assistant_turn_observability::metadata(turn, Utc::now());
+                let mut turn_metadata = super::assistant_turn_observability::metadata(turn, Utc::now());
+                turn_metadata.failure_reason = error.as_ref().and_then(|error|
+                    super::assistant_model_observer::failure_reason(error, turn, Utc::now()));
                 if let Some(error) = error.as_mut() {
                     error.metadata = Some(Box::new(turn_metadata.clone()));
                     if error.code == "capacity_exceeded" {
@@ -6124,6 +6128,10 @@ impl TurnError {
             "nyxid_error" => (
                 "nyxid_error",
                 "NyxID could not authorize the assistant operation.",
+            ),
+            "guest_model_route_required" => (
+                "guest_model_route_required",
+                "This assistant isn't available to guests yet.",
             ),
             "first_byte_timeout" => (
                 "first_byte_timeout",

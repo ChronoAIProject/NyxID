@@ -1529,7 +1529,7 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
     // (or on refresh failure) falls through to the original 401 so the
     // browser gets a real error instead of hanging.
     let upstream_resp = if first_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        match try_refresh_access_token(&state).await {
+        match try_refresh_access_token(&state, &current_token).await {
             Some(new_token) => match build_req(&new_token).send().await {
                 Ok(retry) => retry,
                 Err(_) => first_resp,
@@ -1633,8 +1633,36 @@ async fn conditional_abandon_key(state: &ServerState, key_id: &str) {
 /// new access token on success, or `None` on any failure (no saved
 /// refresh token, refresh endpoint 4xx/5xx, network error, malformed
 /// body). Callers should treat `None` as "keep the original 401".
-async fn try_refresh_access_token(state: &ServerState) -> Option<String> {
+async fn try_refresh_access_token(state: &ServerState, rejected_token: &str) -> Option<String> {
+    if !state.proxy.refresh_enabled {
+        return None;
+    }
+    // Serialize this wizard's refreshes, then join the cross-process profile
+    // lock without blocking the async server's executor.
+    let mut current = state.access_token.lock().await;
+    let profile_owned = state.proxy.profile.clone();
+    let _lock = tokio::task::spawn_blocking(move || {
+        crate::auth::acquire_refresh_lock(profile_owned.as_deref())
+    })
+    .await
+    .ok()?
+    .ok()?;
     let profile = state.proxy.profile.as_deref();
+    if state.proxy.login_generation != crate::auth::login_generation(profile)
+        || crate::auth::agent_key::is_agent_key_profile(profile)
+        || crate::auth::validate_profile_destination(profile, &state.proxy.base_url_root).is_err()
+    {
+        return None;
+    }
+    if let Some(fresh) = crate::auth::fresh_access_token_on_disk(profile)
+        && fresh != *current
+    {
+        *current = fresh.clone();
+        return Some(fresh);
+    }
+    if *current != rejected_token {
+        return Some(current.clone());
+    }
     let refresh_token = crate::auth::read_saved_refresh_token_for(profile)?;
     match crate::auth::exchange_refresh_token(
         &state.upstream,
@@ -1648,7 +1676,7 @@ async fn try_refresh_access_token(state: &ServerState) -> Option<String> {
             refresh_token,
         } => {
             crate::auth::save_tokens_for(profile, &access_token, Some(&refresh_token)).ok()?;
-            *state.access_token.lock().await = access_token.clone();
+            *current = access_token.clone();
             eprintln!("  [wizard] refreshed expired access token for profile {profile:?}");
             Some(access_token)
         }
@@ -2327,6 +2355,8 @@ mod tests {
                 base_url_root: base_url,
                 access_token: "test-token".into(),
                 profile: None,
+                refresh_enabled: false,
+                login_generation: None,
             }),
             allowlist: Arc::new(Vec::new()),
             upstream: ReqwestClient::builder()
@@ -2341,6 +2371,113 @@ mod tests {
             completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
             prefill: Arc::new(Value::Null),
         }
+    }
+
+    struct RefreshTestHome {
+        previous: Option<std::ffi::OsString>,
+        _directory: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl RefreshTestHome {
+        fn new() -> Self {
+            let lock = crate::test_support::env_lock().lock().unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os("HOME");
+            // SAFETY: serialized with every environment-mutating CLI test.
+            unsafe {
+                std::env::set_var("HOME", directory.path());
+            }
+            Self {
+                previous,
+                _directory: directory,
+                _lock: lock,
+            }
+        }
+    }
+    impl Drop for RefreshTestHome {
+        fn drop(&mut self) {
+            // SAFETY: the shared environment lock is still held.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wizard_refreshes_share_profile_lock_and_reread_rotated_pair() {
+        use base64::Engine;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        let _home = RefreshTestHome::new();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let server = MockServer::start().await;
+            let old = uuid::Uuid::new_v4().to_string();
+            let refresh = uuid::Uuid::new_v4().to_string();
+            let next = uuid::Uuid::new_v4().to_string();
+            let fresh = format!(
+                "e30.{}.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(json!({"exp":chrono::Utc::now().timestamp()+3600}).to_string()),
+                uuid::Uuid::new_v4()
+            );
+            let directory = _home._directory.path().join(".nyxid");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("base_url"), server.uri()).unwrap();
+            crate::auth::save_tokens_for(None, &old, Some(&refresh)).unwrap();
+            let mut first = make_state(server.uri(), vec![]);
+            Arc::make_mut(&mut first.proxy).refresh_enabled = true;
+            *first.access_token.lock().await = old.clone();
+            let mut second = make_state(server.uri(), vec![]);
+            Arc::make_mut(&mut second.proxy).refresh_enabled = true;
+            *second.access_token.lock().await = old.clone();
+            Mock::given(method("POST"))
+                .and(path("/api/v1/auth/refresh"))
+                .and(body_json(json!({"refresh_token":refresh})))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(Duration::from_millis(100))
+                        .set_body_json(json!({"access_token":fresh,"refresh_token":next})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let (a, b) = tokio::join!(
+                try_refresh_access_token(&first, &old),
+                try_refresh_access_token(&second, &old)
+            );
+            assert!(a.as_deref() == Some(fresh.as_str()));
+            assert!(b.as_deref() == Some(fresh.as_str()));
+            assert!(
+                crate::auth::read_saved_refresh_token_for(None).as_deref() == Some(next.as_str())
+            );
+        });
+    }
+
+    #[test]
+    fn wizard_refresh_never_switches_selected_identity_or_login_generation() {
+        let _home = RefreshTestHome::new();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let server = wiremock::MockServer::start().await;
+            let old = uuid::Uuid::new_v4().to_string();
+            let directory = _home._directory.path().join(".nyxid");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("base_url"), server.uri()).unwrap();
+            crate::auth::save_tokens_for(None, &old, Some(&uuid::Uuid::new_v4().to_string()))
+                .unwrap();
+            let mut state = make_state(server.uri(), vec![]);
+            // Explicit callers are ineligible even if saved account credentials exist.
+            assert!(try_refresh_access_token(&state, &old).await.is_none());
+            Arc::make_mut(&mut state.proxy).refresh_enabled = true;
+            Arc::make_mut(&mut state.proxy).login_generation =
+                Some(uuid::Uuid::new_v4().to_string());
+            assert!(try_refresh_access_token(&state, &old).await.is_none());
+            assert!(server.received_requests().await.unwrap().is_empty());
+        });
     }
 
     /// Drives the same router `run_flow` merges, so a missing or

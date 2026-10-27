@@ -2675,6 +2675,49 @@ async fn assert_route_settled(db: &mongodb::Database, service_slug: &str, metric
     assert_route_settled_count(db, service_slug, metric, 1).await;
 }
 
+/// Provider completion precedes the asynchronous wallet release and journal
+/// append. Return only durable charged settlements, with a bounded test wait.
+pub(crate) async fn wait_for_charged_usage(
+    db: &mongodb::Database,
+    filter: bson::Document,
+    expected: usize,
+) -> Vec<UsageMeterRow> {
+    use futures::TryStreamExt;
+    let started = Instant::now();
+    loop {
+        let rows: Vec<UsageMeterRow> = db
+            .collection(USAGE_METER)
+            .find(filter.clone())
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let mut settled = rows.len() == expected;
+        for row in &rows {
+            settled &= row.status == UsageStatus::Finalized
+                && row.forwarded
+                && row.released
+                && row.wallet_id.is_some()
+                && row.funding.as_ref().is_some_and(|funding| funding.settled);
+            settled &= db
+                .collection::<bson::Document>("billing_ledger")
+                .find_one(doc! {"reference_id": &row.id, "owner_id": &row.billing_owner_id})
+                .await
+                .unwrap()
+                .is_some();
+        }
+        if settled {
+            return rows;
+        }
+        assert!(
+            started.elapsed() < SETTLEMENT_DEADLINE,
+            "expected {expected} charged settlements, got {rows:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 async fn assert_route_settled_count(
     db: &mongodb::Database,
     service_slug: &str,

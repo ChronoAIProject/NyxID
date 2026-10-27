@@ -270,6 +270,10 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRefusal {
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub error_code: Option<u32>,
     pub code: String,
     pub attempt_id: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -494,6 +498,10 @@ pub struct AssistantConversation {
     #[serde(default)]
     pub title_source: TitleSource,
     pub model: String,
+    /// Exact route admitted by an owner on this thread, including legacy channel
+    /// threads whose profile differs from the agent default. Never browser input.
+    #[serde(default)]
+    pub owner_model_route: Option<Box<super::assistant_agent::OwnerModelRoute>>,
     #[serde(default)]
     pub access_mode: AccessMode,
     pub nyxagent_session_id: Option<String>,

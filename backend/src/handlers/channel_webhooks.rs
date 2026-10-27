@@ -173,6 +173,28 @@ pub(crate) async fn channel_webhook_with_producers(
             Ok(Err(_)) | Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     }
+    if platform == "discord" {
+        match serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["type"].as_u64())
+        {
+            Some(0) => {
+                let _ =
+                    crate::services::discord_gateway::record_setup_probe(&state.db, &bot_id, true)
+                        .await;
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error":"discord_event_webhooks_wrong_endpoint",
+                    "message":"Use General Information > Interactions Endpoint URL for this URL. Event Webhooks do not deliver ordinary bot chat messages. Ordinary chat requires Discord Gateway ingress and Message Content Intent."
+                }))).into_response();
+            }
+            Some(1) => {
+                let _ =
+                    crate::services::discord_gateway::record_setup_probe(&state.db, &bot_id, false)
+                        .await;
+            }
+            _ => {}
+        }
+    }
     let empty_ack_is_text = adapter.registration().empty_ack_is_text;
     match adapter.webhook_policy(&body) {
         WebhookPolicy::RetryAwareInline => {
@@ -1465,6 +1487,7 @@ mod tests {
             jwt_private_key_path: key_dir.join("private.pem").display().to_string(),
             jwt_public_key_path: key_dir.join("public.pem").display().to_string(),
             jwt_retained_public_key_paths: Vec::new(),
+            domain_aliases: Default::default(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,

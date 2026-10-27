@@ -21,15 +21,40 @@ the requested operation and inputs. Same catalog and URL do not establish
 account/resource equivalence. Unknown account equivalence requires the owner to
 choose the exact target, rather than making a model proposal count as selection.
 
-The composer's **Add context → Use a connection** and a leading
+The web composer's **Add context → Use a connection** and a leading
 `/service <connection UUID or unambiguous slug>` are authenticated owner choices
-for one turn. Channel selectors require a verified owner sender. Guests, webhooks,
+for one turn, including its automatic continuations. The command accepts the
+request on the same line (`/service <UUID> continue the search`) or the next line.
+The UUID is the connection's `UserService.id`, not its credential or catalog ID.
+External channel chats have no connection picker; use the command there.
+Channel selectors require a verified owner sender and read the original message
+before NyxID adds the sender attribution. Guests, webhooks,
 delegated credentials, service accounts and conversation keys cannot promote
 text/flags into human selection. New ordinary turns reset the choice. An allowed
 card continuation inherits only its exact bound target/operation; denied, expired
 or consumed cards cannot install a choice. Selection is separate from consent.
 A removable **This message** chip makes the selected account visible. Saved connection order is managed in **Agent
 Details → Connections** and applies across the owner's agents.
+
+An invalid command or unavailable selection fails turn admission with the existing
+`validation_error` / 1008 response and an additive `details.reason`:
+`invalid_selector`, `connection_unavailable`, `connection_disabled`,
+`connection_access_denied`, or `ambiguous_selection`. Guidance names the repair
+(enable/reconnect the connection, restore access, or choose an exact connection)
+instead of silently ignoring a command and repeating the selection prompt.
+Missing and inaccessible IDs are indistinguishable unless the owner can already
+see the connection. Selection never grants new access or substitutes a different
+account. A call targeting another connection in the selected catalog family is
+refused with `service_selection_required` and a reason; unrelated families keep
+their ordinary policy.
+
+Selection rows keep the existing schema, so older replicas can enforce choices
+admitted by upgraded replicas. Only owner-choice metadata is retained for the
+maximum logical-turn duration plus its admission lease; live turn/key/owner and
+catalog fences still apply, and consent-card expiry is unchanged. During a mixed
+rollout, use the web picker or put `/service <UUID>` alone on the first line;
+older admission replicas do not recognize inline requests or attributed channel
+commands. Upgrade all admission replicas for those forms to work consistently.
 
 ## Existing permission modes
 

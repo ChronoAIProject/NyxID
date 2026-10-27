@@ -145,15 +145,15 @@ jobs:
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-          # Backend compiler layers exceed the shared Actions cache budget.
-          # Only this trusted publish workflow writes the per-platform registry
-          # cache; PRs can read it from the existing public backend repository.
-          # Retain the old cache as an import fallback during the transition.
+          # Image layer caches exceed the shared 10 GB Actions cache budget and
+          # evicted the Rust release caches, so every component now writes a
+          # per-platform registry cache (backend did first). Only this trusted
+          # publish workflow writes it. Keep the old Actions cache as a
+          # read-only import fallback during the transition.
           cache-from: |
-            ${{ matrix.component == 'backend' && format('type=registry,ref={0}:buildcache-{1}', steps.repo.outputs.image, matrix.platform_pair) || '' }}
+            type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }}
             type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
-          cache-to: >-
-            ${{ matrix.component == 'backend' && format('type=registry,ref={0}:buildcache-{1},mode=max,ignore-error=true', steps.repo.outputs.image, matrix.platform_pair) || format('type=gha,mode=max,scope={0}-{1}', matrix.component, matrix.platform_pair) }}
+          cache-to: type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }},mode=max,ignore-error=true
           provenance: false
 
       - name: Verify machine browser and desktop
