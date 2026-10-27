@@ -9,7 +9,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppForm } from "@/components/ui/form";
-import { usePublicConfig } from "@/hooks/use-public-config";
 import { useMachineContexts } from "@/hooks/use-machine-access";
 import { useMachineDesktops } from "@/hooks/use-machines";
 import {
@@ -110,7 +109,6 @@ export function MachineDesktopPanel({
     );
     return () => clearTimeout(timer);
   }, [turnActive, activityAt, controls, controller, collapse]);
-  const { data: config } = usePublicConfig();
   const contexts = useMachineContexts(nodeId);
   const control = useCallback((type: string, note?: string) => {
     if (socket.current?.readyState === WebSocket.OPEN)
@@ -119,13 +117,7 @@ export function MachineDesktopPanel({
   useEffect(() => {
     const target = canvas.current;
     const ws = new WebSocket(
-      desktopUrl(
-        nodeId,
-        conversationId,
-        config?.node_ws_url,
-        display,
-        contextId,
-      ),
+      desktopUrl(nodeId, conversationId, display, contextId),
     );
     session.current = "";
     sequence.current = 0n;
@@ -301,7 +293,7 @@ export function MachineDesktopPanel({
       ws.close();
       target?.getContext("2d")?.clearRect(0, 0, target.width, target.height);
     };
-  }, [nodeId, conversationId, config?.node_ws_url, attempt, display, contextId]);
+  }, [nodeId, conversationId, attempt, display, contextId]);
   const input = useCallback(
     (tool: string, args: Record<string, unknown>) => {
       if (
