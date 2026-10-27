@@ -2890,6 +2890,7 @@ mod tests {
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
                 "assistant:channel-media",
                 "assistant:attachment-writes",
