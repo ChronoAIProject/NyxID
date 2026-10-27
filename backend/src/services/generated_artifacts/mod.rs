@@ -30,6 +30,19 @@ mod mp4;
 pub mod sandbox;
 pub(crate) mod storage;
 
+/// Stable instructions are added only for enabled owner readers. Flag-off text
+/// remains byte-for-byte baseline; admitted watches and HTTP recovery drain separately.
+pub const GUIDANCE: &str = "\nA completed cloud execution does not prove file delivery. Claim attached/downloadable only after NyxID materializes a private attachment. For an owner's request to recover saved Web cloud files, use nyx__artifact_delivery with an empty object: the server binds the saved result. Never choose result IDs, resubmit an execution, or request machine setup for that recovery.\n";
+
+pub async fn enabled(db: &Database, user: &str) -> AppResult<bool> {
+    super::feature_flag_service::personal_flag_enabled(
+        db,
+        user,
+        super::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
+    )
+    .await
+}
+
 /// Recovery audit data is fixed metadata: never message/watch/operation IDs or arguments.
 pub fn recovery_audit_data(http: bool) -> serde_json::Value {
     serde_json::json!({

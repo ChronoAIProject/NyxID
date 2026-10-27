@@ -4920,6 +4920,9 @@ async fn chat_native_definitions(
         && !chat.turn_stopped
         && chat.channel_adapter_origin.is_none()
         && chat.org_agent_access.is_none()
+        && crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
+            .await
+            .unwrap_or(false)
     {
         tools.push(crate::services::generated_artifacts::recovery_definition());
     }

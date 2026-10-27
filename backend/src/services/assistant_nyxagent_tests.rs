@@ -4094,6 +4094,42 @@ async fn voice_queue_bounds_concurrent_admission_and_never_replays_lost_claims()
 }
 
 #[test]
+fn generated_artifact_guidance_is_opt_in_and_resets_stable_binding() {
+    use crate::services::assistant_instruction_context::Prepared;
+    let mut row = stale_test_row(Utc::now());
+    row.nyxagent_session_id = None;
+    let off = Prepared::with_guidance(&[2; 32], &row, None, &[], "").unwrap();
+    assert!(!off.instructions().contains("nyx__artifact_delivery"));
+    let mut binding = off.binding.clone();
+    binding.session_id = "session".into();
+    row.nyxagent_session_id = Some(binding.session_id.clone());
+    row.nyxagent_instruction_binding = Some(binding);
+    assert!(
+        !Prepared::with_guidance(&[2; 32], &row, None, &[], "")
+            .unwrap()
+            .reset
+    );
+    let on = Prepared::with_guidance(
+        &[2; 32],
+        &row,
+        None,
+        &[],
+        crate::services::generated_artifacts::GUIDANCE,
+    )
+    .unwrap();
+    assert!(on.reset);
+    assert!(on.instructions().contains("nyx__artifact_delivery"));
+    let mut binding = on.binding;
+    binding.session_id = "new-session".into();
+    row.nyxagent_session_id = Some(binding.session_id.clone());
+    row.nyxagent_instruction_binding = Some(binding);
+    let disabled = Prepared::with_guidance(&[2; 32], &row, None, &[], "").unwrap();
+    assert!(disabled.reset);
+    assert_eq!(disabled.binding.fingerprint, off.binding.fingerprint);
+    assert!(!disabled.instructions().contains("nyx__artifact_delivery"));
+}
+
+#[test]
 fn instruction_fingerprint_covers_configuration_and_audience_without_database_access() {
     use crate::models::{
         assistant_agent::{AssistantAgent, MemoryNote},

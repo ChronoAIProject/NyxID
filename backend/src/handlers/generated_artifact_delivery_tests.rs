@@ -173,6 +173,30 @@ async fn generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after
 fn check_artifact_flag_off_legacy() -> futures::future::BoxFuture<'static, ()> {
     Box::pin(async {
         let legacy = AsyncFixture::new().await;
+        let auth = authenticate(&legacy.f).await;
+        let tools = chat_native_definitions(&legacy.f.state, auth.chat.as_ref().unwrap()).await;
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool.name == "nyx__artifact_delivery")
+        );
+        enabled(&legacy, true).await;
+        let enabled_tools =
+            chat_native_definitions(&legacy.f.state, auth.chat.as_ref().unwrap()).await;
+        let without_recovery: Vec<_> = enabled_tools
+            .iter()
+            .filter(|tool| tool.name != "nyx__artifact_delivery")
+            .map(|tool| (&tool.name, &tool.description, &tool.input_schema))
+            .collect();
+        assert_eq!(enabled_tools.len(), tools.len() + 1);
+        assert_eq!(
+            without_recovery,
+            tools
+                .iter()
+                .map(|tool| (&tool.name, &tool.description, &tool.input_schema))
+                .collect::<Vec<_>>()
+        );
+        enabled(&legacy, false).await;
         assert!(legacy.submit().await.artifact_mode.is_none());
         complete(&legacy).await;
         assert_eq!(
@@ -203,6 +227,14 @@ fn check_admitted_artifact_drain(
         let w = a.submit().await;
         assert_eq!(w.artifact_mode.as_deref(), Some(artifacts::sandbox::MODE));
         enabled(a, false).await;
+        let auth = authenticate(&a.f).await;
+        let tools = chat_native_definitions(&a.f.state, auth.chat.as_ref().unwrap()).await;
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool.name == "nyx__artifact_delivery"),
+            "admitted history must not change flag-off discovery"
+        );
         complete(a).await;
         assert_eq!(a.watch().await.artifact_result.as_ref().unwrap().count, 1);
         finish(a, &a.f.row, "submitted").await;
