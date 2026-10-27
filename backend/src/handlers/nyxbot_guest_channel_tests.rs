@@ -386,6 +386,13 @@ async fn channel_model_turns_for(
     if matches!(platform, "lark" | "feishu") {
         channel.gateway_bot_id = Some("ou_bot".into());
     }
+    // Discord provider events must name the bound gateway channel and carry
+    // snowflake actor/conversation IDs.
+    let discord_gateway = transport == "gateway" && canonical_platform(platform) == "discord";
+    if discord_gateway {
+        channel.gateway_channel_id = Some("cmaeg1.ch.test".into());
+        channel.gateway_bot_id = Some("100".into());
+    }
     if org_bot {
         use crate::models::org_membership::{OrgMembership, OrgRole};
         let org = Uuid::new_v4().to_string();
@@ -489,16 +496,17 @@ async fn channel_model_turns_for(
         ensure_partition(&state, &gateway_key, PARTITION).await;
         ensure_partition(&state, &gateway_key, GUEST_PARTITION).await;
     }
+    let group_chat = if discord_gateway { "100200" } else { "-100200" };
     if group {
         // Known chat metadata avoids live provider title lookups. Fresh-agent
         // cases have owner-enabled settings but no previous owner model turn.
         let chat = chats::record_chat(
             &state,
             &channel,
-            &chats::group_partition("-100200", None),
+            &chats::group_partition(group_chat, None),
             &chats::ChatFacts {
                 kind: "group",
-                chat_id: "-100200".into(),
+                chat_id: group_chat.into(),
                 thread_id: None,
                 owner: false,
                 title: Some("Customer support".into()),
@@ -579,14 +587,20 @@ async fn channel_model_turns_for(
     } else {
         vec![false]
     } {
-        let sender = if owner { "7" } else { guest_person };
-        let id = Uuid::new_v4().to_string();
-        let chat = if group {
-            "-100200"
-        } else if owner {
-            "owner-chat"
+        let sender = if owner {
+            "7"
+        } else if discord_gateway {
+            "9"
         } else {
-            "guest-chat"
+            guest_person
+        };
+        let id = Uuid::new_v4().to_string();
+        let chat = match (discord_gateway, group, owner) {
+            (_, true, _) => group_chat,
+            (true, false, true) => "1001",
+            (true, false, false) => "1002",
+            (false, false, true) => "owner-chat",
+            (false, false, false) => "guest-chat",
         };
         let text = "@helper_bot hello";
         let delivered = if transport == "gateway" {
@@ -601,6 +615,10 @@ async fn channel_model_turns_for(
             body["event_context"]["activity"]["source"]["platform"] =
                 json!(canonical_platform(platform));
             body["event_context"]["activity"]["conversation"]["id"] = json!(chat);
+            if discord_gateway {
+                body["event_context"]["channel_id"] = json!(channel.gateway_channel_id);
+                body["event_context"]["activity"]["source"]["route_id"] = json!(channel.route_id);
+            }
             if canonical_platform(platform) != "telegram" {
                 body["event_context"]["activity"]
                     .as_object_mut()
