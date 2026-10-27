@@ -1,14 +1,7 @@
-# ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM rust:1.93-bookworm AS builder
-
-WORKDIR /build
-
-# Keep native amd64/arm64 builds bounded while allowing two compiler jobs.
-# CI prepares 24 GiB total swap for the large server crate. Small builders can
-# override this to 1; Cargo's default would otherwise use every available CPU.
-ARG CARGO_BUILD_JOBS=2
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
-ENV CARGO_INCREMENTAL=0
+# Normalize release-only workspace versions outside the dependency layer chain.
+# COPY from this stage is keyed by its output, not the original manifest bytes.
+FROM python:3.12-slim-bookworm AS dependency-recipe
+WORKDIR /input
 
 # Copy workspace manifests and lock file for dependency caching.
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
@@ -25,6 +18,20 @@ COPY nyxid-crypto/Cargo.toml nyxid-crypto/Cargo.toml
 COPY machine/Cargo.toml machine/Cargo.toml
 COPY permissions/Cargo.toml permissions/Cargo.toml
 COPY machine-updater/Cargo.toml machine-updater/Cargo.toml
+COPY scripts/docker-dependency-recipe.py /recipe.py
+RUN python /recipe.py /input /recipe
+
+# Build only dependencies; usable as --target dependencies for cache checks.
+FROM rust:1.93-bookworm AS dependencies
+WORKDIR /build
+
+# Keep native amd64/arm64 builds bounded while allowing two compiler jobs.
+# CI prepares 24 GiB total swap for the large server crate. Small builders can
+# override this to 1; Cargo's default would otherwise use every available CPU.
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_INCREMENTAL=0
+COPY --from=dependency-recipe /recipe/ ./
 
 # Create dummy entry points so cargo can resolve and compile dependencies.
 # backend, cli, and mcp-demo are binary crates (need main.rs).
@@ -44,6 +51,11 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
     && mkdir -p machine-updater/src && echo "fn main() {}" > machine-updater/src/main.rs \
     && echo "" > machine-updater/src/lib.rs
 RUN cargo build --locked --release --manifest-path backend/Cargo.toml --bin nyxid-server --features gcp-kms
+
+FROM dependencies AS builder
+# Restore every original manifest and the exact lock before compiling real code.
+# CARGO_PKG_VERSION and workspace path dependency identities must be real here.
+COPY --from=dependency-recipe /input/ ./
 
 # Remove the dummy build artifacts (forces recompilation of our code only).
 # Drop the cloud-auth artifacts too so its real source is recompiled.

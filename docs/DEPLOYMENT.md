@@ -155,13 +155,23 @@ binaries retain their build-time stamp. CLI/node binaries retain their existing
 build-time identity. The credential-accept bundle still receives its own commit
 stamp and release-integrity manifest.
 
-The dependency layer copies only workspace manifests and `Cargo.lock`, then
-generates stub crate entry points. Both Cargo invocations use `--locked` and the
-same release binary/features. Real source and embedded assets enter only after
+A separate Python recipe stage copies only workspace manifests and `Cargo.lock`
+and normalizes the nine workspace packages to version `0.0.0` in both. It leaves
+third-party versions, checksums and requirements exact. The fresh `dependencies`
+stage copies only that normalized output and generates stub crate entry points;
+a version-only release changes the recipe stage but its output still has the
+same content hash. Normalizing in the compiler stage itself would not work: its
+parent COPY layer would already have changed. The real `builder` restores the
+original manifests/lock before compiling application code, preserving `/health`
+and every `CARGO_PKG_VERSION`. New versioned path constraints or inherited member
+versions fail the recipe explicitly until supported; they are never relaxed.
+Both Cargo invocations use `--locked` and the same release binary/features.
+Real source and embedded assets enter only after
 dependency compilation. With those inputs unchanged, a commit-only change now
 reuses the compiled server layer; source/embedded-input changes still rebuild
-the affected crates, and manifest/lockfile changes invalidate the dependency
-layer. This is layer reuse, not incremental Rust compilation.
+the affected crates, and dependency/toolchain changes invalidate the dependency
+layer. Workspace package version bumps alone do not. This is layer reuse, not
+incremental Rust compilation.
 
 `CARGO_BUILD_JOBS` is a build argument with a default of **2**, used by both the
 amd64 smoke job and native amd64/arm64 publishing. Each backend image runner
@@ -183,6 +193,14 @@ intermediate compiler layers. PRs never overwrite the trusted registry cache
 or consume the shared Actions cache budget, where large image exports previously
 evicted Rust release caches. A missing/cold registry cache still requires a full
 compile. The first publish after this Dockerfile change repopulates it.
+
+For a bounded dependency-cache check, build with `--target dependencies`, then
+repeat after changing only workspace package versions in the manifests/lock.
+The dependency Cargo step must say `CACHED`. On small local builders add
+`--build-arg CARGO_BUILD_JOBS=1`; this target never compiles the real server.
+Local native arm64 validation on 2026-10-27 compiled dependencies in 8m 10s.
+Changing all nine local package versions to `9.8.7` then completed in 3s with
+the Cargo layer `CACHED`; both invocations retained `--locked`.
 
 For timings, use `docker buildx build --progress=plain` with the same registry
 `--cache-from` as publishing, then repeat with only `NYXID_GIT_HASH` changed.

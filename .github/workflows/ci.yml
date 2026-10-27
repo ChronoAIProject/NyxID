@@ -97,6 +97,8 @@ jobs:
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
             backend_image:
+              - 'scripts/docker-dependency-recipe.py'
+              - 'scripts/test-docker-dependency-recipe.py'
               - 'backend/Dockerfile'
               - '.dockerignore'
               - '.github/scripts/prepare-backend-runner.sh'
@@ -129,6 +131,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
             backend:
+              - 'scripts/docker-dependency-recipe.py'
+              - 'scripts/test-docker-dependency-recipe.py'
               - 'backend/**'
               - 'permissions/**'
               - 'machine/**'
@@ -478,6 +482,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: backend-image-inputs
+      - name: Check dependency recipe invariants
+        run: python3 scripts/test-docker-dependency-recipe.py
       - name: Build backend image binary
         run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
       - name: Check backend Docker embedded assets
