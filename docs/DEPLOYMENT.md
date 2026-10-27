@@ -148,6 +148,68 @@ separate Node 22.23.2 credential-accept bundle. Its Debian runtime runs as
 non-root `nyxid` and includes the standalone HTML, SRI assets and release
 manifest at `/app/frontend/dist/`; it also needs its private durable TUF volume.
 
+Backend builds accept `--build-arg NYXID_GIT_HASH=<commit>`. The final image sets
+that value as a runtime environment variable for `/health`; it is not an input
+to either Cargo layer. Without a nonempty runtime value, standalone server
+binaries retain their build-time stamp. CLI/node binaries retain their existing
+build-time identity. The credential-accept bundle still receives its own commit
+stamp and release-integrity manifest.
+
+A separate Python recipe stage copies only workspace manifests and `Cargo.lock`
+and normalizes the nine workspace packages to version `0.0.0` in both. It leaves
+third-party versions, checksums and requirements exact. The fresh `dependencies`
+stage copies only that normalized output and generates stub crate entry points;
+a version-only release changes the recipe stage but its output still has the
+same content hash. Normalizing in the compiler stage itself would not work: its
+parent COPY layer would already have changed. The real `builder` restores the
+original manifests/lock before compiling application code, preserving `/health`
+and every `CARGO_PKG_VERSION`. New versioned path constraints or inherited member
+versions fail the recipe explicitly until supported; they are never relaxed.
+Both Cargo invocations use `--locked` and the same release binary/features.
+Real source and embedded assets enter only after
+dependency compilation. With those inputs unchanged, a commit-only change now
+reuses the compiled server layer; source/embedded-input changes still rebuild
+the affected crates, and dependency/toolchain changes invalidate the dependency
+layer. Workspace package version bumps alone do not. This is layer reuse, not
+incremental Rust compilation.
+
+`CARGO_BUILD_JOBS` is a build argument with a default of **2**, used by both the
+amd64 smoke job and native amd64/arm64 publishing. Each backend image runner
+first provisions at least 24 GiB total swap. Two jobs permit bounded dependency
+and code-generation parallelism without using every runner CPU; the large
+server crate compiles after its dependencies, and the CLI/test binaries are not
+built. The swap reserve absorbs peaks rather than making sustained swapping
+fast. Smaller local builders can pass `--build-arg CARGO_BUILD_JOBS=1`. No change
+to optimization, release features or runtime resources is made.
+
+Publishing imports and exports registry caches at
+`ghcr.io/<owner>/nyxid/backend:buildcache-linux-{amd64,arm64}` with `mode=max`,
+including intermediate compiler layers. Both jobs retain the matching
+`backend-linux-<arch>` GHA import as a migration fallback. Smoke also imports the
+old `backend-pr-linux-amd64` scope, but exports no cache: in PR #2052 the release
+compile finished in 49m 23s, then even a `mode=min` GHA export stalled for nearly
+40 minutes until the 90-minute job timeout. That export did not retain
+intermediate compiler layers. PRs never overwrite the trusted registry cache
+or consume the shared Actions cache budget, where large image exports previously
+evicted Rust release caches. A missing/cold registry cache still requires a full
+compile. The first publish after this Dockerfile change repopulates it.
+
+For a bounded dependency-cache check, build with `--target dependencies`, then
+repeat after changing only workspace package versions in the manifests/lock.
+The dependency Cargo step must say `CACHED`. On small local builders add
+`--build-arg CARGO_BUILD_JOBS=1`; this target never compiles the real server.
+Local native arm64 validation on 2026-10-27 compiled dependencies in 8m 10s.
+Changing all nine local package versions to `9.8.7` then completed in 3s with
+the Cargo layer `CACHED`; both invocations retained `--locked`.
+
+For timings, use `docker buildx build --progress=plain` with the same registry
+`--cache-from` as publishing, then repeat with only `NYXID_GIT_HASH` changed.
+Both Cargo `RUN` steps should report `CACHED` on the second build; the credential
+bundle stamp and final image metadata still change. Backend source changes
+cannot get that complete compiler-layer hit. No fixed speedup is assumed for
+cold builds or the single large crate: compare Cargo's reported build duration
+and BuildKit's per-layer durations on each native runner.
+
 The **frontend Dockerfile** (`frontend/Dockerfile`) uses a two-stage build:
 1. Node 22.23.2 builder with `npm ci` and `npm run build`
 2. Unprivileged nginx 1.27 runtime with a validating Python origin/policy renderer

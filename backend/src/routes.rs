@@ -3497,6 +3497,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         private
     };
 
+    let (public_oauth, private) = if let Some(state) = router_state.as_ref() {
+        let layer =
+            middleware::from_fn_with_state(state.clone(), crate::mw::cookie_domain::middleware);
+        (public_oauth.layer(layer.clone()), private.layer(layer))
+    } else {
+        (public_oauth, private)
+    };
+
     (
         public_oauth.layer(middleware::from_fn(
             crate::services::service_history::context::middleware,

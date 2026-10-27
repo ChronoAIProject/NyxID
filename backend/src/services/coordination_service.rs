@@ -970,7 +970,11 @@ fn exact_lease_filter(id: &str, holder: &CoordinationHolder, lease_id: &str) -> 
     }
 }
 
-fn active_lease_filter(id: &str, holder: &CoordinationHolder, lease_id: &str) -> Document {
+pub(crate) fn active_lease_filter(
+    id: &str,
+    holder: &CoordinationHolder,
+    lease_id: &str,
+) -> Document {
     let mut filter = exact_lease_filter(id, holder, lease_id);
     filter.insert("$expr", doc! { "$gt": ["$expires_at", "$$NOW"] });
     filter

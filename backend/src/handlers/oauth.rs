@@ -496,13 +496,16 @@ async fn sender_constraint_from_headers(
             let proof = value
                 .to_str()
                 .map_err(|_| AppError::InvalidDpopProof("invalid DPoP proof".to_string()))?;
-            let htu =
-                crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, "/oauth/token")
-                    .map_err(dpop_token_error)?;
             Some(
-                crate::crypto::dpop::validate_proof(proof, "POST", &htu, &state.db)
-                    .await
-                    .map_err(dpop_token_error)?,
+                crate::crypto::dpop::validate_configured_proof(
+                    proof,
+                    "POST",
+                    "/oauth/token",
+                    &state.config,
+                    &state.db,
+                )
+                .await
+                .map_err(dpop_token_error)?,
             )
         }
         None => None,
@@ -716,7 +719,7 @@ fn verify_consent_request_with_expiry(
     allow_expired: bool,
 ) -> AppResult<AuthorizeQuery> {
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(&[&state.config.jwt_issuer]);
+    validation.set_issuer(&state.config.accepted_jwt_issuers());
     validation.set_audience(&[CONSENT_REQUEST_AUDIENCE]);
     validation.validate_exp = !allow_expired;
 
@@ -4293,6 +4296,30 @@ mod tests {
             server.abort();
             db.drop().await.unwrap();
         }).await;
+    }
+
+    #[tokio::test]
+    async fn domain_alias_consent_ticket_keeps_its_subject_and_dedicated_audience() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.jwt_issuer = "https://old.example".into();
+        let user = Uuid::new_v4().to_string();
+        let params: AuthorizeQuery = serde_json::from_value(serde_json::json!({
+            "response_type":"code", "client_id":"client", "redirect_uri":"https://client.example/callback",
+            "scope":"openid", "state":Uuid::new_v4().to_string(), "code_challenge":Uuid::new_v4().to_string(),
+            "code_challenge_method":"S256"
+        })).unwrap();
+        let token = sign_consent_request(&state, &user, &params, "openid").unwrap();
+        state.config.jwt_issuer = "https://new.example".into();
+        assert!(verify_consent_request(&state, &token, &user).is_err());
+        state.config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        assert_eq!(
+            verify_consent_request(&state, &token, &user)
+                .unwrap()
+                .redirect_uri,
+            params.redirect_uri
+        );
+        assert!(verify_consent_request(&state, &token, &Uuid::new_v4().to_string()).is_err());
+        assert!(jwt::verify_token(&state.jwt_keys, &state.config, &token).is_err());
     }
 
     #[tokio::test]

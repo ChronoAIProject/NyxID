@@ -45,6 +45,8 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:live-turn-gate",
     PLATFORM_POLICY,
     "approval:required-web-v1",
+    // Older transport writers do not wait for relay sockets before remote setup.
+    "channel:discord-gateway",
 ];
 const MAX_AGE_SECS: i64 = 45;
 

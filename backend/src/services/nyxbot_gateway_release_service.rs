@@ -55,6 +55,7 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
         doc! {"state":1,"next_attempt_at":1,"lease_until":1,"_id":1},
         doc! {"state":1,"provisional_expires_at":1,"_id":1},
         doc! {"channel_id":1,"state":1},
+        doc! {"channel_bot_id":1,"state":1},
         doc! {"agent_api_key_id":1,"binding_id":1},
     ] {
         db.collection::<Release>(RELEASES)
@@ -198,6 +199,9 @@ fn setup_fence(release: &Release) -> Document {
 }
 
 pub(crate) async fn dispatch(db: &Database, release: &Release) -> AppResult<()> {
+    if release.platform == "discord" {
+        super::discord_gateway::transport::wait_relay_stopped(db, &release.channel_bot_id).await?;
+    }
     let mut filter = setup_fence(release);
     filter.insert("dispatch_started_at", bson::Bson::Null);
     if db
@@ -302,6 +306,9 @@ pub(crate) async fn adopt_in_session(
             != 1
     {
         return Err(conflict());
+    }
+    if row.platform == "discord" {
+        super::discord_gateway::transport::retire_resume(db, &row.channel_bot_id, session).await?;
     }
     Ok(())
 }
@@ -700,7 +707,7 @@ async fn destination(state: &AppState, release: &Release) -> AppResult<bool> {
         };
     Ok(row.id == release.gateway_service_id
         && row.base_url.trim_end_matches('/') == release.gateway_base_url
-        && state.config.jwt_issuer == release.creator_issuer)
+        && state.config.accepts_jwt_issuer(&release.creator_issuer))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

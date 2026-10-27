@@ -97,6 +97,8 @@ jobs:
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
             backend_image:
+              - 'scripts/docker-dependency-recipe.py'
+              - 'scripts/test-docker-dependency-recipe.py'
               - 'backend/Dockerfile'
               - '.dockerignore'
               - '.github/scripts/prepare-backend-runner.sh'
@@ -129,6 +131,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
             backend:
+              - 'scripts/docker-dependency-recipe.py'
+              - 'scripts/test-docker-dependency-recipe.py'
               - 'backend/**'
               - 'permissions/**'
               - 'machine/**'
@@ -478,6 +482,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: backend-image-inputs
+      - name: Check dependency recipe invariants
+        run: python3 scripts/test-docker-dependency-recipe.py
       - name: Build backend image binary
         run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
       - name: Check backend Docker embedded assets
@@ -510,15 +516,16 @@ jobs:
           platforms: linux/amd64
           build-args: |
             NYXID_GIT_HASH=${{ github.sha }}
+            CARGO_BUILD_JOBS=2
           outputs: type=cacheonly
           push: false
           cache-from: |
             type=registry,ref=${{ steps.backend-cache.outputs.ref }}
             type=gha,scope=backend-pr-linux-amd64
             type=gha,scope=backend-linux-amd64
-          # The shared registry retains intermediate compiler layers. Keep PR
-          # exports small so they do not evict the Rust and coverage caches.
-          cache-to: type=gha,mode=min,scope=backend-pr-linux-amd64
+          # Import only: even mode=min GHA export stalled for ~40 minutes after
+          # compilation in #2052. Trusted publishing retains compiler layers in
+          # the registry; PRs neither overwrite it nor add Actions cache storage.
           provenance: false
 
   # ---------------------------------------------------------------------------

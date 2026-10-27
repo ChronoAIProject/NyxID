@@ -2691,6 +2691,15 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    // Bounded Discord Gateway keyset discovery, additive for mixed replicas.
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"is_active":1,"status":1,"_id":1})
+                .build(),
+        )
+        .await?;
+
     // ── channel_conversations ──
     //
     // Two partial unique indexes cover the two conversation regimes, since

@@ -231,6 +231,7 @@ async fn persist_rules(
             == crate::models::downstream_service::OfferingKind::Tool
             || service.owner_user_id.is_some()
             || (service.catalog_manager_created && service.visibility != "private"),
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
     };
     let rules_bson = bson::to_bson(rules).map_err(|e| AppError::Internal(e.to_string()))?;

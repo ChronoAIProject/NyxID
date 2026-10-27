@@ -1904,10 +1904,70 @@ pub async fn resolve_proxy_target_from_user_service(
     catalog_service_id: Option<&str>,
     execution_context: ProxyExecutionContext<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_from_user_service_with_mode(
+        db,
+        Some(encryption_keys),
+        user_id,
+        slug,
+        catalog_service_id,
+        ProxyCredentialResolution::materialize(execution_context),
+        true,
+    )
+    .await
+}
+
+/// Resolve the configured model slug with the same personal/legacy/org order
+/// as execution, without credential effects or pool selection. Only the guest
+/// default-route gate uses this; ordinary requests retain their existing work.
+pub(crate) async fn read_default_model_authority(
+    db: &mongodb::Database,
+    actor: &str,
+    slug: &str,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_from_user_service_with_mode(
+        db,
+        None,
+        actor,
+        Some(slug),
+        None,
+        ProxyCredentialResolution {
+            resolve_header_values: false,
+            ..ProxyCredentialResolution::read_only_snapshot()
+        },
+        false,
+    )
+    .await
+}
+
+async fn refuse_model_pool(
+    db: &mongodb::Database,
+    owner: &str,
+    slug: Option<&str>,
+) -> AppResult<()> {
+    if let Some(slug) = slug
+        && db
+            .collection::<mongodb::bson::Document>("service_pools")
+            .find_one(doc! {"user_id":owner,"slug":slug,"is_active":true})
+            .await?
+            .is_some()
+    {
+        return Err(AppError::GuestModelRouteRequired);
+    }
+    Ok(())
+}
+
+async fn resolve_proxy_target_from_user_service_with_mode(
+    db: &mongodb::Database,
+    encryption_keys: Option<&EncryptionKeys>,
+    user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+    credential_resolution: ProxyCredentialResolution<'_>,
+    allow_pools: bool,
+) -> AppResult<Option<UserServiceResolution>> {
     // Keep catalog/credential resolution state on the heap; callers combine
     // several of these futures when revalidating delegated execution.
     Box::pin(async move {
-        let credential_resolution = ProxyCredentialResolution::materialize(execution_context);
         // NyxID#974 routing boundary: identical-instance service pools belong
         // here, before `finish_resolution()`, because this function is the
         // authoritative place that preserves personal/legacy/org precedence and
@@ -1920,7 +1980,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     user_id,
                     us,
                     None,
@@ -1930,7 +1990,11 @@ pub async fn resolve_proxy_target_from_user_service(
                 .await?,
             ));
         }
-        if catalog_service_id.is_none()
+        if !allow_pools && catalog_service_id.is_none() {
+            refuse_model_pool(db, user_id, slug).await?;
+        }
+        if allow_pools
+            && catalog_service_id.is_none()
             && let Some((us, pool_selection)) =
                 lookup_service_pool_member(db, user_id, slug).await?
         {
@@ -1945,7 +2009,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     user_id,
                     us,
                     None,
@@ -1959,6 +2023,9 @@ pub async fn resolve_proxy_target_from_user_service(
         // 2. Legacy personal guard. Preserves the invariant that pre-migration
         //    personal connections beat org-shared credentials. See function doc.
         if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
+            if !allow_pools {
+                return Err(AppError::GuestModelRouteRequired);
+            }
             return Ok(None);
         }
 
@@ -1994,6 +2061,10 @@ pub async fn resolve_proxy_target_from_user_service(
             let (org_us, pool_selection) = if let Some(org_us) = org_us {
                 (org_us, None)
             } else if catalog_service_id.is_none() {
+                if !allow_pools {
+                    refuse_model_pool(db, &membership.org_user_id, slug).await?;
+                    continue;
+                }
                 match lookup_service_pool_member(db, &membership.org_user_id, slug).await? {
                     Some((svc, selection)) => (svc, Some(selection)),
                     None => continue,
@@ -2053,7 +2124,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     &membership.org_user_id,
                     org_us,
                     Some(routing),

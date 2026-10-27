@@ -230,7 +230,14 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
         .filter(|fact| {
             turn.model_attempt_id.as_deref() == Some(&fact.attempt_id) && recent(fact.at)
         })
-        .and_then(|fact| billing_failure_code(&fact.code))
+        .and_then(|fact| {
+            billing_failure_code(&fact.code).or_else(|| {
+                (fact.code == "guest_model_route_required"
+                    && fact.http_status == Some(403)
+                    && fact.error_code == Some(9000))
+                .then_some("guest_model_route_required")
+            })
+        })
         .or_else(|| {
             turn.model_stream_fault
                 .as_ref()

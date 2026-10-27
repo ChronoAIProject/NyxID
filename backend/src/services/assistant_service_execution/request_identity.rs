@@ -61,6 +61,15 @@ pub fn http_operation(
 /// provider extensions retain exact action consent. Function tools describe
 /// callbacks to NyxAgent; provider-hosted tools can execute effects themselves.
 pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
+    // Preserve the existing owner admission/approval/fallback classification.
+    // Recognizing Codex telemetry must not migrate legacy owner callbacks into
+    // raw-inference consent or make their accounts interchangeable.
+    body.get("client_metadata").is_none() && stateless_model_transport(path, body)
+}
+
+/// Closed generation contract used only for guest model transport and recording
+/// an already-admitted owner route. It never selects an owner's admission path.
+pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {
     let path = path
         .trim_matches('/')
         .strip_prefix("v1/")
@@ -128,6 +137,7 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         "safety_identifier",
         "prompt_cache_key",
         "prompt_cache_retention",
+        "client_metadata",
     ];
     if object.keys().any(|key| !FIELDS.contains(&key.as_str()))
         || object
@@ -138,6 +148,31 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
             .is_some_and(|value| value != &Value::Bool(false))
     {
         return false;
+    }
+    // Codex correlation fields are client telemetry, not stored provider
+    // resource handles. NyxAgent forwards this object on ordinary model calls.
+    // Keep the extension closed and bounded; unknown/nested values still deny.
+    if let Some(metadata) = object.get("client_metadata") {
+        const CORRELATION: &[&str] = &[
+            "root_turn_id",
+            "session_id",
+            "thread_id",
+            "turn_id",
+            "x-codex-installation-id",
+            "x-codex-turn-metadata",
+            "x-codex-window-id",
+        ];
+        if path != "responses"
+            || metadata.as_object().is_none_or(|fields| {
+                fields.len() > CORRELATION.len()
+                    || fields.iter().any(|(key, value)| {
+                        !CORRELATION.contains(&key.as_str())
+                            || value.as_str().is_none_or(|text| text.len() > 8192)
+                    })
+            })
+        {
+            return false;
+        }
     }
     fn handles(value: &Value) -> bool {
         match value {
@@ -167,6 +202,10 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         .as_object_mut()
         .expect("model request")
         .remove("tools");
+    executable
+        .as_object_mut()
+        .expect("model request")
+        .remove("client_metadata");
     if handles(&executable) {
         return false;
     }
@@ -194,6 +233,23 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         }
     }
     true
+}
+
+pub(super) fn model_route_operation(
+    target: &crate::services::proxy_service::ProxyTarget,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    body: &[u8],
+) -> Option<Value> {
+    if target.service.inference.is_none() || method != "POST" {
+        return None;
+    }
+    let parsed = serde_json::from_slice::<Value>(body).ok()?;
+    stateless_model_transport(path, &parsed).then(|| {
+        json!({"kind":"raw_inference", "method":method, "path":path, "query":query,
+            "model":parsed["model"], "provider":target.service.id})
+    })
 }
 
 /// Bind sanitized semantic headers. Correlation metadata can change at each

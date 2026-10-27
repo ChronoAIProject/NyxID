@@ -103,11 +103,12 @@ export function desktopInput(
 export function desktopUrl(
   node: string,
   conversation?: string,
-  backend?: string,
   display: "secure" | "dev" = "secure",
   contextId?: string,
 ): string {
-  const url = new URL(backend || window.location.origin);
+  // Human sessions use the same-origin API proxy and its cookies/CSP. The
+  // public node_ws_url is companion ingress, not the browser's auth origin.
+  const url = new URL(window.location.origin);
   url.protocol =
     url.protocol === "https:" || url.protocol === "wss:" ? "wss:" : "ws:";
   url.pathname = `/api/v1/assistant/nyxagent/machines/${encodeURIComponent(node)}/desktop`;

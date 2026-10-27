@@ -236,7 +236,7 @@ fn parse_interaction(payload: &serde_json::Value) -> Option<InboundMessage> {
 }
 
 /// Parse a Gateway-style message object into an [`InboundMessage`].
-fn parse_gateway_message(payload: &serde_json::Value) -> Option<InboundMessage> {
+pub(crate) fn parse_gateway_message(payload: &serde_json::Value) -> Option<InboundMessage> {
     let msg = payload.get("d").unwrap_or(payload);
     let message_id = msg.get("id")?.as_str()?;
     let channel_id = msg.get("channel_id")?.as_str()?;
@@ -450,8 +450,10 @@ impl PlatformAdapter for DiscordAdapter {
             ),
             required_suffix: " for Discord",
             setup_instructions: &[
-                "In Discord Developer Portal > General Information, set Interactions Endpoint URL to the Callback URL shown here and save. Discord verifies the endpoint with a PING challenge.",
-                "Install the app in the intended server with the permissions required for its interactions. Assign an agent in NyxID, then invoke an interaction to test delivery.",
+                "For interactions, paste the Callback URL into Discord Developer Portal > General Information > Interactions Endpoint URL. Do not use the Webhooks / Event Webhooks page: Event Webhooks do not deliver ordinary bot chat messages.",
+                "For ordinary chat, ask your NyxID administrator to enable channel:discord-gateway. In Discord Developer Portal > Bot > Privileged Gateway Intents, enable Message Content Intent (approval is required for verified apps). NyxID requests Guilds, Guild Messages, Direct Messages and Message Content.",
+                "Install the app with the bot scope; add applications.commands only if you use interactions. Grant View Channels, Send Messages, Send Messages in Threads and Read Message History; grant Attach Files only for media replies. Private threads require bot membership. NyxID does not create slash commands.",
+                "Assign an agent in NyxID, then send a DM or @mention the bot in a server channel or thread. Group chats default to mentions; followed threads also need NyxID thread follow enabled. Check Health for Gateway connection or intent/token errors.",
             ],
             fields: &[
                 BOT_TOKEN_FIELD,

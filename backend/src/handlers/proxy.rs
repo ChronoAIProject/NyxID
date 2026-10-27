@@ -4206,6 +4206,7 @@ async fn execute_resolved_proxy_inner<'a>(
         target.service.billing.as_ref(),
         state.billing.resale_enabled(),
     );
+    billing_ctx = billing_ctx.with_assistant_payer(auth_user.assistant_chat.as_deref());
     billing_ctx = billing_ctx.with_assistant_provenance(
         auth_user.assistant_turn_fence.is_some(),
         nyxagent_admission,
@@ -4467,6 +4468,10 @@ async fn execute_resolved_proxy_inner<'a>(
         &target.service,
         Some(&body_bytes),
         method_override,
+        auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(|chat| chat.guest && chat.turn_live),
     );
     // The unforgeable extension is installed only after the server admits an
     // owner turn and validates the fixed engine contract. Tool effects retain
