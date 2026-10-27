@@ -1,1 +1,0 @@
-{"version":"8.0.17","setName":"nyxidPermissionsR3","host":"127.0.0.1:27471","primary":true,"dbPath":"/tmp/nyxid-permissions-r3-mongo/data","commitVerified":true,"abortVerified":true,"probeDatabase":"nyxidPermissionsR3_F005_narrow_preflight","probeCollection":"probe_6ae0967739301933c88154e2","retainedDataPreserved":true}

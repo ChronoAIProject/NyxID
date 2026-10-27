@@ -1,1 +1,0 @@
-Error: Mongo readiness assertion failed
