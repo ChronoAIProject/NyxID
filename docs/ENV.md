@@ -49,9 +49,19 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | HTTP listen port |
-| `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
+| `BASE_URL` | `http://localhost:3001` | Canonical backend base URL (default JWT issuer/audience); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
+| `BASE_URL_ALIASES` | *(empty)* | Comma-separated HTTPS API origins accepted during migration; no paths, credentials, query or fragment. Adds JWT issuer/audience verification overlap and equivalent resource, DPoP, webhook and hosted-asset origins. Minted URLs use `BASE_URL`. |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
+| `FRONTEND_URL_ALIASES` | *(empty)* | Comma-separated HTTPS frontend origins additionally trusted by CORS, CSRF, social `return_to`, login approvals and voice. Does not add JWT issuers/audiences. |
+| `COOKIE_DOMAIN` | *(unset)* | Domain for first-party auth cookies; unset means host-only cookies. |
+| `COOKIE_DOMAIN_ALIASES` | *(empty)* | Comma-separated DNS cookie domains (optional leading dot). On first-party auth responses, the longest matching configured alias replaces `COOKIE_DOMAIN`. Uses Host, or a single `X-Forwarded-Host` only from a peer in `TRUSTED_PROXY_IPS`. Never derives a cookie domain from an arbitrary host. |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
+
+Alias lists are opt-in, limited to 32 entries each, and reject malformed or empty
+entries. HTTPS origins may have one trailing slash, which is removed. Cookie
+domains must be DNS names, without ports, paths, wildcards or attributes. An empty
+list preserves existing behavior. Configure only domains you control; see
+[Domain migration](DOMAIN_MIGRATION.md) for rollout and retirement ordering.
 
 ### Frontend nginx policy
 
@@ -352,7 +362,8 @@ prices with `nyxid admin billing service show <slug>` and
 |----------|---------|-------------|
 | `JWT_PRIVATE_KEY_PATH` | `keys/private.pem` | Path to RSA private key PEM file |
 | `JWT_PUBLIC_KEY_PATH` | `keys/public.pem` | Path to RSA public key PEM file |
-| `JWT_ISSUER` | `nyxid` | JWT `iss` claim value |
+| `JWT_ISSUER` | `BASE_URL` | JWT `iss` claim and OIDC discovery issuer. Pin during a domain migration to preserve external client validation. |
+| `JWT_AUDIENCE` | `BASE_URL` | Audience for NyxID access, refresh, delegated, service-account and relay access tokens. Does not replace OAuth ID-token client audiences or the dedicated relay reply/callback audiences. Verification accepts this value plus `BASE_URL_ALIASES`; issuer verification accepts `JWT_ISSUER` plus those aliases. |
 | `JWT_ACCESS_TTL_SECS` | `900` (15 min) | Access token lifetime in seconds |
 | `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Rolling refresh-token lifetime; restarts on rotation. First-party account refreshes also require an unexpired session (see below) |
 | `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens authorize one send, scoped to one inbound message + conversation + agent. Repeated attachment downloads do not consume the send; edits require the consumed send token. |

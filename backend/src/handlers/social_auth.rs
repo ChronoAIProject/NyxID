@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use axum::{
+    Extension,
     extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
 };
@@ -50,6 +51,7 @@ pub struct AuthorizeQuery {
 /// setting a state cookie, and redirecting to the provider's authorization URL.
 pub async fn authorize(
     State(state): State<AppState>,
+    callback_origin: Option<Extension<crate::mw::cookie_domain::SocialCallbackOrigin>>,
     Path(provider_name): Path<String>,
     Query(query): Query<AuthorizeQuery>,
     request_headers: HeaderMap,
@@ -114,6 +116,9 @@ pub async fn authorize(
         &state_token,
         nonce_token.as_deref(),
         &state.config,
+        callback_origin
+            .as_ref()
+            .map(|Extension(origin)| origin.0.as_str()),
     )?;
 
     let mut headers = HeaderMap::new();
@@ -214,8 +219,7 @@ pub async fn authorize(
     append_return_to_cookie(
         &mut headers,
         query.return_to.as_deref(),
-        &state.config.frontend_url,
-        &state.config.base_url,
+        &state.config,
         secure,
         domain,
         same_site,
@@ -284,6 +288,7 @@ pub struct CallbackQuery {
 /// and redirects to the frontend.
 pub async fn callback(
     State(state): State<AppState>,
+    callback_origin: Option<Extension<crate::mw::cookie_domain::SocialCallbackOrigin>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(provider_name): Path<String>,
     Query(params): Query<CallbackQuery>,
@@ -291,8 +296,6 @@ pub async fn callback(
 ) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
-    let frontend_url = &state.config.frontend_url;
-    let backend_url = &state.config.base_url;
 
     // Resolve redirect target from state param first (mobile info may be
     // encoded there since ASWebAuthenticationSession drops cookies), then
@@ -304,7 +307,7 @@ pub async fn callback(
                 redirect_uri: redirect_uri.clone(),
             }
         }
-        _ => resolve_redirect_target(frontend_url, backend_url, &headers),
+        _ => resolve_redirect_target(&headers, &state.config),
     };
 
     // Parse provider
@@ -385,13 +388,20 @@ pub async fn callback(
     }
 
     // Exchange code for access token
-    let access_token =
-        social_auth_service::exchange_code(provider, code, &state.config, &state.http_client)
-            .await
-            .map_err(|e| {
-                tracing::warn!(error = %e, "Social auth code exchange failed");
-                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
-            })?;
+    let access_token = social_auth_service::exchange_code(
+        provider,
+        code,
+        &state.config,
+        &state.http_client,
+        callback_origin
+            .as_ref()
+            .map(|Extension(origin)| origin.0.as_str()),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "Social auth code exchange failed");
+        redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+    })?;
 
     // Fetch user profile
     let profile =
@@ -607,6 +617,7 @@ struct AppleUserName {
 /// Apple's cross-site POST does not carry SameSite=Lax cookies.
 pub async fn apple_callback(
     State(state): State<AppState>,
+    callback_origin: Option<Extension<crate::mw::cookie_domain::SocialCallbackOrigin>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     axum::Form(form): axum::Form<AppleCallbackForm>,
@@ -614,7 +625,6 @@ pub async fn apple_callback(
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let frontend_url = &state.config.frontend_url;
-    let backend_url = &state.config.base_url;
 
     // Resolve redirect target from state param (mobile info encoded in state)
     // before full validation so error redirects also go to the right place.
@@ -625,7 +635,7 @@ pub async fn apple_callback(
         }
         _ => SocialRedirectTarget::Web {
             frontend_url: frontend_url.to_string(),
-            return_to: extract_trusted_return_to(&headers, frontend_url, backend_url),
+            return_to: extract_trusted_return_to(&headers, &state.config),
         },
     };
 
@@ -687,6 +697,9 @@ pub async fn apple_callback(
         code,
         &state.config,
         &state.http_client,
+        callback_origin
+            .as_ref()
+            .map(|Extension(origin)| origin.0.as_str()),
     )
     .await
     .map_err(|e| {
@@ -1277,9 +1290,8 @@ enum SocialRedirectTarget {
 }
 
 fn resolve_redirect_target(
-    frontend_url: &str,
-    backend_url: &str,
     headers: &HeaderMap,
+    config: &crate::config::AppConfig,
 ) -> SocialRedirectTarget {
     let client_cookie = extract_cookie_value(headers, SOCIAL_CLIENT_COOKIE);
     let redirect_cookie = extract_cookie_value(headers, SOCIAL_REDIRECT_COOKIE);
@@ -1294,8 +1306,8 @@ fn resolve_redirect_target(
     }
 
     SocialRedirectTarget::Web {
-        frontend_url: frontend_url.to_string(),
-        return_to: extract_trusted_return_to(headers, frontend_url, backend_url),
+        frontend_url: config.frontend_url.clone(),
+        return_to: extract_trusted_return_to(headers, config),
     }
 }
 
@@ -1504,8 +1516,7 @@ fn social_clear_cookie_values(secure: bool, domain: Option<&str>) -> [String; 6]
 fn append_return_to_cookie(
     headers: &mut HeaderMap,
     return_to: Option<&str>,
-    frontend_url: &str,
-    backend_url: &str,
+    config: &crate::config::AppConfig,
     secure: bool,
     domain: Option<&str>,
     same_site: &str,
@@ -1519,9 +1530,7 @@ fn append_return_to_cookie(
         );
     }
 
-    let Some(return_to) =
-        return_to.filter(|url| is_trusted_return_to(frontend_url, backend_url, url))
-    else {
+    let Some(return_to) = return_to.filter(|url| config.trusted_return_to(url)) else {
         return Ok(());
     };
 
@@ -1571,14 +1580,14 @@ fn return_to_clear_cookie_values(domain: Option<&str>) -> [String; 3] {
 
 fn extract_trusted_return_to(
     headers: &HeaderMap,
-    frontend_url: &str,
-    backend_url: &str,
+    config: &crate::config::AppConfig,
 ) -> Option<String> {
     extract_cookie_value(headers, SOCIAL_RETURN_TO_COOKIE)
         .and_then(|encoded| urlencoding::decode(&encoded).ok().map(|v| v.to_string()))
-        .filter(|return_to| is_trusted_return_to(frontend_url, backend_url, return_to))
+        .filter(|return_to| config.trusted_return_to(return_to))
 }
 
+#[cfg(test)]
 fn is_trusted_return_to(frontend_url: &str, backend_url: &str, return_to: &str) -> bool {
     let frontend = frontend_url.trim_end_matches('/');
     let backend = backend_url.trim_end_matches('/');
@@ -1926,14 +1935,57 @@ mod tests {
     }
 
     #[test]
+    fn domain_alias_social_return_to_round_trips_only_trusted_urls() {
+        let mut config = crate::test_utils::test_app_config();
+        for aliases in [false, true] {
+            config.domain_aliases.frontend_urls = if aliases {
+                vec!["https://old.example".into()]
+            } else {
+                vec![]
+            };
+            let value = "https://old.example/oauth/authorize?client_id=test";
+            let mut headers = HeaderMap::new();
+            append_return_to_cookie(
+                &mut headers,
+                Some(value),
+                &config,
+                true,
+                None,
+                COOKIE_SAMESITE_LAX,
+            )
+            .unwrap();
+            assert_eq!(
+                headers.get_all(header::SET_COOKIE).iter().count(),
+                if aliases { 4 } else { 3 }
+            );
+            headers.insert(
+                header::COOKIE,
+                format!("nyx_social_return_to={}", urlencoding::encode(value))
+                    .parse()
+                    .unwrap(),
+            );
+            assert_eq!(
+                extract_trusted_return_to(&headers, &config).as_deref(),
+                if aliases { Some(value) } else { None }
+            );
+            headers.insert(
+                header::COOKIE,
+                "nyx_social_return_to=https%3A%2F%2Fold.example.evil%2Foauth"
+                    .parse()
+                    .unwrap(),
+            );
+            assert!(extract_trusted_return_to(&headers, &config).is_none());
+        }
+    }
+
+    #[test]
     fn append_return_to_cookie_clears_stale_cookie_when_return_to_missing() {
         let mut headers = HeaderMap::new();
 
         append_return_to_cookie(
             &mut headers,
             None,
-            "http://localhost:3000",
-            "http://localhost:3001",
+            &crate::test_utils::test_app_config(),
             false,
             None,
             COOKIE_SAMESITE_LAX,
@@ -1959,8 +2011,7 @@ mod tests {
         append_return_to_cookie(
             &mut headers,
             Some(return_to),
-            "http://localhost:3000",
-            "http://localhost:3001",
+            &crate::test_utils::test_app_config(),
             true,
             None,
             COOKIE_SAMESITE_NONE,
@@ -1992,11 +2043,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let target = resolve_redirect_target(
-            "https://app.example.com",
-            "https://auth.example.com",
-            &headers,
-        );
+        let target = resolve_redirect_target(&headers, &crate::test_utils::test_app_config());
 
         match target {
             SocialRedirectTarget::Web { return_to, .. } => assert!(return_to.is_none()),

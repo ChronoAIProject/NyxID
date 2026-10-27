@@ -254,7 +254,9 @@ pub(crate) async fn forward_native(
     }
     let base = super::nyxbot_gateway_service::gateway_base(state).await?;
     if base != row.gateway_base
-        || row.request_policy["sources"][0]["issuer"] != state.config.jwt_issuer
+        || !row.request_policy["sources"][0]["issuer"]
+            .as_str()
+            .is_some_and(|issuer| state.config.accepts_jwt_issuer(issuer))
     {
         return Err(refused());
     }
@@ -995,8 +997,12 @@ fn retained_matches(
     row: &PlatformEntryGateway,
     authority: &super::platform_entry_admin_service::NativeConversionAuthority,
     base: &str,
-    issuer: &str,
+    config: &crate::config::AppConfig,
 ) -> AppResult<()> {
+    let issuer = row.request_policy["sources"][0]["issuer"]
+        .as_str()
+        .filter(|issuer| config.accepts_jwt_issuer(issuer))
+        .ok_or_else(refused)?;
     let mut expected = authority.configuration().clone();
     expected.transport = row.configuration.transport.clone();
     let policy = request_policy(
@@ -1235,7 +1241,7 @@ pub(crate) async fn prepare(
         .find_one(doc! {"profile_id":&authority.profile_id,"state":{"$in":["prepared","active"]}})
         .await?;
     let (mut row, provider, route) = if let Some(row) = existing {
-        retained_matches(&row, authority, &base, &state.config.jwt_issuer)?;
+        retained_matches(&row, authority, &base, &state.config)?;
         let (provider, route) = keys_for_setup(state, &row).await?;
         let creator = super::nyxbot_gateway_service::creator_bearer(state, authority.actor())?;
         let observed = super::nyxbot_gateway_service::gateway_call(
@@ -1430,7 +1436,7 @@ pub(super) async fn inspect_pending(
         .find_one(doc! {"profile_id":&authority.profile_id,"state":"prepared"})
         .await?
         .ok_or_else(refused)?;
-    retained_matches(&row, authority, &base, &state.config.jwt_issuer)?;
+    retained_matches(&row, authority, &base, &state.config)?;
     let (provider, route) = keys_for_setup(state, &row).await?;
     let creator = super::nyxbot_gateway_service::creator_bearer(state, authority.actor())?;
     let response = super::nyxbot_gateway_service::gateway_call(

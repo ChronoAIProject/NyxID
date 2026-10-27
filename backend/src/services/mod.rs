@@ -520,3 +520,4 @@ pub(crate) mod nyxbot_channel_continuity_service;
 pub(crate) mod nyxbot_gateway_release_service;
 
 pub mod discord_gateway;
+pub mod domain_alias_service;

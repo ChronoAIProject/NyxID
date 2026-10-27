@@ -1487,6 +1487,7 @@ mod tests {
             jwt_private_key_path: key_dir.join("private.pem").display().to_string(),
             jwt_public_key_path: key_dir.join("public.pem").display().to_string(),
             jwt_retained_public_key_paths: Vec::new(),
+            domain_aliases: Default::default(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,

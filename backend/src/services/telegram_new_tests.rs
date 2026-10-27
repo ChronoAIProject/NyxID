@@ -2446,6 +2446,7 @@ pub(crate) async fn register_manager_channel(
         MANAGER,
         &callback,
         &created.webhook_secret,
+        &state.config,
     )
     .await
     .unwrap();

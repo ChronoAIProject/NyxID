@@ -1377,6 +1377,7 @@ pub async fn apply_manager_configuration_status(
 /// Register the webhook URL with the platform and activate the bot.
 ///
 /// The `webhook_secret` must be the raw secret returned from [`create_bot`].
+#[allow(clippy::too_many_arguments)]
 pub async fn register_webhook(
     db: &mongodb::Database,
     http_client: &reqwest::Client,
@@ -1385,6 +1386,7 @@ pub async fn register_webhook(
     bot_token: &str,
     webhook_url: &str,
     webhook_secret: &str,
+    config: &AppConfig,
 ) -> AppResult<()> {
     register_webhook_with_telegram_api(
         db,
@@ -1394,10 +1396,12 @@ pub async fn register_webhook(
         bot_token,
         webhook_url,
         webhook_secret,
+        config,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn register_webhook_with_telegram_api(
     db: &mongodb::Database,
     telegram_api: &super::telegram_new_api::TelegramApi<'_>,
@@ -1406,6 +1410,7 @@ pub(crate) async fn register_webhook_with_telegram_api(
     bot_token: &str,
     webhook_url: &str,
     webhook_secret: &str,
+    config: &AppConfig,
 ) -> AppResult<()> {
     if adapter.serializes_lifecycle() {
         return super::channel_retry_ingress::with_lifecycle(
@@ -1445,6 +1450,7 @@ pub(crate) async fn register_webhook_with_telegram_api(
                     bot_token,
                     webhook_url,
                     webhook_secret,
+                    config,
                 )
                 .await
             },
@@ -1505,6 +1511,7 @@ async fn verify_telegram_token_identity(
 }
 
 // The identity lease covers the provider effect and its matching local secret/status.
+#[allow(clippy::too_many_arguments)]
 async fn register_telegram_webhook_locked(
     db: &mongodb::Database,
     telegram_api: &super::telegram_new_api::TelegramApi<'_>,
@@ -1513,6 +1520,7 @@ async fn register_telegram_webhook_locked(
     bot_token: &str,
     webhook_url: &str,
     webhook_secret: &str,
+    config: &AppConfig,
 ) -> AppResult<()> {
     if bot.credential_source == "telegram_manager" {
         let verification = async {
@@ -1526,7 +1534,7 @@ async fn register_telegram_webhook_locked(
             let webhook = telegram_api
                 .call(bot_token, "getWebhookInfo", serde_json::json!({}))
                 .await?;
-            super::telegram_new_admin::validate_manager_webhook(&webhook, webhook_url)
+            super::telegram_new_admin::validate_manager_webhook(&webhook, webhook_url, config)
         }
         .await;
         if let Err(error) = verification {
@@ -1579,7 +1587,7 @@ pub(crate) async fn verify_telegram_bot(
     adapter: &dyn PlatformAdapter,
     bot_id: &str,
     owner_id: &str,
-    base_url: &str,
+    config: &AppConfig,
 ) -> AppResult<ChannelBot> {
     let bot = get_bot_for_user(db, bot_id, owner_id).await?;
     super::telegram_new_service::with_operation(
@@ -1609,7 +1617,7 @@ pub(crate) async fn verify_telegram_bot(
                 hex::encode(rand::random::<[u8; 32]>())
             };
             if let Err(error) = register_telegram_webhook_locked(
-                db, telegram_api, adapter, &bot, &token, &webhook_url(base_url, &bot), &secret,
+                db, telegram_api, adapter, &bot, &token, &webhook_url(&config.base_url, &bot), &secret, config,
             ).await {
                 if bot.credential_source == "telegram_manager" {
                     return Err(error);
@@ -2661,6 +2669,7 @@ mod tests {
             "app:secret",
             "https://nyxid.test/hook",
             "unused",
+            &crate::test_utils::test_app_config(),
         )
         .await
         .unwrap();

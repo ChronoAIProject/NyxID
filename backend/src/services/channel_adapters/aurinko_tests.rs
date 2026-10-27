@@ -273,6 +273,7 @@ impl Fixture {
             TOKEN,
             &url,
             "unused",
+            &state.config,
         )
         .await
         .unwrap();

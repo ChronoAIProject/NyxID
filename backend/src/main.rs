@@ -632,6 +632,12 @@ async fn server_main() {
         .await
         .expect("Failed to retire legacy vendor credential stores");
 
+    Box::pin(services::domain_alias_service::normalize_hosted_specs(
+        &db, &config,
+    ))
+    .await
+    .expect("Failed to normalize hosted catalog spec URLs");
+
     // Materialize ServiceEndpoint rows for seeded catalog services from the
     // hosted overlay specs so /api/v1/mcp/config publishes concrete
     // service_id + endpoint_id operations for workflow consumers (#1290).
@@ -1593,17 +1599,7 @@ async fn server_main() {
         }
     });
 
-    // Build set of allowed CORS origins: frontend_url + any extra from CORS_ALLOWED_ORIGINS
-    let mut allowed_origins: std::collections::HashSet<axum::http::HeaderValue> =
-        std::collections::HashSet::new();
-    allowed_origins.insert(config.frontend_url.parse().expect("Invalid FRONTEND_URL"));
-    for origin in &config.cors_allowed_origins {
-        if let Ok(hv) = origin.parse() {
-            allowed_origins.insert(hv);
-        } else {
-            tracing::warn!(origin, "Ignoring invalid CORS_ALLOWED_ORIGINS entry");
-        }
-    }
+    let allowed_origins = configured_cors_origins(&config);
     tracing::info!(
         origins = ?allowed_origins.iter().map(|h| h.to_str().unwrap_or("?")).collect::<Vec<_>>(),
         "CORS allowed origins"
@@ -1929,6 +1925,27 @@ async fn run_promote_admin(db: &mongodb::Database, email: &str) {
     }
 }
 
+fn configured_cors_origins(
+    config: &AppConfig,
+) -> std::collections::HashSet<axum::http::HeaderValue> {
+    // Build set of allowed CORS origins: frontend_url + any extra from CORS_ALLOWED_ORIGINS
+    let mut allowed_origins: std::collections::HashSet<axum::http::HeaderValue> =
+        std::collections::HashSet::new();
+    allowed_origins.insert(config.frontend_url.parse().expect("Invalid FRONTEND_URL"));
+    for origin in config
+        .cors_allowed_origins
+        .iter()
+        .chain(&config.domain_aliases.frontend_urls)
+    {
+        if let Ok(hv) = origin.parse() {
+            allowed_origins.insert(hv);
+        } else {
+            tracing::warn!(origin, "Ignoring invalid CORS_ALLOWED_ORIGINS entry");
+        }
+    }
+    allowed_origins
+}
+
 fn private_cors(allowed_origins: std::collections::HashSet<axum::http::HeaderValue>) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin, _| {
@@ -2211,6 +2228,48 @@ mod tests {
         );
         assert_eq!(old.commitments(), adopted.commitments());
         db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn domain_alias_cors_preflight_only_allows_configured_frontends() {
+        use tower::ServiceExt;
+        let mut config = crate::test_utils::test_app_config();
+        config.frontend_url = "https://new.example".into();
+        for aliases in [false, true] {
+            config.domain_aliases.frontend_urls = if aliases {
+                vec!["https://old.example".into()]
+            } else {
+                vec![]
+            };
+            let app = axum::Router::new()
+                .route("/test", axum::routing::post(|| async {}))
+                .layer(private_cors(configured_cors_origins(&config)));
+            for origin in [
+                "https://new.example",
+                "https://old.example",
+                "https://old.example.evil",
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("OPTIONS")
+                            .uri("/test")
+                            .header("Origin", origin)
+                            .header("Access-Control-Request-Method", "POST")
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response
+                        .headers()
+                        .contains_key("access-control-allow-origin"),
+                    origin == "https://new.example" || (aliases && origin == "https://old.example")
+                );
+            }
+        }
     }
 
     #[tokio::test]

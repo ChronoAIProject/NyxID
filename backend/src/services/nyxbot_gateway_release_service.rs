@@ -707,7 +707,7 @@ async fn destination(state: &AppState, release: &Release) -> AppResult<bool> {
         };
     Ok(row.id == release.gateway_service_id
         && row.base_url.trim_end_matches('/') == release.gateway_base_url
-        && state.config.jwt_issuer == release.creator_issuer)
+        && state.config.accepts_jwt_issuer(&release.creator_issuer))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

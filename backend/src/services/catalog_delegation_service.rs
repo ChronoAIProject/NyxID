@@ -115,6 +115,7 @@ pub async fn validate_live_grant(
         actor_client_id,
         receiving_client_id,
         &authority,
+        config,
     ) {
         return Err(invalid_catalog_authority());
     }
@@ -155,7 +156,7 @@ pub async fn validate_live_grant(
             canonical_resources.push(mcp_resource);
         }
         canonical_resources.sort();
-        if canonical_resources != authority.resources {
+        if canonical_resources != config.canonical_resources(&authority.resources) {
             return Err(invalid_catalog_authority());
         }
     }
@@ -318,12 +319,13 @@ fn grant_matches_claims(
     actor_client_id: &str,
     receiving_client_id: &str,
     authority: &CatalogAuthority,
+    config: &crate::config::AppConfig,
 ) -> bool {
     grant.user_id == claims.sub
         && grant.actor_client_id == actor_client_id
         && grant.receiving_client_id == receiving_client_id
         && grant.scope == claims.scope
-        && grant.resources == authority.resources
+        && config.resources_equal(&grant.resources, &authority.resources)
         && grant.allow_all_services == authority.allow_all_services
         && grant.allowed_service_ids == authority.allowed_service_ids
         && grant.allow_all_nodes == authority.allow_all_nodes
@@ -453,6 +455,25 @@ mod tests {
             Err(AppError::Unauthorized(message))
                 if message == "Delegated catalog authority is invalid or inactive"
         ));
+    }
+
+    #[tokio::test]
+    async fn domain_alias_live_catalog_grant_accepts_old_resources_without_new_authority() {
+        let (db, mut config, mut claims) = live_grant_fixture().await.unwrap();
+        config.base_url = "https://new.example".into();
+        claims.resources = Some(vec!["https://new.example/mcp".into()]);
+        db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .update_one(
+                doc! {"_id":&claims.jti},
+                doc! {"$set":{"resources":["https://old.example/mcp"]}},
+            )
+            .await
+            .unwrap();
+        assert_invalid(validate_live_grant(&db, &config, &claims).await);
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        validate_live_grant(&db, &config, &claims).await.unwrap();
+        claims.allow_all_nodes = Some(true);
+        assert_invalid(validate_live_grant(&db, &config, &claims).await);
     }
 
     #[tokio::test]
@@ -609,6 +630,7 @@ mod tests {
             "nyxid-assistant",
             "aevatar",
             &authority,
+            &crate::test_utils::test_app_config(),
         ));
         assert!(!grant_matches_claims(
             &grant,
@@ -616,6 +638,7 @@ mod tests {
             "wrong-actor",
             "aevatar",
             &authority,
+            &crate::test_utils::test_app_config(),
         ));
         assert!(!grant_matches_claims(
             &grant,
@@ -623,6 +646,7 @@ mod tests {
             "nyxid-assistant",
             "wrong-receiver",
             &authority,
+            &crate::test_utils::test_app_config(),
         ));
     }
 }

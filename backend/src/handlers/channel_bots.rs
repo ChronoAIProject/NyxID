@@ -886,7 +886,7 @@ pub(crate) async fn create_bot_with_link(
             adapter,
             &bot_id,
             &owner_id,
-            &state.config.base_url,
+            &state.config,
         )
         .await
         .map(|_| ())
@@ -899,6 +899,7 @@ pub(crate) async fn create_bot_with_link(
             &body.bot_token,
             &webhook_url,
             &webhook_secret,
+            &state.config,
         )
         .await
     };
@@ -1466,7 +1467,7 @@ pub(crate) async fn verify_bot_with_adapter(
             adapter,
             &bot.id,
             &bot.user_id,
-            &state.config.base_url,
+            &state.config,
         )
         .await?;
         return Ok(Json(VerifyBotResponse {
@@ -1660,6 +1661,7 @@ pub(crate) async fn verify_bot_with_adapter(
         &bot_token,
         &webhook_url,
         &raw_secret,
+        &state.config,
     )
     .await;
 

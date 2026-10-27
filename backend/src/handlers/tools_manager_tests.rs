@@ -98,6 +98,7 @@ async fn change_test_publication(
         db,
         &observed,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: Vec::new(),
             catalog_base_url: "http://localhost:3001".into(),
             actor: actor.clone(),
             first_party_human: true,
@@ -1105,6 +1106,7 @@ async fn tools_manager_mutations_reject_stale_kind_owner_and_revoked_admin() {
         .unwrap()
         .unwrap();
     let actor = mutations::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: AuditActor::from_auth_user(&test_auth_user(&catalog)),
         first_party_human: true,
@@ -1217,6 +1219,7 @@ async fn tools_manager_mutations_reject_stale_kind_owner_and_revoked_admin() {
         .unwrap()
         .unwrap();
     let admin_authority = mutations::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: AuditActor::from_auth_user(&test_auth_user(&admin)),
         first_party_human: true,
@@ -3207,6 +3210,7 @@ async fn tools_manager_icons_and_operation_fences_recheck_live_authority() {
         actor: actor.clone(),
         first_party_human: true,
         admin_required: false,
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
     };
     assert!(
@@ -4159,6 +4163,7 @@ async fn tools_manager_parent_projection_allows_billing_sync_but_binds_contract(
         .unwrap()
         .unwrap();
     let authority = mutations::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: AuditActor::from_auth_user(&test_auth_user(&admin)),
         first_party_human: true,
@@ -4234,6 +4239,7 @@ async fn tools_manager_operation_description_demotes_one_and_route_demotes_all()
         .unwrap()
         .unwrap();
     let authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(&admin)),
         first_party_human: true,
@@ -4661,6 +4667,7 @@ async fn tools_manager_provider_and_identity_alternate_paths_bind_live_parent_an
         .unwrap()
         .unwrap();
     let authority = mutations::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(
             &catalog,
@@ -4847,6 +4854,7 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
         .await
         .unwrap();
     let authority = mutations::Authority {
+        catalog_base_aliases: Vec::new(),
         catalog_base_url: "http://localhost:3001".into(),
         actor: AuditActor::from_auth_user(&test_auth_user(&manager)),
         first_party_human: true,
