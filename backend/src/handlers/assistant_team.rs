@@ -12,7 +12,7 @@ use axum::{
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, future::Future, pin::Pin, time::Duration};
@@ -175,6 +175,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         attachment_ids: Vec::new(),
         group_request_id: None,
         group_attachments: Vec::new(),
+        automation_parent: None,
         trigger: None,
         conversation_id: Some(conversation_id.to_owned()),
         text: String::new(),
@@ -535,7 +536,30 @@ pub(crate) async fn after_turn(
         super::assistant_group::member_settled(state, row, text, error.map(|error| error.code))
             .await;
     }
+    let direct_handoff = if row.is_subagent() && !row.guest_turn {
+        match Box::pin(crate::services::trigger_schedule::direct::settled(
+            &state.db,
+            owner,
+            &row.id,
+            &turn.turn_id,
+        ))
+        .await
+        {
+            Ok(Some(target)) => {
+                Box::pin(wake(state, owner, &target)).await;
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::debug!(%error,"Direct specialist notification deferred");
+                return;
+            }
+        }
+    } else {
+        false
+    };
     if row.is_subagent()
+        && !direct_handoff
         && !row.guest_turn
         && let Some(target) = match settled_report_target(state, row, turn).await {
             Ok(target) => target,
@@ -963,6 +987,7 @@ pub(crate) async fn assign(
     text: &str,
     report_to: Option<&str>,
     invocation_id: Option<&str>,
+    chat: Option<&ChatAuthority>,
 ) -> AppResult<Started> {
     if agent.user_id != owner {
         crate::services::org_agent_service::require_creation_enabled(&state.db, owner).await?;
@@ -977,6 +1002,24 @@ pub(crate) async fn assign(
         agent,
     ))
     .await?;
+    let automation_parent = if let Some(chat) = chat
+        && let (Some(run_id), Some(turn_id)) = (&chat.trigger_run_id, &chat.turn_id)
+        && state
+            .db
+            .collection::<Document>(crate::models::trigger_run::COLLECTION_NAME)
+            .find_one(doc! {"_id":run_id,"user_id":owner,"continuation_protocol_version":2})
+            .projection(doc! {"_id":1})
+            .await?
+            .is_some()
+    {
+        Some(crate::services::trigger_schedule::direct::Parent {
+            run_id: run_id.clone(),
+            thread_id: chat.conversation_id.clone(),
+            turn_id: turn_id.clone(),
+        })
+    } else {
+        None
+    };
     let limit = team_pool_limit(state, owner).await;
     let note = engine::reporting_channel_length_note(&state.db, owner, report_to).await?;
     start_server_turn(
@@ -993,6 +1036,7 @@ pub(crate) async fn assign(
             attachment_ids: Vec::new(),
             group_request_id: None,
             group_attachments: Vec::new(),
+            automation_parent,
             trigger: None,
             conversation_id: Some(home.id),
             text: text.to_owned(),
@@ -1522,6 +1566,7 @@ async fn dispatch_specialists(
                                 task,
                                 Some(caller),
                                 chat.invocation_id.as_deref(),
+                                Some(chat),
                             ))
                             .await?,
                         ),
@@ -1548,6 +1593,7 @@ async fn dispatch_specialists(
                         text_arg(args, "text"),
                         Some(caller),
                         chat.invocation_id.as_deref(),
+                        Some(chat),
                     ))
                     .await?,
                 ),
@@ -2341,6 +2387,20 @@ async fn dispatch_groups(
                 ));
             }
             let author = team::ensure_nyxbot(db, owner).await?;
+            // Legacy trigger turns keep ordinary best-effort followers. Only a
+            // persisted v2 run may register a completion-barrier source.
+            let automation_run = if let Some(id) = chat.trigger_run_id.as_deref()
+                && db
+                    .collection::<Document>(crate::models::trigger_run::COLLECTION_NAME)
+                    .find_one(doc! {"_id":id,"user_id":owner,"continuation_protocol_version":2})
+                    .projection(doc! {"_id":1})
+                    .await?
+                    .is_some()
+            {
+                Some(id)
+            } else {
+                None
+            };
             // Posting can start member turns and bind uploads. Keep that nested
             // state off the group-tool frame.
             let result = Box::pin(super::assistant_group::post_and_follow(
@@ -2350,19 +2410,19 @@ async fn dispatch_groups(
                 text_arg(args, "text"),
                 Some(&author),
                 caller,
-                chat.trigger_run_id.as_deref(),
+                automation_run,
             ))
             .await;
             let (message, addressed) = match result {
                 Ok(posted) => posted,
                 Err(AppError::Conflict(reason))
-                    if reason == "group_follower_capacity" && chat.trigger_run_id.is_some() =>
+                    if reason == "group_follower_capacity" && automation_run.is_some() =>
                 {
                     crate::services::trigger_schedule::continuation::defer_group_capacity(
                         db,
                         owner,
                         caller,
-                        chat.trigger_run_id.as_deref().unwrap_or_default(),
+                        automation_run.unwrap_or_default(),
                     )
                     .await?;
                     return Ok((
@@ -2844,7 +2904,14 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
                 .filter(|summary| summary.status != "running")
                 .map(|summary| summary.id.clone())
                 .collect();
-            team::consume_settled_events(db, owner, caller, &settled).await?;
+            team::consume_settled_events(
+                db,
+                owner,
+                caller,
+                &settled,
+                chat.trigger_run_id.as_deref(),
+            )
+            .await?;
             return Ok(json!({
                 "settled": summaries.iter().filter(|s| s.status != "running").map(|s| json!({
                     "id": s.id, "name": s.delegation_name(), "status": s.status, "reply": s.last_reply,
@@ -3556,6 +3623,10 @@ pub fn spawn_sweeps(state: AppState) {
                     }
                 }
                 Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
+            }
+            if let Err(error) = crate::services::trigger_schedule::direct::recover(&state.db).await
+            {
+                tracing::debug!(%error,"Direct specialist receipt sweep deferred");
             }
             // Things the owner finished outside the chat queue events first.
             if let Err(error) = super::nyxbot::process_watches(&state).await {

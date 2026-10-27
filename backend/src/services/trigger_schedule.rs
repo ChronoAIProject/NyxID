@@ -2,6 +2,7 @@
 //! and admission fenced in the same transaction as an assistant turn.
 pub mod compute;
 pub mod continuation;
+pub mod direct;
 pub mod result_delivery;
 use super::api_key_mutation_service as transactions;
 use super::assistant_engine_policy as policy;
@@ -43,6 +44,24 @@ pub fn run_id(trigger_id: &str, at: DateTime<Utc>) -> String {
 
 pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
     for (collection, keys, name, ttl) in [
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"run_id":1,"state":1},
+            "direct_handoff_run",
+            false,
+        ),
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"state":1,"retry_at":1,"_id":1},
+            "direct_handoff_retry",
+            false,
+        ),
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"expires_at":1},
+            "direct_handoff_ttl",
+            true,
+        ),
         (WORK, doc! { "at": 1, "_id": 1 }, "trigger_work_due", false),
         (
             WORK,
@@ -270,20 +289,12 @@ pub(crate) async fn insert_run(
         .session(&mut *session)
         .await?;
     let mut run = run.clone();
-    if matches!(trigger.delivery, TriggerDelivery::Assistant { .. }) {
+    if matches!(trigger.delivery, TriggerDelivery::Assistant { .. })
+        && continuation::requires_v2(trigger.continuation_protocol_version)
+    {
         continuation::ready_in_session(db, session).await?;
-        let settings = db
-            .collection::<crate::models::assistant_settings::AssistantSettings>(
-                crate::models::assistant_settings::COLLECTION_NAME,
-            )
-            .find_one(doc! {"_id": &run.user_id})
-            .session(&mut *session)
-            .await?
-            .unwrap_or_else(|| {
-                crate::models::assistant_settings::AssistantSettings::defaults(&run.user_id)
-            });
         run.continuation_protocol_version = 2;
-        run.continuation_limit = settings.max_auto_continuations.clamp(0, 32) as u32;
+        run.continuation_limit = continuation::AUTOMATION_CONTINUATION_LIMIT;
     }
     if outstanding > 0 && trigger.overlap == crate::models::trigger_schedule::OverlapPolicy::Skip {
         run.reason = Some("overlap_skip".into());
@@ -966,7 +977,10 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_paused".into()))?;
-    if matches!(trigger.delivery, TriggerDelivery::Assistant { .. }) {
+    if matches!(trigger.delivery, TriggerDelivery::Assistant { .. })
+        && (continuation::requires_v2(run.continuation_protocol_version)
+            || trigger.continuation_protocol_version >= 2)
+    {
         continuation::ready_in_session(db, session).await?;
         if run.continuation_protocol_version != 2 {
             return Err(AppError::Conflict(

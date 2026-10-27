@@ -671,6 +671,8 @@ pub struct TurnStart {
     pub group_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     pub group_request_id: Option<String>,
     pub trigger: Option<super::trigger_schedule::TurnClaim>,
+    /// Direct specialist notification authority; never a trigger claim.
+    pub automation_parent: Option<super::trigger_schedule::direct::Parent>,
     pub conversation_id: Option<String>,
     pub text: String,
     pub model: Option<String>,
@@ -840,6 +842,7 @@ impl From<&TurnRequest> for TurnStart {
             attachment_ids: request.attachment_ids.clone(),
             group_request_id: None,
             group_attachments: Vec::new(),
+            automation_parent: None,
             trigger: None,
             conversation_id: request.conversation_id.clone(),
             text: request.text.clone(),
@@ -2210,7 +2213,9 @@ pub(crate) async fn begin_owner_turn_in_session(
             session,
         )
         .await?;
-        if !row.coordinator_run_ids.contains(&claim.run_id) {
+        if super::trigger_schedule::continuation::enabled()
+            && !row.coordinator_run_ids.contains(&claim.run_id)
+        {
             row.coordinator_run_ids.push(claim.run_id.clone());
         }
     }
@@ -2889,6 +2894,12 @@ pub(crate) async fn begin_owner_turn_in_session(
         _ => {}
     }
     row.updated_at = now;
+    if let Some(parent) = &start.automation_parent {
+        Box::pin(super::trigger_schedule::direct::register(
+            db, session, parent, &row,
+        ))
+        .await?;
+    }
     Box::pin(super::assistant_service_execution::bind_owner_selection(
         db, session, &row, start, &text,
     ))
@@ -3411,65 +3422,75 @@ pub async fn audit_model_change(
 }
 
 pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
+    request_stop_target(db, user_id, id).await.map(|_| ())
+}
+
+/// Return the exact stopped snapshot for transport cancellation. A lost CAS
+/// never authorizes a caller to stop whichever turn happened to replace it.
+pub async fn request_stop_target(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<Option<AssistantConversation>> {
     let now = Utc::now();
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let existing = get(db, user_id, id).await?;
-    super::trigger_schedule::continuation::cancel_thread(db, &existing).await?;
-    let Some(existing_turn) = existing.active_turn.as_ref() else {
-        return super::async_service_operation::cancel(db, user_id, id).await;
-    };
-    // Rows written before heartbeat support retain the old lease boundary: an
-    // already-expired legacy fence is reclaimed by the next send instead.
-    if existing_turn.heartbeat_at.is_none() && live_turn(&existing, now).is_none() {
-        return super::async_service_operation::cancel(db, user_id, id).await;
-    }
-    let expected_turn_id = existing_turn.turn_id.clone();
-    let row = db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one_and_update(
-            doc! {
-                "_id": id,
-                "user_id": user_id,
-                "active_turn.turn_id": &expected_turn_id,
-            },
-            doc! {"$set": {"active_turn.stop_requested": true}},
-        )
-        .return_document(ReturnDocument::After)
-        .await?;
-    // Fence new submissions before cancelling existing watches. A reserve
-    // racing this update writes the same conversation inside its transaction.
-    super::async_service_operation::cancel(db, user_id, id).await?;
-    let Some(row) = row else {
-        // A concurrent settlement, delete, or new turn won the exact fence.
-        return Ok(());
-    };
-    let Some(turn) = row.active_turn.as_ref() else {
-        return Ok(());
-    };
-    // A legacy row has no worker liveness signal. Keep its historical Stop
-    // behavior: the worker may observe the durable flag, while an absent worker
-    // is reclaimed only by the existing lease/TTL path.
-    let Some(heartbeat) = turn.heartbeat_at else {
-        return Ok(());
-    };
-    let turn_id = turn.turn_id.clone();
-    let delay = if heartbeat <= stale_before {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(STOP_SETTLEMENT_GRACE_SECS)
-    };
-    let db = db.clone();
-    let user_id = user_id.to_owned();
-    let id = id.to_owned();
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        if let Err(error) = force_stop(&db, &user_id, &id, &turn_id).await
-            && !matches!(error, AppError::NotFound(_))
-        {
-            tracing::debug!(conversation_id = %id, turn_id = %turn_id, %error, "Forced assistant stop deferred");
+    let row = if let Some(turn) = &existing.active_turn {
+        // Preserve the pre-heartbeat lease boundary.
+        if turn.heartbeat_at.is_none() && live_turn(&existing, now).is_none() {
+            if let Err(error) = super::async_service_operation::cancel_for_stop(db, &existing).await
+            {
+                tracing::warn!(conversation_id=%id,%error,"Legacy async stop cleanup deferred");
+            }
+            return Ok(None);
         }
-    });
-    Ok(())
+        let Some(row) = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one_and_update(
+                doc! {"_id":id,"user_id":user_id,"active_turn.turn_id":&turn.turn_id},
+                doc! {"$set":{"active_turn.stop_requested":true}},
+            )
+            .return_document(ReturnDocument::After)
+            .await?
+        else {
+            // Settlement or a replacement turn won; do not cancel its work.
+            return Ok(None);
+        };
+        // Schedule actual settlement before fallible automation/watch cleanup.
+        if let Some(turn) = row.active_turn.as_ref()
+            && let Some(heartbeat) = turn.heartbeat_at
+        {
+            let turn_id = turn.turn_id.clone();
+            let delay = if heartbeat <= stale_before {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(STOP_SETTLEMENT_GRACE_SECS)
+            };
+            let db = db.clone();
+            let user_id = user_id.to_owned();
+            let id = id.to_owned();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if let Err(error) = force_stop(&db, &user_id, &id, &turn_id).await
+                    && !matches!(error, AppError::NotFound(_))
+                {
+                    tracing::debug!(conversation_id=%id,turn_id=%turn_id,%error,"Forced assistant stop deferred");
+                }
+            });
+        }
+        row
+    } else {
+        existing
+    };
+    // Auxiliary cleanup must not suppress the persisted Stop, forced settlement,
+    // or the handler's subsequent upstream/machine cancellation attempts.
+    if let Err(error) = super::trigger_schedule::continuation::cancel_thread(db, &row).await {
+        tracing::warn!(conversation_id=%id,%error,"Automation stop cleanup deferred");
+    }
+    if let Err(error) = super::async_service_operation::cancel_for_stop(db, &row).await {
+        tracing::warn!(conversation_id=%id,%error,"Async stop cleanup deferred");
+    }
+    Ok(Some(row))
 }
 
 /// Record that a claimed turn waits for one of its owner's running slots,
@@ -5338,6 +5359,9 @@ pub async fn delete(
                         )
                         .await?;
                     }
+                    Box::pin(super::trigger_schedule::continuation::delete_thread_in_session(
+                        db,user_id,id,session,
+                    )).await?;
                     // Revoke the conversation's key and ciphertext in this transaction.
                     let credential = db
                         .collection::<bson::Document>(

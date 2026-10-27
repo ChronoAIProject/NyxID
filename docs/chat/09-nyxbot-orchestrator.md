@@ -346,27 +346,33 @@ deterministic event ID deduplicates retries. Expiry produces no queued summary.
 
 Ordinary follower wake-ups use the ordinary event-hour and streak guards. For an
 automation coordinator, the server carries the exact `trigger_run_id` from live
-chat authority into the follower and its v2 event. A completion barrier fenced
-against concurrent follower registration keeps that run waiting while its
+chat authority into the follower and its v2 event. Direct specialist assignments
+also register a durable parent-run handoff without granting coordinator
+authority to the specialist. A completion barrier
+fenced against concurrent handoff registration keeps the run waiting while its
 attributable work remains. Wake claims the run's work lease and starts an
 `origin: event` turn with an internal continuation `TurnClaim`, admitted against
 the exact owner/run/thread/event and existing live security and generation fences.
 It drains only that run's v2 events; other runs and ordinary notices stay queued.
 Trigger-bound events and followers cannot be evicted to admit ordinary notices.
 
-Each coordinator continuation atomically debits both its immutable per-run
-allowance and the persisted owner's hourly/daily trigger budget. Ordinary event
-budgets remain independent. Temporary owner-budget exhaustion waits for the next
+Each coordinator continuation atomically debits both its independent immutable
+per-run allowance (32 for new or migrated runs) and the persisted owner's
+hourly/daily trigger budget.
+The engine setting `max_auto_continuations=0` does not disable an automation wait.
+Ordinary event budgets remain independent. Temporary owner-budget exhaustion waits for the next
 applicable UTC reset, bounded by `coordinator_deadline` (one hour after the
 dispatch/grace deadline, capped by retention). Deadline/allowance exhaustion
 records `coordinator_timeout`/`continuation_limit_exceeded`; confirmation waits
 keep their acknowledgement decision/expiry flow and resume as trigger turns
-without another occurrence-budget or coordinator-allowance charge. Stop and
-terminal cleanup reject late handoffs and continuation admission.
+without another occurrence-budget or coordinator-allowance charge. The run's
+own Stop and terminal cleanup reject late handoffs and continuation admission;
+an unrelated active-turn Stop on a shared home thread preserves waiting runs.
 
-This requires the continuation-v2 flag, durable migration marker and an operator
-drain after upgrading every replica/worker; neither flag nor marker proves old
-workers stopped. Existing assistant schedule/webhook runs must be classified
+Legacy assistant creation, editing and execution remain available with the flag
+off. New continuation-v2 waits require the flag, durable migration marker and an
+operator drain after upgrading every replica/worker; neither flag nor marker
+proves old workers stopped. Existing assistant schedule/webhook runs must be classified
 before admission resumes, and rollback requires draining or stopping all bound
 work with upgraded code. Follow the [NyxBot schedules runbook](../NYXBOT_SCHEDULES.md#coordinator-completion-and-continuation-v2-operations).
 Transcript lines are rendered with indented continuations so

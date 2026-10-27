@@ -1556,19 +1556,24 @@ at creation, turn admission and recovery after deletion.
 
 `ActiveTurn.trigger_run_id` connects settlement and confirmations to metadata-only
 run history. The server also derives this identity in `ChatAuthority`, group
-followers and their queued events. Group-post registration and the completion
-barrier transaction fence the thread/run handoff versions, so settlement cannot
+followers, direct specialist assignments and their queued result events. A child
+specialist retains separate execution authority from its parent coordinator.
+Group-post registration and the completion barrier transaction fence the
+thread/run handoff versions, so settlement cannot
 complete from a stale snapshot while a follower is registered. Notification keeps
 the follower under a reclaimable, fenced lease; deterministic run-qualified event
 IDs deduplicate replay, and queue acceptance commits with follower removal.
 Trigger-bound followers and events are protected from ordinary capacity eviction.
-Stop and terminal cleanup fence late notification and continuation admission.
+Stop of the automation coordinator and terminal cleanup fence late notification
+and continuation admission. An unrelated active-turn Stop on the same home
+thread must leave waiting runs intact; automation cleanup cannot block Stop.
 
-A settled coordinator with an attributable follower or event stays
-`waiting(coordinator)` until its exact thread consumes the replies and reaches a
+A settled coordinator with an attributable follower, direct assignment or event
+stays `waiting(coordinator)` until its exact thread consumes the replies and reaches a
 final result. Each admitted coordinator event continuation atomically consumes
-the run's snapshotted allowance (0–32) and the persisted owner trigger hourly/daily
-budget. Ordinary event-hour and streak guards retain their separate budgets and
+the run's independent snapshotted allowance (32 for new or migrated runs) and the persisted owner trigger
+hourly/daily budget; `max_auto_continuations=0` does not disable these handoffs.
+Ordinary event-hour and streak guards retain their separate budgets and
 admission path. The run's continuation count, limit and protocol version persist
 across restart. Confirmation requests copy the run identity and active turn ID;
 automation settlement keeps the run waiting until cards are decided, scheduling
@@ -1604,8 +1609,11 @@ exhaustion records `coordinator_timeout` or `continuation_limit_exceeded`.
 Confirmation waits retain their card-expiry/decision semantics rather than
 inheriting the coordinator bound.
 
-Continuation v2 requires every replica/worker upgraded, an operator drain of both
-schedule and assistant-webhook ingress and old workers, the durable
+With the v2 flag off, legacy assistant creation, editing, schedule dispatch and
+ordinary webhooks retain their existing behavior. Persisted v2 work never
+downgrades to this legacy path. Continuation v2 requires every replica/worker
+upgraded, an operator drain of both schedule and assistant-webhook ingress and
+old workers, the durable
 `trigger_migrations/continuation-v2.completed_at` marker, and
 `AUTOMATION_CONTINUATION_V2_ENABLED=true`. The flag and marker do not attest that
 old workers were stopped. Migration classifies existing schedule/webhook runs,

@@ -1262,9 +1262,16 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    engine::request_stop(&state.db, &user_id, &id).await?;
-    super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id).await?;
-    super::machine_cancel::conversation(&state, &user_id, &id).await?;
+    let target = engine::request_stop_target(&state.db, &user_id, &id).await?;
+    let watches =
+        super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id).await;
+    let machines = if let Some(target) = target {
+        crate::services::machine_service::cancel_stopped_turn(&state, &target).await
+    } else {
+        Ok(())
+    };
+    watches?;
+    machines?;
     Ok(StatusCode::NO_CONTENT)
 }
 

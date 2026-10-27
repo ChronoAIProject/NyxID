@@ -514,6 +514,48 @@ pub async fn cancel(db: &Database, user: &str, id: &str) -> AppResult<()> {
     }).await.map_err(transactions::map_transaction_error)
 }
 
+/// Stop the current turn's watches without cancelling another waiting run in
+/// the same home thread. Idle Stop retains conversation-wide watch semantics.
+pub async fn cancel_for_stop(db: &Database, saved: &AssistantConversation) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let saved = saved.clone();
+    session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<()> = Box::pin(async {
+            let mut thread = doc! {"_id":&saved.id,"user_id":&saved.user_id};
+            let mut filter = doc! {"user_id":&saved.user_id,"conversation_id":&saved.id,
+                "state":{"$in":["submitting","waiting","ready","queued"]}};
+            if let Some(turn) = &saved.active_turn {
+                // Only this stopped turn (or its own run) is in scope. Even if
+                // force-stop already settled it, a new turn has different IDs.
+                let mut scopes = vec![doc! {"turn_id":&turn.turn_id}];
+                if let Some(run) = &turn.trigger_run_id { scopes.push(doc! {"delivery.trigger_run_id":run}); }
+                filter.insert("$or",scopes);
+            } else {
+                thread.insert("active_turn",bson::Bson::Null);
+                if db.collection::<bson::Document>(CONVERSATIONS).update_one(thread,
+                    doc! {"$inc":{"async_operation_generation":1_i64}}).session(&mut *session).await?.matched_count != 1 {
+                    return Ok(());
+                }
+            }
+            let mut cursor = db.collection::<AsyncServiceOperation>(WATCHES).find(filter.clone())
+                .session(&mut *session).await?;
+            let watches: Vec<AsyncServiceOperation> = cursor.stream(&mut *session).try_collect().await?;
+            let ids: Vec<String> = watches.into_iter().map(|watch|watch.id).collect();
+            db.collection::<bson::Document>(WATCHES).update_many(filter,
+                doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"state":"cancelling",
+                    "result_encrypted":null,"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}})
+                .session(&mut *session).await?;
+            db.collection::<bson::Document>(CONVERSATIONS).update_one(
+                doc! {"_id":&saved.id,"user_id":&saved.user_id},
+                doc! {"$pull":{"pending_events":{"kind":EVENT_KIND,"id":{"$in":ids}}}},
+            ).session(session).await?;
+            Ok(())
+        }).await;
+        transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)
+}
+
 /// Record the attempt before dispatch. A crash leaves a durable unknown outcome
 /// on the root receipt, and a reclaimed lease must never repeat that RPC.
 pub async fn begin_tracked_cancellation(

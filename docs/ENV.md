@@ -640,6 +640,19 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 
 Webhook-target dedup uses durable delivery records. Agent and notification targets use fenced claims in the shared MongoDB coordination collection. `CHANNEL_EVENT_DEDUP_TTL_SECS` controls how long a successful event ID remains deduplicated.
 
+## Automation coordinator continuations
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTOMATION_CONTINUATION_V2_ENABLED` | `false` | Exact `true` enables new v2 coordinator waits after the durable `trigger_migrations/continuation-v2.completed_at` marker exists. With the flag off, legacy assistant creation, editing, schedules, ordinary webhooks and confirmation continuations remain available. Persisted v2 runs still require v2 readiness; disabling the flag never downgrades their authority or protocol. |
+| `AUTOMATION_CONTINUATION_V2_MIGRATE_DRAIN_STARTED_AT` | *(unset)* | One-shot startup mode: RFC3339 UTC time when the operator finished draining old writers. Requires the flag off, at least 60 seconds (two work-lease intervals) elapsed, and no live work lease. Runs fenced migration against the configured database and exits before normal workers start. Clear after use. |
+| `AUTOMATION_CONTINUATION_V2_CHECK_ROLLBACK` | `false` | Exact `true` runs the rollback drain check and exits before normal workers start. Refuses while nonterminal v2 runs or bound handoff work remain. It does not stop workers, cancel work or revert data. Clear after use. |
+
+The release operator must pause admission and stop old writers externally; the
+feature flag is not a maintenance switch or proof that writers have drained.
+Never set both one-shot mode variables together: rollback-check mode takes
+precedence. See the ordered [activation and rollback runbook](NYXBOT_SCHEDULES.md#coordinator-completion-and-continuation-v2-operations).
+
 ## Mobile Push Notifications (Optional)
 
 | Variable | Default | Description |
