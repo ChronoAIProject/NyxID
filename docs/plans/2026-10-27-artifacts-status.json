@@ -13,8 +13,8 @@
   "opus_session_id": null,
   "sol_implementer_id": "01a17afe-64ad-7ed1-bd1f-8b75d719d9f9",
   "sol_session_id": "01a17afe-64ad-7ed1-bd1f-8b98e1a1ec1a",
-  "current_commit": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
-  "implementation_gate": "BACKEND_VALIDATION_HOLD",
+  "current_commit": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+  "implementation_gate": "LOCAL_VALIDATION_COMPLETE_COMBINED_ACCEPTANCE_OPEN",
   "shared_contract_changes": [
     "Defaulted flattened generated metadata on AssistantAttachment/TurnAttachment includes source_turn_id; AsyncServiceOperation adds artifact_mode, artifact_result, artifact_event_turn_id. AttachmentResponse exposes safe filename/source/result_version/preview_kind/expiry only.",
     "New encrypted async_service_operation_artifacts collection keyed by watch/source-result identity/artifact index, with a BSON-under-16-MiB proof for encrypted 8 MiB rows.",
@@ -29,10 +29,8 @@
     "Read-only overlap assessment confirms generated-artifact provenance/event binding remains separate from protocol-v2 trigger continuation and Stop state; combined acceptance must prove coexistence and cancellation ordering."
   ],
   "open_acceptance": [
-    "Backend compilation, focused Rust tests, and all-target warnings-denied Clippy are pending explicit coordinator release of the Artifacts resource hold. No Cargo/rustc/build/backend-test command has been launched or queued in this worktree.",
-    "The prior backend diagnostics and all new route, malformed-status, reservation, BSON, lifecycle, retention, and authorization regressions remain unexecuted on the current source tip.",
-    "Combined Automation\u2013Artifacts acceptance is open for applicable rows I-01\u2013I-05 and I-07; I-06 belongs to Permissions/Automation. Exact event selection, trigger isolation, Stop ordering, production-router credentials and recovery effects must be demonstrated on an integrated tip.",
-    "Authorized live Sandbox-to-originating-Web-chat acceptance has not run. Fixture browser and mounted-router tests are separate evidence."
+    "Combined Automation–Artifacts acceptance is open for applicable rows I-01–I-05 and I-07; I-06 belongs to Permissions/Automation. Exact event selection, trigger isolation, Stop ordering, production-router credentials and recovery effects must be demonstrated on an integrated tip.",
+    "Authorized live Sandbox-to-originating-Web-chat acceptance has not run. Fixture browser and mounted-router tests are separate evidence; no deployed feature build or live credential/result authority is available."
   ],
   "evidence": {
     "issue": "Issue body read; no comments returned.",
@@ -78,12 +76,38 @@
         "scope": "all 44 changed Rust files, including A-002, A-003 and arbitrary-length range-position follow-up"
       },
       "backend": {
-        "status": "not_compiled_or_tested_after_changes",
-        "reason": "active coordinator resource hold",
+        "status": "passed_local_validation",
+        "compile": {
+          "command": "CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test --manifest-path backend/Cargo.toml generated_artifacts --no-run",
+          "metadata": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.json",
+          "log": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.log",
+          "argv": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.argv.log",
+          "exit_code": 0,
+          "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+          "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+          "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
+          "minimum_free_gib": 12.013,
+          "disk_guard_stopped": false
+        },
+        "regression_summary": "/tmp/nyxid-artifacts-2037-validation-3a2c9c996-20261027T112816Z.json",
+        "clippy": {
+          "command": "CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo clippy --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' --manifest-path backend/Cargo.toml --all-targets -- -D warnings",
+          "metadata": "/tmp/nyxid-artifacts-2037-clippy-3a2c9c996-20261027T112121Z.json",
+          "log": "/tmp/nyxid-artifacts-2037-clippy-3a2c9c996-20261027T112121Z.log",
+          "argv": "/tmp/nyxid-artifacts-2037-clippy-3a2c9c996-20261027T112121Z.argv.log",
+          "exit_code": 0,
+          "warnings_denied": true,
+          "actual_config_reached_cargo_child": true,
+          "minimum_free_gib": 13.858,
+          "disk_guard_stopped": false
+        },
         "database_url": "mongodb://127.0.0.1:29237/?replicaSet=artifacts2037",
         "database_isolation": "managed unique test databases",
         "required_threads": 1,
-        "required_cargo_config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml"
+        "nofile": 65536,
+        "required_cargo_config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "resource_config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+        "validation_summary": "/tmp/nyxid-artifacts-2037-validation-3a2c9c996-20261027T112816Z.json"
       },
       "prettier": {
         "status": "passed",
@@ -94,57 +118,102 @@
         "command": "git diff --check"
       },
       "A-002": {
-        "status": "prepared_not_run",
-        "reason": "active coordinator backend resource hold; no Cargo/rustc/build/backend-test command launched or queued",
+        "status": "passed",
         "tests": [
           "generated_summary_selects_metadata_and_discards_process_streams",
           "generated_artifact_persisted_summary_and_input_context_exclude_process_streams"
         ],
-        "coverage": "Path/content/secret markers excluded from parsed and persisted decrypted summary, admitted Event model context, and older saved generated-summary context; exact metadata shape, wire type, body bound and legacy handling preserved."
+        "metadata": [
+          "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-02-20261027T113321Z.json",
+          "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-03-20261027T113324Z.json"
+        ],
+        "logs": [
+          "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-02-20261027T113321Z.log",
+          "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-03-20261027T113324Z.log"
+        ],
+        "exit_code": 0,
+        "exactly_one_test_each": true,
+        "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+        "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+        "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
+        "assertions": "stdout/stderr/file paths and secrets do not enter parsed/persisted summary or model context."
       },
       "A-003": {
-        "status": "prepared_not_run",
-        "reason": "active coordinator backend resource hold; no Cargo/rustc/build/backend-test command launched or queued",
-        "test": "generated_artifact_worker_fences_lifecycle_version_across_result_fetch",
-        "coverage": "Version 1->2, 1->absent and absent->1 reject with no artifact/attachment rows, manifest or encrypted summary. Stable 1->1, 2->2 and absent->absent preserve canonical byte identity and diagnostic version. All cases assert exact operation-scoped one-result/two-status calls. Parser also rejects malformed present version values."
+        "status": "passed",
+        "test": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_worker_fences_lifecycle_version_across_result_fetch",
+        "metadata": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-04-20261027T113328Z.json",
+        "log": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-04-20261027T113328Z.log",
+        "argv": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-04-20261027T113328Z.argv.log",
+        "exit_code": 0,
+        "exactly_one_test_passed": true,
+        "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+        "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+        "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
+        "assertions": "lifecycle version changed/added/removed rejects before persistence; stable versions preserve identity and diagnostic version."
       },
       "rust_correction": {
         "status": "passed",
         "command": "rustfmt --edition 2024 --config skip_children=true --check backend/src/handlers/async_service_operation_tests.rs backend/src/handlers/async_service_operations.rs backend/src/handlers/generated_artifact_delivery_tests.rs backend/src/services/generated_artifacts/tests.rs; git diff --check",
         "result": "Both direct rustfmt and diff hygiene passed; no Cargo/rustc/build/test/Clippy command was launched or queued under the hold.",
-        "commit": "91ef35238a0e81f46628fd377d3d7f6a74c9b08c"
+        "commit": "91ef35238a0e81f46628fd377d3d7f6a74c9b08c",
+        "execution_note": "Source correction was rebuilt; affected regression and Clippy passed on 3a2c9c996."
       },
       "production_router_regression": {
-        "status": "prepared_not_run",
-        "test": "generated_artifact_production_routes_enforce_owner_bytes_and_recovery_lineage",
-        "route": "build_router_with_state(state.clone()) then private.with_state(state.clone()); GET /api/v1/assistant/nyxagent/conversations/{conversation_id}/attachments/{attachment_id} and POST /api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/artifact-delivery",
-        "credential": "signed first-party owner access token against completed/idle conversation; no AuthUser injection",
-        "assertions": "exact 206 range bytes/content-range/content-type/filename; anonymous/foreign/expired/delegated/API-key/service-account/relay rejection; empty-body recovery uses server-written association and no Sandbox resubmission; non-empty recovery rejected",
-        "reason": "backend execution hold"
+        "status": "passed",
+        "test": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_production_routes_enforce_owner_bytes_and_recovery_lineage",
+        "metadata": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-01-20261027T113316Z.json",
+        "log": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-01-20261027T113316Z.log",
+        "argv": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-01-20261027T113316Z.argv.log",
+        "exit_code": 0,
+        "exactly_one_test_passed": true,
+        "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+        "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+        "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
+        "assertions": "real build_router_with_state/private.with_state mounted route; signed first-party owner credential on completed/idle conversation; exact range bytes and composed headers; credential/rejection/no-disclosure/recovery/no-resubmission fences."
       },
       "malformed_status_regression": {
-        "status": "prepared_not_run",
-        "test": "generated_artifact_malformed_status_is_terminal_before_or_after_result_fetch",
-        "assertions": "admitted malformed initial and post-result successful JSON terminalize artifact_invalid; initial makes zero result calls; post-result fetches result once; later sweep makes no repeat fetch or materialization; ordinary async remains waiting with its existing ValidationError/defer semantics",
-        "reason": "backend execution hold"
+        "status": "passed",
+        "test": "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_malformed_status_is_terminal_before_or_after_result_fetch",
+        "metadata": "/tmp/nyxid-artifacts-2037-regression-malformed-3a2c9c996-20261027T112046Z.json",
+        "log": "/tmp/nyxid-artifacts-2037-regression-malformed-3a2c9c996-20261027T112046Z.log",
+        "argv": "/tmp/nyxid-artifacts-2037-regression-malformed-3a2c9c996-20261027T112046Z.argv.log",
+        "exit_code": 0,
+        "exactly_one_test_passed": true,
+        "default_stack": true,
+        "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+        "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+        "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
+        "assertions": "admitted malformed initial/post-result status terminalizes artifact_invalid; initial has zero result calls; post-result fetches once; later sweep has no repeat fetch/materialization; ordinary async remains waiting."
       },
       "reservation_and_bson_regressions": {
-        "status": "prepared_not_run",
+        "status": "passed_carried_forward",
         "tests": [
           "generated_artifact_worker_reservation_spans_persist_and_releases_on_error",
           "generated_artifact_worker_reserves_shared_budget_before_result_body_and_releases_on_cancel",
           "maximum_encrypted_pending_document_fits_bson_and_rejects_oversize"
         ],
         "assertions": "shared byte budget reservation stays held through decode/encryption/persist and owner response body lifetime; weighted reservation is 2 * payload bytes; encrypted maximum 8 MiB row plus metadata is below 16 MiB BSON and oversize is rejected",
-        "reason": "backend execution hold"
+        "reason": "backend execution hold",
+        "batch_summary": "/tmp/nyxid-artifacts-2037-focused-8544ce193-batch-20261027T105658Z.json",
+        "verified_batch": "/tmp/nyxid-artifacts-2037-focused-8544ce193-batch-20261027T105658Z.verified.json",
+        "note": "These tests were executed on 8544ce193 and carried forward because 3a2c9c996 changes only the async fixture condition; source/binary identity and assertions are unchanged.",
+        "executed_source_head": "8544ce1934251e3bc1abd223014af8c76375397d",
+        "executed_source_digest_sha256": "b571a3cb781a45de2ae0a8518917c6f98d0c8e78d4ac4634b37d52c0157346dc",
+        "executed_binary_sha256": "58a90e02f55dbba3dc925ca23f85e6ec2050a105b1a932b737c58c34ed46600b",
+        "carried_forward_to_source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+        "carried_forward_reason": "3a2c9c996 changes only the async fixture condition that Clippy identified; these tests and production code are unchanged, and their original source/binary metadata remains authoritative."
       },
       "header_contract_regression": {
-        "status": "passed_lightweight_only",
+        "status": "passed_current_tip",
         "commit": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
         "test": "generated_artifact_production_routes_enforce_owner_bytes_and_recovery_lineage",
-        "assertions": "Mounted owner response now asserts exact Content-Length, Accept-Ranges, Cache-Control, X-Content-Type-Options, CSP and generated Content-Disposition in addition to status/range/type/body.",
+        "assertions": "Current-tip mounted production-router test passed exact Content-Length, Accept-Ranges, Cache-Control, X-Content-Type-Options, CSP and generated Content-Disposition.",
         "command": "rustfmt --edition 2024 --config skip_children=true --check backend/src/handlers/generated_artifact_delivery_tests.rs; git diff --check",
-        "reason": "No Cargo/rustc/backend test/build/check/Clippy command under coordinator hold."
+        "reason": "No Cargo/rustc/backend test/build/check/Clippy command under coordinator hold.",
+        "current_tip": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+        "metadata": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-01-20261027T113316Z.json",
+        "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+        "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce"
       }
     },
     "user_amendment": "Astra-Sol personal implementation; Opus gates superseded. No reviewer or subagent created, called or awaited.",
@@ -172,8 +241,9 @@
     "live_acceptance": {
       "status": "open",
       "journey_run": false,
-      "blocking_state": "Backend implementation build/test window held. No verified feature build deployed for this journey. In-app browser skill requires Node REPL js/browser-client; available tool inventory has no Node REPL js or tool_search. No alternative browser transport used.",
-      "account_authentication_status": "not determined; no live navigation attempted"
+      "blocking_state": "No authorized live Sandbox-to-originating-Web journey or deployed feature build; local backend/frontend/fixture validation is complete.",
+      "account_authentication_status": "not determined; no live navigation attempted",
+      "local_validation_complete": true
     },
     "personal_source_inspection": {
       "status": "SOURCE_REVIEW_COMPLETE",
@@ -192,7 +262,8 @@
           "finding": "Malformed successful Sandbox status JSON was previously mapped to ordinary ValidationError/defer behavior, allowing an admitted artifact watch to retry until its deadline.",
           "resolution": "Admitted generated-artifact initial and post-result parse failures now settle artifact_invalid; ordinary async initial parse retains ValidationError and sweep retry semantics. The post-result path preserves transport/5xx retry, expiry, claim fences and reservation release.",
           "regression": "generated_artifact_malformed_status_is_terminal_before_or_after_result_fetch",
-          "state": "RESOLVED_AFTER_SOURCE_REVIEW_execution_pending"
+          "state": "RESOLVED_AFTER_SOURCE_REVIEW_AND_LOCAL_VALIDATION",
+          "evidence": "/tmp/nyxid-artifacts-2037-regression-malformed-3a2c9c996-20261027T112046Z.json"
         }
       ],
       "automation_overlap_review": {
@@ -204,19 +275,19 @@
         "materializing_state": "cleanup-only and unreachable because attachment insert plus pending-to-materialized transition are one transaction",
         "combined_test_obligation": "exercise coexistence, exact event selection, Stop cancellation, and no trigger recovery/materialization after sibling integration"
       },
-      "current_tip": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
+      "current_tip": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
       "production_router_review": {
-        "state": "RESOLVED_AFTER_SOURCE_REVIEW_execution_pending",
+        "state": "RESOLVED_AFTER_SOURCE_REVIEW_AND_LOCAL_VALIDATION",
         "test": "generated_artifact_production_routes_enforce_owner_bytes_and_recovery_lineage",
-        "evidence": "Uses build_router_with_state/private.with_state, actual assistant_nyxagent routes, signed first-party owner JWT on completed/idle conversation, exact range bytes and empty-body server-associated recovery; no AuthUser injection or legacy route broadening.",
-        "current_tip": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
+        "evidence": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-batch-20261027T113316Z.json",
+        "current_tip": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
         "header_correction": "Exact composed response headers are asserted; no runtime route change."
       },
       "legacy_route_regression": {
         "state": "REVERTED_AND_VERIFIED",
         "evidence": "assistant_uploads.rs remains SHA-256 a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83; thread_image continues uploads::chat_bytes and attachment/range behavior."
       },
-      "execution_claim": "No backend compilation, test, check or Clippy execution is claimed; held regressions are prepared only."
+      "execution_claim": "Required local backend validation is complete on the exact current tip; combined I-01–I-05/I-07 and live Sandbox-to-Web acceptance remain open."
     },
     "sol_runtime_settings_latest": {
       "agent_id": "01a17afe-64ad-7ed1-bd1f-8b75d719d9f9",
@@ -230,14 +301,36 @@
       "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts",
       "status_observed_via": "heca_agent_status",
       "state": "idle",
-      "observed_at": "2026-10-27T08:29:45Z"
+      "observed_at": "2026-10-27T11:34:42Z",
+      "observed_via": "heca_agent_status"
+    },
+    "backend_validation": {
+      "status": "LOCAL_VALIDATION_COMPLETE",
+      "source_head": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+      "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
+      "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
+      "binary_identity": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.binary.json",
+      "summary": "/tmp/nyxid-artifacts-2037-validation-3a2c9c996-20261027T112816Z.json",
+      "compile": "/tmp/nyxid-artifacts-2037-compile-3a2c9c996-20261027T111024Z.json",
+      "malformed_regression": "/tmp/nyxid-artifacts-2037-regression-malformed-3a2c9c996-20261027T112046Z.json",
+      "clippy": "/tmp/nyxid-artifacts-2037-clippy-3a2c9c996-20261027T112121Z.json",
+      "current_tip_batch": "/tmp/nyxid-artifacts-2037-final-current-tip-3a2c9c996-batch-20261027T113316Z.json",
+      "config_path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+      "target_dir": "/Users/chronoai/Desktop/projects/nyxid/target",
+      "build_jobs": 2,
+      "mongo": "mongodb://127.0.0.1:29237/?replicaSet=artifacts2037",
+      "test_threads": 1,
+      "nofile": 65536,
+      "owned_processes_remaining": 0,
+      "disk_guard_stopped": false
     }
   },
-  "implementation_status": "Reviewed source tip 47a2f3f1845b1896e172e68ec077bb8270ee2e33, composed from candidate 9886d2620d69ec456f3c1fd814ec12aa972ee2cc plus prerequisite 5b44175af5d69af272200a2fc7f374d4b10355f2. Astra source review is complete after the malformed-status, production-router, reservation-lifetime and legacy-regression corrections; direct rustfmt and git diff --check are complete. Backend execution, combined I-01\u2013I-05/I-07 acceptance and live Sandbox-to-Web acceptance remain open, so ASTRA_IMPLEMENTATION_APPROVED is not recorded.",
-  "updated_at": "2026-10-27T08:29:45Z",
+  "implementation_status": "Reviewed and locally validated source tip 3a2c9c996a756ed4f58673c122a6d4775f0e66b7, composed from candidate 9886d2620d69ec456f3c1fd814ec12aa972ee2cc plus prerequisite 5b44175af5d69af272200a2fc7f374d4b10355f2. Astra personally reviewed the complete implementation and the bounded Clippy correction; required rebuild, malformed-status regression, current-tip router/process-stream/lifecycle regressions, focused generated-artifact regressions, and all-target warnings-denied Clippy passed with exact source/binary identities. Combined I-01–I-05/I-07 acceptance and live Sandbox-to-Web acceptance remain open, so ASTRA_IMPLEMENTATION_APPROVED is not recorded.",
+  "updated_at": "2026-10-27T11:34:42Z",
   "resource_hold": {
-    "active": true,
-    "explicit_release_received": false,
+    "active": false,
+    "explicit_release_received": true,
     "terminated_pids_confirmed_absent": [
       99540,
       15898,
@@ -254,11 +347,11 @@
       "frontend checks",
       "fixtures",
       "documentation",
-      "test preparation"
+      "backend validation completed"
     ],
     "latest_artifacts_worktree_cargo_rustc_processes": [],
     "other_worktree_processes_left_untouched": "Cargo/rustc observed under the nyxid-permissions coordinator runner; left untouched.",
-    "designated_retry_stream": "Telegram only; artifacts remains HOLD",
+    "designated_retry_stream": "Released after Artifacts validation; no owned Cargo/rustc process remains",
     "required_cargo_config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
     "required_cargo_argument_order": "cargo --config <required_cargo_config> <subcommand>",
     "resource_config_observed": {
@@ -281,26 +374,30 @@
         }
       }
     },
-    "resource_config_sha256": "b2c2c52277e36fde7ab2b01ea7746e9fdcd811e8eba833ebccefc748439fd277",
+    "resource_config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
     "independent_profile_changes_or_extra_flags": false,
     "stream_cleanup_authorized": false,
-    "coordinator_reported_recovery": "Fourth exact cleanup reclaimed 16.49 GiB; 23.40 GiB free. This is not release of the artifacts window."
+    "coordinator_reported_recovery": "Fourth exact cleanup reclaimed 16.49 GiB; 23.40 GiB free. This is not release of the artifacts window.",
+    "released_at": "2026-10-27T11:34:42Z",
+    "release_basis": "Required compile, focused regressions and warnings-denied Clippy completed; all owned process groups exited; no additional validation jobs queued.",
+    "latest_validation_record": "/tmp/nyxid-artifacts-2037-validation-3a2c9c996-20261027T112816Z.json",
+    "historical_hold_note": "Earlier backend hold and resource recovery remain historical; they did not waive any checks."
   },
   "findings_addressed_in_source": {
-    "range_policy": "206 for one satisfiable range; 416 with bytes */size only for a valid unsatisfiable single range; unsupported/malformed/multi-header/multi-range ignored with 200. Arbitrary-length decimal positions use saturating arithmetic plus full decimal ordering, so huge starts are unsatisfiable and huge ends/suffixes remain satisfiable. Focused parser and owner-response cases prepared, unrun.",
-    "delivery_lineage_idempotence": "Exact saved event/watch/operation/source/original-turn/attachment lineage; unique watch/event identity, setOnInsert and typed exact readback. Duplicate settlement and conflicting lineage cases prepared.",
-    "transaction_reads": "Retention policy singleton and generated attachment metadata are read/fenced in the materialization/recovery session. Recovery fences conversation/watch/message state; tests cover abort rollback and nonterminal source refusal.",
-    "legacy_http": "Generated safe filename/disposition/octet-stream policy is scoped by origin. Tool documents, actual user text/image uploads and tool PNG/JPEG retain stored MIME plus exact inline. Regression and generated active-content response cases prepared.",
-    "audit": "Fixed-name assistant_mcp_tool_call request audit for direct MCP, wrapped MCP and HTTP; event data contains only tool_name/outcome/transport. Actor attribution uses existing audit service. Refusal audit test prepared.",
-    "storage_module": "Exactly one pub(crate) mod storage declaration at module top; GeneratedArtifact dispatch in verify/migrate matches. Both operator walk and finding lookup reserve shared budget and use a one-row generated-artifact batch. Compilation pending.",
-    "effective_expiry": "Association derives its deadline from persisted attachment expiry; recovery preserves the minimum and checks live retention/tombstones. History marks live-retention expiry. Shorter-normal-retention regression prepared.",
-    "native_owner_policy": "Direct and wrapped recovery share Change acknowledgement policy. Tool schema remains empty (maxProperties 0); approval uses server-written continuation/card and original initiating message. No client/model lineage IDs accepted. Integration case prepared.",
+    "range_policy": "206 for one satisfiable range; 416 with bytes */size only for a valid unsatisfiable single range; unsupported/malformed/multi-header/multi-range ignored with 200. Arbitrary-length decimal positions use saturating arithmetic plus full decimal ordering, so huge starts are unsatisfiable and huge ends/suffixes remain satisfiable. Focused parser and owner-response cases prepared, unrun. Focused owner/range tests passed on the carried-forward source identity.",
+    "delivery_lineage_idempotence": "Exact saved event/watch/operation/source/original-turn/attachment lineage; unique watch/event identity, setOnInsert and typed exact readback. Duplicate settlement and conflicting lineage cases prepared. Focused lifecycle/lineage/recovery tests passed.",
+    "transaction_reads": "Retention policy singleton and generated attachment metadata are read/fenced in the materialization/recovery session. Recovery fences conversation/watch/message state; tests cover abort rollback and nonterminal source refusal. Focused materialization/recovery tests passed.",
+    "legacy_http": "Generated safe filename/disposition/octet-stream policy is scoped by origin. Tool documents, actual user text/image uploads and tool PNG/JPEG retain stored MIME plus exact inline. Regression and generated active-content response cases prepared. Current-tip mounted/legacy tests passed.",
+    "audit": "Fixed-name assistant_mcp_tool_call request audit for direct MCP, wrapped MCP and HTTP; event data contains only tool_name/outcome/transport. Actor attribution uses existing audit service. Refusal audit test prepared. Affected tests and warnings-denied Clippy passed.",
+    "storage_module": "Exactly one pub(crate) mod storage declaration at module top; GeneratedArtifact dispatch in verify/migrate matches. Both operator walk and finding lookup reserve shared budget and use a one-row generated-artifact batch. Compilation passed on current tip.",
+    "effective_expiry": "Association derives its deadline from persisted attachment expiry; recovery preserves the minimum and checks live retention/tombstones. History marks live-retention expiry. Shorter-normal-retention regression prepared. Focused retention tests passed on the carried-forward source identity.",
+    "native_owner_policy": "Direct and wrapped recovery share Change acknowledgement policy. Tool schema remains empty (maxProperties 0); approval uses server-written continuation/card and original initiating message. No client/model lineage IDs accepted. Integration case prepared. Current-tip mounted route/recovery test passed.",
     "A-002": {
       "state": "RESOLVED_AFTER_INSPECTION",
       "finding": "Generated-artifact stdout/stderr can contain file names, paths, bytes or secrets and must not enter model context.",
       "fix": "Parser validates and discards stdout/stderr; encrypted summary contains only typed success, optional numeric exit code and verified file count. Generated input_context reconstructs a closed metadata schema and withholds older free-form summaries. Delivery state remains a separate server field. Unmarked legacy text and existing bounds remain.",
       "inspection": "Personally inspected parser, summary encryption/persistence, input_context reconstruction, fixed generated attachment label and user-upload-only model listing.",
-      "regression_execution": "pending explicit coordinator backend resource release",
+      "regression_execution": "passed on current tip; see evidence.tests and validation batch",
       "ledger": "docs/plans/2026-10-27-artifacts-review.md"
     },
     "A-003": {
@@ -308,7 +405,7 @@
       "finding": "Artifact worker validated both status snapshots but did not fence lifecycle version drift across result retrieval.",
       "fix": "Compare optional before/after lifecycle tokens before persistence. Changed, added or removed tokens fail with artifact_source_changed. Malformed present tokens fail with artifact_invalid. Exact operation, canonical operation/metadata/byte-derived identity, expiry minimum, privacy, budget and legacy behavior are preserved.",
       "inspection": "Personally inspected the equality fence before artifacts::persist, optional-token parser, identity hash, reservation scope, metadata-only context and unmarked legacy branch.",
-      "regression_execution": "pending explicit coordinator backend resource release",
+      "regression_execution": "passed on current tip; see evidence.tests and validation batch",
       "ledger": "docs/plans/2026-10-27-artifacts-review.md"
     }
   },
@@ -385,15 +482,15 @@
   ],
   "signoff_path": "docs/plans/2026-10-27-artifacts-signoff.md",
   "signoff_verdict": "BLOCKED",
-  "signoff_updated_at": "2026-10-27T08:29:45Z",
+  "signoff_updated_at": "2026-10-27T11:34:42Z",
   "applied_prerequisite_commit": "5b44175af5d69af272200a2fc7f374d4b10355f2",
   "prerequisite_source_commit": "336405f8e667ea2eb2c6513effec3d15fd960b02",
-  "effective_source_tip": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
-  "signoff_commit": "c4ba8f8779501ebc766d7c91490104e7068874ef",
+  "effective_source_tip": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+  "signoff_commit": "PENDING_DOCUMENTATION_COMMIT",
   "prerequisite_commit": "5b44175af5d69af272200a2fc7f374d4b10355f2",
-  "source_tip_commit": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
+  "source_tip_commit": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
   "source_review_state": "SOURCE_REVIEW_COMPLETE",
-  "local_validation_state": "LOCAL_VALIDATION_PENDING_BACKEND",
+  "local_validation_state": "LOCAL_VALIDATION_COMPLETE",
   "astra_implementation_approval": null,
   "opus_gate_status": "SUPERSEDED_BY_USER",
   "opus_gate_history": {
@@ -403,7 +500,7 @@
     "session_id": null,
     "authentication_history": "Claude authentication was pending before the user explicitly removed both Opus gates; no reviewer was created, resumed, retried, or awaited."
   },
-  "changed_source_tip": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
+  "changed_source_tip": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
   "source_correction_history": [
     {
       "commit": "91ef35238a0e81f46628fd377d3d7f6a74c9b08c",
@@ -414,6 +511,12 @@
       "commit": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
       "scope": "Exact mounted owner response header assertions",
       "review_state": "SOURCE_REVIEW_COMPLETE"
+    },
+    {
+      "commit": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
+      "scope": "Clippy fixture correction: collapse equivalent nested status condition; rebuilt and reran current-tip router/process-stream/lifecycle plus malformed-status and all-target Clippy",
+      "review_state": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_COMPLETE",
+      "evidence": "/tmp/nyxid-artifacts-2037-validation-3a2c9c996-20261027T112816Z.json"
     }
   ],
   "lightweight_validation_state": "LIGHTWEIGHT_CHECKS_COMPLETE",
@@ -421,6 +524,6 @@
     "frontend": "focused unit tests (141 across four files), TypeScript typecheck, ESLint and Chromium fixture evidence are recorded under evidence.tests; no live Sandbox journey is implied.",
     "formatting": "Direct rustfmt checks and git diff --check passed for the reviewed source corrections; no Cargo invocation was used.",
     "prettier": "Frontend feature files, browser test and isolated Playwright config passed the recorded Prettier check.",
-    "backend": "Compilation, focused Rust tests and all-target warnings-denied Clippy remain pending the coordinator-owned Artifacts window."
+    "backend": "Backend compilation, focused Rust regressions and all-target warnings-denied Clippy passed on exact source tip 3a2c9c996; remaining combined/live gates are separate."
   }
 }
