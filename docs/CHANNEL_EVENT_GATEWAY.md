@@ -513,6 +513,18 @@ explanations and a secondary stable code; a gateway 401 means authentication
 failed and a 403 means gateway permission is missing. Remote response bodies are
 never displayed. There is **no automatic reconnect** of failed rows.
 
+Confirmed missing/inactive/invalid local `cmaeg` configuration reports
+`gateway_configuration_required`; ask an administrator to verify the active
+service and its URL. Failed configuration reads, network errors and transport
+outages remain `gateway_unavailable` and can be retried. These bounded codes
+also survive hosted setup watches and NyxBot tool reporting. Authentication
+(401), permission (403), provider setup (502), and availability (503) remain
+separate. For 403, verify the actual gateway's full confidential introspection
+client ID association described above; do not grant broad CMA roles to the owner.
+A bot being saved or linked does not verify an agent reply: open the same bot,
+complete its existing owner-link step if needed, and send a unique message to
+observe the reply.
+
 REST and NyxBot tools list one current row per owner/bot. A pending/active row
 wins over failed attempts, even newer ones. Without a live row the latest record
 wins; a newer disconnection suppresses older failures. Creation time and then ID

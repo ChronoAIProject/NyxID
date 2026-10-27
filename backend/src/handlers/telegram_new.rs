@@ -78,6 +78,22 @@ pub struct RequestResponse {
     pub channel_bot_id: Option<String>,
     pub auto_connect: bool,
     pub connection_error: Option<String>,
+    pub prompt_delivery: Option<PromptDeliveryResponse>,
+    pub can_open_creation_form: bool,
+}
+
+#[derive(Serialize)]
+pub struct PromptDeliveryResponse {
+    pub attempt_id: String,
+    pub phase: crate::models::telegram_bot_request::PromptPhase,
+    pub outcome: crate::models::telegram_bot_request::PromptOutcome,
+    pub attempted_at: String,
+    pub completed_at: Option<String>,
+    pub failure: Option<crate::models::telegram_bot_request::TelegramFailure>,
+    pub reason: Option<crate::models::telegram_bot_request::TelegramReason>,
+    pub http_status: Option<u16>,
+    pub error_code: Option<i32>,
+    pub retry_after: Option<u32>,
 }
 
 impl From<TelegramBotRequest> for RequestResponse {
@@ -86,7 +102,45 @@ impl From<TelegramBotRequest> for RequestResponse {
             request.status,
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
         );
+        let can_open_creation_form = request.active
+            && request.auto_connect
+            && request.setup_authority.is_none()
+            && request.creation_context.is_some()
+            && request.status == Status::WaitingBot
+            && request.expires_at > chrono::Utc::now()
+            && request.telegram_user_id.is_some()
+            && request.start_update_id.is_some()
+            && request.telegram_bot_id.is_none()
+            && request.bot_username.is_none();
+        let prompt_delivery = request.prompt_delivery.map(|prompt| {
+            use crate::models::telegram_bot_request::PromptOutcome;
+            let outcome = if prompt.outcome == PromptOutcome::Sending
+                && prompt.attempted_at
+                    + chrono::Duration::seconds(
+                        crate::services::telegram_new_service::PROMPT_HORIZON_SECS,
+                    )
+                    <= chrono::Utc::now()
+            {
+                PromptOutcome::Unknown
+            } else {
+                prompt.outcome
+            };
+            PromptDeliveryResponse {
+                attempt_id: prompt.attempt_id,
+                phase: prompt.phase,
+                outcome,
+                attempted_at: prompt.attempted_at.to_rfc3339(),
+                completed_at: prompt.completed_at.map(|time| time.to_rfc3339()),
+                failure: prompt.diagnostic.as_ref().map(|d| d.failure),
+                reason: prompt.diagnostic.as_ref().map(|d| d.reason),
+                http_status: prompt.diagnostic.as_ref().and_then(|d| d.http_status),
+                error_code: prompt.diagnostic.as_ref().and_then(|d| d.error_code),
+                retry_after: prompt.diagnostic.as_ref().and_then(|d| d.retry_after),
+            }
+        });
         Self {
+            prompt_delivery,
+            can_open_creation_form,
             auto_connect: request.auto_connect,
             connection_error: request.connection_error,
             channel_bot_id: matches!(
@@ -282,6 +336,35 @@ pub async fn launch(
         Json(LaunchResponse {
             request: service(&state).get(&actor, &id).await?.into(),
             launch_url,
+        }),
+    ))
+}
+
+#[derive(Serialize)]
+pub struct CreationLinkResponse {
+    pub request: RequestResponse,
+    pub creation_url: String,
+}
+
+pub async fn creation_link(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> AppResult<(HeaderMap, Json<CreationLinkResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "This action accepts no parameters".into(),
+        ));
+    }
+    let (request, creation_url) = service(&state).creation_link(&actor, &id).await?;
+    Ok((
+        private_headers(),
+        Json(CreationLinkResponse {
+            request: request.into(),
+            creation_url,
         }),
     ))
 }

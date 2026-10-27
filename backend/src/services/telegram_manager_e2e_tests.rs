@@ -8,6 +8,125 @@ use axum::{
     middleware,
     routing::{get, post},
 };
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
+tokio::task_local! {
+    // Correlate only this fixture's HTTP webhook with synchronous driver events.
+    static WEBHOOK_UPDATE: i64;
+}
+
+#[derive(Clone, Debug)]
+struct TransactionStatement {
+    request_id: i32,
+    update_id: i64,
+    transaction: i64,
+    command: &'static str,
+    collection: &'static str,
+    statement: &'static str,
+    code: Option<i32>,
+    transient: bool,
+}
+
+#[derive(Default)]
+struct TransactionTrace {
+    pending: HashMap<i32, TransactionStatement>,
+    failures: Vec<TransactionStatement>,
+    overflowed: bool,
+}
+
+fn transaction_observer(
+    trace: Arc<Mutex<TransactionTrace>>,
+) -> mongodb::event::EventHandler<mongodb::event::command::CommandEvent> {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    EventHandler::callback(move |event| {
+        let mut trace = trace.lock().unwrap();
+        match event {
+            CommandEvent::Started(event) if event.command_name == "update" => {
+                let Ok(update_id) = WEBHOOK_UPDATE.try_with(|id| *id) else {
+                    return;
+                };
+                if update_id != 15 || event.command.get_bool("autocommit") != Ok(false) {
+                    return;
+                }
+                let Ok(transaction) = event.command.get_i64("txnNumber") else {
+                    return;
+                };
+                let collection = match event.command.get_str("update").unwrap_or_default() {
+                    crate::models::user::COLLECTION_NAME => "users",
+                    crate::models::org_membership::COLLECTION_NAME => "org_memberships",
+                    CREDENTIALS => "platform_credentials",
+                    REQUESTS => "telegram_bot_requests",
+                    _ => "other",
+                };
+                let update = event
+                    .command
+                    .get_array("updates")
+                    .ok()
+                    .and_then(|a| a.first())
+                    .and_then(bson::Bson::as_document);
+                let query = update.and_then(|u| u.get_document("q").ok());
+                let increments = update
+                    .and_then(|u| u.get_document("u").ok())
+                    .and_then(|u| u.get_document("$inc").ok());
+                let statement = if increments
+                    .is_some_and(|u| u.contains_key("membership_authority_revision"))
+                {
+                    if query.and_then(|q| q.get_str("user_type").ok()) == Some("org") {
+                        "owner_org_fence"
+                    } else {
+                        "actor_person_fence"
+                    }
+                } else if increments.is_some_and(|u| u.contains_key("telegram_creation_fence")) {
+                    "telegram_creation_fence"
+                } else if collection == "telegram_bot_requests" {
+                    "request_mutation"
+                } else {
+                    "other"
+                };
+                if trace.pending.len() >= 32 {
+                    trace.overflowed = true;
+                    return;
+                }
+                trace.pending.insert(
+                    event.request_id,
+                    TransactionStatement {
+                        request_id: event.request_id,
+                        update_id,
+                        transaction,
+                        command: "update",
+                        collection,
+                        statement,
+                        code: None,
+                        transient: false,
+                    },
+                );
+            }
+            CommandEvent::Succeeded(event) => {
+                trace.pending.remove(&event.request_id);
+            }
+            CommandEvent::Failed(event) => {
+                if let Some(mut statement) = trace.pending.remove(&event.request_id) {
+                    statement.code = match event.failure.kind.as_ref() {
+                        mongodb::error::ErrorKind::Command(error) => Some(error.code),
+                        _ => None,
+                    };
+                    statement.transient = event.failure.contains_label("TransientTransactionError");
+                    if trace.failures.len() >= 16 {
+                        trace.overflowed = true;
+                        return;
+                    }
+                    // Retain fixed categories/numbers only, never command BSON,
+                    // provider bodies, private text, tokens or Mongo error prose.
+                    trace.failures.push(statement);
+                }
+            }
+            _ => {}
+        }
+    })
+}
 
 #[derive(Clone)]
 struct HttpFixture {
@@ -47,13 +166,21 @@ async fn manager_http(
     headers: HeaderMap,
     body: Bytes,
 ) -> crate::errors::AppResult<StatusCode> {
-    crate::handlers::telegram_new::webhook_with_service(
-        &state,
-        &service(&state, &fixture.telegram_url),
-        &headers,
-        &body,
-    )
-    .await
+    let update = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| value["update_id"].as_i64())
+        .unwrap_or(-1);
+    WEBHOOK_UPDATE
+        .scope(
+            update,
+            crate::handlers::telegram_new::webhook_with_service(
+                &state,
+                &service(&state, &fixture.telegram_url),
+                &headers,
+                &body,
+            ),
+        )
+        .await
 }
 
 async fn reply_http(
@@ -96,6 +223,10 @@ async fn start_http(
         .route(
             "/api/v1/channel-bots/telegram-new/requests/{id}",
             get(telegram_new::get),
+        )
+        .route(
+            "/api/v1/channel-bots/telegram-new/requests/{id}/creation-link",
+            post(telegram_new::creation_link),
         )
         .route(
             "/api/v1/channel-conversations",
@@ -197,7 +328,13 @@ async fn telegram_new_manager_org_channel_http_chat_reply_and_creation_end_to_en
 }
 
 async fn manager_channel_http_end_to_end(org_owned: bool) {
-    let (state, actor, server) = fixture().await;
+    let trace = Arc::new(Mutex::new(TransactionTrace::default()));
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "telegram_manager_http",
+        transaction_observer(trace.clone()),
+    )
+    .await;
+    let (state, actor, server) = fixture_with_database(db).await;
     let target_org_id = if org_owned {
         use crate::models::org_membership::{MemberScopeSource, OrgRole};
         let org =
@@ -414,6 +551,7 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
             .send().await.unwrap(), StatusCode::OK,
     ).await;
     let request_id = launch["request"]["id"].as_str().unwrap();
+    let initial_request = manager.get(&actor, request_id).await.unwrap();
     let challenge = reqwest::Url::parse(launch["launch_url"].as_str().unwrap())
         .unwrap()
         .query_pairs()
@@ -475,6 +613,57 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
     }
     let mut created = message(json!({"managed_bot_created": {"bot": bot()}}));
     created["update_id"] = json!(15);
+    for attempt in 0..3 {
+        trace.lock().unwrap().failures.clear();
+        let response = state
+            .http_client
+            .post(&inbound)
+            .headers(headers(&state).await)
+            .json(&created)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        if status == StatusCode::OK {
+            break;
+        }
+        let envelope: Value = response.json().await.unwrap();
+        // The envelope classifies retryability; a correlated Mongo failure is
+        // additionally required to establish the originating statement/cause.
+        assert_eq!(status, StatusCode::CONFLICT, "{envelope}");
+        assert!(org_owned, "personal creation must not conflict: {envelope}");
+        assert_eq!(envelope["error_code"], 1004, "{envelope}");
+        assert_eq!(envelope["error"], "conflict", "{envelope}");
+        assert_eq!(
+            envelope["message"], "Conflict: Security state changed; restart the operation",
+            "{envelope}"
+        );
+        {
+            let observations = trace.lock().unwrap();
+            assert!(!observations.overflowed);
+            let failure = observations
+                .failures
+                .last()
+                .expect("transient HTTP conflict requires a correlated Mongo failure");
+            assert_eq!(failure.update_id, 15);
+            assert_eq!(failure.command, "update");
+            assert_eq!(failure.collection, "users");
+            assert_eq!(failure.statement, "owner_org_fence");
+            assert_eq!(failure.code, Some(112));
+            assert!(failure.transient);
+            assert!(failure.request_id > 0 && failure.transaction > 0);
+            eprintln!("telegram_manager_creation_retry envelope={envelope} mongo={failure:?}");
+        }
+        assert!(
+            attempt < 2,
+            "fresh creation did not settle after bounded redelivery"
+        );
+        wait_for_callbacks(&state, &channel, 3).await;
+    }
+
+    let consumed = manager.get(&actor, request_id).await.unwrap();
+    assert_eq!(consumed.status, Status::Ready);
+    assert_eq!(consumed.telegram_bot_id, Some(900));
     assert_eq!(
         state
             .http_client
@@ -485,9 +674,14 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
             .await
             .unwrap()
             .status(),
-        StatusCode::OK
+        StatusCode::OK,
+    );
+    assert_eq!(
+        manager.get(&actor, request_id).await.unwrap().revision,
+        consumed.revision
     );
     provider_connection(&server, request_id, 200).await;
+    manager.complete_pending_creations().await.unwrap();
     manager.complete_pending_creations().await.unwrap();
     let child = response_json(
         state
@@ -502,6 +696,24 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
     .await;
     assert_eq!(child["status"], "connected");
     assert_eq!(child["owner_user_id"], owner);
+    let saved = manager.get(&actor, request_id).await.unwrap();
+    assert_eq!(saved.start_update_id, Some(10));
+    assert_eq!(saved.telegram_user_id, Some(700));
+    assert_eq!(saved.telegram_bot_id, Some(900));
+    assert_eq!(saved.id, initial_request.id);
+    assert_eq!(saved.actor_user_id, initial_request.actor_user_id);
+    assert_eq!(saved.owner_user_id, initial_request.owner_user_id);
+    assert_eq!(saved.created_at, initial_request.created_at);
+    assert_eq!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .count_documents(doc! {"_id": request_id})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!trace.lock().unwrap().overflowed);
     wait_for_callbacks(&state, &channel, 3).await;
 
     let callbacks: Vec<_> = server
@@ -563,6 +775,18 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
     let sent = server.received_requests().await.unwrap();
+    assert_eq!(
+        sent.iter()
+            .filter(|r| r.url.path() == format!("/bot{MANAGER}/getManagedBotToken"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|r| r.url.path() == format!("/bot{CHILD}/setWebhook"))
+            .count(),
+        1
+    );
     let replies: Vec<_> = sent
         .iter()
         .filter(|r| r.url.path() == format!("/bot{MANAGER}/sendMessage"))
@@ -708,4 +932,85 @@ async fn telegram_new_manager_ordinary_lookup_failure_isolated_from_control_fail
         .unwrap();
     assert!(control.status().is_server_error());
     http_task.abort();
+}
+
+#[tokio::test]
+async fn telegram_new_creation_recovery_http_authentication_and_middleware_boundary() {
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let (request, launch) = service
+        .begin(&actor, &actor, "Scoped recovery", true)
+        .await
+        .unwrap();
+    let challenge = reqwest::Url::parse(&launch)
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "start")
+        .unwrap()
+        .1
+        .to_string();
+    webhook(
+        &service,
+        &headers(&state).await,
+        message(json!({"text":format!("/start {challenge}")})),
+    )
+    .await;
+    let (url, task) = start_http(&state, &server).await;
+    let endpoint = format!(
+        "{url}/api/v1/channel-bots/telegram-new/requests/{}/creation-link",
+        request.id
+    );
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client.post(&endpoint).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let denied = super::super::key_service::create_api_key(
+        &state.db,
+        &actor,
+        "recovery denied",
+        "read write",
+        None,
+        None,
+        Some(&[]),
+        Some(&[]),
+        Some(false),
+        Some(false),
+        Some(false),
+        None,
+        None,
+        Some("generic"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header("X-API-Key", denied.full_key.as_str())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = client
+        .post(&endpoint)
+        .bearer_auth(access_token(&state, &actor))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["request"]["id"], request.id);
+    assert!(
+        body["creation_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://t.me/newbot/NyxSetupBot/")
+    );
+    task.abort();
 }

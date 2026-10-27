@@ -28,6 +28,8 @@ use crate::models::telegram_bot_request::{
 use crate::models::telegram_bot_request::{MANAGED_BOTS, ManagedBotEvents};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
+pub(crate) use prompt::PROMPT_HORIZON_SECS;
+
 pub struct TelegramNewService<'a> {
     pub manager_id: Option<i64>,
     pub db: &'a mongodb::Database,
@@ -623,6 +625,10 @@ impl TelegramNewService<'_> {
             manager_revision: None,
             auto_connect,
             start_update_id: None,
+            creation_context: (setup_authority.is_none() && link_claim.is_none())
+                .then_some(crate::models::telegram_bot_request::CreationContext::Standalone),
+            prompt_delivery: None,
+            prompt_update_boundary: None,
             connection_attempts: 0,
             next_connection_attempt_at: None,
             connection_error: None,
@@ -687,6 +693,7 @@ impl TelegramNewService<'_> {
                 .insert_one(&request)
                 .await?;
         }
+        let request = self.get(actor, &request.id).await?;
         Ok((
             request,
             format!("https://t.me/{manager_name}?start={}", challenge.as_str()),
@@ -977,8 +984,13 @@ impl TelegramNewService<'_> {
                 })
                 .await?;
             let pending = match pending {
-                Some(request) if self.owner_still_authorized(&request).await? => Some(request),
-                _ => None,
+                Some(request) => {
+                    if !self.owner_still_authorized(&request).await? {
+                        return Ok(None);
+                    }
+                    Some(request)
+                }
+                None => None,
             };
             if pending.is_none()
                 && self
@@ -994,12 +1006,36 @@ impl TelegramNewService<'_> {
                 return Ok(bot.map(|bot| (bot, update)));
             }
             return self
-                .send_creation_prompt(manager_id, token, user_id, pending.as_ref())
+                .send_creation_prompt(manager_id, token, user_id, update_id, pending.as_ref())
                 .await
                 .map(|()| None);
         }
         if let Some(("/start", challenge)) = command {
             if challenge.len() != 48 || !challenge.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok(None);
+            }
+            // A redelivered or explicit repeated handoff preserves the original
+            // creation boundary and never advances creation revision for observability.
+            let bound = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(doc! {
+                "manager_bot_id": manager_id, "challenge_hash": hash(challenge), "telegram_user_id": user_id,
+                "active": true, "expires_at": {"$gt": bson::DateTime::now()},
+                "status": {"$in": ["waiting_bot", "waiting_consent"]},
+            }).await?;
+            if let Some(bound) = bound {
+                if self.owner_still_authorized(&bound).await? {
+                    if bound.status == Status::WaitingConsent {
+                        self.send_consent(token, &bound).await?;
+                    } else {
+                        self.send_creation_prompt(
+                            manager_id,
+                            token,
+                            user_id,
+                            update_id,
+                            Some(&bound),
+                        )
+                        .await?;
+                    }
+                }
                 return Ok(None);
             }
             let claimed = self.db.collection::<TelegramBotRequest>(REQUESTS)
@@ -1058,15 +1094,21 @@ impl TelegramNewService<'_> {
                 if request.status == Status::WaitingConsent {
                     self.send_consent(token, &request).await?;
                 } else {
-                    self.db
-                        .collection::<TelegramBotRequest>(REQUESTS)
-                        .update_one(
-                            doc! {"_id": &request.id, "revision": request.revision},
-                            doc! {"$set": {"status": "waiting_bot"}},
-                        )
-                        .await?;
-                    self.send_creation_prompt(manager_id, token, user_id, Some(&request))
-                        .await?;
+                    let bound = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
+                        doc! {"_id": &request.id, "revision": request.revision, "active": true, "expires_at": {"$gt": bson::DateTime::now()}, "status": {"$in": ["waiting_telegram", "waiting_bot"]}},
+                        doc! {"$set": {"status": "waiting_bot"}},
+                    ).return_document(ReturnDocument::After).await?;
+                    let Some(request) = bound else {
+                        return Ok(None);
+                    };
+                    self.send_creation_prompt(
+                        manager_id,
+                        token,
+                        user_id,
+                        update_id,
+                        Some(&request),
+                    )
+                    .await?;
                 }
             }
             return Ok(None);
@@ -1155,6 +1197,11 @@ impl TelegramNewService<'_> {
             {
                 return Ok(None);
             }
+            if pending.creation_context.is_some() && pending.setup_authority.is_none() {
+                self.consume_created_bot(&pending, bot_id, &username)
+                    .await?;
+                return Ok(None);
+            }
             let result = self.db.collection::<TelegramBotRequest>(REQUESTS).update_one(
                 doc! {"_id": &pending.id, "revision": pending.revision, "status": "waiting_bot", "active": true},
                 doc! {"$set": {"telegram_bot_id": bot_id, "bot_username": &username, "status": "ready", "manager_revision": 1_i64}, "$inc": {"revision": 1}},
@@ -1197,7 +1244,7 @@ impl TelegramNewService<'_> {
             .await?)
     }
 
-    async fn send_creation_prompt(
+    async fn send_unbound_creation_prompt(
         &self,
         manager_id: i64,
         token: &str,
@@ -1211,7 +1258,7 @@ impl TelegramNewService<'_> {
         };
         self.api.call(token, "sendMessage", json!({
             "chat_id": user,
-            "text": format!("{text}\n\nIf no Create bot button appears, send /start to try again. If the next message is blank or the button is still missing, open this chat in the latest Telegram app to continue."),
+            "text": format!("{text}\n\nIf no Create bot button appears, send /start to try again."),
             "parse_mode": "HTML",
             "link_preview_options": {"is_disabled": true},
         })).await?;
@@ -1570,3 +1617,9 @@ mod tests {
         }
     }
 }
+
+#[path = "telegram_new_prompt.rs"]
+mod prompt;
+
+#[path = "telegram_new_recovery.rs"]
+mod recovery;

@@ -1,5 +1,18 @@
 import { z } from "zod";
 
+export const telegramPromptDeliverySchema = z.object({
+  attempt_id: z.string().uuid(),
+  phase: z.enum(["instructions", "keyboard"]),
+  outcome: z.enum(["sending", "accepted", "rejected", "unknown"]),
+  attempted_at: z.string().datetime({ offset: true }),
+  completed_at: z.string().datetime({ offset: true }).nullable(),
+  failure: z.enum(["network", "timeout", "http_rejected", "provider_rejected", "invalid_response", "response_too_large"]).nullable(),
+  reason: z.enum(["rate_limited", "unauthorized", "forbidden", "bad_request", "provider_unavailable", "unknown"]).nullable(),
+  http_status: z.number().int().min(100).max(599).nullable(),
+  error_code: z.number().int().positive().nullable(),
+  retry_after: z.number().int().min(1).max(86400).nullable(),
+});
+
 export const telegramNewRequestSchema = z.object({
   id: z.string().uuid(),
   status: z.enum([
@@ -22,6 +35,8 @@ export const telegramNewRequestSchema = z.object({
   channel_bot_id: z.string().nullable(),
   auto_connect: z.boolean().optional(),
   connection_error: z.string().nullable().optional(),
+  prompt_delivery: telegramPromptDeliverySchema.nullable().optional(),
+  can_open_creation_form: z.boolean().optional(),
 });
 
 export const telegramNewConfigSchema = z.object({
@@ -41,6 +56,17 @@ export const telegramNewLaunchSchema = z.object({
         url.origin === "https://t.me" && /^\/[A-Za-z0-9_]+$/.test(url.pathname)
       );
     }, "Invalid Telegram launch URL"),
+});
+
+export const telegramCreationLinkSchema = z.object({
+  request: telegramNewRequestSchema,
+  creation_url: z.string().url().refine((value) => {
+    const url = new URL(value);
+    return url.origin === "https://t.me" && !url.username && !url.password && !url.hash
+      && /^\/newbot\/[A-Za-z0-9_]{5,32}\/[A-Za-z0-9_]{5,32}$/.test(url.pathname)
+      && [...url.searchParams.keys()].every((key) => key === "name")
+      && url.searchParams.getAll("name").length === 1;
+  }, "Invalid Telegram creation URL"),
 });
 
 export const telegramNewBeginSchema = z.object({

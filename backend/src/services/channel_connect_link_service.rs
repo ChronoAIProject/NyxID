@@ -457,7 +457,22 @@ pub async fn insert_telegram_request(
                 doc! {"$set": {"telegram_request_id": &claim.link.id}},
             ).session(&mut *session).await?;
             if saved.matched_count != 1 { return Err(busy()); }
-            db.collection::<crate::models::telegram_bot_request::TelegramBotRequest>(crate::models::telegram_bot_request::COLLECTION_NAME).insert_one(&request).session(session).await?;
+            use crate::models::telegram_bot_request::{CreationContext, CreationWatch};
+            use crate::models::nyxbot_channel::{NyxbotWatch, WATCHES_COLLECTION_NAME};
+            let mut watches = db.collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME)
+                .find(doc! {"connect_link_id": &claim.link.id, "kind": "channel_bot"})
+                .limit(2).session(&mut *session).await?;
+            let watch = watches.next(&mut *session).await.transpose()?;
+            if watches.next(&mut *session).await.is_some() { return Err(busy()); }
+            let snapshot = watch.map(|watch| Box::new(CreationWatch {
+                id: watch.id, user_id: watch.user_id, kind: watch.kind, platform: watch.platform,
+                agent_id: watch.agent_id, conversation_id: watch.conversation_id,
+                invocation_id: watch.invocation_id, report_to: watch.report_to, report_provenance: watch.report_provenance,
+                created_at: watch.created_at, expires_at: watch.expires_at,
+            }));
+            let mut inserted = request.clone();
+            inserted.creation_context = Some(CreationContext::Hosted { link_id: claim.link.id.clone(), link_created_by_user_id: claim.link.created_by_user_id.clone(), link_created_at: claim.link.created_at, watch: snapshot });
+            db.collection::<crate::models::telegram_bot_request::TelegramBotRequest>(crate::models::telegram_bot_request::COLLECTION_NAME).insert_one(&inserted).session(session).await?;
             Ok(())
         }.await;
         transaction_result(result)

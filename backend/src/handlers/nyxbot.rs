@@ -854,9 +854,12 @@ async fn connect_inner(
                     (operator step). Telegram bots cannot use NyxBot until it is."
                         .into()
                 }
-                "gateway_not_authenticated" => "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator.".into(),
-                "gateway_permission_required" => "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration.".into(),
-                "gateway_unavailable" => "The channel gateway is temporarily unavailable. Try again shortly.".into(),
+                // Keep bounded codes through tool/watch callers. Their presentation
+                // layer supplies guidance without parsing an error's prose.
+                "gateway_not_authenticated"
+                | "gateway_permission_required"
+                | "gateway_configuration_required"
+                | "gateway_unavailable" => code.into(),
                 other => format!("Could not connect this bot. Try again. ({other})"),
             }))
         }
@@ -1279,7 +1282,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     };
     let base = gateway_base(state)
         .await
-        .map_err(|_| "gateway_unavailable")?;
+        .map_err(|error| crate::services::nyxbot_gateway_service::availability_code(&error))?;
     let creator = creator_bearer(state, &row.user_id).map_err(|_| "creator_unavailable")?;
     let owner = row.user_id.as_str();
     let key_owner = bot_owner(row);
@@ -1566,7 +1569,16 @@ pub(crate) async fn connect_tool(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(Value, bool)> {
-    connect_tool_inner(state, owner, source_conversation_id, bot_id, agent, true).await
+    connect_tool_inner(state, owner, source_conversation_id, bot_id, agent, true)
+        .await
+        .map_err(|error| {
+            let guidance = gateway_error_guidance(error_code(&error));
+            if guidance.is_empty() {
+                error
+            } else {
+                AppError::ValidationError(guidance.to_owned())
+            }
+        })
 }
 
 async fn connect_tool_inner(
@@ -2177,7 +2189,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
         Ok((agent, value)) if value["channel_agent"]["owner_linked"] == true => format!(
             "The {} channel bot {} the user just created is now linked to {}, and their \
             account there is already verified. Tell them to open the bot and press Start (or \
-            send a message): it answers there. Only if they chat from a different account, \
+            send a message) to check the first reply. A reply has not been verified yet. Only if they chat from a different account, \
             give them this verification step: {}",
             identifier(&bot.platform),
             identifier(&bot.label),
@@ -2193,11 +2205,12 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
             value["link"]
         ),
         Err(error) => format!(
-            "The {} channel bot {} was created but could not be linked ({}). Try \
+            "The {} channel bot {} was created but could not be linked ({}). {} Try \
             nyxid__connect_channel_bot with bot_id {}.",
             identifier(&bot.platform),
             identifier(&bot.label),
             error_code(error),
+            gateway_error_guidance(error_code(error)),
             bot.id
         ),
     };
@@ -2252,12 +2265,34 @@ async fn connect_link_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<
     Ok(())
 }
 
+fn gateway_error_guidance(code: &str) -> &'static str {
+    match code {
+        "gateway_configuration_required" => {
+            "Ask an administrator to check the active cmaeg service and its URL."
+        }
+        "gateway_not_authenticated" => {
+            "The gateway could not authenticate NyxBot; reconnect and ask an administrator if this persists."
+        }
+        "gateway_permission_required" => {
+            "Ask an administrator to verify the actual gateway confidential client's cmaeg introspection association."
+        }
+        "gateway_unavailable" => "The gateway is temporarily unavailable; retry shortly.",
+        _ => "",
+    }
+}
+
 /// Stable code for an error, never its prose.
 fn error_code(error: &AppError) -> &'static str {
     match error {
         AppError::NotFound(_) => "not_found",
         AppError::Conflict(_) => "conflict",
-        AppError::ValidationError(_) => "invalid",
+        AppError::ValidationError(code) => match code.as_str() {
+            "gateway_configuration_required" => "gateway_configuration_required",
+            "gateway_not_authenticated" => "gateway_not_authenticated",
+            "gateway_permission_required" => "gateway_permission_required",
+            "gateway_unavailable" => "gateway_unavailable",
+            _ => "invalid",
+        },
         _ => "unavailable",
     }
 }
