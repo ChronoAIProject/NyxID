@@ -109,7 +109,7 @@ fn samples(
     }
     let timing = table(one(stbl, b"stts")?.data, 8)?;
     let mut timed = 0usize;
-    for entry in timing.chunks_exact(8) {
+    for entry in timing.as_chunks::<8>().0 {
         let n = u32_at(entry, 0)? as usize;
         if n == 0 || u32_at(entry, 4)? == 0 {
             return Err(INVALID);
@@ -122,7 +122,7 @@ fn samples(
     let mapping = table(one(stbl, b"stsc")?.data, 12)?;
     let mut chunks = Vec::new();
     let mut previous = 0;
-    for entry in mapping.chunks_exact(12) {
+    for entry in mapping.as_chunks::<12>().0 {
         let first = u32_at(entry, 0)? as usize;
         let n = u32_at(entry, 4)? as usize;
         let description = u32_at(entry, 8)? as usize;
@@ -237,9 +237,16 @@ pub fn validate(data: &[u8]) -> Checked<bool> {
     if ftyp.data.len() < 8 || ftyp.data.len() % 4 != 0 {
         return Err(INVALID);
     }
-    if !ftyp.data.chunks_exact(4).enumerate().any(|(i, b)| {
-        i != 1 && matches!(b, b"isom" | b"iso2" | b"mp41" | b"mp42" | b"avc1" | b"M4V ")
-    }) {
+    if !ftyp
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .any(|(i, b)| {
+            i != 1 && matches!(b, b"isom" | b"iso2" | b"mp41" | b"mp42" | b"avc1" | b"M4V ")
+        })
+    {
         return Err(INVALID);
     }
     if !top.iter().any(|b| b.kind == *b"mdat" && !b.data.is_empty()) {
