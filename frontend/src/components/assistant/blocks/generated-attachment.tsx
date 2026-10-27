@@ -136,7 +136,7 @@ export function GeneratedAttachment({
               />
             </a>
           )}
-          {(preview === "download" || decodeFailed) && (
+          {(!inline || decodeFailed) && (
             <p role="status" className="text-xs text-muted-foreground">
               {decodeFailed
                 ? "Your browser could not decode this preview. You can still download the verified file."
