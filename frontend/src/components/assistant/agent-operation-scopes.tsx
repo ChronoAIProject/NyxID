@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { ApiError } from "@/lib/api-client";
+import { assistantRequestErrorMessage, withAssistantTrace } from "@/lib/assistant/request-error";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -140,7 +142,15 @@ export function OperationSelectionForm({
       form.reset(next);
     } catch (cause) {
       setError(
-        cause instanceof Error
+        cause instanceof ApiError
+          && cause.status === 503
+          && cause.errorCode === 12900
+          && cause.errorResponse.error === "security_readiness_unavailable"
+          ? withAssistantTrace(
+              assistantRequestErrorMessage(cause.status, cause.message, cause.errorCode, cause.errorResponse.error, "save"),
+              /\nTrace ID: ([a-zA-Z0-9_-]{8,128})$/.exec(cause.message)?.[1] ?? null,
+            )
+          : cause instanceof Error
           ? cause.message
           : "Could not save operations. Reload and try again.",
       );

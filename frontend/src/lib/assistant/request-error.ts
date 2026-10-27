@@ -4,12 +4,15 @@ export function assistantRequestErrorMessage(
   message?: string,
   errorCode?: number,
   errorKey?: string,
+  context: "request" | "save" = "request",
 ): string {
   if (status === 0) {
     return "Connection interrupted. Check your connection and the chat before trying again; your message may have arrived.";
   }
   if (status === 503 && errorCode === 12900 && errorKey === "security_readiness_unavailable") {
-    return "An administrator must complete security rollout readiness before these changes can be saved. Your proposed changes are still unsaved. Try saving again after the rollout is ready.";
+    return context === "save"
+      ? "An administrator must complete security rollout readiness before these changes can be saved. Your proposed changes are still unsaved. Try saving again after the rollout is ready."
+      : "An administrator must complete security rollout readiness before this action can be completed. Try again after the rollout is ready.";
   }
   if (status === 502 || status === 503) return "NyxBot is temporarily unavailable. Try again shortly.";
   if (status === 504 || status === 408) return "NyxBot took too long to respond. Check the chat before trying again.";

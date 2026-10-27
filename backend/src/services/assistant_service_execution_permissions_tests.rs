@@ -9,6 +9,49 @@ pub(super) fn callback() -> Value {
     serde_json::from_str(include_str!("fixtures/permissions-codex-responses.json")).unwrap()
 }
 
+fn captured_and_derived_generations() -> Vec<Value> {
+    [
+        include_str!("../../../docs/fixtures/codex-public-responses-0.160.1.json"),
+        include_str!(
+            "../../../docs/fixtures/codex-public-responses-0.160.1-native-schema-derived.json"
+        ),
+    ]
+    .into_iter()
+    .flat_map(|source| {
+        let captured: Value = serde_json::from_str(source).unwrap();
+        captured["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|call| call["codex"].clone())
+            .collect::<Vec<_>>()
+    })
+    .collect()
+}
+
+#[test]
+fn codex_original_and_derived_generations_are_stateless_inference() {
+    // Four original Codex calls plus four unchanged native-schema-derived cases.
+    let captured = captured_and_derived_generations();
+    assert_eq!(captured.len(), 8);
+    for body in captured {
+        // Check the captured grammar without exposing correlation IDs or bodies.
+        let window = body["client_metadata"]["x-codex-window-id"]
+            .as_str()
+            .unwrap();
+        assert!(window.contains(':'));
+        assert!(stateless_inference("responses", &body));
+        let operation = http_operation(
+            &inference_target(),
+            "POST",
+            "responses",
+            None,
+            &serde_json::to_vec(&body).unwrap(),
+        );
+        assert_eq!(operation["kind"], "inference");
+    }
+}
+
 fn inference_target() -> crate::services::proxy_service::ProxyTarget {
     let mut service = test_utils::test_auto_connected_catalog_service();
     service.slug = "chrono-llm-public".into();
@@ -121,6 +164,7 @@ fn codex_client_metadata_enforces_each_scalar_and_utf8_boundary() {
             ("a b".into(), false),
             ("a\n".into(), false),
             ("a.b".into(), false),
+            ("a:0".into(), key == "x-codex-window-id"),
         ] {
             let mut body = callback();
             body["client_metadata"][key] = json!(value);
@@ -140,6 +184,24 @@ fn codex_client_metadata_enforces_each_scalar_and_utf8_boundary() {
         let mut body = callback();
         body["client_metadata"].as_object_mut().unwrap().remove(key);
         assert!(!stateless_inference("responses", &body), "missing {key}");
+    }
+    for (value, accepted) in [
+        ("00000000-0000-4000-8000-000000000006:0".into(), true),
+        (format!("{}:0", "a".repeat(126)), true),
+        (format!("{}:0", "a".repeat(127)), false),
+        ("id:0123456789".into(), true),
+        ("id:".into(), false),
+        (":0".into(), false),
+        ("id:-1".into(), false),
+        ("id:+1".into(), false),
+        ("id:1:2".into(), false),
+        ("id:１".into(), false),
+        ("id:0\n".into(), false),
+        ("id:0x1".into(), false),
+    ] {
+        let mut body = callback();
+        body["client_metadata"]["x-codex-window-id"] = json!(value);
+        assert_eq!(stateless_inference("responses", &body), accepted);
     }
     for (value, accepted) in [
         (String::new(), true),
@@ -339,6 +401,26 @@ async fn codex_callback_projected_read_path_keeps_exact_negative_approvals() {
             .await
             .unwrap(),
         0
+    );
+    for captured in captured_and_derived_generations() {
+        let bytes = serde_json::to_vec(&captured).unwrap();
+        let decision = projected(&f, &auth, &resolved, &id, &bytes, "responses", &headers).await;
+        assert!(decision.refusal.is_none());
+        let admission = decision.admission.unwrap();
+        assert!(admission.read);
+        assert_eq!(admission.operation_identity["kind"], "raw_inference");
+        admission
+            .revalidate(&f.state.db, &id, Some(&resolved))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        cards
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        0,
+        "original and derived fixtures must not create an owner action card"
     );
     for (reason, body) in unsafe_callbacks() {
         let bytes = serde_json::to_vec(&body).unwrap();

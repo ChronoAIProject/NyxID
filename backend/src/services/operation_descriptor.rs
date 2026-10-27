@@ -160,8 +160,9 @@ pub fn apply_operation_effects(
 /// and the same closed, stateless request contract used for assistant consent.
 /// Provider storage, resource handles, hosted effects and unknown extensions
 /// retain method classification. Service names never establish this authority.
-/// Only live guest model transport recognizes Codex correlation metadata here;
-/// owner approval verbs retain their pre-extension behavior.
+/// Owners recognize only the strict seven-field metadata contract. Guest model
+/// transport permits the broader closed telemetry shape after route authority
+/// is proved; that classification supplies no owner consent or connection grant.
 pub fn apply_inference_contract(
     descriptor: &mut OperationDescriptor,
     service: &crate::models::downstream_service::DownstreamService,

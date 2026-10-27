@@ -9,6 +9,12 @@ fn body_digest(bytes: &[u8]) -> String {
 /// Keep this contract closed and measure the sorted compact UTF-8 encoding,
 /// including JSON escaping, independently of serde_json's map feature flags.
 fn valid_client_metadata(value: &Value) -> bool {
+    fn ascii_id(id: &str) -> bool {
+        !id.is_empty()
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    }
     const IDS: &[&str] = &[
         "root_turn_id",
         "session_id",
@@ -24,9 +30,13 @@ fn valid_client_metadata(value: &Value) -> bool {
         || !IDS.iter().all(|key| {
             object.get(*key).and_then(Value::as_str).is_some_and(|id| {
                 (1..=128).contains(&id.len())
-                    && id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                    && (ascii_id(id)
+                        || (*key == "x-codex-window-id"
+                            && id.split_once(':').is_some_and(|(id, index)| {
+                                ascii_id(id)
+                                    && !index.is_empty()
+                                    && index.bytes().all(|byte| byte.is_ascii_digit())
+                            })))
             })
         })
         || object

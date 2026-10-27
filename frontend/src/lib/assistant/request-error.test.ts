@@ -5,7 +5,15 @@ describe("readiness request errors", () => {
   it("requires the complete status, numeric code and key before showing rollout guidance", () => {
     const copy = assistantRequestErrorMessage(503, "private diagnostic", 12900, "security_readiness_unavailable");
     expect(copy).toContain("An administrator must complete security rollout readiness");
+    expect(copy).toContain("before this action can be completed");
+    expect(copy).not.toMatch(/sav(?:e|ing)|unsaved/i);
+    expect(copy).not.toContain("private diagnostic");
+  });
+
+  it("shows unsaved draft guidance only in a save context", () => {
+    const copy = assistantRequestErrorMessage(503, "private diagnostic", 12900, "security_readiness_unavailable", "save");
     expect(copy).toContain("proposed changes are still unsaved");
+    expect(copy).toContain("Try saving again after the rollout is ready");
     expect(copy).not.toContain("private diagnostic");
   });
 

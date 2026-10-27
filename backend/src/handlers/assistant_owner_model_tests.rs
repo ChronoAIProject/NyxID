@@ -26,6 +26,11 @@ async fn owner_1995_multiple_connections_keep_the_owner_route_without_new_select
 }
 
 #[tokio::test]
+async fn codex_unedited_capture_keeps_owner_connection_credentials_and_billing() {
+    Box::pin(owner_pipeline_with_callback(Route::Multiple, false, true)).await;
+}
+
+#[tokio::test]
 async fn owner_1995_metadata_model_callbacks_survive_steering_and_continuation() {
     Box::pin(owner_pipeline(Route::Platform, true)).await;
 }
@@ -177,6 +182,15 @@ async fn byok_connection(
 }
 
 async fn owner_pipeline(route: Route, continue_and_steer: bool) {
+    Box::pin(owner_pipeline_with_callback(
+        route,
+        continue_and_steer,
+        false,
+    ))
+    .await;
+}
+
+async fn owner_pipeline_with_callback(route: Route, continue_and_steer: bool, captured: bool) {
     let mut f = Box::pin(direct_fixture("owner_1995_model_transport")).await;
     f.state.billing = Arc::new(crate::billing_integration_tests::billing_service(
         &f.state.db,
@@ -270,22 +284,27 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
             "test-other-byok",
         )
         .await;
-        // Existing owner preference, not new selection/consent created by the
-        // callback. Both connections remain outside specialist tool grants.
+        // Captured inference must respect the explicit owner choice even when
+        // the other connection is preferred. Keep legacy variants unchanged.
+        let ordered = if captured {
+            vec![other, connection.clone()]
+        } else {
+            vec![connection.clone(), other]
+        };
         f.state
             .db
             .collection::<bson::Document>("service_preferences")
             .insert_one(doc! {
-                "_id":&f.owner,"ordered":[&connection,other],
+                "_id":&f.owner,"ordered":ordered,
                 "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
             })
             .await
             .unwrap();
     }
-    // Platform defaults work without a global preference. BYOK retains the
-    // fixture's existing owner approval exemption; required policies are
-    // covered separately by the exact-body approval regression.
-    if platform {
+    // Platform and strict captured inference use the writes-only default.
+    // Legacy BYOK retains the fixture's existing approval exemption; required
+    // policies are covered separately by the exact-body approval regression.
+    if platform || captured {
         f.state
             .db
             .collection::<bson::Document>("notification_channels")
@@ -306,6 +325,11 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
         .route("/api/v1/proxy/s/{slug}/{*path}", any(callback_proxy))
         .layer(Extension(SERVER_TURN_POLICY))
         .with_state(f.state.clone());
+    let callback_uri = if captured {
+        format!("/api/v1/proxy/s/{slug}/responses?_nyxid_via={connection}")
+    } else {
+        format!("/api/v1/proxy/s/{slug}/responses")
+    };
     let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let steers = Arc::new(Mutex::new(Vec::<Value>::new()));
     let calls = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -327,10 +351,11 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
         }))
         .route("/v1/responses", post({
             let sent = sent.clone(); let calls = calls.clone(); let steers = steers.clone();
-            let ready = ready.clone(); let resume = resume.clone();
+            let ready = ready.clone(); let resume = resume.clone(); let callback_uri = callback_uri.clone();
             move |headers: HeaderMap, Json(body): Json<Value>| {
                 let callbacks = callbacks.clone(); let sent = sent.clone(); let calls = calls.clone();
                 let ready = ready.clone(); let resume = resume.clone(); let steers = steers.clone();
+                let callback_uri = callback_uri.clone();
                 let attempt = rounds.fetch_add(1, Ordering::SeqCst);
                 async move {
                     calls.lock().await.push(body);
@@ -340,11 +365,20 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
                             "response":{"id":response,"conversation":{"id":SESSION},"status":"in_progress"}}).to_string()));
                         for round in 0..if attempt == 0 { 2 } else { 1 } {
                             let guidance = steers.lock().await.last().map(|body| body["input"].as_str().unwrap().to_owned()).unwrap_or_default();
-                            let model = generation(&format!("round {attempt}/{round}: {guidance}"));
+                            let model = if captured {
+                                let capture: Value = serde_json::from_str(include_str!(
+                                    "../../../docs/fixtures/codex-public-responses-0.160.1.json"
+                                )).unwrap();
+                                let body = capture["calls"][0]["codex"].clone();
+                                assert!(execution::stateless_inference("responses", &body));
+                                body
+                            } else {
+                                generation(&format!("round {attempt}/{round}: {guidance}"))
+                            };
                             let bytes = serde_json::to_vec_pretty(&model).unwrap();
                             sent.lock().await.push(bytes.clone());
                             let callback = callbacks.clone().oneshot(Request::builder().method("POST")
-                                .uri(format!("/api/v1/proxy/s/{slug}/responses"))
+                                .uri(callback_uri.as_str())
                                 .header("authorization", headers["authorization"].clone())
                                 .header("content-type","application/json").header("accept","*/*")
                                 .body(Body::from(bytes)).unwrap()).await.unwrap();
@@ -378,8 +412,13 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
         )
         .await
         .unwrap();
+    let text = if captured {
+        format!("/service {connection}\nHello")
+    } else {
+        "Hello".into()
+    };
     let input: engine::TurnRequest =
-        serde_json::from_value(json!({"conversation_id":f.row.id,"text":"Hello"})).unwrap();
+        serde_json::from_value(json!({"conversation_id":f.row.id,"text":text})).unwrap();
     let start = engine::TurnStart::from(&input);
     let permit = f
         .state
@@ -396,6 +435,21 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
     ))
     .await
     .unwrap();
+    if captured {
+        let filter = doc! {"conversation_id":&row.id,"user_id":&f.owner,
+        "api_key_id":&row.credential_api_key_id,"turn_id":&row.active_turn.as_ref().unwrap().turn_id,
+        "kind":"selection"};
+        let selections = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_service_execution");
+        assert_eq!(selections.count_documents(filter.clone()).await.unwrap(), 1);
+        let selected = selections.find_one(filter).await.unwrap().unwrap();
+        assert_eq!(selected.get_str("connection_id").unwrap(), connection);
+        assert_eq!(selected.get_str("owner_id").unwrap(), f.owner);
+        assert_eq!(selected.get_str("catalog_service_id").unwrap(), catalog.id);
+        assert_eq!(selected.get_str("selection_source").unwrap(), "owner");
+    }
     if continue_and_steer {
         tokio::time::timeout(Duration::from_secs(20), ready.acquire())
             .await
@@ -443,8 +497,9 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
     let sent = sent.lock().await;
     assert_eq!(received.len(), model_calls);
     for (request, expected) in received.iter().zip(sent.iter()) {
-        assert_eq!(
-            &request.body, expected,
+        // Captured prompts and correlation values must not enter failure logs.
+        assert!(
+            request.body == *expected,
             "forwarded body must be byte-for-byte unchanged"
         );
     }
@@ -483,8 +538,65 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
         assert_eq!(calls.lock().await[1]["conversation"], SESSION);
     }
     assert_eq!(f.state.db.collection::<bson::Document>("assistant_service_execution")
-        .count_documents(doc!{"conversation_id":&row.id,"kind":{"$in":["model_consent","selection","card_binding","unavailable_bucket"]}})
-        .await.unwrap(),0,"no new model consent, selection, card or fallback bucket");
+        .count_documents(doc!{"conversation_id":&row.id,"kind":{"$in":["card_binding","unavailable_bucket"]}})
+        .await.unwrap(),0,"no new card or fallback bucket");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("assistant_service_execution")
+            .count_documents(doc! {"conversation_id":&row.id,"kind":"selection"})
+            .await
+            .unwrap(),
+        u64::from(captured),
+        "only the explicit owner selector creates a selection"
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("assistant_service_execution")
+            .count_documents(doc! {"conversation_id":&row.id,"kind":"model_consent"})
+            .await
+            .unwrap(),
+        u64::from(captured),
+        "only strict inference installs turn-bound model consent"
+    );
+    if captured {
+        let grant = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_service_execution")
+            .find_one(doc! {"conversation_id":&row.id,"kind":"model_consent"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.get_str("connection_id").unwrap(), connection);
+        assert_eq!(
+            grant.get_str("binding").unwrap(),
+            execution::connection_binding(&f.state.db, &connection, &row.credential_api_key_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("assistant_acknowledgements")
+                .count_documents(doc! {"conversation_id":&row.id})
+                .await
+                .unwrap(),
+            0,
+            "strict captured inference must create no action card"
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("notification_channels")
+                .count_documents(doc! {"user_id":&f.owner})
+                .await
+                .unwrap(),
+            0,
+            "no global approval exemption masks the writes-only default"
+        );
+    }
     assert_eq!(
         f.state
             .db
@@ -504,6 +616,19 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
         0
     );
     let final_row = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+    if captured {
+        let route = final_row.owner_model_route.as_ref().unwrap();
+        assert_eq!(route.catalog_service_id, catalog.id);
+        assert_eq!(route.profile, row.model);
+        let capture: Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/codex-public-responses-0.160.1.json"
+        ))
+        .unwrap();
+        for request in &received {
+            let forwarded: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(forwarded["model"], capture["calls"][0]["codex"]["model"]);
+        }
+    }
     assert_eq!(
         final_row
             .owner_model_route

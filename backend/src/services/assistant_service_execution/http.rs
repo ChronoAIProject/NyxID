@@ -287,8 +287,9 @@ async fn check_http_projected_inner(
     let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
     let generation = !method_override
         && super::request_identity::legacy_model_generation(target, method, path, body);
-    // Separate route identity from admission: Codex metadata remains legacy for
-    // owners, including approval, exact selection and fallback classification.
+    // Route recognition uses the broader closed transport shape. Only the
+    // strict metadata subset below gains owner inference consent; other shapes
+    // retain legacy approval, exact selection and fallback classification.
     let model_route = (generation && pool.is_none())
         .then(|| super::request_identity::model_route_operation(target, method, path, query, body))
         .flatten()

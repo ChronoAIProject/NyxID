@@ -25,17 +25,21 @@ const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
 
 describe("assistantHttp", () => {
-  it("preserves the readiness envelope and safe trace with actionable unsaved copy", async () => {
+  it.each([
+    ["/assistant/nyxagent/agents/agent/operations/service", "PUT"],
+    ["/assistant/nyxagent/conversations/chat/acknowledgements/card", "POST"],
+  ] as const)("preserves readiness and safe trace with neutral action copy for %s", async (endpoint, method) => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       error: "security_readiness_unavailable", error_code: 12900, message: "private rollout diagnostic",
     }), { status: 503, headers: { "X-NyxID-Trace-Id": "permissions_trace-2007" } })));
-    const failure = await assistantJson("/assistant/nyxagent/agents/agent/operations/service", {
-      method: "PUT", body: {},
+    const failure = await assistantJson(endpoint, {
+      method, body: {},
     }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AssistantHttpError);
     expect(failure).toMatchObject({ status: 503, errorResponse: { error: "security_readiness_unavailable" }, errorCode: 12900,
       message: expect.stringContaining("An administrator must complete security rollout readiness") });
-    expect((failure as Error).message).toContain("proposed changes are still unsaved");
+    expect((failure as Error).message).toContain("before this action can be completed");
+    expect((failure as Error).message).not.toMatch(/sav(?:e|ing)|unsaved/i);
     expect((failure as Error).message).toContain("Trace ID: permissions_trace-2007");
     expect((failure as Error).message).not.toContain("private rollout diagnostic");
   });
