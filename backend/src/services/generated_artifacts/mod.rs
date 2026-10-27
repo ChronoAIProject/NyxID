@@ -115,6 +115,41 @@ pub fn sandbox_contract(
             })
         })
 }
+/// Trust the resolved producer catalog, never an instance/display name or URL.
+/// Endpoint and target checks remain additional execution-binding fences.
+pub async fn trusted_sandbox_catalog(
+    db: &Database,
+    service: &super::mcp_service::McpToolService,
+    submit: &super::mcp_service::McpToolEndpoint,
+) -> AppResult<Option<String>> {
+    use super::mcp_service::McpToolSource;
+    use crate::models::downstream_service::{COLLECTION_NAME, DownstreamService};
+    if !sandbox_contract(service, submit) {
+        return Ok(None);
+    }
+    let id = match &service.source {
+        McpToolSource::Platform {
+            downstream_service_id,
+        } => Some(downstream_service_id.as_str()),
+        McpToolSource::UserManaged {
+            catalog_service_id, ..
+        } => catalog_service_id.as_deref(),
+        McpToolSource::Internal => None,
+    };
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let catalog = db
+        .collection::<DownstreamService>(COLLECTION_NAME)
+        .find_one(doc! {"_id":id,"is_active":true,"tools_manager_created":{"$ne":true}})
+        .await?;
+    Ok(catalog
+        .filter(|catalog| {
+            super::catalog_spec_registry::spec_key_for_slug(&catalog.slug) == Some("chrono-sandbox")
+        })
+        .map(|catalog| catalog.id))
+}
+
 pub fn admitted(w: &AsyncServiceOperation) -> bool {
     w.artifact_mode.as_deref() == Some(sandbox::MODE) && web_delivery(&w.delivery)
 }

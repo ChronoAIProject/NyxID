@@ -76,6 +76,10 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
+    /// Producer identity verified at generated-artifact admission. Missing legacy
+    /// snapshots cannot gain fresh acquisition authority from endpoint shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_catalog_service_id: Option<String>,
     #[serde(default)]
     pub artifact_mode: Option<String>,
     #[serde(default)]

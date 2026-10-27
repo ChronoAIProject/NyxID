@@ -1343,6 +1343,131 @@ fn check_ordinary_async_malformed_status(
 }
 
 #[tokio::test]
+async fn generated_artifact_requires_saved_trusted_catalog_for_acquisition() {
+    check_custom_sandbox_lookalike().await;
+    for case in ["missing_snapshot", "changed_snapshot", "changed_catalog"] {
+        check_artifact_catalog_revalidation(case).await;
+    }
+}
+fn check_custom_sandbox_lookalike() -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async {
+        let a = boxed_generated().await;
+        a.f.state
+            .db
+            .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&a.service},
+                doc! {"$unset":{"catalog_service_id":""}},
+            )
+            .await
+            .unwrap();
+        let instance =
+            a.f.state
+                .db
+                .collection::<crate::models::user_service::UserService>(
+                    crate::models::user_service::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id":&a.service})
+                .await
+                .unwrap()
+                .unwrap();
+        a.f.state.db.collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
+            .update_one(doc! {"_id":&instance.endpoint_id}, doc! {"$set":{"openapi_spec_url":"https://custom.invalid/api/v1/catalog-specs/chrono-sandbox/openapi.json"}}).await.unwrap();
+        // This custom instance retains the same hosted spec and endpoint shape.
+        // Neither the name nor URL confers producer catalog identity.
+        assert!(a.submit().await.artifact_mode.is_none());
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(ARTIFACTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    })
+}
+fn check_artifact_catalog_revalidation(
+    case: &'static str,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let a = boxed_generated().await;
+        let watch = a.submit().await;
+        let catalog = watch
+            .artifact_catalog_service_id
+            .as_ref()
+            .expect("server verified catalog snapshot");
+        if case == "changed_catalog" {
+            a.f.state
+                .db
+                .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":catalog},
+                    doc! {"$set":{"slug":"custom-sandbox-lookalike"}},
+                )
+                .await
+                .unwrap();
+        } else {
+            let update = if case == "missing_snapshot" {
+                doc! {"$unset":{"artifact_catalog_service_id":""}}
+            } else {
+                doc! {"$set":{"artifact_catalog_service_id":uuid::Uuid::new_v4().to_string()}}
+            };
+            a.f.state
+                .db
+                .collection::<bson::Document>(WATCHES)
+                .update_one(doc! {"_id":&watch.id}, update)
+                .await
+                .unwrap();
+        }
+        let calls = a.calls.lock().unwrap().len();
+        complete(&a).await;
+        assert_eq!(
+            a.watch().await.reason.as_deref(),
+            Some("artifact_source_changed")
+        );
+        assert_eq!(
+            a.calls.lock().unwrap().len(),
+            calls,
+            "no source call after catalog trust changes"
+        );
+        Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+        assert_eq!(
+            a.watch().await.reason.as_deref(),
+            Some("artifact_source_changed")
+        );
+        assert_eq!(
+            a.calls.lock().unwrap().len(),
+            calls,
+            "terminal failure must not repeat source calls"
+        );
+        finish(&a, &a.f.row, "submitted").await;
+        let event = admit_event(&a).await;
+        assert!(event.active_turn.as_ref().unwrap().attachments.is_empty());
+        let context = watches::input_context(&a.f.state.db, &a.f.state.encryption_keys, &event)
+            .await
+            .unwrap();
+        assert!(context.contains("artifact_source_changed"));
+        finish(
+            &a,
+            &event,
+            "The saved source could not be verified for delivery.",
+        )
+        .await;
+
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(ARTIFACTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    })
+}
+
+#[tokio::test]
 async fn generated_artifact_worker_rejects_expired_changed_and_unavailable_sources() {
     for case in [
         "result_410",

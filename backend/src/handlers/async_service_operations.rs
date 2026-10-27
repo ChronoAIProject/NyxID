@@ -83,6 +83,15 @@ async fn call(
         return Err(denied());
     }
     watches::validate_endpoints(&watch.contract, service, submit).map_err(|_| denied())?;
+    if crate::services::generated_artifacts::admitted(watch) {
+        let trusted = crate::services::generated_artifacts::trusted_sandbox_catalog(
+            &state.db, service, submit,
+        )
+        .await?;
+        if trusted.is_none() || trusted != watch.artifact_catalog_service_id {
+            return Err(AppError::Conflict("artifact_source_changed".into()));
+        }
+    }
     let endpoint = service
         .endpoints
         .iter()
@@ -450,6 +459,12 @@ async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
         };
         match tokio::time::timeout(Duration::from_secs(45), Box::pin(step(state, &w))).await {
             Ok(Ok(())) => {}
+            Ok(Err(AppError::Conflict(reason)))
+                if crate::services::generated_artifacts::admitted(&w)
+                    && reason == "artifact_source_changed" =>
+            {
+                watches::ready(&state.db, &w, None, "artifact_source_changed", None).await?;
+            }
             Ok(Err(
                 AppError::Forbidden(_)
                 | AppError::Unauthorized(_)

@@ -171,13 +171,14 @@ pub async fn reserve_with_arguments(
     let contract = endpoint.async_operation.clone().ok_or_else(invalid)?;
     validate_endpoints(&contract, service, endpoint)?;
     let cma = super::cma_operation::metadata(&contract, args);
-    let artifacts_enabled = super::generated_artifacts::sandbox_contract(service, endpoint)
-        && super::feature_flag_service::personal_flag_enabled(
-            db,
-            &chat.user_id,
-            super::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
-        )
-        .await?;
+    let artifact_catalog_service_id =
+        if super::generated_artifacts::sandbox_contract(service, endpoint)
+            && super::generated_artifacts::enabled(db, &chat.user_id).await?
+        {
+            super::generated_artifacts::trusted_sandbox_catalog(db, service, endpoint).await?
+        } else {
+            None
+        };
     let db_ref_for_audit = db;
     let db = db.clone();
     let chat = chat.clone();
@@ -222,7 +223,9 @@ pub async fn reserve_with_arguments(
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
             }
             let now=Utc::now();
-            let watch=AsyncServiceOperation{artifact_event_turn_id:None,artifact_mode: (artifacts_enabled && turn.origin == TurnOrigin::User && super::generated_artifacts::web_delivery(&delivery)).then(|| super::generated_artifacts::sandbox::MODE.into()),artifact_result:None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
+            let artifact_mode = (artifact_catalog_service_id.is_some() && turn.origin == TurnOrigin::User && super::generated_artifacts::web_delivery(&delivery)).then(|| super::generated_artifacts::sandbox::MODE.to_owned());
+            let admitted_catalog = artifact_mode.as_ref().and(artifact_catalog_service_id.clone());
+            let watch=AsyncServiceOperation{artifact_catalog_service_id:admitted_catalog,artifact_event_turn_id:None,artifact_mode,artifact_result:None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
                 operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+if cma.is_some(){Duration::days(30)}else{Duration::hours(4)},result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;
