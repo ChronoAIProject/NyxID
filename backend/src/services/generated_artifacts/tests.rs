@@ -154,12 +154,40 @@ fn sandbox_files_contract_and_structured_visual_track_validation() {
     let mut oversized = MP4.to_vec();
     oversized[0..4].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(mp4::validate(&oversized).is_err());
+    let high = include_bytes!("../../../tests/fixtures/generated-artifacts/visual-high.mp4");
+    assert_eq!(mp4::validate(high), Ok(true));
     assert_eq!(
-        mp4::validate(include_bytes!(
-            "../../../tests/fixtures/generated-artifacts/visual-high.mp4"
-        )),
-        Ok(false)
+        sandbox::parse(&body("high.mp4", high), "op").unwrap().files[0].preview,
+        "video"
     );
+    let fragmented =
+        include_bytes!("../../../tests/fixtures/generated-artifacts/visual-fragmented.mp4");
+    assert_eq!(mp4::validate(fragmented), Ok(false));
+    assert_eq!(
+        sandbox::parse(&body("fragmented.mp4", fragmented), "op")
+            .unwrap()
+            .files[0]
+            .preview,
+        "download"
+    );
+    for kind in [b"tfhd", b"trun", b"trex"] {
+        let mut damaged = fragmented.to_vec();
+        let offset = damaged.windows(4).position(|b| b == kind).unwrap() + 4;
+        match kind {
+            b"tfhd" | b"trex" => {
+                damaged[offset + 4..offset + 8].copy_from_slice(&0u32.to_be_bytes())
+            }
+            _ => damaged[offset + 8..offset + 12].copy_from_slice(&i32::MAX.to_be_bytes()),
+        }
+        assert!(mp4::validate(&damaged).is_err());
+    }
+    for end in [32, fragmented.len() - 1] {
+        assert!(mp4::validate(&fragmented[..end]).is_err());
+    }
+    let mut high_tampered = high.to_vec();
+    let offset = high_tampered.windows(4).position(|b| b == b"avcC").unwrap() + 4;
+    high_tampered[offset + 1] = 66; // A profile byte alone is not codec proof.
+    assert!(mp4::validate(&high_tampered).is_err());
     // Full sample tables and codec configuration matter, not marker strings.
     for kind in [b"stts", b"stsc", b"stco", b"avcC"] {
         let mut damaged = MP4.to_vec();

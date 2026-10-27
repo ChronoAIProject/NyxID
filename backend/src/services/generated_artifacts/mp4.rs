@@ -5,6 +5,7 @@ const INVALID: &str = "artifact_invalid";
 struct BoxRef<'a> {
     kind: [u8; 4],
     data: &'a [u8],
+    header: usize,
 }
 fn u32_at(data: &[u8], offset: usize) -> Checked<u32> {
     Ok(u32::from_be_bytes(
@@ -47,6 +48,7 @@ fn boxes<'a>(data: &'a [u8], count: &mut usize) -> Checked<Vec<BoxRef<'a>>> {
         }
         output.push(BoxRef {
             kind,
+            header,
             data: &data[offset + header..end],
         });
         offset = end;
@@ -221,12 +223,244 @@ fn avc_preview(config: &[u8]) -> Checked<bool> {
             if nal.is_empty() || nal[0] & 0x1f != nal_type {
                 return Err(INVALID);
             }
+            if nal_type == 7 && (nal.len() < 4 || nal[1..4] != config[1..4]) {
+                return Err(INVALID);
+            }
             offset = end;
         }
     }
-    // Our real Chromium fixture is AVC Baseline with four-byte NAL lengths.
-    // Main/High/HEVC/AV1 remain valid download-only pending playback evidence.
-    Ok(config[1] == 66 && config[4] & 3 == 3)
+    let mut high_420 = false;
+    if matches!(config[1], 100 | 110 | 122 | 144) && offset < config.len() {
+        let extension = config.get(offset..offset + 4).ok_or(INVALID)?;
+        if extension[0] & 0xfc != 0xfc || extension[1] & 0xf8 != 0xf8 || extension[2] & 0xf8 != 0xf8
+        {
+            return Err(INVALID);
+        }
+        high_420 = extension[..3] == [0xfd, 0xf8, 0xf8];
+        offset += 4;
+        for _ in 0..extension[3] {
+            let len = u16::from_be_bytes(
+                config
+                    .get(offset..offset + 2)
+                    .ok_or(INVALID)?
+                    .try_into()
+                    .map_err(|_| INVALID)?,
+            ) as usize;
+            offset += 2;
+            let end = offset.checked_add(len).ok_or(INVALID)?;
+            let nal = config.get(offset..end).ok_or(INVALID)?;
+            if nal.is_empty() || nal[0] & 0x1f != 13 {
+                return Err(INVALID);
+            }
+            offset = end;
+        }
+    }
+    if offset != config.len() {
+        return Err(INVALID);
+    }
+    // Baseline and eight-bit 4:2:0 High use real encoder fixtures. The browser
+    // remains the final decoder and retains the same-byte download fallback.
+    Ok((config[1] == 66 || (config[1] == 100 && high_420)) && config[4] & 3 == 3)
+}
+#[derive(Clone, Copy)]
+struct FragmentTrack {
+    id: u32,
+    descriptions: usize,
+    visual: bool,
+}
+fn empty_samples(stbl: &[BoxRef<'_>]) -> Checked<()> {
+    if one(stbl, b"stsz")?.data != [0; 12] {
+        return Err(INVALID);
+    }
+    for kind in [b"stts", b"stsc"] {
+        if one(stbl, kind)?.data != [0; 8] {
+            return Err(INVALID);
+        }
+    }
+    let mut offsets = stbl.iter().filter(|b| matches!(&b.kind, b"stco" | b"co64"));
+    if offsets.next().ok_or(INVALID)?.data != [0; 8] || offsets.next().is_some() {
+        return Err(INVALID);
+    }
+    Ok(())
+}
+/// Fragmented files are download-only. Validate actual sample extents through
+/// trex/tfhd/trun, including signed offsets and every declared field boundary.
+fn fragments(
+    data: &[u8],
+    top: &[BoxRef<'_>],
+    moov: &[BoxRef<'_>],
+    tracks: &[FragmentTrack],
+    count: &mut usize,
+) -> Checked<()> {
+    let mvex = boxes(one(moov, b"mvex")?.data, count)?;
+    let mut defaults = Vec::new();
+    for entry in mvex.iter().filter(|b| b.kind == *b"trex") {
+        if entry.data.len() != 24 || u32_at(entry.data, 0)? != 0 {
+            return Err(INVALID);
+        }
+        let id = u32_at(entry.data, 4)?;
+        if id == 0 || defaults.iter().any(|(existing, _, _, _)| *existing == id) {
+            return Err(INVALID);
+        }
+        defaults.push((
+            id,
+            u32_at(entry.data, 8)?,
+            u32_at(entry.data, 12)?,
+            u32_at(entry.data, 16)?,
+        ));
+    }
+    let mut total = 0usize;
+    let mut visual = false;
+    for moof in top.iter().filter(|b| b.kind == *b"moof") {
+        let start = (moof.data.as_ptr() as usize)
+            .checked_sub(data.as_ptr() as usize)
+            .and_then(|n| n.checked_sub(moof.header))
+            .ok_or(INVALID)? as u64;
+        let children = boxes(moof.data, count)?;
+        let mfhd = one(&children, b"mfhd")?.data;
+        if mfhd.len() != 8 || u32_at(mfhd, 0)? != 0 {
+            return Err(INVALID);
+        }
+        let mut traf_count = 0;
+        for traf in children.iter().filter(|b| b.kind == *b"traf") {
+            traf_count += 1;
+            let entries = boxes(traf.data, count)?;
+            let tfhd = one(&entries, b"tfhd")?.data;
+            let flags = u32_at(tfhd, 0)?;
+            if flags & !0x02003b != 0 {
+                return Err(INVALID);
+            }
+            let id = u32_at(tfhd, 4)?;
+            let track = tracks.iter().find(|t| t.id == id).ok_or(INVALID)?;
+            let (_, mut description, mut duration, mut size) = *defaults
+                .iter()
+                .find(|(t, _, _, _)| *t == id)
+                .ok_or(INVALID)?;
+            let mut offset = 8usize;
+            let base = if flags & 1 != 0 {
+                let n = u64::from_be_bytes(
+                    tfhd.get(offset..offset + 8)
+                        .ok_or(INVALID)?
+                        .try_into()
+                        .map_err(|_| INVALID)?,
+                );
+                offset += 8;
+                n
+            } else if flags & 0x020000 != 0 {
+                start
+            } else {
+                return Err(INVALID);
+            };
+            for (flag, value) in [(2, &mut description), (8, &mut duration), (16, &mut size)] {
+                if flags & flag != 0 {
+                    *value = u32_at(tfhd, offset)?;
+                    offset += 4;
+                }
+            }
+            if flags & 32 != 0 {
+                u32_at(tfhd, offset)?;
+                offset += 4;
+            }
+            if offset != tfhd.len() || description == 0 || description as usize > track.descriptions
+            {
+                return Err(INVALID);
+            }
+            if let Some(tfdt) = entries.iter().find(|b| b.kind == *b"tfdt") {
+                let version = u32_at(tfdt.data, 0)?;
+                if !matches!((version, tfdt.data.len()), (0, 8) | (0x01000000, 12)) {
+                    return Err(INVALID);
+                }
+                one(&entries, b"tfdt")?;
+            }
+            let mut previous_end = None;
+            let mut runs = 0;
+            for run in entries.iter().filter(|b| b.kind == *b"trun") {
+                runs += 1;
+                let flags = u32_at(run.data, 0)?;
+                if flags & !0x01000f05 != 0
+                    || flags >> 24 > 1
+                    || (flags & 4 != 0 && flags & 0x400 != 0)
+                {
+                    return Err(INVALID);
+                }
+                let n = u32_at(run.data, 4)? as usize;
+                total = total
+                    .checked_add(n)
+                    .filter(|n| *n <= 100_000)
+                    .ok_or(INVALID)?;
+                if n == 0 {
+                    return Err(INVALID);
+                }
+                let mut offset = 8usize;
+                let mut position = if flags & 1 != 0 {
+                    let delta = u32_at(run.data, offset)? as i32;
+                    offset += 4;
+                    base.checked_add_signed(i64::from(delta)).ok_or(INVALID)?
+                } else {
+                    previous_end.unwrap_or(base)
+                };
+                if flags & 4 != 0 {
+                    u32_at(run.data, offset)?;
+                    offset += 4;
+                }
+                let stride = [0x100, 0x200, 0x400, 0x800]
+                    .iter()
+                    .filter(|flag| flags & **flag != 0)
+                    .count()
+                    * 4;
+                if offset
+                    .checked_add(n.checked_mul(stride).ok_or(INVALID)?)
+                    .ok_or(INVALID)?
+                    != run.data.len()
+                {
+                    return Err(INVALID);
+                }
+                for _ in 0..n {
+                    let sample_duration = if flags & 0x100 != 0 {
+                        let value = u32_at(run.data, offset)?;
+                        offset += 4;
+                        value
+                    } else {
+                        duration
+                    };
+                    let sample_size = if flags & 0x200 != 0 {
+                        let value = u32_at(run.data, offset)?;
+                        offset += 4;
+                        value
+                    } else {
+                        size
+                    };
+                    for flag in [0x400, 0x800] {
+                        if flags & flag != 0 {
+                            u32_at(run.data, offset)?;
+                            offset += 4;
+                        }
+                    }
+                    if sample_duration == 0
+                        || sample_size == 0
+                        || !in_media(top, data, position, u64::from(sample_size))
+                    {
+                        return Err(INVALID);
+                    }
+                    position = position
+                        .checked_add(u64::from(sample_size))
+                        .ok_or(INVALID)?;
+                }
+                previous_end = Some(position);
+                visual |= track.visual;
+            }
+            if runs == 0 {
+                return Err(INVALID);
+            }
+        }
+        if traf_count == 0 {
+            return Err(INVALID);
+        }
+    }
+    if !visual || total == 0 {
+        return Err(INVALID);
+    }
+    Ok(())
 }
 /// Only AVC configurations tested in our browser fixture enable preview. Other
 /// allowlisted visual entries stay downloadable; the browser is the final decoder.
@@ -253,6 +487,9 @@ pub fn validate(data: &[u8]) -> Checked<bool> {
         return Err(INVALID);
     }
     let moov = boxes(one(&top, b"moov")?.data, &mut count)?;
+    let fragmented =
+        moov.iter().any(|b| b.kind == *b"mvex") || top.iter().any(|b| b.kind == *b"moof");
+    let mut tracks = Vec::new();
     let mut visual = false;
     let mut preview = false;
     for trak in moov.iter().filter(|b| b.kind == *b"trak") {
@@ -275,6 +512,18 @@ pub fn validate(data: &[u8]) -> Checked<bool> {
         if u32_at(stsd, 4)? as usize != entries.len() || entries.is_empty() {
             return Err(INVALID);
         }
+        let id = u32_at(tkhd, if version == 0 { 12 } else { 20 })?;
+        if id == 0 || tracks.iter().any(|t: &FragmentTrack| t.id == id) {
+            return Err(INVALID);
+        }
+        tracks.push(FragmentTrack {
+            id,
+            descriptions: entries.len(),
+            visual: handler == b"vide",
+        });
+        if fragmented {
+            empty_samples(&stbl)?;
+        }
         if handler != b"vide" {
             continue;
         }
@@ -291,7 +540,9 @@ pub fn validate(data: &[u8]) -> Checked<bool> {
         {
             return Err(INVALID);
         }
-        samples(&stbl, &top, data, entries.len())?;
+        if !fragmented {
+            samples(&stbl, &top, data, entries.len())?;
+        }
         for entry in entries {
             if !matches!(&entry.kind, b"avc1" | b"avc3" | b"hvc1" | b"hev1" | b"av01") {
                 return Err(INVALID);
@@ -323,6 +574,10 @@ pub fn validate(data: &[u8]) -> Checked<bool> {
     }
     if !visual {
         return Err(INVALID);
+    }
+    if fragmented {
+        fragments(data, &top, &moov, &tracks, &mut count)?;
+        return Ok(false);
     }
     Ok(preview)
 }
