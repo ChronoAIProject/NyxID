@@ -41,7 +41,7 @@ export type CustomColors = Record<ColorMode, ColorOverrides>;
 export const DEFAULT_COLORS: Record<ColorMode, Record<ColorKey, string>> = {
   dark: {
     background: "#17171A",
-    sidebar: "#141416",
+    sidebar: "#1C1C1F",
     card: "#222225",
     muted: "#2C2C30",
     foreground: "#EFEFF1",
@@ -54,7 +54,7 @@ export const DEFAULT_COLORS: Record<ColorMode, Record<ColorKey, string>> = {
   },
   light: {
     background: "#F4F4F5",
-    sidebar: "#F4F4F5",
+    sidebar: "#FFFFFF",
     card: "#FFFFFF",
     muted: "#F4F4F5",
     foreground: "#18181B",
