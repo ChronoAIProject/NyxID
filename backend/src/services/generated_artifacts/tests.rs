@@ -355,9 +355,15 @@ async fn generated_artifacts_materialize_history_owner_http_ranges_recovery_and_
     assert_eq!(bytes, MP4);
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("range", "bytes=4-15".parse().unwrap());
+    let budget_before_egress = byte_budget::available_for_tests();
     let response = http::owner_response(&db, &keys, &w.user_id, &row.id, &id, &headers)
         .await
         .unwrap();
+    assert_eq!(
+        budget_before_egress - byte_budget::available_for_tests(),
+        MP4.len() * 2,
+        "owner egress reservation must remain held while the response body owns its bytes"
+    );
     assert_eq!(response.status(), 206);
     assert_eq!(
         response.headers()["content-range"],
@@ -376,6 +382,11 @@ async fn generated_artifacts_materialize_history_owner_http_ranges_recovery_and_
             .await
             .unwrap()[..],
         &MP4[4..16]
+    );
+    assert_eq!(
+        byte_budget::available_for_tests(),
+        budget_before_egress,
+        "owner egress reservation must release after the body is consumed"
     );
     assert!(
         http::owner_response(&db, &keys, "foreign2037", &row.id, &id, &headers)
@@ -691,6 +702,81 @@ async fn generated_artifacts_expiry_and_stale_lease_cannot_publish_or_relabel() 
             .unwrap(),
         0
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn generated_artifact_worker_reservation_spans_persist_and_releases_on_error() {
+    let db = crate::test_utils::connect_transaction_test_database("artbudget2037").await;
+    let keys = crate::test_utils::test_encryption_keys();
+    ensure_indexes(&db).await.unwrap();
+    let (w, _row) = seeded(&db, &keys).await;
+    let budget_before_success = byte_budget::available_for_tests();
+    db.collection::<Document>(WATCHES)
+        .update_one(
+            doc! {"_id": &w.id},
+            doc! {"$set": {"state": "waiting", "lease_id": "budget-lease", "lease_until": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(1))}},
+        )
+        .await
+        .unwrap();
+    let live = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id": &w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let result = sandbox::parse(
+        &body("../../movie.mp4", MP4),
+        live.operation_id.as_deref().unwrap(),
+    )
+    .unwrap();
+    let reservation = byte_budget::reserve(sandbox::RESERVATION).await.unwrap();
+    let budget_held = byte_budget::available_for_tests();
+    persist(
+        &db,
+        &keys,
+        &live,
+        &result,
+        &sandbox::Status {
+            expires_at: None,
+            version: Some("7".into()),
+        },
+        &reservation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        budget_held,
+        byte_budget::available_for_tests(),
+        "the worker reservation must remain held through decode, encryption and persistence"
+    );
+    drop(reservation);
+    assert_eq!(byte_budget::available_for_tests(), budget_before_success);
+
+    // A dropped reservation on a failed persist has the same release contract.
+    let budget_before_error = byte_budget::available_for_tests();
+    let reservation = byte_budget::reserve(sandbox::RESERVATION).await.unwrap();
+    let budget_held = byte_budget::available_for_tests();
+    let mut stale = live.clone();
+    stale.lease_id = Some("stale-lease".into());
+    assert!(
+        persist(
+            &db,
+            &keys,
+            &stale,
+            &result,
+            &sandbox::Status {
+                expires_at: None,
+                version: Some("7".into()),
+            },
+            &reservation,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(budget_held, byte_budget::available_for_tests());
+    drop(reservation);
+    assert_eq!(byte_budget::available_for_tests(), budget_before_error);
     db.drop().await.unwrap();
 }
 

@@ -4,6 +4,7 @@ use crate::models::assistant_conversation::{
 };
 use crate::models::async_service_operation::{AsyncServiceOperation, COLLECTION_NAME as WATCHES};
 use crate::services::{assistant_nyxagent as engine, async_service_operation as watches};
+use axum::response::IntoResponse;
 
 struct AsyncFixture {
     f: Fixture,
@@ -57,6 +58,9 @@ impl AsyncFixture {
                 let override_body = status_body.lock().unwrap().clone();
                 let result_code = response_status.load(Ordering::SeqCst);
                 let result_wait = result_wait.clone();
+                let malformed_status = !uri.path().ends_with("/result")
+                    && override_body.as_ref().and_then(Value::as_str)
+                        == Some("__malformed_json_after_result_status__");
                 if uri.path().ends_with("/result") {
                     if let Some(next) = after_result.lock().unwrap().take() { *status_body.lock().unwrap() = Some(next); }
                 }
@@ -71,6 +75,13 @@ impl AsyncFixture {
                     } else {
                         None
                     };
+                    if malformed_status {
+                        return (
+                            axum::http::StatusCode::OK,
+                            axum::body::Body::from("{"),
+                        )
+                            .into_response();
+                    }
                     let body = Json(match uri.path() {
                         "/api/v1/agents" => json!({"id":"lifecycle-1","status":"queued"}),
                         "/api/v1/agent-lifecycle/lifecycle-1" => json!({"id":"lifecycle-1","status":status_phase,"agent_id":"agt_coffee","phase":"agent_startup"}),
@@ -94,6 +105,7 @@ impl AsyncFixture {
                         _ => json!({"status":"cancelled"}),
                     });
                     (axum::http::StatusCode::from_u16(if uri.path().ends_with("/result") {result_code} else {200}).unwrap(), body)
+                        .into_response()
                 }
             }),
         );

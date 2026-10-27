@@ -288,9 +288,21 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
     if status.text.len() > watches::RESULT_BYTES {
         return watches::ready(&state.db, w, None, "result_too_large", None).await;
     }
-    let parsed: serde_json::Value = serde_json::from_str(&status.text).map_err(|_| {
-        crate::errors::AppError::ValidationError("Invalid async operation status".into())
-    })?;
+    let parsed: serde_json::Value = match serde_json::from_str(&status.text) {
+        Ok(value) => value,
+        Err(_) if crate::services::generated_artifacts::admitted(w) => {
+            // Generated-artifact status is a bounded, server-owned lifecycle
+            // contract. A successful response that is not JSON cannot become
+            // a retrying defer: settle it terminally before any result fetch.
+            return watches::ready(&state.db, w, None, "artifact_invalid", None).await;
+        }
+        Err(_) => {
+            // Preserve ordinary async operation behavior and error contract.
+            return Err(crate::errors::AppError::ValidationError(
+                "Invalid async operation status".into(),
+            ));
+        }
+    };
     // The result is a separate proxy call and must acquire its own slot.
     drop(status);
     let phase = parsed
@@ -388,8 +400,10 @@ async fn artifact_result(
     if !(200..300).contains(&response.status) {
         return watches::defer(&state.db, w).await;
     }
-    let value: serde_json::Value = serde_json::from_str(&response.text)
-        .map_err(|_| crate::errors::AppError::ValidationError("artifact_invalid".into()))?;
+    let value: serde_json::Value = match serde_json::from_str(&response.text) {
+        Ok(value) => value,
+        Err(_) => return fail("artifact_invalid").await,
+    };
     let mut after = match sandbox::status(&value, operation, chrono::Utc::now()) {
         Ok(s) => s,
         Err(reason) => return fail(reason).await,
