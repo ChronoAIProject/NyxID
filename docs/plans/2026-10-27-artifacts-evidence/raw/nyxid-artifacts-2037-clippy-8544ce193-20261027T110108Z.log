@@ -1,0 +1,20 @@
+   Compiling nyxid-cli v0.73.1 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/cli)
+   Compiling nyxid v0.73.1 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend)
+error: this `if` statement can be collapsed
+  --> backend/src/handlers/async_service_operation_tests.rs:64:17
+   |
+64 | /                 if uri.path().ends_with("/result") {
+65 | |                     if let Some(next) = after_result.lock().unwrap().take() { *status_body.lock().unwrap() = Some(next); }
+66 | |                 }
+   | |_________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#collapsible_if
+   = note: `-D clippy::collapsible-if` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+   |
+64 ~                 if uri.path().ends_with("/result")
+65 ~                     && let Some(next) = after_result.lock().unwrap().take() { *status_body.lock().unwrap() = Some(next); }
+   |
+
+error: could not compile `nyxid` (bin "nyxid-server" test) due to 1 previous error

@@ -1,0 +1,5 @@
+
+running 1 test
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_malformed_status_is_terminal_before_or_after_result_fetch ... 
+thread 'handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_malformed_status_is_terminal_before_or_after_result_fetch' (5003051) has overflowed its stack
+fatal runtime error: stack overflow, aborting

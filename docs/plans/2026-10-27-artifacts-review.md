@@ -418,8 +418,10 @@ still separate applicable acceptance rows and have no integrated execution
 evidence in this checkpoint.
 
 The later local source composition was also read through the coordinator's
-reported `427ca78b8` tip: Telegram source/docs `b67ad9d81` and current main
-`49f5a61214f6a29485471adea8185763e5ef424d` were composed with only the three
+reported Telegram-composition tip `427ca78b8`. That composition included
+Telegram source/docs `b67ad9d81`; the actual subsequent current-main merge is
+`5e8812b6f6b6c8137b23f116a910cc39c303a1cf` against current main
+`49f5a61214f6a29485471adea8185763e5ef424d`. The merge had only the three
 expected additive conflicts in `assistant_nyxagent.rs`,
 `feature_flag_service.rs`, and `docs/chat/09-nyxbot-orchestrator.md`. Both
 response structs, both feature-flag entries/registries, and both documentation
@@ -441,7 +443,7 @@ historical failures, and redacted scan are archived under
 derivatives (94 raw records, two redacted derivatives, and two source
 identity/manifest files) indexed by `SHA256SUMS`. The current checksum index
 SHA-256 is
-`054a4e2fefe8a03df06abc6f9d92bf405c8da21c0cb8a3749ba76a3f3e7a8725`, and
+`d63b7795c4809d8d35b40d1cfd41e6fa317912668695b1e7519fc0622baf37c5`, and
 `shasum -a 256 -c SHA256SUMS` passes from the archive directory. The preserved
 source digest is
 `350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33` over 1,383
@@ -451,3 +453,19 @@ credential scan found no credential-shaped values; the four compiler identifier
 matches are documented false positives and fixture marker words are test data.
 This archive is documentation evidence only and does not close any acceptance
 gate.
+
+## Evidence publication repair — 2026-10-27
+
+The first archive commit indexed 99 local files but Git tracked only 43 archive
+content files plus the index, because the repository-wide `*.log` rule hid 56
+raw log/argv records. I scanned every `SHA256SUMS` entry before mutation: all 99
+paths existed locally, all recorded SHA-256 values matched, and the 56 missing
+paths were exactly the intended `raw/*.log` or `raw/*.argv.log` records. I then
+force-added only those 56 explicit paths; no ignore rule was changed and no
+blanket force-add was used. The post-repair committed-tree audit must report 99
+indexed paths, zero missing paths, and zero blob/hash mismatches.
+
+The archive README and status now distinguish Telegram composition tip
+`427ca78b8` from the actual current-main merge
+`5e8812b6f6b6c8137b23f116a910cc39c303a1cf` against current main
+`49f5a61214f6a29485471adea8185763e5ef424d`.

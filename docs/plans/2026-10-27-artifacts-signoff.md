@@ -156,9 +156,11 @@ checks no materialization, no recovery side effect, no provider resubmission,
 and preservation of independent work. Astra found no concrete shared-boundary
 source incompatibility. I-05 and I-07 remain unexecuted and are still required.
 
-The coordinator's later local source composition `427ca78b8` retained the
-Telegram source/docs `b67ad9d81` and current-main `49f5a61214f6a29485471adea8185763e5ef424d`.
-The three conflicts were additive only (`assistant_nyxagent.rs`,
+The coordinator's later Telegram composition tip was `427ca78b8`, retaining
+Telegram source/docs `b67ad9d81`. The actual subsequent current-main merge is
+`5e8812b6f6b6c8137b23f116a910cc39c303a1cf`, merged against current main
+`49f5a61214f6a29485471adea8185763e5ef424d`. The three conflicts were additive
+only (`assistant_nyxagent.rs`,
 `feature_flag_service.rs`, and `docs/chat/09-nyxbot-orchestrator.md`); both
 response structs, both flag registrations, and both documentation sections
 remain present. No runtime logic was authored by conflict resolution, and no
@@ -167,10 +169,20 @@ combined execution evidence exists for the composed tip.
 The standalone evidence packet is archived at
 `docs/plans/2026-10-27-artifacts-evidence/`. Its 99 indexed records and
 derivatives pass `shasum -a 256 -c SHA256SUMS`; the checksum index SHA-256 is
-`054a4e2fefe8a03df06abc6f9d92bf405c8da21c0cb8a3749ba76a3f3e7a8725`. The
+`d63b7795c4809d8d35b40d1cfd41e6fa317912668695b1e7519fc0622baf37c5`. The
 archive preserves source digest `350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33`,
 rebuilt binary SHA-256 `2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce`,
 and the no-credential-shaped-values scan with documented false positives. This
 is evidence durability bookkeeping and does not change the BLOCKED verdict.
+
+The first archive publication exposed a Git-object durability defect: the
+repository-wide `*.log` ignore rule left 56 indexed raw log/argv paths absent
+from the committed tree even though their local bytes matched `SHA256SUMS`. I
+scanned all 99 index entries, confirmed every file existed and matched its
+recorded digest, and force-added only those exact 56 ignored paths. No ignore
+rule changed. The repaired publication is accepted only with 99 tracked indexed
+paths, zero missing paths, and zero committed-blob/hash mismatches. The report
+also distinguishes Telegram composition `427ca78b8` from the actual
+current-main merge `5e8812b6f6b6c8137b23f116a910cc39c303a1cf`.
 
 This report records that the exclusive Artifacts validation window is quiescent after local validation; it does not alter the source candidate. No merge, deployment, production send, or issue closure is authorized.

@@ -1,0 +1,6 @@
+
+running 1 test
+test services::generated_artifacts::tests::generated_artifacts_exact_event_binding_cancellation_capacity_and_recovery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10471 filtered out; finished in 0.52s
+

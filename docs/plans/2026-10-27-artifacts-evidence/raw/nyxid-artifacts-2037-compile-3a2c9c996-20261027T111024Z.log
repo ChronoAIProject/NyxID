@@ -1,0 +1,4 @@
+   Compiling nyxid-cli v0.73.1 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/cli)
+   Compiling nyxid v0.73.1 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9m 47s
+  Executable unittests src/main.rs (/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a)

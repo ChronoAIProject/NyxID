@@ -1,0 +1,6 @@
+
+running 1 test
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_worker_rejects_expired_changed_and_unavailable_sources ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10471 filtered out; finished in 10.78s
+

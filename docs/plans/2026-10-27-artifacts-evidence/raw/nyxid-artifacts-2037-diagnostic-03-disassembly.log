@@ -1,0 +1,118 @@
+(lldb) target create /Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a
+Current executable set to '/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a' (arm64).
+(lldb) disassemble --start-address 0x1060cdd80 --count 45
+nyxid_server-a7bf57b9c4cb166a`nyxid_server::handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable::h8d77f00d17fda572:
+nyxid_server-a7bf57b9c4cb166a[0x1060cdd80] <+0>:   stp    x28, x27, [sp, #-0x20]!
+nyxid_server-a7bf57b9c4cb166a[0x1060cdd84] <+4>:   stp    x29, x30, [sp, #0x10]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdd88] <+8>:   add    x29, sp, #0x10
+nyxid_server-a7bf57b9c4cb166a[0x1060cdd8c] <+12>:  sub    x9, sp, #0x1b, lsl #12    ; =0x1b000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdd90] <+16>:  sub    sp, sp, #0x1, lsl #12     ; =0x1000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdd94] <+20>:  str    xzr, [sp]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdd98] <+24>:  cmp    sp, x9
+nyxid_server-a7bf57b9c4cb166a[0x1060cdd9c] <+28>:  b.ne   0x1060cdd90               ; <+16>
+nyxid_server-a7bf57b9c4cb166a[0x1060cdda0] <+32>:  sub    sp, sp, #0x790
+nyxid_server-a7bf57b9c4cb166a[0x1060cdda4] <+36>:  str    xzr, [sp]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdda8] <+40>:  sub    x8, x29, #0x20
+nyxid_server-a7bf57b9c4cb166a[0x1060cddac] <+44>:  str    x8, [sp, #0x10]
+nyxid_server-a7bf57b9c4cb166a[0x1060cddb0] <+48>:  mov    w8, #0x7030               ; =28720 
+nyxid_server-a7bf57b9c4cb166a[0x1060cddb4] <+52>:  mov    x9, x8
+nyxid_server-a7bf57b9c4cb166a[0x1060cddb8] <+56>:  add    x1, sp, #0x18
+nyxid_server-a7bf57b9c4cb166a[0x1060cddbc] <+60>:  mov    x8, x1
+nyxid_server-a7bf57b9c4cb166a[0x1060cddc0] <+64>:  add    x8, x8, x9
+nyxid_server-a7bf57b9c4cb166a[0x1060cddc4] <+68>:  strb   wzr, [x8]
+nyxid_server-a7bf57b9c4cb166a[0x1060cddc8] <+72>:  add    x0, sp, #0xd, lsl #12     ; =0xd000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cddcc] <+76>:  add    x0, x0, #0xb00
+nyxid_server-a7bf57b9c4cb166a[0x1060cddd0] <+80>:  mov    w8, #0xdae8               ; =56040 
+nyxid_server-a7bf57b9c4cb166a[0x1060cddd4] <+84>:  mov    x2, x8
+nyxid_server-a7bf57b9c4cb166a[0x1060cddd8] <+88>:  bl     0x107cfa1a4               ; memcpy.island
+nyxid_server-a7bf57b9c4cb166a[0x1060cdddc] <+92>:  b      0x1060cde04               ; <+132>
+nyxid_server-a7bf57b9c4cb166a[0x1060cdde0] <+96>:  add    x0, sp, #0xd, lsl #12     ; =0xd000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdde4] <+100>: add    x0, x0, #0xb00
+nyxid_server-a7bf57b9c4cb166a[0x1060cdde8] <+104>: bl     0x100f6eed4               ; core::ptr::drop_in_place$LT$nyxid_server..handlers..mcp_transport..chat_authority_tests..async_service_operation_tests..generated_artifact_delivery_tests..generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable..$u7b$$u7b$closure$u7d$$u7d$$GT$::hce184233677ffa90
+nyxid_server-a7bf57b9c4cb166a[0x1060cddec] <+108>: b      0x1060cdf20               ; <+416>
+nyxid_server-a7bf57b9c4cb166a[0x1060cddf0] <+112>: ldr    x9, [sp, #0x10]
+nyxid_server-a7bf57b9c4cb166a[0x1060cddf4] <+116>: str    x0, [x9]
+nyxid_server-a7bf57b9c4cb166a[0x1060cddf8] <+120>: mov    x8, x1
+nyxid_server-a7bf57b9c4cb166a[0x1060cddfc] <+124>: str    w8, [x9, #0x8]
+nyxid_server-a7bf57b9c4cb166a[0x1060cde00] <+128>: b      0x1060cdde0               ; <+96>
+nyxid_server-a7bf57b9c4cb166a[0x1060cde04] <+132>: add    x8, sp, #0x1b, lsl #12    ; =0x1b000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cde08] <+136>: add    x8, x8, #0x688
+nyxid_server-a7bf57b9c4cb166a[0x1060cde0c] <+140>: bl     0x107cf9d40               ; tokio::runtime::builder::Builder::new_current_thread::h3732fd9c214fd8a1 (.island)
+nyxid_server-a7bf57b9c4cb166a[0x1060cde10] <+144>: b      0x1060cde14               ; <+148>
+nyxid_server-a7bf57b9c4cb166a[0x1060cde14] <+148>: add    x0, sp, #0x1b, lsl #12    ; =0x1b000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cde18] <+152>: add    x0, x0, #0x688
+nyxid_server-a7bf57b9c4cb166a[0x1060cde1c] <+156>: bl     0x107cf9d30               ; tokio::runtime::builder::Builder::enable_all::h8b1c94745f05bc7e (.island)
+nyxid_server-a7bf57b9c4cb166a[0x1060cde20] <+160>: str    x0, [sp, #0x8]
+nyxid_server-a7bf57b9c4cb166a[0x1060cde24] <+164>: b      0x1060cde4c               ; <+204>
+nyxid_server-a7bf57b9c4cb166a[0x1060cde28] <+168>: add    x0, sp, #0x1b, lsl #12    ; =0x1b000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cde2c] <+172>: add    x0, x0, #0x688
+nyxid_server-a7bf57b9c4cb166a[0x1060cde30] <+176>: bl     0x107cf9c28               ; core::ptr::drop_in_place$LT$tokio..runtime..builder..Builder$GT$::hff4a87e7c5cd47d8 (.island)
+(lldb) disassemble --start-address 0x1060cdf2c --count 65
+nyxid_server-a7bf57b9c4cb166a`nyxid_server::handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable::_$u7b$$u7b$closure$u7d$$u7d$::ha98c1b43b62e9dd7:
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf2c] <+0>:   sub    sp, sp, #0x20
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf30] <+4>:   stp    x29, x30, [sp, #0x10]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf34] <+8>:   add    x29, sp, #0x10
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf38] <+12>:  str    x8, [sp, #0x8]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf3c] <+16>:  bl     0x1060cdd80               ; nyxid_server::handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable::h8d77f00d17fda572
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf40] <+20>:  ldr    x8, [sp, #0x8]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf44] <+24>:  bl     0x1043c7d74               ; test::assert_test_result::h294d5a145399f17f
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf48] <+28>:  ldp    x29, x30, [sp, #0x10]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf4c] <+32>:  add    sp, sp, #0x20
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf50] <+36>:  ret    
+
+nyxid_server-a7bf57b9c4cb166a`nyxid_server::handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::generated_artifact_delivery_tests::generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable::_$u7b$$u7b$closure$u7d$$u7d$::hae0459d9f4e9321f:
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf54] <+0>:   stp    x28, x27, [sp, #-0x20]!
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf58] <+4>:   stp    x29, x30, [sp, #0x10]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf5c] <+8>:   add    x29, sp, #0x10
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf60] <+12>:  sub    x9, sp, #0x91, lsl #12    ; =0x91000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf64] <+16>:  sub    sp, sp, #0x1, lsl #12     ; =0x1000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf68] <+20>:  str    xzr, [sp]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf6c] <+24>:  cmp    sp, x9
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf70] <+28>:  b.ne   0x1060cdf64               ; <+16>
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf74] <+32>:  sub    sp, sp, #0x220
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf78] <+36>:  add    x8, sp, #0x90, lsl #12    ; =0x90000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf7c] <+40>:  add    x8, x8, #0xa90
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf80] <+44>:  str    x8, [sp, #0x9e0]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf84] <+48>:  add    x8, sp, #0x8e, lsl #12    ; =0x8e000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf88] <+52>:  add    x8, x8, #0x478
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf8c] <+56>:  str    x8, [sp, #0x9e8]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf90] <+60>:  add    x8, sp, #0x8e, lsl #12    ; =0x8e000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf94] <+64>:  add    x8, x8, #0x217
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf98] <+68>:  str    x8, [sp, #0x9f0]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdf9c] <+72>:  add    x8, sp, #0x84, lsl #12    ; =0x84000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfa0] <+76>:  add    x8, x8, #0xfe0
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfa4] <+80>:  str    x8, [sp, #0x9f8]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfa8] <+84>:  add    x8, sp, #0x83, lsl #12    ; =0x83000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfac] <+88>:  add    x8, x8, #0xe88
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfb0] <+92>:  str    x8, [sp, #0xa00]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfb4] <+96>:  add    x8, sp, #0x7a, lsl #12    ; =0x7a000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfb8] <+100>: add    x8, x8, #0x440
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfbc] <+104>: str    x8, [sp, #0xa08]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfc0] <+108>: add    x8, sp, #0x79, lsl #12    ; =0x79000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfc4] <+112>: add    x8, x8, #0xf97
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfc8] <+116>: str    x8, [sp, #0xa10]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfcc] <+120>: add    x8, sp, #0x71, lsl #12    ; =0x71000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfd0] <+124>: add    x8, x8, #0x7b0
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfd4] <+128>: str    x8, [sp, #0xa18]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfd8] <+132>: add    x8, sp, #0x71, lsl #12    ; =0x71000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfdc] <+136>: add    x8, x8, #0x1e8
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfe0] <+140>: str    x8, [sp, #0xa20]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfe4] <+144>: add    x8, sp, #0x70, lsl #12    ; =0x70000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfe8] <+148>: add    x8, x8, #0xbb7
+nyxid_server-a7bf57b9c4cb166a[0x1060cdfec] <+152>: str    x8, [sp, #0xa28]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdff0] <+156>: add    x8, sp, #0x58, lsl #12    ; =0x58000 
+nyxid_server-a7bf57b9c4cb166a[0x1060cdff4] <+160>: add    x8, x8, #0x8a0
+nyxid_server-a7bf57b9c4cb166a[0x1060cdff8] <+164>: str    x8, [sp, #0xa30]
+nyxid_server-a7bf57b9c4cb166a[0x1060cdffc] <+168>: add    x8, sp, #0x4c, lsl #12    ; =0x4c000 
+nyxid_server-a7bf57b9c4cb166a[0x1060ce000] <+172>: add    x8, x8, #0xd48
+nyxid_server-a7bf57b9c4cb166a[0x1060ce004] <+176>: str    x8, [sp, #0xa38]
+nyxid_server-a7bf57b9c4cb166a[0x1060ce008] <+180>: add    x8, sp, #0x45, lsl #12    ; =0x45000 
+nyxid_server-a7bf57b9c4cb166a[0x1060ce00c] <+184>: add    x8, x8, #0xf80
+nyxid_server-a7bf57b9c4cb166a[0x1060ce010] <+188>: str    x8, [sp, #0xa40]
+nyxid_server-a7bf57b9c4cb166a[0x1060ce014] <+192>: add    x8, sp, #0x3e, lsl #12    ; =0x3e000 
+nyxid_server-a7bf57b9c4cb166a[0x1060ce018] <+196>: add    x8, x8, #0x858
+nyxid_server-a7bf57b9c4cb166a[0x1060ce01c] <+200>: str    x8, [sp, #0xa48]
+nyxid_server-a7bf57b9c4cb166a[0x1060ce020] <+204>: add    x8, sp, #0x3d, lsl #12    ; =0x3d000 
+nyxid_server-a7bf57b9c4cb166a[0x1060ce024] <+208>: add    x8, x8, #0xbff
+nyxid_server-a7bf57b9c4cb166a[0x1060ce028] <+212>: str    x8, [sp, #0xa50]
+nyxid_server-a7bf57b9c4cb166a[0x1060ce02c] <+216>: add    x8, sp, #0x34, lsl #12    ; =0x34000 

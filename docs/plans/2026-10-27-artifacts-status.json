@@ -327,7 +327,7 @@
     }
   },
   "implementation_status": "Reviewed and locally validated source tip 3a2c9c996a756ed4f58673c122a6d4775f0e66b7, composed from candidate 9886d2620d69ec456f3c1fd814ec12aa972ee2cc plus prerequisite 5b44175af5d69af272200a2fc7f374d4b10355f2. Astra personally reviewed the complete implementation and the bounded Clippy correction; required rebuild, malformed-status regression, current-tip router/process-stream/lifecycle regressions, focused generated-artifact regressions, and all-target warnings-denied Clippy passed with exact source/binary identities. Combined I-01–I-05/I-07 acceptance and live Sandbox-to-Web acceptance remain open, so ASTRA_IMPLEMENTATION_APPROVED is not recorded.",
-  "updated_at": "2026-10-27T12:35:46Z",
+  "updated_at": "2026-10-27T12:47:11Z",
   "resource_hold": {
     "active": false,
     "explicit_release_received": true,
@@ -482,7 +482,7 @@
   ],
   "signoff_path": "docs/plans/2026-10-27-artifacts-signoff.md",
   "signoff_verdict": "BLOCKED",
-  "signoff_updated_at": "2026-10-27T12:35:46Z",
+  "signoff_updated_at": "2026-10-27T12:47:11Z",
   "applied_prerequisite_commit": "5b44175af5d69af272200a2fc7f374d4b10355f2",
   "prerequisite_source_commit": "336405f8e667ea2eb2c6513effec3d15fd960b02",
   "effective_source_tip": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
@@ -557,8 +557,9 @@
         "backend/src/services/feature_flag_service.rs",
         "docs/chat/09-nyxbot-orchestrator.md"
       ],
-      "resolution": "Additive response structs, flag entries/registries, and documentation sections retained; no runtime logic authored by conflict resolution.",
-      "execution": "No Cargo compile or combined test result claimed."
+      "resolution": "Telegram composition 427ca78b8 and actual current-main merge 5e8812b6f6b6c8137b23f116a910cc39c303a1cf retained additive response structs, flag entries/registries, and documentation sections; no runtime logic authored by conflict resolution.",
+      "execution": "No Cargo compile or combined test result claimed.",
+      "current_main_merge": "5e8812b6f6b6c8137b23f116a910cc39c303a1cf"
     }
   },
   "evidence_archive": {
@@ -568,12 +569,16 @@
     "redacted_derivatives": 2,
     "identity_manifest_files": 2,
     "sha256sums": "docs/plans/2026-10-27-artifacts-evidence/SHA256SUMS",
-    "sha256sums_sha256": "054a4e2fefe8a03df06abc6f9d92bf405c8da21c0cb8a3749ba76a3f3e7a8725",
+    "sha256sums_sha256": "d63b7795c4809d8d35b40d1cfd41e6fa317912668695b1e7519fc0622baf37c5",
     "checksum_verification": "shasum -a 256 -c SHA256SUMS passed from archive directory",
     "source_digest_sha256": "350bb2497cd79ba222e340ca90874ccc126e74052edff168a70baa62fed1cc33",
     "source_manifest_inputs": 1383,
     "binary_sha256": "2cd44c5d63639d4c315bc3dbe64bac7cd7e7a2f77d8a0d1adfb4fcaf73a8d9ce",
-    "credential_scan": "No credential-shaped values; four compiler identifier matches are documented false positives and fixture marker words are test data."
+    "credential_scan": "No credential-shaped values; four compiler identifier matches are documented false positives and fixture marker words are test data.",
+    "tracked_indexed_files_after_repair": 99,
+    "indexed_path_missing_count_after_repair": 0,
+    "indexed_blob_mismatch_count_after_repair": 0,
+    "publication_repair": "Force-added exactly the 56 ignored raw .log/.argv.log paths listed in SHA256SUMS after local existence and SHA-256 verification; no ignore rule changed."
   },
   "sol_runtime_settings_latest": {
     "agent_id": "01a17afe-64ad-7ed1-bd1f-8b75d719d9f9",

@@ -27,9 +27,17 @@ combined I-01--I-05/I-07 gate, the live Sandbox/Web gate, or the BLOCKED ticket 
 
 The read-only combined integration source was reviewed separately from this
 standalone archive. The integration checkpoint is `ed2c6a52ea5a20205b92c1da45d9c84fc1edbc80`
-(parent `b1d627eca05d4227f6cd94655f17dccb313fb96e`), with the later local
-composition `427ca78b8` including Telegram's `b67ad9d81` source/docs and the
-current-main reconciliation at `49f5a61214f6a29485471adea8185763e5ef424d`.
-The composition review found only the three expected additive conflicts and no
-runtime logic authored by conflict resolution. No Cargo compile or combined test
-run has been claimed for those integration commits.
+(parent `b1d627eca05d4227f6cd94655f17dccb313fb96e`). The Telegram composition
+tip was `427ca78b8`, including Telegram's `b67ad9d81` source/docs; the actual
+subsequent current-main merge was `5e8812b6f6b6c8137b23f116a910cc39c303a1cf`
+against current main `49f5a61214f6a29485471adea8185763e5ef424d`. The composition
+review found only the three expected additive conflicts and no runtime logic
+authored by conflict resolution. No Cargo compile or combined test run has been
+claimed for those integration commits.
+
+Publication repair: the repository-wide `*.log` ignore rule initially hid 56
+indexed raw log/argv records from Git. Before force-adding, every one of the 99
+`SHA256SUMS` paths was checked for local existence and matching SHA-256. Only
+those exact 56 ignored paths were force-added; no ignore rule changed. The
+post-repair audit requires all 99 indexed paths to be tracked with zero missing
+or blob/hash mismatches.

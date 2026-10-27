@@ -1,0 +1,1878 @@
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/assistant_nyxagent.rs:869:
+         message.recovery = recovery.get(&message.id).cloned().map(Into::into);
+     }
+     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
+[31m-    let mut artifact_deliveries = crate::services::generated_artifacts::delivery_states(&state.db,&user_id,&id,&ids).await?;
+(B[m[32m+    let mut artifact_deliveries =
+(B[m[32m+        crate::services::generated_artifacts::delivery_states(&state.db, &user_id, &id, &ids)
+(B[m[32m+            .await?;
+(B[m     for message in &mut messages {
+[31m-        message.artifact_delivery = artifact_deliveries.remove(&message.id).map(|s| ArtifactDeliveryResponse { state:s.state,count:s.count,recovery_available:s.recovery_available });
+(B[m[32m+        message.artifact_delivery =
+(B[m[32m+            artifact_deliveries
+(B[m[32m+                .remove(&message.id)
+(B[m[32m+                .map(|s| ArtifactDeliveryResponse {
+(B[m[32m+                    state: s.state,
+(B[m[32m+                    count: s.count,
+(B[m[32m+                    recovery_available: s.recovery_available,
+(B[m[32m+                });
+(B[m     }
+ 
+     let feedback =
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/assistant_nyxagent.rs:1036:
+ ) -> AppResult<Response> {
+     let user_id = auth.user_id.to_string();
+     engine::require_enabled(&state.db, &user_id).await?;
+[31m-    auth.ensure_live_assistant_turn(&state.db, "assistant.attachment").await?;
+(B[m[31m-    if Uuid::parse_str(&attachment_id).is_err() {return Err(AppError::NotFound("Attachment not found".into()));}
+(B[m[31m-    crate::services::generated_artifacts::http::owner_response(&state.db,&state.encryption_keys,&user_id,&id,&attachment_id,&headers).await
+(B[m[32m+    auth.ensure_live_assistant_turn(&state.db, "assistant.attachment")
+(B[m[32m+        .await?;
+(B[m[32m+    if Uuid::parse_str(&attachment_id).is_err() {
+(B[m[32m+        return Err(AppError::NotFound("Attachment not found".into()));
+(B[m[32m+    }
+(B[m[32m+    crate::services::generated_artifacts::http::owner_response(
+(B[m[32m+        &state.db,
+(B[m[32m+        &state.encryption_keys,
+(B[m[32m+        &user_id,
+(B[m[32m+        &id,
+(B[m[32m+        &attachment_id,
+(B[m[32m+        &headers,
+(B[m[32m+    )
+(B[m[32m+    .await
+(B[m }
+ 
+ pub async fn artifact_delivery(
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/assistant_nyxagent.rs:1045:
+[31m-    State(state): State<AppState>, auth: AuthUser,
+(B[m[31m-    Path((id,message_id)): Path<(String,String)>, body: axum::body::Bytes,
+(B[m[32m+    State(state): State<AppState>,
+(B[m[32m+    auth: AuthUser,
+(B[m[32m+    Path((id, message_id)): Path<(String, String)>,
+(B[m[32m+    body: axum::body::Bytes,
+(B[m ) -> AppResult<Json<Value>> {
+[31m-    let user_id=auth.user_id.to_string();
+(B[m[31m-    engine::require_enabled(&state.db,&user_id).await?;
+(B[m[31m-    if !body.is_empty(){return Err(AppError::BadRequest("Artifact recovery requires an empty body".into()));}
+(B[m[31m-    crate::services::generated_artifacts::recover(&state.db,&state.encryption_keys,&user_id,&id,&message_id).await?;
+(B[m[32m+    let user_id = auth.user_id.to_string();
+(B[m[32m+    engine::require_enabled(&state.db, &user_id).await?;
+(B[m[32m+    if !body.is_empty() {
+(B[m[32m+        return Err(AppError::BadRequest(
+(B[m[32m+            "Artifact recovery requires an empty body".into(),
+(B[m[32m+        ));
+(B[m[32m+    }
+(B[m[32m+    crate::services::generated_artifacts::recover(
+(B[m[32m+        &state.db,
+(B[m[32m+        &state.encryption_keys,
+(B[m[32m+        &user_id,
+(B[m[32m+        &id,
+(B[m[32m+        &message_id,
+(B[m[32m+    )
+(B[m[32m+    .await?;
+(B[m     Ok(Json(json!({"status":"materialized"})))
+ }
+ #[derive(Serialize)]
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/async_service_operations.rs:126:
+         crate::services::billing::route_inventory::BillingIngress::Mcp,
+     )?;
+     let mut exec = mcp_exec_context(&auth);
+[31m-    exec.response_body_limit = Some(if crate::services::generated_artifacts::admitted(watch)
+(B[m[31m-        && name == watch.contract.result_operation {
+(B[m[31m-        if !crate::services::generated_artifacts::sandbox_contract(service, submit) { return Err(denied()); }
+(B[m[31m-        crate::services::generated_artifacts::sandbox::RESPONSE_BYTES
+(B[m[31m-    } else { watches::RESULT_BYTES });
+(B[m[32m+    exec.response_body_limit = Some(
+(B[m[32m+        if crate::services::generated_artifacts::admitted(watch)
+(B[m[32m+            && name == watch.contract.result_operation
+(B[m[32m+        {
+(B[m[32m+            if !crate::services::generated_artifacts::sandbox_contract(service, submit) {
+(B[m[32m+                return Err(denied());
+(B[m[32m+            }
+(B[m[32m+            crate::services::generated_artifacts::sandbox::RESPONSE_BYTES
+(B[m[32m+        } else {
+(B[m[32m+            watches::RESULT_BYTES
+(B[m[32m+        },
+(B[m[32m+    );
+(B[m     mcp_service::execute_tool_response(
+         &state.http_client,
+         &state.db,
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/async_service_operations.rs:334:
+ 
+ // One artifact decode/encrypt worker per process. Other watches remain text-bounded.
+ static ARTIFACT_WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+[31m-async fn artifact_result(state: &AppState, w: &AsyncServiceOperation, before: &serde_json::Value) -> crate::errors::AppResult<()> {
+(B[m[31m-    use crate::services::{generated_artifacts::{self as artifacts, sandbox}, assistant_upload_service::byte_budget};
+(B[m[31m-    let fail = |reason| watches::ready(&state.db,w,None,reason,None);
+(B[m[31m-    let operation = w.operation_id.as_deref().ok_or_else(|| crate::errors::AppError::Conflict("artifact_source_changed".into()))?;
+(B[m[31m-    let before = match sandbox::status(before,operation,chrono::Utc::now()) {Ok(s)=>s,Err(reason)=>return fail(reason).await};
+(B[m[31m-    let _worker = ARTIFACT_WORKER.acquire().await.map_err(|_| crate::errors::AppError::Internal("Artifact worker unavailable".into()))?;
+(B[m[32m+async fn artifact_result(
+(B[m[32m+    state: &AppState,
+(B[m[32m+    w: &AsyncServiceOperation,
+(B[m[32m+    before: &serde_json::Value,
+(B[m[32m+) -> crate::errors::AppResult<()> {
+(B[m[32m+    use crate::services::{
+(B[m[32m+        assistant_upload_service::byte_budget,
+(B[m[32m+        generated_artifacts::{self as artifacts, sandbox},
+(B[m[32m+    };
+(B[m[32m+    let fail = |reason| watches::ready(&state.db, w, None, reason, None);
+(B[m[32m+    let operation = w
+(B[m[32m+        .operation_id
+(B[m[32m+        .as_deref()
+(B[m[32m+        .ok_or_else(|| crate::errors::AppError::Conflict("artifact_source_changed".into()))?;
+(B[m[32m+    let before = match sandbox::status(before, operation, chrono::Utc::now()) {
+(B[m[32m+        Ok(s) => s,
+(B[m[32m+        Err(reason) => return fail(reason).await,
+(B[m[32m+    };
+(B[m[32m+    let _worker = ARTIFACT_WORKER
+(B[m[32m+        .acquire()
+(B[m[32m+        .await
+(B[m[32m+        .map_err(|_| crate::errors::AppError::Internal("Artifact worker unavailable".into()))?;
+(B[m     let reservation = byte_budget::reserve(sandbox::RESERVATION).await?;
+[31m-    let response = call(state,w,&w.contract.result_operation).await?;
+(B[m[31m-    if response.status == 410 { return fail("result_expired").await; }
+(B[m[31m-    if response.status >= 500 {return watches::defer(&state.db,w).await;}
+(B[m[31m-    if !(200..300).contains(&response.status) {return fail("result_unavailable").await;}
+(B[m[31m-    let result = match sandbox::parse(&response.text,operation) {Ok(result)=>result,Err(reason)=>return fail(reason).await};
+(B[m[32m+    let response = call(state, w, &w.contract.result_operation).await?;
+(B[m[32m+    if response.status == 410 {
+(B[m[32m+        return fail("result_expired").await;
+(B[m[32m+    }
+(B[m[32m+    if response.status >= 500 {
+(B[m[32m+        return watches::defer(&state.db, w).await;
+(B[m[32m+    }
+(B[m[32m+    if !(200..300).contains(&response.status) {
+(B[m[32m+        return fail("result_unavailable").await;
+(B[m[32m+    }
+(B[m[32m+    let result = match sandbox::parse(&response.text, operation) {
+(B[m[32m+        Ok(result) => result,
+(B[m[32m+        Err(reason) => return fail(reason).await,
+(B[m[32m+    };
+(B[m     drop(response); // Releases service concurrency before the recheck.
+[31m-    let response = call(state,w,&w.contract.status_operation).await?;
+(B[m[31m-    if response.status == 410 {return fail("result_expired").await;}
+(B[m[31m-    if !(200..300).contains(&response.status) {return watches::defer(&state.db,w).await;}
+(B[m[31m-    let value: serde_json::Value=serde_json::from_str(&response.text).map_err(|_|crate::errors::AppError::ValidationError("artifact_invalid".into()))?;
+(B[m[31m-    let mut after = match sandbox::status(&value,operation,chrono::Utc::now()) {Ok(s)=>s,Err(reason)=>return fail(reason).await};
+(B[m[31m-    after.expires_at=before.expires_at.into_iter().chain(after.expires_at).min();
+(B[m[32m+    let response = call(state, w, &w.contract.status_operation).await?;
+(B[m[32m+    if response.status == 410 {
+(B[m[32m+        return fail("result_expired").await;
+(B[m[32m+    }
+(B[m[32m+    if !(200..300).contains(&response.status) {
+(B[m[32m+        return watches::defer(&state.db, w).await;
+(B[m[32m+    }
+(B[m[32m+    let value: serde_json::Value = serde_json::from_str(&response.text)
+(B[m[32m+        .map_err(|_| crate::errors::AppError::ValidationError("artifact_invalid".into()))?;
+(B[m[32m+    let mut after = match sandbox::status(&value, operation, chrono::Utc::now()) {
+(B[m[32m+        Ok(s) => s,
+(B[m[32m+        Err(reason) => return fail(reason).await,
+(B[m[32m+    };
+(B[m[32m+    after.expires_at = before.expires_at.into_iter().chain(after.expires_at).min();
+(B[m     drop(response);
+[31m-    if w.artifact_result.as_ref().is_some_and(|m|m.source_result_identity!=result.identity) {return fail("artifact_source_changed").await;}
+(B[m[31m-    artifacts::persist(&state.db,&state.encryption_keys,w,&result,&after,&reservation).await
+(B[m[32m+    if w.artifact_result
+(B[m[32m+        .as_ref()
+(B[m[32m+        .is_some_and(|m| m.source_result_identity != result.identity)
+(B[m[32m+    {
+(B[m[32m+        return fail("artifact_source_changed").await;
+(B[m[32m+    }
+(B[m[32m+    artifacts::persist(
+(B[m[32m+        &state.db,
+(B[m[32m+        &state.encryption_keys,
+(B[m[32m+        w,
+(B[m[32m+        &result,
+(B[m[32m+        &after,
+(B[m[32m+        &reservation,
+(B[m[32m+    )
+(B[m[32m+    .await
+(B[m }
+ 
+ pub(crate) async fn sweep(state: &AppState) -> crate::errors::AppResult<()> {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/nyxbot_gateway_thread_tests.rs:681:
+         let mut attachments = Vec::new();
+         for _ in 0..2 {
+             let attachment = AssistantAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+                artifact: Default::default(),
+(B[m                 secret_context_versions: Default::default(),
+                 id: Uuid::new_v4().to_string(),
+                 origin: "tool".into(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/nyxbot_gateway_thread_tests.rs:702:
+                 .await
+                 .unwrap();
+             attachments.push(TurnAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+                artifact: Default::default(),
+(B[m                 id: attachment.id,
+                 label: "private label".into(),
+                 content_type: "image/png".into(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/nyxbot_image_delivery_tests.rs:121:
+     for index in 0..2 {
+         let bytes = format!("pixels-{index}");
+         let row = AssistantAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             secret_context_versions: Default::default(),
+             id: Uuid::new_v4().to_string(),
+             origin: "tool".into(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/handlers/nyxbot_image_delivery_tests.rs:145:
+             .await
+             .unwrap();
+         attachments.push(TurnAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             id: row.id,
+             label: "private_tool_label".into(),
+             content_type: row.content_type,
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/routes.rs:2536:
+         )
+         .route(
+             "/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery",
+[31m-            post(assistant_nyxagent::artifact_delivery).layer(axum::extract::DefaultBodyLimit::max(0)),
+(B[m[32m+            post(assistant_nyxagent::artifact_delivery)
+(B[m[32m+                .layer(axum::extract::DefaultBodyLimit::max(0)),
+(B[m         )
+         .route(
+             "/nyxagent/conversations/{id}/model",
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_nyxagent.rs:4189:
+     );
+     let stored = async {
+         let mut attachment = AssistantAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             secret_context_versions: Default::default(),
+             origin: "tool".into(),
+             id: meta.id.clone(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_nyxagent.rs:4270:
+     let attachment = if let Some(media) = media {
+         let meta = meta.as_ref().ok_or_else(resources::missing)?;
+         let mut row = AssistantAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             secret_context_versions: Default::default(),
+             id: meta.id.clone(),
+             origin: "tool".into(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_nyxagent_tests.rs:715:
+             ended_at: None,
+         }],
+         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             chat_delivery: None,
+             image_input: None,
+             image_inspection: None,
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_nyxagent_tests.rs:781:
+             ended_at: None,
+         }],
+         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             chat_delivery: None,
+             image_input: None,
+             image_inspection: None,
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_nyxagent_tests.rs:4560:
+             message
+                 .attachments
+                 .push(crate::models::assistant_conversation::TurnAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+                    artifact: Default::default(),
+(B[m                     chat_delivery: None,
+                     id: upload_id.clone(),
+                     label: "Old source.txt".into(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_record_service.rs:179:
+         },
+     ];
+     if row.origin == "generated_artifact" {
+[31m-        path.extend(["watch", row.artifact.source_watch_id.as_deref().unwrap_or_default(),
+(B[m[31m-            "operation", row.artifact.source_operation_id.as_deref().unwrap_or_default(),
+(B[m[31m-            "source", row.artifact.source_result_identity.as_deref().unwrap_or_default()]);
+(B[m[32m+        path.extend([
+(B[m[32m+            "watch",
+(B[m[32m+            row.artifact.source_watch_id.as_deref().unwrap_or_default(),
+(B[m[32m+            "operation",
+(B[m[32m+            row.artifact
+(B[m[32m+                .source_operation_id
+(B[m[32m+                .as_deref()
+(B[m[32m+                .unwrap_or_default(),
+(B[m[32m+            "source",
+(B[m[32m+            row.artifact
+(B[m[32m+                .source_result_identity
+(B[m[32m+                .as_deref()
+(B[m[32m+                .unwrap_or_default(),
+(B[m[32m+        ]);
+(B[m     }
+     path
+ }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_record_service.rs:192:
+ ) -> AppResult<Vec<u8>> {
+     let path = image_path(row);
+     if row.origin == "generated_artifact" {
+[31m-        return keys.encrypt_record(bytes, &RecordContext::new(
+(B[m[31m-            crate::models::assistant_attachment::COLLECTION_NAME, &row.id, &row.user_id, &path,
+(B[m[31m-        )?).await;
+(B[m[32m+        return keys
+(B[m[32m+            .encrypt_record(
+(B[m[32m+                bytes,
+(B[m[32m+                &RecordContext::new(
+(B[m[32m+                    crate::models::assistant_attachment::COLLECTION_NAME,
+(B[m[32m+                    &row.id,
+(B[m[32m+                    &row.user_id,
+(B[m[32m+                    &path,
+(B[m[32m+                )?,
+(B[m[32m+            )
+(B[m[32m+            .await;
+(B[m     }
+     fields::encrypt_context(
+         keys,
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_record_service.rs:362:
+         } else {
+             let row: AssistantAttachment =
+                 bson::from_document(source.clone()).map_err(|_| invalid())?;
+[31m-            if !matches!(row.origin.as_str(), "tool" | "machine_preview" | "generated_artifact") {
+(B[m[32m+            if !matches!(
+(B[m[32m+                row.origin.as_str(),
+(B[m[32m+                "tool" | "machine_preview" | "generated_artifact"
+(B[m[32m+            ) {
+(B[m                 return Err(invalid());
+             }
+             let size = usize::try_from(row.size).map_err(|_| invalid())?;
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_upload_retention.rs:147:
+ 
+ fn age_expired(row: &Document, policy: Policy, now: DateTime<Utc>) -> bool {
+     if row.get_str("origin").ok() == Some("generated_artifact") {
+[31m-        if date(row, "expires_at").is_none_or(|expiry| expiry <= now) { return true; }
+(B[m[31m-        let days = policy.tool_image_days.unwrap_or(if row.get_str("content_type").unwrap_or_default().starts_with("image/") { policy.image_days } else { policy.document_days });
+(B[m[31m-        return date(row, "created_at").is_none_or(|created| created + Duration::days(i64::from(days)) <= now);
+(B[m[32m+        if date(row, "expires_at").is_none_or(|expiry| expiry <= now) {
+(B[m[32m+            return true;
+(B[m[32m+        }
+(B[m[32m+        let days = policy.tool_image_days.unwrap_or(
+(B[m[32m+            if row
+(B[m[32m+                .get_str("content_type")
+(B[m[32m+                .unwrap_or_default()
+(B[m[32m+                .starts_with("image/")
+(B[m[32m+            {
+(B[m[32m+                policy.image_days
+(B[m[32m+            } else {
+(B[m[32m+                policy.document_days
+(B[m[32m+            },
+(B[m[32m+        );
+(B[m[32m+        return date(row, "created_at")
+(B[m[32m+            .is_none_or(|created| created + Duration::days(i64::from(days)) <= now);
+(B[m     }
+     let (start, duration) = if row.get_str("origin").ok() == Some("machine_preview") {
+         (
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_upload_service.rs:3044:
+     #[test]
+     fn assistant_uploads_capability_fallback_is_explicit_and_bounded() {
+         let item = TurnAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             id: Uuid::new_v4().to_string(),
+             content_type: "image/png".into(),
+             label: "photo.png".into(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/assistant_upload_service.rs:3254:
+     #[test]
+     fn tool_image_plan_keeps_user_selection_separate_and_enforces_capabilities() {
+         let item = TurnAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             id: Uuid::new_v4().to_string(),
+             origin: "tool".into(),
+             content_type: "image/png".into(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/async_service_operation.rs:172:
+     validate_endpoints(&contract, service, endpoint)?;
+     let cma = super::cma_operation::metadata(&contract, args);
+     let artifacts_enabled = super::generated_artifacts::sandbox_contract(service, endpoint)
+[31m-        && super::feature_flag_service::personal_flag_enabled(db, &chat.user_id,
+(B[m[31m-            super::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY).await?;
+(B[m[32m+        && super::feature_flag_service::personal_flag_enabled(
+(B[m[32m+            db,
+(B[m[32m+            &chat.user_id,
+(B[m[32m+            super::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
+(B[m[32m+        )
+(B[m[32m+        .await?;
+(B[m     let db_ref_for_audit = db;
+     let db = db.clone();
+     let chat = chat.clone();
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/http.rs:1:
+ //! HTTP policy is separate from file validation and the private owner read service.
+[31m-use crate::errors::{AppError, AppResult};
+(B[m[31m-use axum::{body::Body, http::{HeaderMap, StatusCode}, response::Response};
+(B[m use super::*;
+[32m+use crate::errors::{AppError, AppResult};
+(B[m[32m+use axum::{
+(B[m[32m+    body::Body,
+(B[m[32m+    http::{HeaderMap, StatusCode},
+(B[m[32m+    response::Response,
+(B[m[32m+};
+(B[m 
+[31m-pub fn single_range(header: &str, size: usize) -> Result<(usize,usize), ()> {
+(B[m[31m-    let range=header.strip_prefix("bytes=").ok_or(())?;
+(B[m[31m-    if range.contains(',') || range.chars().any(char::is_whitespace) || size==0 {return Err(());}
+(B[m[31m-    let (start,end)=range.split_once('-').ok_or(())?;
+(B[m[31m-    let number=|s:&str| if s.is_empty() || !s.bytes().all(|c|c.is_ascii_digit()) {Err(())} else {s.parse::<usize>().map_err(|_|())};
+(B[m[32m+pub fn single_range(header: &str, size: usize) -> Result<(usize, usize), ()> {
+(B[m[32m+    let range = header.strip_prefix("bytes=").ok_or(())?;
+(B[m[32m+    if range.contains(',') || range.chars().any(char::is_whitespace) || size == 0 {
+(B[m[32m+        return Err(());
+(B[m[32m+    }
+(B[m[32m+    let (start, end) = range.split_once('-').ok_or(())?;
+(B[m[32m+    let number = |s: &str| {
+(B[m[32m+        if s.is_empty() || !s.bytes().all(|c| c.is_ascii_digit()) {
+(B[m[32m+            Err(())
+(B[m[32m+        } else {
+(B[m[32m+            s.parse::<usize>().map_err(|_| ())
+(B[m[32m+        }
+(B[m[32m+    };
+(B[m     if start.is_empty() {
+[31m-        let suffix=number(end)?;
+(B[m[31m-        if suffix==0 {return Err(());}
+(B[m[31m-        return Ok((size.saturating_sub(suffix),size-1));
+(B[m[32m+        let suffix = number(end)?;
+(B[m[32m+        if suffix == 0 {
+(B[m[32m+            return Err(());
+(B[m[32m+        }
+(B[m[32m+        return Ok((size.saturating_sub(suffix), size - 1));
+(B[m     }
+[31m-    let start=number(start)?;
+(B[m[31m-    if start>=size {return Err(());}
+(B[m[31m-    let end=if end.is_empty(){size-1}else{number(end)?.min(size-1)};
+(B[m[31m-    if end<start {return Err(());}
+(B[m[31m-    Ok((start,end))
+(B[m[32m+    let start = number(start)?;
+(B[m[32m+    if start >= size {
+(B[m[32m+        return Err(());
+(B[m[32m+    }
+(B[m[32m+    let end = if end.is_empty() {
+(B[m[32m+        size - 1
+(B[m[32m+    } else {
+(B[m[32m+        number(end)?.min(size - 1)
+(B[m[32m+    };
+(B[m[32m+    if end < start {
+(B[m[32m+        return Err(());
+(B[m[32m+    }
+(B[m[32m+    Ok((start, end))
+(B[m }
+[31m-fn disposition(filename:Option<&str>,inline:bool)->String {
+(B[m[31m-    let kind=if inline {"inline"} else {"attachment"};
+(B[m[32m+fn disposition(filename: Option<&str>, inline: bool) -> String {
+(B[m[32m+    let kind = if inline { "inline" } else { "attachment" };
+(B[m     match filename {
+[31m-        None=>kind.into(),
+(B[m[31m-        Some(name)=>{
+(B[m[31m-            let name=sandbox::filename(name,0);
+(B[m[31m-            let ascii:String=name.chars().map(|c|if c.is_ascii_alphanumeric()||".-_ ".contains(c){c}else{'_'}).collect();
+(B[m[31m-            format!("{kind}; filename=\"{ascii}\"; filename*=UTF-8''{}",urlencoding::encode(&name))
+(B[m[32m+        None => kind.into(),
+(B[m[32m+        Some(name) => {
+(B[m[32m+            let name = sandbox::filename(name, 0);
+(B[m[32m+            let ascii: String = name
+(B[m[32m+                .chars()
+(B[m[32m+                .map(|c| {
+(B[m[32m+                    if c.is_ascii_alphanumeric() || ".-_ ".contains(c) {
+(B[m[32m+                        c
+(B[m[32m+                    } else {
+(B[m[32m+                        '_'
+(B[m[32m+                    }
+(B[m[32m+                })
+(B[m[32m+                .collect();
+(B[m[32m+            format!(
+(B[m[32m+                "{kind}; filename=\"{ascii}\"; filename*=UTF-8''{}",
+(B[m[32m+                urlencoding::encode(&name)
+(B[m[32m+            )
+(B[m         }
+     }
+ }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/http.rs:33:
+[31m-pub async fn owner_response(db:&Database,keys:&EncryptionKeys,user:&str,conversation:&str,id:&str,request:&HeaderMap)->AppResult<Response> {
+(B[m[31m-    super::super::assistant_nyxagent::get(db,user,conversation).await?;
+(B[m[31m-    let filter=doc!{"_id":id,"user_id":user,"conversation_id":conversation};
+(B[m[31m-    super::super::assistant_upload_retention::require_available(db,filter.clone()).await?;
+(B[m[31m-    let metadata=db.collection::<Document>(ATTACHMENTS).find_one(filter).projection(doc!{"size":1,"filename":1,"preview_kind":1,"content_type":1,"origin":1}).await?.ok_or_else(missing)?;
+(B[m[31m-    let size=metadata.get_i64("size").ok().and_then(|n|usize::try_from(n).ok()).filter(|n|*n>0&&*n<=super::super::attachment_extraction::MAX_BYTES).ok_or_else(invalid)?;
+(B[m[31m-    let reservation=byte_budget::reserve(size).await?;
+(B[m[31m-    let (content_type,bytes)=super::super::assistant_nyxagent::read_attachment(db,keys,user,conversation,id).await?;
+(B[m[31m-    if bytes.len()!=size {return Err(AppError::Internal("Attachment size mismatch".into()));}
+(B[m[31m-    let inline=matches!(content_type.as_str(),"image/png"|"image/jpeg"|"image/gif"|"image/webp") || (content_type=="video/mp4" && metadata.get_str("preview_kind").ok()==Some("video"));
+(B[m[31m-    let mut status=StatusCode::OK;
+(B[m[31m-    let mut content_range=None;
+(B[m[31m-    let mut payload=bytes::Bytes::from(bytes);
+(B[m[32m+pub async fn owner_response(
+(B[m[32m+    db: &Database,
+(B[m[32m+    keys: &EncryptionKeys,
+(B[m[32m+    user: &str,
+(B[m[32m+    conversation: &str,
+(B[m[32m+    id: &str,
+(B[m[32m+    request: &HeaderMap,
+(B[m[32m+) -> AppResult<Response> {
+(B[m[32m+    super::super::assistant_nyxagent::get(db, user, conversation).await?;
+(B[m[32m+    let filter = doc! {"_id":id,"user_id":user,"conversation_id":conversation};
+(B[m[32m+    super::super::assistant_upload_retention::require_available(db, filter.clone()).await?;
+(B[m[32m+    let metadata = db
+(B[m[32m+        .collection::<Document>(ATTACHMENTS)
+(B[m[32m+        .find_one(filter)
+(B[m[32m+        .projection(doc! {"size":1,"filename":1,"preview_kind":1,"content_type":1,"origin":1})
+(B[m[32m+        .await?
+(B[m[32m+        .ok_or_else(missing)?;
+(B[m[32m+    let size = metadata
+(B[m[32m+        .get_i64("size")
+(B[m[32m+        .ok()
+(B[m[32m+        .and_then(|n| usize::try_from(n).ok())
+(B[m[32m+        .filter(|n| *n > 0 && *n <= super::super::attachment_extraction::MAX_BYTES)
+(B[m[32m+        .ok_or_else(invalid)?;
+(B[m[32m+    let reservation = byte_budget::reserve(size).await?;
+(B[m[32m+    let (content_type, bytes) =
+(B[m[32m+        super::super::assistant_nyxagent::read_attachment(db, keys, user, conversation, id).await?;
+(B[m[32m+    if bytes.len() != size {
+(B[m[32m+        return Err(AppError::Internal("Attachment size mismatch".into()));
+(B[m[32m+    }
+(B[m[32m+    let inline = matches!(
+(B[m[32m+        content_type.as_str(),
+(B[m[32m+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+(B[m[32m+    ) || (content_type == "video/mp4"
+(B[m[32m+        && metadata.get_str("preview_kind").ok() == Some("video"));
+(B[m[32m+    let mut status = StatusCode::OK;
+(B[m[32m+    let mut content_range = None;
+(B[m[32m+    let mut payload = bytes::Bytes::from(bytes);
+(B[m     if !request.contains_key("if-range") && request.contains_key("range") {
+[31m-        let headers:Vec<_>=request.get_all("range").iter().collect();
+(B[m[31m-        let selected=if headers.len()==1 {headers[0].to_str().ok().and_then(|h|single_range(h,size).ok())}else{None};
+(B[m[32m+        let headers: Vec<_> = request.get_all("range").iter().collect();
+(B[m[32m+        let selected = if headers.len() == 1 {
+(B[m[32m+            headers[0]
+(B[m[32m+                .to_str()
+(B[m[32m+                .ok()
+(B[m[32m+                .and_then(|h| single_range(h, size).ok())
+(B[m[32m+        } else {
+(B[m[32m+            None
+(B[m[32m+        };
+(B[m         match selected {
+[31m-            Some((start,end))=>{status=StatusCode::PARTIAL_CONTENT;content_range=Some(format!("bytes {start}-{end}/{size}"));payload=payload.slice(start..=end);}
+(B[m[31m-            None=>{status=StatusCode::RANGE_NOT_SATISFIABLE;content_range=Some(format!("bytes */{size}"));payload=bytes::Bytes::new();}
+(B[m[32m+            Some((start, end)) => {
+(B[m[32m+                status = StatusCode::PARTIAL_CONTENT;
+(B[m[32m+                content_range = Some(format!("bytes {start}-{end}/{size}"));
+(B[m[32m+                payload = payload.slice(start..=end);
+(B[m[32m+            }
+(B[m[32m+            None => {
+(B[m[32m+                status = StatusCode::RANGE_NOT_SATISFIABLE;
+(B[m[32m+                content_range = Some(format!("bytes */{size}"));
+(B[m[32m+                payload = bytes::Bytes::new();
+(B[m[32m+            }
+(B[m         }
+     }
+[31m-    let length=payload.len();
+(B[m[31m-    let stream=async_stream::stream! {let _reservation=reservation;yield Ok::<_,std::convert::Infallible>(payload);};
+(B[m[31m-    let mut response=Response::builder().status(status)
+(B[m[31m-        .header("content-type",if inline {content_type.as_str()}else{"application/octet-stream"})
+(B[m[31m-        .header("content-length",length.to_string()).header("accept-ranges","bytes")
+(B[m[31m-        .header("cache-control","private, no-store").header("x-content-type-options","nosniff")
+(B[m[31m-        .header("content-security-policy","default-src 'none'; sandbox")
+(B[m[31m-        .header("content-disposition",disposition(metadata.get_str("filename").ok(),inline));
+(B[m[31m-    if let Some(range)=content_range {response=response.header("content-range",range);}
+(B[m[31m-    response.body(Body::from_stream(stream)).map_err(|_|AppError::Internal("Invalid attachment response".into()))
+(B[m[32m+    let length = payload.len();
+(B[m[32m+    let stream = async_stream::stream! {let _reservation=reservation;yield Ok::<_,std::convert::Infallible>(payload);};
+(B[m[32m+    let mut response = Response::builder()
+(B[m[32m+        .status(status)
+(B[m[32m+        .header(
+(B[m[32m+            "content-type",
+(B[m[32m+            if inline {
+(B[m[32m+                content_type.as_str()
+(B[m[32m+            } else {
+(B[m[32m+                "application/octet-stream"
+(B[m[32m+            },
+(B[m[32m+        )
+(B[m[32m+        .header("content-length", length.to_string())
+(B[m[32m+        .header("accept-ranges", "bytes")
+(B[m[32m+        .header("cache-control", "private, no-store")
+(B[m[32m+        .header("x-content-type-options", "nosniff")
+(B[m[32m+        .header("content-security-policy", "default-src 'none'; sandbox")
+(B[m[32m+        .header(
+(B[m[32m+            "content-disposition",
+(B[m[32m+            disposition(metadata.get_str("filename").ok(), inline),
+(B[m[32m+        );
+(B[m[32m+    if let Some(range) = content_range {
+(B[m[32m+        response = response.header("content-range", range);
+(B[m[32m+    }
+(B[m[32m+    response
+(B[m[32m+        .body(Body::from_stream(stream))
+(B[m[32m+        .map_err(|_| AppError::Internal("Invalid attachment response".into()))
+(B[m }
+ 
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:1:
+ //! Verified Sandbox files, fenced pending storage and owner-message recovery.
+[31m-use crate::{crypto::aes::{EncryptionKeys, RecordContext}, errors::{AppError, AppResult}, models::{
+(B[m[31m-    async_service_operation::{AsyncServiceOperation, DeliveryBinding, COLLECTION_NAME as WATCHES},
+(B[m[31m-    assistant_conversation::{AssistantConversation, TurnAttachment, TurnOrigin, PlatformReplyRouting, COLLECTION_NAME as CONVERSATIONS},
+(B[m[31m-    assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
+(B[m[31m-    generated_artifact::{PendingArtifact, Metadata, ResultManifest, Delivery, COLLECTION_NAME as ARTIFACTS, DELIVERIES},
+(B[m[31m-}};
+(B[m[32m+use super::{api_key_mutation_service as transactions, assistant_upload_service::byte_budget};
+(B[m[32m+use crate::{
+(B[m[32m+    crypto::aes::{EncryptionKeys, RecordContext},
+(B[m[32m+    errors::{AppError, AppResult},
+(B[m[32m+    models::{
+(B[m[32m+        assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
+(B[m[32m+        assistant_conversation::{
+(B[m[32m+            AssistantConversation, COLLECTION_NAME as CONVERSATIONS, PlatformReplyRouting,
+(B[m[32m+            TurnAttachment, TurnOrigin,
+(B[m[32m+        },
+(B[m[32m+        async_service_operation::{
+(B[m[32m+            AsyncServiceOperation, COLLECTION_NAME as WATCHES, DeliveryBinding,
+(B[m[32m+        },
+(B[m[32m+        generated_artifact::{
+(B[m[32m+            COLLECTION_NAME as ARTIFACTS, DELIVERIES, Delivery, Metadata, PendingArtifact,
+(B[m[32m+            ResultManifest,
+(B[m[32m+        },
+(B[m[32m+    },
+(B[m[32m+};
+(B[m use chrono::{DateTime, Duration, Utc};
+ use futures::TryStreamExt;
+[31m-use mongodb::{Database, ClientSession, bson::{self, doc, Document}};
+(B[m[32m+use mongodb::{
+(B[m[32m+    ClientSession, Database,
+(B[m[32m+    bson::{self, Document, doc},
+(B[m[32m+};
+(B[m use uuid::Uuid;
+[31m-use super::{api_key_mutation_service as transactions, assistant_upload_service::byte_budget};
+(B[m[31m-pub mod sandbox;
+(B[m pub mod http;
+ mod mp4;
+[32m+pub mod sandbox;
+(B[m 
+[31m-fn invalid() -> AppError { AppError::Conflict("Generated artifact association is invalid".into()) }
+(B[m[31m-fn missing() -> AppError { AppError::NotFound("Artifact delivery not found".into()) }
+(B[m[32m+fn invalid() -> AppError {
+(B[m[32m+    AppError::Conflict("Generated artifact association is invalid".into())
+(B[m[32m+}
+(B[m[32m+fn missing() -> AppError {
+(B[m[32m+    AppError::NotFound("Artifact delivery not found".into())
+(B[m[32m+}
+(B[m pub fn web_delivery(d: &DeliveryBinding) -> bool {
+[31m-    d.origin == TurnOrigin::User && d.channel.is_none() && d.reply_channel.is_none()
+(B[m[31m-        && d.group_id.is_none() && d.group_request_id.is_none() && d.voice_request_id.is_none()
+(B[m[31m-        && d.trigger_run_id.is_none() && d.platform_origin.is_none()
+(B[m[32m+    d.origin == TurnOrigin::User
+(B[m[32m+        && d.channel.is_none()
+(B[m[32m+        && d.reply_channel.is_none()
+(B[m[32m+        && d.group_id.is_none()
+(B[m[32m+        && d.group_request_id.is_none()
+(B[m[32m+        && d.voice_request_id.is_none()
+(B[m[32m+        && d.trigger_run_id.is_none()
+(B[m[32m+        && d.platform_origin.is_none()
+(B[m         && d.platform_reply == Some(PlatformReplyRouting::WebOnly)
+         && d.invocation_id.is_none()
+ }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:26:
+[31m-pub fn sandbox_contract(service: &super::mcp_service::McpToolService, submit: &super::mcp_service::McpToolEndpoint) -> bool {
+(B[m[31m-    let Some(c) = &submit.async_operation else {return false;};
+(B[m[31m-    submit.name == "submit_execution_handler" && submit.method == "POST" && submit.path == "/executions"
+(B[m[31m-        && c.status_operation == "get_execution_handler" && c.result_operation == "get_execution_result_handler"
+(B[m[31m-        && c.id_parameter == "operation_id" && c.id_field == "/operation_id" && c.status_field == "/status"
+(B[m[31m-        && [(c.status_operation.as_str(), "/executions/{operation_id}"), (c.result_operation.as_str(), "/executions/{operation_id}/result")].iter()
+(B[m[31m-            .all(|(name,path)| service.endpoints.iter().any(|e| e.name == *name && e.path == *path && e.method == "GET" && e.target_id == submit.target_id))
+(B[m[32m+pub fn sandbox_contract(
+(B[m[32m+    service: &super::mcp_service::McpToolService,
+(B[m[32m+    submit: &super::mcp_service::McpToolEndpoint,
+(B[m[32m+) -> bool {
+(B[m[32m+    let Some(c) = &submit.async_operation else {
+(B[m[32m+        return false;
+(B[m[32m+    };
+(B[m[32m+    submit.name == "submit_execution_handler"
+(B[m[32m+        && submit.method == "POST"
+(B[m[32m+        && submit.path == "/executions"
+(B[m[32m+        && c.status_operation == "get_execution_handler"
+(B[m[32m+        && c.result_operation == "get_execution_result_handler"
+(B[m[32m+        && c.id_parameter == "operation_id"
+(B[m[32m+        && c.id_field == "/operation_id"
+(B[m[32m+        && c.status_field == "/status"
+(B[m[32m+        && [
+(B[m[32m+            (c.status_operation.as_str(), "/executions/{operation_id}"),
+(B[m[32m+            (
+(B[m[32m+                c.result_operation.as_str(),
+(B[m[32m+                "/executions/{operation_id}/result",
+(B[m[32m+            ),
+(B[m[32m+        ]
+(B[m[32m+        .iter()
+(B[m[32m+        .all(|(name, path)| {
+(B[m[32m+            service.endpoints.iter().any(|e| {
+(B[m[32m+                e.name == *name
+(B[m[32m+                    && e.path == *path
+(B[m[32m+                    && e.method == "GET"
+(B[m[32m+                    && e.target_id == submit.target_id
+(B[m[32m+            })
+(B[m[32m+        })
+(B[m }
+ pub fn admitted(w: &AsyncServiceOperation) -> bool {
+     w.artifact_mode.as_deref() == Some(sandbox::MODE) && web_delivery(&w.delivery)
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:36:
+ }
+ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+     use mongodb::{IndexModel, options::IndexOptions};
+[31m-    db.collection::<Document>(ARTIFACTS).create_index(IndexModel::builder()
+(B[m[31m-        .keys(doc!{"watch_id":1,"source_result_identity":1,"artifact_index":1})
+(B[m[31m-        .options(IndexOptions::builder().unique(true).build()).build()).await?;
+(B[m[31m-    for keys in [doc!{"expires_at":1,"state":1}, doc!{"assistant_attachment_id":1},doc!{"user_id":1,"conversation_id":1}] {
+(B[m[31m-        db.collection::<Document>(ARTIFACTS).create_index(IndexModel::builder().keys(keys).build()).await?;
+(B[m[32m+    db.collection::<Document>(ARTIFACTS)
+(B[m[32m+        .create_index(
+(B[m[32m+            IndexModel::builder()
+(B[m[32m+                .keys(doc! {"watch_id":1,"source_result_identity":1,"artifact_index":1})
+(B[m[32m+                .options(IndexOptions::builder().unique(true).build())
+(B[m[32m+                .build(),
+(B[m[32m+        )
+(B[m[32m+        .await?;
+(B[m[32m+    for keys in [
+(B[m[32m+        doc! {"expires_at":1,"state":1},
+(B[m[32m+        doc! {"assistant_attachment_id":1},
+(B[m[32m+        doc! {"user_id":1,"conversation_id":1},
+(B[m[32m+    ] {
+(B[m[32m+        db.collection::<Document>(ARTIFACTS)
+(B[m[32m+            .create_index(IndexModel::builder().keys(keys).build())
+(B[m[32m+            .await?;
+(B[m     }
+[31m-    db.collection::<Document>(DELIVERIES).create_index(IndexModel::builder().keys(doc!{"user_id":1,"conversation_id":1}).build()).await?;
+(B[m[32m+    db.collection::<Document>(DELIVERIES)
+(B[m[32m+        .create_index(
+(B[m[32m+            IndexModel::builder()
+(B[m[32m+                .keys(doc! {"user_id":1,"conversation_id":1})
+(B[m[32m+                .build(),
+(B[m[32m+        )
+(B[m[32m+        .await?;
+(B[m     Ok(())
+ }
+ fn context_path(row: &PendingArtifact) -> [&str; 11] {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:49:
+     [
+[31m-        "data_encrypted", "conversation", &row.conversation_id, "turn", &row.turn_id,
+(B[m[31m-        "watch", &row.watch_id, "operation", &row.operation_id, "source", &row.source_result_identity,
+(B[m[32m+        "data_encrypted",
+(B[m[32m+        "conversation",
+(B[m[32m+        &row.conversation_id,
+(B[m[32m+        "turn",
+(B[m[32m+        &row.turn_id,
+(B[m[32m+        "watch",
+(B[m[32m+        &row.watch_id,
+(B[m[32m+        "operation",
+(B[m[32m+        &row.operation_id,
+(B[m[32m+        "source",
+(B[m[32m+        &row.source_result_identity,
+(B[m     ]
+ }
+ pub fn check_bson(row: &PendingArtifact) -> AppResult<()> {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:55:
+[31m-    if bson::to_vec(row).map_err(|_| invalid())?.len() >= 16 * 1024 * 1024 {return Err(AppError::BadRequest("artifact_too_large".into()));}
+(B[m[32m+    if bson::to_vec(row).map_err(|_| invalid())?.len() >= 16 * 1024 * 1024 {
+(B[m[32m+        return Err(AppError::BadRequest("artifact_too_large".into()));
+(B[m[32m+    }
+(B[m     Ok(())
+ }
+ /// Caller owns one reservation from before the HTTP body read until this commit.
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:59:
+[31m-pub async fn persist(db: &Database, keys: &EncryptionKeys, w: &AsyncServiceOperation,
+(B[m[31m-    result: &sandbox::ResultFiles, status: &sandbox::Status, reservation: &byte_budget::ByteReservation) -> AppResult<()> {
+(B[m[31m-    if !admitted(w) || reservation.payload_limit != sandbox::RESERVATION { return Err(invalid()); }
+(B[m[32m+pub async fn persist(
+(B[m[32m+    db: &Database,
+(B[m[32m+    keys: &EncryptionKeys,
+(B[m[32m+    w: &AsyncServiceOperation,
+(B[m[32m+    result: &sandbox::ResultFiles,
+(B[m[32m+    status: &sandbox::Status,
+(B[m[32m+    reservation: &byte_budget::ByteReservation,
+(B[m[32m+) -> AppResult<()> {
+(B[m[32m+    if !admitted(w) || reservation.payload_limit != sandbox::RESERVATION {
+(B[m[32m+        return Err(invalid());
+(B[m[32m+    }
+(B[m     let operation = w.operation_id.as_deref().ok_or_else(invalid)?;
+     let expires_at = status.expires_at.unwrap_or(w.expires_at).min(w.expires_at);
+[31m-    if expires_at <= Utc::now() {return Err(AppError::AssistantAttachmentExpired);}
+(B[m[32m+    if expires_at <= Utc::now() {
+(B[m[32m+        return Err(AppError::AssistantAttachmentExpired);
+(B[m[32m+    }
+(B[m     let mut rows = Vec::new();
+[31m-    for (index,file) in result.files.iter().enumerate() {
+(B[m[32m+    for (index, file) in result.files.iter().enumerate() {
+(B[m         let mut row = PendingArtifact {
+[31m-            id:Uuid::new_v4().to_string(),watch_id:w.id.clone(),user_id:w.user_id.clone(),conversation_id:w.conversation_id.clone(),turn_id:w.turn_id.clone(),operation_id:operation.into(),
+(B[m[31m-            source_result_identity:result.identity.clone(),artifact_index:index,filename:file.filename.clone(),source_path:file.source_path.clone(),content_type:file.content_type.into(),
+(B[m[31m-            size:file.bytes.len() as i64,sha256:file.sha256.clone(),preview_kind:file.preview.into(),source_status_version:status.version.clone(),content_revision:"1".into(),
+(B[m[31m-            state:"pending".into(),assistant_attachment_id:Uuid::new_v4().to_string(),data_encrypted:None,secret_context_versions:Default::default(),created_at:Utc::now(),expires_at,
+(B[m[32m+            id: Uuid::new_v4().to_string(),
+(B[m[32m+            watch_id: w.id.clone(),
+(B[m[32m+            user_id: w.user_id.clone(),
+(B[m[32m+            conversation_id: w.conversation_id.clone(),
+(B[m[32m+            turn_id: w.turn_id.clone(),
+(B[m[32m+            operation_id: operation.into(),
+(B[m[32m+            source_result_identity: result.identity.clone(),
+(B[m[32m+            artifact_index: index,
+(B[m[32m+            filename: file.filename.clone(),
+(B[m[32m+            source_path: file.source_path.clone(),
+(B[m[32m+            content_type: file.content_type.into(),
+(B[m[32m+            size: file.bytes.len() as i64,
+(B[m[32m+            sha256: file.sha256.clone(),
+(B[m[32m+            preview_kind: file.preview.into(),
+(B[m[32m+            source_status_version: status.version.clone(),
+(B[m[32m+            content_revision: "1".into(),
+(B[m[32m+            state: "pending".into(),
+(B[m[32m+            assistant_attachment_id: Uuid::new_v4().to_string(),
+(B[m[32m+            data_encrypted: None,
+(B[m[32m+            secret_context_versions: Default::default(),
+(B[m[32m+            created_at: Utc::now(),
+(B[m[32m+            expires_at,
+(B[m         };
+         // New collection always uses authenticated v3 context, independently of legacy write migration.
+         let path = context_path(&row);
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:75:
+[31m-        row.data_encrypted = Some(keys.encrypt_record(&file.bytes, &RecordContext::new(ARTIFACTS,&row.id,&row.user_id,&path)?).await?);
+(B[m[31m-        row.secret_context_versions.insert("data_encrypted".into(),3);
+(B[m[32m+        row.data_encrypted = Some(
+(B[m[32m+            keys.encrypt_record(
+(B[m[32m+                &file.bytes,
+(B[m[32m+                &RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?,
+(B[m[32m+            )
+(B[m[32m+            .await?,
+(B[m[32m+        );
+(B[m[32m+        row.secret_context_versions
+(B[m[32m+            .insert("data_encrypted".into(), 3);
+(B[m         check_bson(&row)?;
+         rows.push(row);
+     }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:80:
+[31m-    let manifest = ResultManifest {source_result_identity:result.identity.clone(),source_status_version:status.version.clone(),content_revision:"1".into(),count:rows.len(),delivery_reason:"delivery_pending".into(),expires_at};
+(B[m[31m-    let encrypted = super::record_field_service::encrypt(keys,WATCHES,&w.id,&w.user_id,"result_encrypted",result.summary.as_bytes()).await?;
+(B[m[32m+    let manifest = ResultManifest {
+(B[m[32m+        source_result_identity: result.identity.clone(),
+(B[m[32m+        source_status_version: status.version.clone(),
+(B[m[32m+        content_revision: "1".into(),
+(B[m[32m+        count: rows.len(),
+(B[m[32m+        delivery_reason: "delivery_pending".into(),
+(B[m[32m+        expires_at,
+(B[m[32m+    };
+(B[m[32m+    let encrypted = super::record_field_service::encrypt(
+(B[m[32m+        keys,
+(B[m[32m+        WATCHES,
+(B[m[32m+        &w.id,
+(B[m[32m+        &w.user_id,
+(B[m[32m+        "result_encrypted",
+(B[m[32m+        result.summary.as_bytes(),
+(B[m[32m+    )
+(B[m[32m+    .await?;
+(B[m     let mut versions = w.secret_context_versions.clone();
+     super::credential_record_service::mark_version(&mut versions, keys, "result_encrypted");
+[31m-    let database = db.clone();let watch = w.clone();
+(B[m[32m+    let database = db.clone();
+(B[m[32m+    let watch = w.clone();
+(B[m     let mut session = db.client().start_session().await?;
+     session.start_transaction().and_run2(async move |session| {
+         let operation: AppResult<()> = Box::pin(async {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:103:
+     }).await.map_err(transactions::map_transaction_error)
+ }
+ fn metadata(row: &PendingArtifact, expires: DateTime<Utc>) -> Metadata {
+[31m-    Metadata {filename:Some(row.filename.clone()),source:Some("sandbox".into()),source_watch_id:Some(row.watch_id.clone()),source_operation_id:Some(row.operation_id.clone()),source_result_identity:Some(row.source_result_identity.clone()),source_status_version:row.source_status_version.clone(),content_revision:Some(row.content_revision.clone()),preview_kind:Some(row.preview_kind.clone()),expires_at:Some(expires)}
+(B[m[32m+    Metadata {
+(B[m[32m+        filename: Some(row.filename.clone()),
+(B[m[32m+        source: Some("sandbox".into()),
+(B[m[32m+        source_watch_id: Some(row.watch_id.clone()),
+(B[m[32m+        source_operation_id: Some(row.operation_id.clone()),
+(B[m[32m+        source_result_identity: Some(row.source_result_identity.clone()),
+(B[m[32m+        source_status_version: row.source_status_version.clone(),
+(B[m[32m+        content_revision: Some(row.content_revision.clone()),
+(B[m[32m+        preview_kind: Some(row.preview_kind.clone()),
+(B[m[32m+        expires_at: Some(expires),
+(B[m[32m+    }
+(B[m }
+[31m-fn exact_pending(row: &PendingArtifact,w: &AsyncServiceOperation,m: &ResultManifest) -> bool {
+(B[m[31m-    row.watch_id == w.id && row.user_id == w.user_id && row.conversation_id == w.conversation_id && row.turn_id == w.turn_id
+(B[m[31m-        && Some(row.operation_id.as_str()) == w.operation_id.as_deref() && row.source_result_identity == m.source_result_identity
+(B[m[32m+fn exact_pending(row: &PendingArtifact, w: &AsyncServiceOperation, m: &ResultManifest) -> bool {
+(B[m[32m+    row.watch_id == w.id
+(B[m[32m+        && row.user_id == w.user_id
+(B[m[32m+        && row.conversation_id == w.conversation_id
+(B[m[32m+        && row.turn_id == w.turn_id
+(B[m[32m+        && Some(row.operation_id.as_str()) == w.operation_id.as_deref()
+(B[m[32m+        && row.source_result_identity == m.source_result_identity
+(B[m }
+ /// Runs within completion admission or exact owner-message recovery. No new execution.
+[31m-async fn materialize(db: &Database, keys: &EncryptionKeys,w: &AsyncServiceOperation,session: &mut ClientSession,
+(B[m[31m-    turn_id: &str, existing: &[TurnAttachment]) -> AppResult<(Vec<TurnAttachment>, &'static str)> {
+(B[m[31m-    if !admitted(w) || !matches!(w.reason.as_deref(),Some("completed" | "operation_failed")) {return Err(invalid());}
+(B[m[31m-    let Some(manifest) = &w.artifact_result else {return Ok((Vec::new(),"delivery_failed"));};
+(B[m[31m-    if manifest.expires_at <= Utc::now() {return Ok((Vec::new(),"result_expired"));}
+(B[m[32m+async fn materialize(
+(B[m[32m+    db: &Database,
+(B[m[32m+    keys: &EncryptionKeys,
+(B[m[32m+    w: &AsyncServiceOperation,
+(B[m[32m+    session: &mut ClientSession,
+(B[m[32m+    turn_id: &str,
+(B[m[32m+    existing: &[TurnAttachment],
+(B[m[32m+) -> AppResult<(Vec<TurnAttachment>, &'static str)> {
+(B[m[32m+    if !admitted(w) || !matches!(w.reason.as_deref(), Some("completed" | "operation_failed")) {
+(B[m[32m+        return Err(invalid());
+(B[m[32m+    }
+(B[m[32m+    let Some(manifest) = &w.artifact_result else {
+(B[m[32m+        return Ok((Vec::new(), "delivery_failed"));
+(B[m[32m+    };
+(B[m[32m+    if manifest.expires_at <= Utc::now() {
+(B[m[32m+        return Ok((Vec::new(), "result_expired"));
+(B[m[32m+    }
+(B[m     let _reservation = byte_budget::reserve(sandbox::TOTAL_BYTES).await?;
+[31m-    let mut cursor = db.collection::<PendingArtifact>(ARTIFACTS).find(doc!{"watch_id":&w.id,"source_result_identity":&manifest.source_result_identity}).sort(doc!{"artifact_index":1}).limit(9).session(&mut *session).await?;
+(B[m[32m+    let mut cursor = db
+(B[m[32m+        .collection::<PendingArtifact>(ARTIFACTS)
+(B[m[32m+        .find(doc! {"watch_id":&w.id,"source_result_identity":&manifest.source_result_identity})
+(B[m[32m+        .sort(doc! {"artifact_index":1})
+(B[m[32m+        .limit(9)
+(B[m[32m+        .session(&mut *session)
+(B[m[32m+        .await?;
+(B[m     let rows: Vec<PendingArtifact> = cursor.stream(&mut *session).try_collect().await?;
+[31m-    if rows.len() != manifest.count || rows.len()>8 || rows.iter().any(|r|!exact_pending(r,w,manifest)) {return Err(invalid());}
+(B[m[31m-    let additional = rows.iter().filter(|r|!existing.iter().any(|a|a.id==r.assistant_attachment_id)).count();
+(B[m[31m-    if existing.len()+additional > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS {return Ok((Vec::new(),"delivery_capacity_exhausted"));}
+(B[m[31m-    let policy = super::assistant_upload_retention::load(db).await?.policy.unwrap_or_default();
+(B[m[32m+    if rows.len() != manifest.count
+(B[m[32m+        || rows.len() > 8
+(B[m[32m+        || rows.iter().any(|r| !exact_pending(r, w, manifest))
+(B[m[32m+    {
+(B[m[32m+        return Err(invalid());
+(B[m[32m+    }
+(B[m[32m+    let additional = rows
+(B[m[32m+        .iter()
+(B[m[32m+        .filter(|r| !existing.iter().any(|a| a.id == r.assistant_attachment_id))
+(B[m[32m+        .count();
+(B[m[32m+    if existing.len() + additional > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS {
+(B[m[32m+        return Ok((Vec::new(), "delivery_capacity_exhausted"));
+(B[m[32m+    }
+(B[m[32m+    let policy = super::assistant_upload_retention::load(db)
+(B[m[32m+        .await?
+(B[m[32m+        .policy
+(B[m[32m+        .unwrap_or_default();
+(B[m     let mut attachments = Vec::new();
+     let mut total = 0usize;
+     for row in rows {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:128:
+[31m-        if row.expires_at <= Utc::now() {return Ok((Vec::new(),"result_expired"));}
+(B[m[31m-        let normal_days = policy.tool_image_days.unwrap_or(if row.content_type.starts_with("image/") {policy.image_days}else{policy.document_days});
+(B[m[31m-        let expiry = row.expires_at.min(manifest.expires_at).min(Utc::now()+Duration::days(i64::from(normal_days)));
+(B[m[31m-        let mut meta = TurnAttachment {artifact:metadata(&row,expiry),id:row.assistant_attachment_id.clone(),origin:"generated_artifact".into(),content_type:row.content_type.clone(),size:row.size,label:"Sandbox result".into(),chat_delivery:Some(false),image_input:None,image_inspection:Some(false),pages:None};
+(B[m[32m+        if row.expires_at <= Utc::now() {
+(B[m[32m+            return Ok((Vec::new(), "result_expired"));
+(B[m[32m+        }
+(B[m[32m+        let normal_days =
+(B[m[32m+            policy
+(B[m[32m+                .tool_image_days
+(B[m[32m+                .unwrap_or(if row.content_type.starts_with("image/") {
+(B[m[32m+                    policy.image_days
+(B[m[32m+                } else {
+(B[m[32m+                    policy.document_days
+(B[m[32m+                });
+(B[m[32m+        let expiry = row
+(B[m[32m+            .expires_at
+(B[m[32m+            .min(manifest.expires_at)
+(B[m[32m+            .min(Utc::now() + Duration::days(i64::from(normal_days)));
+(B[m[32m+        let mut meta = TurnAttachment {
+(B[m[32m+            artifact: metadata(&row, expiry),
+(B[m[32m+            id: row.assistant_attachment_id.clone(),
+(B[m[32m+            origin: "generated_artifact".into(),
+(B[m[32m+            content_type: row.content_type.clone(),
+(B[m[32m+            size: row.size,
+(B[m[32m+            label: "Sandbox result".into(),
+(B[m[32m+            chat_delivery: Some(false),
+(B[m[32m+            image_input: None,
+(B[m[32m+            image_inspection: Some(false),
+(B[m[32m+            pages: None,
+(B[m[32m+        };
+(B[m         if row.state == "materialized" {
+             let saved = db.collection::<AssistantAttachment>(ATTACHMENTS).find_one(doc!{"_id":&row.assistant_attachment_id,"user_id":&w.user_id,"conversation_id":&w.conversation_id,"source_watch_id":&w.id,"source_result_identity":&manifest.source_result_identity}).session(&mut *session).await?.ok_or_else(missing)?;
+[31m-            meta.artifact=saved.artifact;attachments.push(meta);continue;
+(B[m[32m+            meta.artifact = saved.artifact;
+(B[m[32m+            attachments.push(meta);
+(B[m[32m+            continue;
+(B[m         }
+[31m-        if row.state != "pending" || row.secret_context_versions.get("data_encrypted") != Some(&3) {return Err(invalid());}
+(B[m[31m-        let size = usize::try_from(row.size).map_err(|_|invalid())?;
+(B[m[31m-        total = total.checked_add(size).filter(|n|*n<=sandbox::TOTAL_BYTES).ok_or_else(invalid)?;
+(B[m[32m+        if row.state != "pending" || row.secret_context_versions.get("data_encrypted") != Some(&3) {
+(B[m[32m+            return Err(invalid());
+(B[m[32m+        }
+(B[m[32m+        let size = usize::try_from(row.size).map_err(|_| invalid())?;
+(B[m[32m+        total = total
+(B[m[32m+            .checked_add(size)
+(B[m[32m+            .filter(|n| *n <= sandbox::TOTAL_BYTES)
+(B[m[32m+            .ok_or_else(invalid)?;
+(B[m         let path = context_path(&row);
+[31m-        let bytes = keys.decrypt_record(row.data_encrypted.as_deref().ok_or_else(invalid)?,&RecordContext::new(ARTIFACTS,&row.id,&row.user_id,&path)?).await?;
+(B[m[31m-        use sha2::{Digest,Sha256};
+(B[m[31m-        if bytes.len()!=size || hex::encode(Sha256::digest(&*bytes))!=row.sha256 {return Err(invalid());}
+(B[m[31m-        let mut attachment = AssistantAttachment {artifact:meta.artifact.clone(),id:meta.id.clone(),origin:meta.origin.clone(),user_id:w.user_id.clone(),conversation_id:w.conversation_id.clone(),turn_id:turn_id.into(),content_type:row.content_type.clone(),size:row.size,data_encrypted:Vec::new(),secret_context_versions:Default::default(),created_at:Utc::now()};
+(B[m[31m-        attachment.data_encrypted = super::assistant_record_service::encrypt_image(keys,&attachment,&bytes).await?;
+(B[m[31m-        attachment.secret_context_versions.insert("data_encrypted".into(),3);
+(B[m[31m-        db.collection::<AssistantAttachment>(ATTACHMENTS).insert_one(&attachment).session(&mut *session).await?;
+(B[m[32m+        let bytes = keys
+(B[m[32m+            .decrypt_record(
+(B[m[32m+                row.data_encrypted.as_deref().ok_or_else(invalid)?,
+(B[m[32m+                &RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?,
+(B[m[32m+            )
+(B[m[32m+            .await?;
+(B[m[32m+        use sha2::{Digest, Sha256};
+(B[m[32m+        if bytes.len() != size || hex::encode(Sha256::digest(&*bytes)) != row.sha256 {
+(B[m[32m+            return Err(invalid());
+(B[m[32m+        }
+(B[m[32m+        let mut attachment = AssistantAttachment {
+(B[m[32m+            artifact: meta.artifact.clone(),
+(B[m[32m+            id: meta.id.clone(),
+(B[m[32m+            origin: meta.origin.clone(),
+(B[m[32m+            user_id: w.user_id.clone(),
+(B[m[32m+            conversation_id: w.conversation_id.clone(),
+(B[m[32m+            turn_id: turn_id.into(),
+(B[m[32m+            content_type: row.content_type.clone(),
+(B[m[32m+            size: row.size,
+(B[m[32m+            data_encrypted: Vec::new(),
+(B[m[32m+            secret_context_versions: Default::default(),
+(B[m[32m+            created_at: Utc::now(),
+(B[m[32m+        };
+(B[m[32m+        attachment.data_encrypted =
+(B[m[32m+            super::assistant_record_service::encrypt_image(keys, &attachment, &bytes).await?;
+(B[m[32m+        attachment
+(B[m[32m+            .secret_context_versions
+(B[m[32m+            .insert("data_encrypted".into(), 3);
+(B[m[32m+        db.collection::<AssistantAttachment>(ATTACHMENTS)
+(B[m[32m+            .insert_one(&attachment)
+(B[m[32m+            .session(&mut *session)
+(B[m[32m+            .await?;
+(B[m         db.collection::<Document>(ARTIFACTS).update_one(doc!{"_id":&row.id,"state":"pending"},doc!{"$set":{"state":"materialized","data_encrypted":null,"secret_context_versions":{}}}).session(&mut *session).await?;
+         attachments.push(meta);
+     }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:150:
+[31m-    Ok((attachments,"materialized"))
+(B[m[32m+    Ok((attachments, "materialized"))
+(B[m }
+[31m-pub async fn bind_in_session(db: &Database, keys: &EncryptionKeys,row: &mut AssistantConversation,w: &AsyncServiceOperation,session: &mut ClientSession) -> AppResult<()> {
+(B[m[31m-    if w.artifact_mode.is_none() {return Ok(());}
+(B[m[32m+pub async fn bind_in_session(
+(B[m[32m+    db: &Database,
+(B[m[32m+    keys: &EncryptionKeys,
+(B[m[32m+    row: &mut AssistantConversation,
+(B[m[32m+    w: &AsyncServiceOperation,
+(B[m[32m+    session: &mut ClientSession,
+(B[m[32m+) -> AppResult<()> {
+(B[m[32m+    if w.artifact_mode.is_none() {
+(B[m[32m+        return Ok(());
+(B[m[32m+    }
+(B[m     let turn = row.active_turn.as_ref().ok_or_else(invalid)?;
+[31m-    let written = db.collection::<Document>(WATCHES).find_one(doc!{"_id":&w.id}).projection(doc!{"artifact_event_turn_id":1}).session(&mut *session).await?.ok_or_else(invalid)?;
+(B[m[31m-    if written.get_str("artifact_event_turn_id").ok().is_some_and(|id|id!=turn.turn_id) {return Err(invalid());}
+(B[m[32m+    let written = db
+(B[m[32m+        .collection::<Document>(WATCHES)
+(B[m[32m+        .find_one(doc! {"_id":&w.id})
+(B[m[32m+        .projection(doc! {"artifact_event_turn_id":1})
+(B[m[32m+        .session(&mut *session)
+(B[m[32m+        .await?
+(B[m[32m+        .ok_or_else(invalid)?;
+(B[m[32m+    if written
+(B[m[32m+        .get_str("artifact_event_turn_id")
+(B[m[32m+        .ok()
+(B[m[32m+        .is_some_and(|id| id != turn.turn_id)
+(B[m[32m+    {
+(B[m[32m+        return Err(invalid());
+(B[m[32m+    }
+(B[m     if db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME).find_one(doc!{"user_id":&w.user_id,"conversation_id":&w.conversation_id,"turn_id":&w.turn_id,"role":"user","origin":"user"}).projection(doc!{"_id":1}).session(&mut *session).await?.is_none() {return Err(invalid());}
+[31m-    if !admitted(w) || turn.origin!=TurnOrigin::Event || turn.turn_id==w.turn_id || super::async_service_operation::event_id(row)!=Some(w.id.as_str())
+(B[m[31m-        || turn.events.iter().filter(|e|e.kind==super::async_service_operation::EVENT_KIND).count()!=1 || row.user_id!=w.user_id || row.id!=w.conversation_id
+(B[m[31m-        || row.channel.is_some() || row.reply_channel.is_some() || row.group_id.is_some() || turn.stop_requested {return Err(invalid());}
+(B[m[31m-    let (attachments,reason)=materialize(db,keys,w,session,&turn.turn_id,&turn.attachments).await?;
+(B[m[32m+    if !admitted(w)
+(B[m[32m+        || turn.origin != TurnOrigin::Event
+(B[m[32m+        || turn.turn_id == w.turn_id
+(B[m[32m+        || super::async_service_operation::event_id(row) != Some(w.id.as_str())
+(B[m[32m+        || turn
+(B[m[32m+            .events
+(B[m[32m+            .iter()
+(B[m[32m+            .filter(|e| e.kind == super::async_service_operation::EVENT_KIND)
+(B[m[32m+            .count()
+(B[m[32m+            != 1
+(B[m[32m+        || row.user_id != w.user_id
+(B[m[32m+        || row.id != w.conversation_id
+(B[m[32m+        || row.channel.is_some()
+(B[m[32m+        || row.reply_channel.is_some()
+(B[m[32m+        || row.group_id.is_some()
+(B[m[32m+        || turn.stop_requested
+(B[m[32m+    {
+(B[m[32m+        return Err(invalid());
+(B[m[32m+    }
+(B[m[32m+    let (attachments, reason) =
+(B[m[32m+        materialize(db, keys, w, session, &turn.turn_id, &turn.attachments).await?;
+(B[m     let turn = row.active_turn.as_mut().ok_or_else(invalid)?;
+[31m-    for attachment in attachments {if !turn.attachments.iter().any(|a|a.id==attachment.id){turn.attachments.push(attachment);}}
+(B[m[32m+    for attachment in attachments {
+(B[m[32m+        if !turn.attachments.iter().any(|a| a.id == attachment.id) {
+(B[m[32m+            turn.attachments.push(attachment);
+(B[m[32m+        }
+(B[m[32m+    }
+(B[m     db.collection::<Document>(WATCHES).update_one(doc!{"_id":&w.id,"state":"queued"},doc!{"$set":{"artifact_result.delivery_reason":reason,"artifact_event_turn_id":&turn.turn_id}}).session(&mut *session).await?;
+     Ok(())
+ }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:167:
+ /// Settlement owns the message identity and writes its immutable recovery lineage.
+[31m-pub async fn associate_in_session(db:&Database,row:&AssistantConversation,message:&str,session:&mut ClientSession)->AppResult<()> {
+(B[m[31m-    let Some(id)=super::async_service_operation::event_id(row) else{return Ok(());};
+(B[m[31m-    let Some(w)=db.collection::<AsyncServiceOperation>(WATCHES).find_one(doc!{"_id":id,"user_id":&row.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await? else{return Ok(());};
+(B[m[31m-    if w.artifact_mode.is_none(){return Ok(());}
+(B[m[31m-    if !admitted(&w){return Err(invalid());}
+(B[m[31m-    let Some(manifest)=w.artifact_result else{return Ok(());};
+(B[m[31m-    let turn=row.active_turn.as_ref().ok_or_else(invalid)?;
+(B[m[31m-    let delivery=Delivery {message_id:message.into(),user_id:row.user_id.clone(),conversation_id:row.id.clone(),originating_turn_id:w.turn_id,event_turn_id:turn.turn_id.clone(),watch_id:w.id,operation_id:w.operation_id.ok_or_else(invalid)?,source_result_identity:manifest.source_result_identity,
+(B[m[32m+pub async fn associate_in_session(
+(B[m[32m+    db: &Database,
+(B[m[32m+    row: &AssistantConversation,
+(B[m[32m+    message: &str,
+(B[m[32m+    session: &mut ClientSession,
+(B[m[32m+) -> AppResult<()> {
+(B[m[32m+    let Some(id) = super::async_service_operation::event_id(row) else {
+(B[m[32m+        return Ok(());
+(B[m[32m+    };
+(B[m[32m+    let Some(w) = db
+(B[m[32m+        .collection::<AsyncServiceOperation>(WATCHES)
+(B[m[32m+        .find_one(doc! {"_id":id,"user_id":&row.user_id,"conversation_id":&row.id,"state":"queued"})
+(B[m[32m+        .session(&mut *session)
+(B[m[32m+        .await?
+(B[m[32m+    else {
+(B[m[32m+        return Ok(());
+(B[m[32m+    };
+(B[m[32m+    if w.artifact_mode.is_none() {
+(B[m[32m+        return Ok(());
+(B[m[32m+    }
+(B[m[32m+    if !admitted(&w) {
+(B[m[32m+        return Err(invalid());
+(B[m[32m+    }
+(B[m[32m+    let Some(manifest) = w.artifact_result else {
+(B[m[32m+        return Ok(());
+(B[m[32m+    };
+(B[m[32m+    let turn = row.active_turn.as_ref().ok_or_else(invalid)?;
+(B[m[32m+    let delivery = Delivery {
+(B[m[32m+        message_id: message.into(),
+(B[m[32m+        user_id: row.user_id.clone(),
+(B[m[32m+        conversation_id: row.id.clone(),
+(B[m[32m+        originating_turn_id: w.turn_id,
+(B[m[32m+        event_turn_id: turn.turn_id.clone(),
+(B[m[32m+        watch_id: w.id,
+(B[m[32m+        operation_id: w.operation_id.ok_or_else(invalid)?,
+(B[m[32m+        source_result_identity: manifest.source_result_identity,
+(B[m         expires_at: manifest.expires_at,
+[31m-        attachment_ids:turn.attachments.iter().filter(|a|a.artifact.source_watch_id.as_deref()==Some(id)).map(|a|a.id.clone()).collect()};
+(B[m[31m-    db.collection::<Delivery>(DELIVERIES).insert_one(delivery).session(session).await?;Ok(())
+(B[m[32m+        attachment_ids: turn
+(B[m[32m+            .attachments
+(B[m[32m+            .iter()
+(B[m[32m+            .filter(|a| a.artifact.source_watch_id.as_deref() == Some(id))
+(B[m[32m+            .map(|a| a.id.clone())
+(B[m[32m+            .collect(),
+(B[m[32m+    };
+(B[m[32m+    db.collection::<Delivery>(DELIVERIES)
+(B[m[32m+        .insert_one(delivery)
+(B[m[32m+        .session(session)
+(B[m[32m+        .await?;
+(B[m[32m+    Ok(())
+(B[m }
+[31m-pub async fn recover(db:&Database,keys:&EncryptionKeys,user:&str,conversation:&str,message:&str)->AppResult<()> {
+(B[m[31m-    let database=db.clone();let user=user.to_owned();let conversation=conversation.to_owned();let message=message.to_owned();
+(B[m[31m-    let mut session=db.client().start_session().await?;
+(B[m[32m+pub async fn recover(
+(B[m[32m+    db: &Database,
+(B[m[32m+    keys: &EncryptionKeys,
+(B[m[32m+    user: &str,
+(B[m[32m+    conversation: &str,
+(B[m[32m+    message: &str,
+(B[m[32m+) -> AppResult<()> {
+(B[m[32m+    let database = db.clone();
+(B[m[32m+    let user = user.to_owned();
+(B[m[32m+    let conversation = conversation.to_owned();
+(B[m[32m+    let message = message.to_owned();
+(B[m[32m+    let mut session = db.client().start_session().await?;
+(B[m     session.start_transaction().and_run2(async move |session| {
+         let operation:AppResult<()>=Box::pin(async {
+             super::erasure_admission::fence_in_session(&database,&user,session).await?;
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:202:
+         }).await;transactions::transaction_result(operation)
+     }).await.map_err(transactions::map_transaction_error)
+ }
+[31m-pub async fn discard_in_session(db:&Database,filter:Document,session:&mut ClientSession)->AppResult<()> {
+(B[m[31m-    db.collection::<Document>(ARTIFACTS).update_many(filter,doc!{"$set":{"state":"discarded","data_encrypted":null,"secret_context_versions":{}}}).session(session).await?;Ok(())
+(B[m[32m+pub async fn discard_in_session(
+(B[m[32m+    db: &Database,
+(B[m[32m+    filter: Document,
+(B[m[32m+    session: &mut ClientSession,
+(B[m[32m+) -> AppResult<()> {
+(B[m[32m+    db.collection::<Document>(ARTIFACTS)
+(B[m[32m+        .update_many(
+(B[m[32m+            filter,
+(B[m[32m+            doc! {"$set":{"state":"discarded","data_encrypted":null,"secret_context_versions":{}}},
+(B[m[32m+        )
+(B[m[32m+        .session(session)
+(B[m[32m+        .await?;
+(B[m[32m+    Ok(())
+(B[m }
+[31m-pub async fn sweep(db:&Database)->AppResult<()> {
+(B[m[32m+pub async fn sweep(db: &Database) -> AppResult<()> {
+(B[m     db.collection::<Document>(ARTIFACTS).update_many(doc!{"expires_at":{"$lte":bson::DateTime::now()},"state":{"$in":["pending","materializing"]}},doc!{"$set":{"state":"expired","data_encrypted":null,"secret_context_versions":{}}}).await?;
+     Ok(())
+ }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mod.rs:212:
+ #[cfg(test)]
+ mod tests;
+ 
+[31m-
+(B[m[31m-pub struct DeliveryState {pub state: String,pub count:usize,pub recovery_available:bool}
+(B[m[31m-pub async fn delivery_states(db:&Database,user:&str,conversation:&str,messages:&[String])->AppResult<std::collections::HashMap<String,DeliveryState>> {
+(B[m[31m-    let deliveries:Vec<Delivery>=db.collection::<Delivery>(DELIVERIES).find(doc!{"_id":{"$in":messages},"user_id":user,"conversation_id":conversation}).await?.try_collect().await?;
+(B[m[31m-    let ids:Vec<&str>=deliveries.iter().map(|d|d.watch_id.as_str()).collect();
+(B[m[31m-    let watches:Vec<AsyncServiceOperation>=db.collection::<AsyncServiceOperation>(WATCHES).find(doc!{"_id":{"$in":ids},"user_id":user,"conversation_id":conversation}).await?.try_collect().await?;
+(B[m[31m-    let mut states=std::collections::HashMap::new();
+(B[m[32m+pub struct DeliveryState {
+(B[m[32m+    pub state: String,
+(B[m[32m+    pub count: usize,
+(B[m[32m+    pub recovery_available: bool,
+(B[m[32m+}
+(B[m[32m+pub async fn delivery_states(
+(B[m[32m+    db: &Database,
+(B[m[32m+    user: &str,
+(B[m[32m+    conversation: &str,
+(B[m[32m+    messages: &[String],
+(B[m[32m+) -> AppResult<std::collections::HashMap<String, DeliveryState>> {
+(B[m[32m+    let deliveries: Vec<Delivery> = db
+(B[m[32m+        .collection::<Delivery>(DELIVERIES)
+(B[m[32m+        .find(doc! {"_id":{"$in":messages},"user_id":user,"conversation_id":conversation})
+(B[m[32m+        .await?
+(B[m[32m+        .try_collect()
+(B[m[32m+        .await?;
+(B[m[32m+    let ids: Vec<&str> = deliveries.iter().map(|d| d.watch_id.as_str()).collect();
+(B[m[32m+    let watches: Vec<AsyncServiceOperation> = db
+(B[m[32m+        .collection::<AsyncServiceOperation>(WATCHES)
+(B[m[32m+        .find(doc! {"_id":{"$in":ids},"user_id":user,"conversation_id":conversation})
+(B[m[32m+        .await?
+(B[m[32m+        .try_collect()
+(B[m[32m+        .await?;
+(B[m[32m+    let mut states = std::collections::HashMap::new();
+(B[m     for delivery in deliveries {
+[31m-        let state=if delivery.expires_at<=Utc::now(){"result_expired"}else{watches.iter().find(|w|w.id==delivery.watch_id).and_then(|w|w.artifact_result.as_ref()).map(|m|m.delivery_reason.as_str()).unwrap_or("delivery_failed")};
+(B[m[31m-        states.insert(delivery.message_id,DeliveryState{state:state.into(),count:delivery.attachment_ids.len(),recovery_available:matches!(state,"delivery_pending"|"delivery_failed"|"delivery_capacity_exhausted")});
+(B[m[32m+        let state = if delivery.expires_at <= Utc::now() {
+(B[m[32m+            "result_expired"
+(B[m[32m+        } else {
+(B[m[32m+            watches
+(B[m[32m+                .iter()
+(B[m[32m+                .find(|w| w.id == delivery.watch_id)
+(B[m[32m+                .and_then(|w| w.artifact_result.as_ref())
+(B[m[32m+                .map(|m| m.delivery_reason.as_str())
+(B[m[32m+                .unwrap_or("delivery_failed")
+(B[m[32m+        };
+(B[m[32m+        states.insert(
+(B[m[32m+            delivery.message_id,
+(B[m[32m+            DeliveryState {
+(B[m[32m+                state: state.into(),
+(B[m[32m+                count: delivery.attachment_ids.len(),
+(B[m[32m+                recovery_available: matches!(
+(B[m[32m+                    state,
+(B[m[32m+                    "delivery_pending" | "delivery_failed" | "delivery_capacity_exhausted"
+(B[m[32m+                ),
+(B[m[32m+            },
+(B[m[32m+        );
+(B[m     }
+     Ok(states)
+ }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:2:
+ use super::sandbox::Checked;
+ const INVALID: &str = "artifact_invalid";
+ #[derive(Clone, Copy)]
+[31m-struct BoxRef<'a> { kind: [u8; 4], data: &'a [u8] }
+(B[m[32m+struct BoxRef<'a> {
+(B[m[32m+    kind: [u8; 4],
+(B[m[32m+    data: &'a [u8],
+(B[m[32m+}
+(B[m fn u32_at(data: &[u8], offset: usize) -> Checked<u32> {
+[31m-    Ok(u32::from_be_bytes(data.get(offset..offset.checked_add(4).ok_or(INVALID)?)
+(B[m[31m-        .ok_or(INVALID)?.try_into().map_err(|_| INVALID)?))
+(B[m[32m+    Ok(u32::from_be_bytes(
+(B[m[32m+        data.get(offset..offset.checked_add(4).ok_or(INVALID)?)
+(B[m[32m+            .ok_or(INVALID)?
+(B[m[32m+            .try_into()
+(B[m[32m+            .map_err(|_| INVALID)?,
+(B[m[32m+    ))
+(B[m }
+ fn boxes<'a>(data: &'a [u8], count: &mut usize) -> Checked<Vec<BoxRef<'a>>> {
+     let mut output = Vec::new();
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:12:
+     let mut offset = 0usize;
+     while offset < data.len() {
+         *count = count.checked_add(1).ok_or(INVALID)?;
+[31m-        if *count > 4096 { return Err(INVALID); }
+(B[m[32m+        if *count > 4096 {
+(B[m[32m+            return Err(INVALID);
+(B[m[32m+        }
+(B[m         let size = u32_at(data, offset)?;
+[31m-        let kind = data.get(offset + 4..offset + 8).ok_or(INVALID)?.try_into().map_err(|_| INVALID)?;
+(B[m[32m+        let kind = data
+(B[m[32m+            .get(offset + 4..offset + 8)
+(B[m[32m+            .ok_or(INVALID)?
+(B[m[32m+            .try_into()
+(B[m[32m+            .map_err(|_| INVALID)?;
+(B[m         let (size, header) = match size {
+             0 => (data.len() - offset, 8),
+             1 => {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:21:
+[31m-                let n = u64::from_be_bytes(data.get(offset+8..offset+16).ok_or(INVALID)?.try_into().map_err(|_| INVALID)?);
+(B[m[32m+                let n = u64::from_be_bytes(
+(B[m[32m+                    data.get(offset + 8..offset + 16)
+(B[m[32m+                        .ok_or(INVALID)?
+(B[m[32m+                        .try_into()
+(B[m[32m+                        .map_err(|_| INVALID)?,
+(B[m[32m+                );
+(B[m                 (usize::try_from(n).map_err(|_| INVALID)?, 16)
+             }
+             n => (n as usize, 8),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:25:
+         };
+         let end = offset.checked_add(size).ok_or(INVALID)?;
+[31m-        if size < header || end > data.len() { return Err(INVALID); }
+(B[m[31m-        output.push(BoxRef { kind, data: &data[offset + header..end] });
+(B[m[32m+        if size < header || end > data.len() {
+(B[m[32m+            return Err(INVALID);
+(B[m[32m+        }
+(B[m[32m+        output.push(BoxRef {
+(B[m[32m+            kind,
+(B[m[32m+            data: &data[offset + header..end],
+(B[m[32m+        });
+(B[m         offset = end;
+     }
+     Ok(output)
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:32:
+ }
+[31m-fn one<'a>(all: &[BoxRef<'a>], kind: &[u8;4]) -> Checked<BoxRef<'a>> {
+(B[m[32m+fn one<'a>(all: &[BoxRef<'a>], kind: &[u8; 4]) -> Checked<BoxRef<'a>> {
+(B[m     let mut found = all.iter().filter(|b| &b.kind == kind);
+     let first = *found.next().ok_or(INVALID)?;
+[31m-    if found.next().is_some() { return Err(INVALID); }
+(B[m[32m+    if found.next().is_some() {
+(B[m[32m+        return Err(INVALID);
+(B[m[32m+    }
+(B[m     Ok(first)
+ }
+ /// Only AVC configurations tested in our browser fixture enable preview. Other
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:42:
+     let mut count = 0;
+     let top = boxes(data, &mut count)?;
+     let ftyp = one(&top, b"ftyp")?;
+[31m-    if ftyp.data.len() < 8 || ftyp.data.len() % 4 != 0 { return Err(INVALID); }
+(B[m[31m-    if !ftyp.data.chunks_exact(4).enumerate().any(|(i, b)| i != 1 && matches!(b, b"isom" | b"iso2" | b"mp41" | b"mp42" | b"avc1" | b"M4V ")) { return Err(INVALID); }
+(B[m[31m-    if !top.iter().any(|b| b.kind == *b"mdat" && !b.data.is_empty()) { return Err(INVALID); }
+(B[m[32m+    if ftyp.data.len() < 8 || ftyp.data.len() % 4 != 0 {
+(B[m[32m+        return Err(INVALID);
+(B[m[32m+    }
+(B[m[32m+    if !ftyp.data.chunks_exact(4).enumerate().any(|(i, b)| {
+(B[m[32m+        i != 1 && matches!(b, b"isom" | b"iso2" | b"mp41" | b"mp42" | b"avc1" | b"M4V ")
+(B[m[32m+    }) {
+(B[m[32m+        return Err(INVALID);
+(B[m[32m+    }
+(B[m[32m+    if !top.iter().any(|b| b.kind == *b"mdat" && !b.data.is_empty()) {
+(B[m[32m+        return Err(INVALID);
+(B[m[32m+    }
+(B[m     let moov = boxes(one(&top, b"moov")?.data, &mut count)?;
+     let mut visual = false;
+     let mut preview = false;
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:52:
+         let track = boxes(trak.data, &mut count)?;
+         let tkhd = one(&track, b"tkhd")?.data;
+         let version = *tkhd.first().ok_or(INVALID)?;
+[31m-        let dim = match version { 0 => 76, 1 => 88, _ => return Err(INVALID) };
+(B[m[32m+        let dim = match version {
+(B[m[32m+            0 => 76,
+(B[m[32m+            1 => 88,
+(B[m[32m+            _ => return Err(INVALID),
+(B[m[32m+        };
+(B[m         let width = u32_at(tkhd, dim)? >> 16;
+[31m-        let height = u32_at(tkhd, dim+4)? >> 16;
+(B[m[32m+        let height = u32_at(tkhd, dim + 4)? >> 16;
+(B[m         let mdia = boxes(one(&track, b"mdia")?.data, &mut count)?;
+         let handler = one(&mdia, b"hdlr")?.data.get(8..12).ok_or(INVALID)?;
+         let minf = boxes(one(&mdia, b"minf")?.data, &mut count)?;
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:61:
+         let stbl = boxes(one(&minf, b"stbl")?.data, &mut count)?;
+         let stsd = one(&stbl, b"stsd")?.data;
+         let entries = boxes(stsd.get(8..).ok_or(INVALID)?, &mut count)?;
+[31m-        if u32_at(stsd,4)? as usize != entries.len() || entries.is_empty() { return Err(INVALID); }
+(B[m[31m-        if handler != b"vide" { continue; }
+(B[m[31m-        if width == 0 || height == 0 || width > 16384 || height > 16384 { return Err(INVALID); }
+(B[m[32m+        if u32_at(stsd, 4)? as usize != entries.len() || entries.is_empty() {
+(B[m[32m+            return Err(INVALID);
+(B[m[32m+        }
+(B[m[32m+        if handler != b"vide" {
+(B[m[32m+            continue;
+(B[m[32m+        }
+(B[m[32m+        if width == 0 || height == 0 || width > 16384 || height > 16384 {
+(B[m[32m+            return Err(INVALID);
+(B[m[32m+        }
+(B[m         let stsz = one(&stbl, b"stsz")?.data;
+[31m-        let samples = u32_at(stsz,8)? as usize;
+(B[m[31m-        if samples == 0 || samples > 1_000_000 { return Err(INVALID); }
+(B[m[31m-        if u32_at(stsz,4)? == 0 && stsz.len() != 12usize.checked_add(samples.checked_mul(4).ok_or(INVALID)?).ok_or(INVALID)? { return Err(INVALID); }
+(B[m[31m-        one(&stbl,b"stts")?;
+(B[m[31m-        one(&stbl,b"stsc")?;
+(B[m[31m-        let offsets = stbl.iter().find(|b| matches!(&b.kind, b"stco" | b"co64")).ok_or(INVALID)?;
+(B[m[31m-        let n = u32_at(offsets.data,4)? as usize;
+(B[m[31m-        let step = if offsets.kind == *b"stco" {4} else {8};
+(B[m[31m-        if n == 0 || offsets.data.len() != 8usize.checked_add(n.checked_mul(step).ok_or(INVALID)?).ok_or(INVALID)? {return Err(INVALID);}
+(B[m[32m+        let samples = u32_at(stsz, 8)? as usize;
+(B[m[32m+        if samples == 0 || samples > 1_000_000 {
+(B[m[32m+            return Err(INVALID);
+(B[m[32m+        }
+(B[m[32m+        if u32_at(stsz, 4)? == 0
+(B[m[32m+            && stsz.len()
+(B[m[32m+                != 12usize
+(B[m[32m+                    .checked_add(samples.checked_mul(4).ok_or(INVALID)?)
+(B[m[32m+                    .ok_or(INVALID)?
+(B[m[32m+        {
+(B[m[32m+            return Err(INVALID);
+(B[m[32m+        }
+(B[m[32m+        one(&stbl, b"stts")?;
+(B[m[32m+        one(&stbl, b"stsc")?;
+(B[m[32m+        let offsets = stbl
+(B[m[32m+            .iter()
+(B[m[32m+            .find(|b| matches!(&b.kind, b"stco" | b"co64"))
+(B[m[32m+            .ok_or(INVALID)?;
+(B[m[32m+        let n = u32_at(offsets.data, 4)? as usize;
+(B[m[32m+        let step = if offsets.kind == *b"stco" { 4 } else { 8 };
+(B[m[32m+        if n == 0
+(B[m[32m+            || offsets.data.len()
+(B[m[32m+                != 8usize
+(B[m[32m+                    .checked_add(n.checked_mul(step).ok_or(INVALID)?)
+(B[m[32m+                    .ok_or(INVALID)?
+(B[m[32m+        {
+(B[m[32m+            return Err(INVALID);
+(B[m[32m+        }
+(B[m         for raw in offsets.data[8..].chunks_exact(step) {
+[31m-            let offset = if step == 4 {u32::from_be_bytes(raw.try_into().map_err(|_| INVALID)?) as u64} else {u64::from_be_bytes(raw.try_into().map_err(|_| INVALID)?)};
+(B[m[32m+            let offset = if step == 4 {
+(B[m[32m+                u32::from_be_bytes(raw.try_into().map_err(|_| INVALID)?) as u64
+(B[m[32m+            } else {
+(B[m[32m+                u64::from_be_bytes(raw.try_into().map_err(|_| INVALID)?)
+(B[m[32m+            };
+(B[m             if !top.iter().filter(|b| b.kind == *b"mdat").any(|b| {
+                 let start = (b.data.as_ptr() as usize) - (data.as_ptr() as usize);
+                 offset >= start as u64 && offset < (start + b.data.len()) as u64
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/mp4.rs:82:
+[31m-            }) { return Err(INVALID); }
+(B[m[32m+            }) {
+(B[m[32m+                return Err(INVALID);
+(B[m[32m+            }
+(B[m         }
+         for entry in entries {
+[31m-            if !matches!(&entry.kind, b"avc1" | b"avc3" | b"hvc1" | b"hev1" | b"av01") {return Err(INVALID);}
+(B[m[31m-            if entry.data.len() < 78 || u16::from_be_bytes(entry.data[24..26].try_into().map_err(|_| INVALID)?) == 0 || u16::from_be_bytes(entry.data[26..28].try_into().map_err(|_| INVALID)?) == 0 { return Err(INVALID); }
+(B[m[32m+            if !matches!(&entry.kind, b"avc1" | b"avc3" | b"hvc1" | b"hev1" | b"av01") {
+(B[m[32m+                return Err(INVALID);
+(B[m[32m+            }
+(B[m[32m+            if entry.data.len() < 78
+(B[m[32m+                || u16::from_be_bytes(entry.data[24..26].try_into().map_err(|_| INVALID)?) == 0
+(B[m[32m+                || u16::from_be_bytes(entry.data[26..28].try_into().map_err(|_| INVALID)?) == 0
+(B[m[32m+            {
+(B[m[32m+                return Err(INVALID);
+(B[m[32m+            }
+(B[m             let configs = boxes(&entry.data[78..], &mut count)?;
+[31m-            let config = one(&configs, match &entry.kind { b"avc1" | b"avc3" => b"avcC", b"hvc1" | b"hev1" => b"hvcC", _ => b"av1C" })?;
+(B[m[31m-            if config.data.len() < 7 { return Err(INVALID); }
+(B[m[32m+            let config = one(
+(B[m[32m+                &configs,
+(B[m[32m+                match &entry.kind {
+(B[m[32m+                    b"avc1" | b"avc3" => b"avcC",
+(B[m[32m+                    b"hvc1" | b"hev1" => b"hvcC",
+(B[m[32m+                    _ => b"av1C",
+(B[m[32m+                },
+(B[m[32m+            )?;
+(B[m[32m+            if config.data.len() < 7 {
+(B[m[32m+                return Err(INVALID);
+(B[m[32m+            }
+(B[m             visual = true;
+[31m-            preview |= matches!(&entry.kind, b"avc1" | b"avc3") && config.data[0] == 1 && matches!(config.data[1], 66 | 77 | 100);
+(B[m[32m+            preview |= matches!(&entry.kind, b"avc1" | b"avc3")
+(B[m[32m+                && config.data[0] == 1
+(B[m[32m+                && matches!(config.data[1], 66 | 77 | 100);
+(B[m         }
+     }
+[31m-    if !visual { return Err(INVALID); }
+(B[m[32m+    if !visual {
+(B[m[32m+        return Err(INVALID);
+(B[m[32m+    }
+(B[m     Ok(preview)
+ }
+ 
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:55:
+         return Err("artifact_source_changed");
+     }
+     let expires_at = match value.get("expires_at").filter(|v| !v.is_null()) {
+[31m-        Some(v) => Some(DateTime::parse_from_rfc3339(v.as_str().ok_or("artifact_invalid")?)
+(B[m[31m-            .map_err(|_| "artifact_invalid")?.with_timezone(&Utc)),
+(B[m[32m+        Some(v) => Some(
+(B[m[32m+            DateTime::parse_from_rfc3339(v.as_str().ok_or("artifact_invalid")?)
+(B[m[32m+                .map_err(|_| "artifact_invalid")?
+(B[m[32m+                .with_timezone(&Utc),
+(B[m[32m+        ),
+(B[m         None => None,
+     };
+[31m-    if expires_at.is_some_and(|expiry| expiry <= now) { return Err("result_expired"); }
+(B[m[32m+    if expires_at.is_some_and(|expiry| expiry <= now) {
+(B[m[32m+        return Err("result_expired");
+(B[m[32m+    }
+(B[m     if value["status"] != "succeeded" || value["result_available"] != true {
+         return Err("result_unavailable");
+     }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:66:
+[31m-    Ok(Status { expires_at, version: value["version"].as_u64().map(|v| v.to_string()) })
+(B[m[32m+    Ok(Status {
+(B[m[32m+        expires_at,
+(B[m[32m+        version: value["version"].as_u64().map(|v| v.to_string()),
+(B[m[32m+    })
+(B[m }
+ pub fn filename(path: &str, index: usize) -> String {
+     let base = path.rsplit(['/', '\\']).next().unwrap_or_default();
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:70:
+     let mut safe = String::new();
+[31m-    for c in base.chars().filter(|c| !c.is_control() && !matches!(c, '/' | '\\') && !matches!(*c as u32, 0x202a..=0x202e | 0x2066..=0x2069)) {
+(B[m[31m-        if safe.len() + c.len_utf8() > 160 { break; }
+(B[m[32m+    for c in base.chars().filter(|c| {
+(B[m[32m+        !c.is_control()
+(B[m[32m+            && !matches!(c, '/' | '\\')
+(B[m[32m+            && !matches!(*c as u32, 0x202a..=0x202e | 0x2066..=0x2069)
+(B[m[32m+    }) {
+(B[m[32m+        if safe.len() + c.len_utf8() > 160 {
+(B[m[32m+            break;
+(B[m[32m+        }
+(B[m         safe.push(c);
+     }
+     let safe = safe.trim().trim_matches('.');
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:76:
+[31m-    if safe.is_empty() { format!("generated-file-{}", index + 1) } else { safe.into() }
+(B[m[32m+    if safe.is_empty() {
+(B[m[32m+        format!("generated-file-{}", index + 1)
+(B[m[32m+    } else {
+(B[m[32m+        safe.into()
+(B[m[32m+    }
+(B[m }
+ fn part(hash: &mut Sha256, bytes: &[u8]) {
+     hash.update((bytes.len() as u64).to_be_bytes());
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:80:
+     hash.update(bytes);
+ }
+ pub fn parse(body: &str, operation: &str) -> Checked<ResultFiles> {
+[31m-    if body.len() > RESPONSE_BYTES { return Err("artifact_too_large"); }
+(B[m[32m+    if body.len() > RESPONSE_BYTES {
+(B[m[32m+        return Err("artifact_too_large");
+(B[m[32m+    }
+(B[m     let result: ExecuteResponse = serde_json::from_str(body).map_err(|_| "artifact_invalid")?;
+     let mut files = Vec::new();
+     let mut total = 0usize;
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:90:
+     let mut summary = Zeroizing::new(format!("Sandbox script success: {}.", result.success));
+     if let Some(output) = result.output {
+         // Text is independently bounded. No file content, names or paths enter model context.
+[31m-        summary.push_str(&format!(" Exit code: {}.\nstdout: {}\nstderr: {}", output.exit_code,
+(B[m[31m-            bounded(&output.stdout, 6000), bounded(&output.stderr, 6000)));
+(B[m[32m+        summary.push_str(&format!(
+(B[m[32m+            " Exit code: {}.\nstdout: {}\nstderr: {}",
+(B[m[32m+            output.exit_code,
+(B[m[32m+            bounded(&output.stdout, 6000),
+(B[m[32m+            bounded(&output.stderr, 6000)
+(B[m[32m+        ));
+(B[m         let entries = output.files.unwrap_or_default();
+[31m-        if entries.len() > 8 { return Err("artifact_too_large"); }
+(B[m[32m+        if entries.len() > 8 {
+(B[m[32m+            return Err("artifact_too_large");
+(B[m[32m+        }
+(B[m         for (index, entry) in entries.into_iter().enumerate() {
+[31m-            if entry.error.is_some() { return Err("artifact_invalid"); }
+(B[m[32m+            if entry.error.is_some() {
+(B[m[32m+                return Err("artifact_invalid");
+(B[m[32m+            }
+(B[m             let encoded = entry.content.ok_or("artifact_invalid")?;
+             let remaining = FILE_BYTES.min(TOTAL_BYTES.saturating_sub(total));
+[31m-            let encoded_max = remaining.div_ceil(3).checked_mul(4).ok_or("artifact_too_large")?;
+(B[m[31m-            if encoded.len() > encoded_max { return Err("artifact_too_large"); }
+(B[m[31m-            let bytes = Zeroizing::new(STANDARD.decode(encoded.as_bytes()).map_err(|_| "artifact_invalid")?);
+(B[m[31m-            if bytes.is_empty() { return Err("artifact_invalid"); }
+(B[m[31m-            if bytes.len() > remaining { return Err("artifact_too_large"); }
+(B[m[32m+            let encoded_max = remaining
+(B[m[32m+                .div_ceil(3)
+(B[m[32m+                .checked_mul(4)
+(B[m[32m+                .ok_or("artifact_too_large")?;
+(B[m[32m+            if encoded.len() > encoded_max {
+(B[m[32m+                return Err("artifact_too_large");
+(B[m[32m+            }
+(B[m[32m+            let bytes = Zeroizing::new(
+(B[m[32m+                STANDARD
+(B[m[32m+                    .decode(encoded.as_bytes())
+(B[m[32m+                    .map_err(|_| "artifact_invalid")?,
+(B[m[32m+            );
+(B[m[32m+            if bytes.is_empty() {
+(B[m[32m+                return Err("artifact_invalid");
+(B[m[32m+            }
+(B[m[32m+            if bytes.len() > remaining {
+(B[m[32m+                return Err("artifact_too_large");
+(B[m[32m+            }
+(B[m             total = total.checked_add(bytes.len()).ok_or("artifact_too_large")?;
+             let name = filename(&entry.path, index);
+             let (content_type, preview) = verified_type(&name, &bytes)?;
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:112:
+             part(&mut hash, content_type.as_bytes());
+             part(&mut hash, &bytes);
+             let sha256 = hex::encode(Sha256::digest(&*bytes));
+[31m-            files.push(File { filename: name, source_path: bounded(&entry.path, 512).into(), content_type, preview, bytes, sha256 });
+(B[m[32m+            files.push(File {
+(B[m[32m+                filename: name,
+(B[m[32m+                source_path: bounded(&entry.path, 512).into(),
+(B[m[32m+                content_type,
+(B[m[32m+                preview,
+(B[m[32m+                bytes,
+(B[m[32m+                sha256,
+(B[m[32m+            });
+(B[m         }
+     }
+     summary.push_str(&format!("\nVerified result files: {}. Private attachment delivery is a separate server state; claim attached/downloadable only when materialized. Never request machine setup to recover this cloud result.", files.len()));
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:119:
+[31m-    Ok(ResultFiles { files, identity: hex::encode(hash.finalize()), summary, success: result.success })
+(B[m[32m+    Ok(ResultFiles {
+(B[m[32m+        files,
+(B[m[32m+        identity: hex::encode(hash.finalize()),
+(B[m[32m+        summary,
+(B[m[32m+        success: result.success,
+(B[m[32m+    })
+(B[m }
+ fn bounded(text: &str, max: usize) -> &str {
+     let mut end = text.len().min(max);
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:123:
+[31m-    while !text.is_char_boundary(end) { end -= 1; }
+(B[m[32m+    while !text.is_char_boundary(end) {
+(B[m[32m+        end -= 1;
+(B[m[32m+    }
+(B[m     &text[..end]
+ }
+ fn verified_type(name: &str, bytes: &[u8]) -> Checked<(&'static str, &'static str)> {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:127:
+[31m-    let ext = name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+(B[m[32m+    let ext = name
+(B[m[32m+        .rsplit('.')
+(B[m[32m+        .next()
+(B[m[32m+        .unwrap_or_default()
+(B[m[32m+        .to_ascii_lowercase();
+(B[m     let candidate = match ext.as_str() {
+[31m-        "png" => Some("image/png"), "jpg" | "jpeg" => Some("image/jpeg"),
+(B[m[31m-        "gif" => Some("image/gif"), "webp" => Some("image/webp"), _ => None,
+(B[m[32m+        "png" => Some("image/png"),
+(B[m[32m+        "jpg" | "jpeg" => Some("image/jpeg"),
+(B[m[32m+        "gif" => Some("image/gif"),
+(B[m[32m+        "webp" => Some("image/webp"),
+(B[m[32m+        _ => None,
+(B[m     };
+     if let Some(mime) = candidate {
+[31m-        if bytes.len() > IMAGE_BYTES { return Err("artifact_too_large"); }
+(B[m[31m-        if !super::super::mcp_service::image_magic_matches(mime, bytes) { return Err("artifact_invalid"); }
+(B[m[32m+        if bytes.len() > IMAGE_BYTES {
+(B[m[32m+            return Err("artifact_too_large");
+(B[m[32m+        }
+(B[m[32m+        if !super::super::mcp_service::image_magic_matches(mime, bytes) {
+(B[m[32m+            return Err("artifact_invalid");
+(B[m[32m+        }
+(B[m         return Ok((mime, "image"));
+     }
+     if ext == "mp4" {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/sandbox.rs:138:
+[31m-        return Ok(("video/mp4", if super::mp4::validate(bytes)? { "video" } else { "download" }));
+(B[m[32m+        return Ok((
+(B[m[32m+            "video/mp4",
+(B[m[32m+            if super::mp4::validate(bytes)? {
+(B[m[32m+                "video"
+(B[m[32m+            } else {
+(B[m[32m+                "download"
+(B[m[32m+            },
+(B[m[32m+        ));
+(B[m     }
+     Ok(("application/octet-stream", "download"))
+ }
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/tests.rs:1:
+ use super::*;
+ use base64::Engine;
+ use serde_json::json;
+[31m-const MP4:&[u8]=include_bytes!("../../../tests/fixtures/generated-artifacts/visual-avc.mp4");
+(B[m[31m-const PNG:&[u8]=include_bytes!("../../../tests/fixtures/generated-artifacts/blue.png");
+(B[m[31m-const JPEG:&[u8]=include_bytes!("../../../tests/fixtures/generated-artifacts/blue.jpg");
+(B[m[31m-fn body(name:&str,bytes:&[u8])->String {
+(B[m[32m+const MP4: &[u8] = include_bytes!("../../../tests/fixtures/generated-artifacts/visual-avc.mp4");
+(B[m[32m+const PNG: &[u8] = include_bytes!("../../../tests/fixtures/generated-artifacts/blue.png");
+(B[m[32m+const JPEG: &[u8] = include_bytes!("../../../tests/fixtures/generated-artifacts/blue.jpg");
+(B[m[32m+fn body(name: &str, bytes: &[u8]) -> String {
+(B[m     json!({"success":true,"output":{"stdout":"done","stderr":"","exit_code":0,"files":[{"path":name,"content":base64::engine::general_purpose::STANDARD.encode(bytes),"size":1}]}}).to_string()
+ }
+[31m-fn watch()->AsyncServiceOperation {
+(B[m[32m+fn watch() -> AsyncServiceOperation {
+(B[m     bson::from_document(doc!{"_id":Uuid::new_v4().to_string(),"user_id":"owner2037","conversation_id":"nyxa-2037","agent_id":"agent2037","turn_id":"original2037","api_key_id":"key2037","service_id":"sandbox2037","submit_endpoint_id":"submit2037",
+         "contract":{"status_operation":"get_execution_handler","result_operation":"get_execution_result_handler","id_field":"/operation_id","id_parameter":"operation_id","status_field":"/status","success_states":["succeeded"],"failure_states":["failed"]},
+         "delivery":{"origin":"user","platform_reply":{"kind":"web_only"}},"operation_id":"operation2037","artifact_mode":sandbox::MODE,"state":"waiting","attempts":0,"lease_id":"lease2037","lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(60)),"created_at":bson::DateTime::now(),"deadline":bson::DateTime::from_chrono(Utc::now()+Duration::hours(2)),"poll_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(4))}).unwrap()
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/tests.rs:14:
+ }
+ #[test]
+ fn sandbox_files_contract_and_structured_visual_track_validation() {
+[31m-    for (name,bytes,preview) in [("movie.mp4",MP4,"video"),("photo.png",PNG,"image"),("photo.jpg",JPEG,"image"),("report.html",b"<script>alert(1)</script>".as_slice(),"download")] {
+(B[m[31m-        let result=sandbox::parse(&body(name,bytes),"operation2037").unwrap();
+(B[m[31m-        assert_eq!(result.files[0].preview,preview);assert_eq!(&*result.files[0].bytes,bytes);
+(B[m[31m-        assert_ne!(result.identity,sandbox::parse(&body(name,bytes),"another-operation").unwrap().identity);
+(B[m[32m+    for (name, bytes, preview) in [
+(B[m[32m+        ("movie.mp4", MP4, "video"),
+(B[m[32m+        ("photo.png", PNG, "image"),
+(B[m[32m+        ("photo.jpg", JPEG, "image"),
+(B[m[32m+        (
+(B[m[32m+            "report.html",
+(B[m[32m+            b"<script>alert(1)</script>".as_slice(),
+(B[m[32m+            "download",
+(B[m[32m+        ),
+(B[m[32m+    ] {
+(B[m[32m+        let result = sandbox::parse(&body(name, bytes), "operation2037").unwrap();
+(B[m[32m+        assert_eq!(result.files[0].preview, preview);
+(B[m[32m+        assert_eq!(&*result.files[0].bytes, bytes);
+(B[m[32m+        assert_ne!(
+(B[m[32m+            result.identity,
+(B[m[32m+            sandbox::parse(&body(name, bytes), "another-operation")
+(B[m[32m+                .unwrap()
+(B[m[32m+                .identity
+(B[m[32m+        );
+(B[m     }
+     assert!(mp4::validate(b"ftypisommoovtrakmdiahdlrvidestblstsdavc1").is_err());
+[31m-    for end in [4,8,32,MP4.len()-1] {assert!(mp4::validate(&MP4[..end]).is_err());}
+(B[m[31m-    let mut audio=MP4.to_vec();let pos=audio.windows(4).position(|b|b==b"vide").unwrap();audio[pos..pos+4].copy_from_slice(b"soun");assert!(mp4::validate(&audio).is_err());
+(B[m[31m-    let mut oversized=MP4.to_vec();oversized[0..4].copy_from_slice(&u32::MAX.to_be_bytes());assert!(mp4::validate(&oversized).is_err());
+(B[m[31m-    assert_eq!(sandbox::filename("../../a\\secret\r\n.mp4",0),"secret.mp4");
+(B[m[31m-    assert!(sandbox::filename(&"界".repeat(100),0).len()<=160);
+(B[m[31m-    for value in [json!({"success":true,"output":null}),json!({"success":false,"output":{"stdout":"","stderr":"","exit_code":2,"files":null}})] {assert!(sandbox::parse(&value.to_string(),"op").unwrap().files.is_empty());}
+(B[m[32m+    for end in [4, 8, 32, MP4.len() - 1] {
+(B[m[32m+        assert!(mp4::validate(&MP4[..end]).is_err());
+(B[m[32m+    }
+(B[m[32m+    let mut audio = MP4.to_vec();
+(B[m[32m+    let pos = audio.windows(4).position(|b| b == b"vide").unwrap();
+(B[m[32m+    audio[pos..pos + 4].copy_from_slice(b"soun");
+(B[m[32m+    assert!(mp4::validate(&audio).is_err());
+(B[m[32m+    let mut oversized = MP4.to_vec();
+(B[m[32m+    oversized[0..4].copy_from_slice(&u32::MAX.to_be_bytes());
+(B[m[32m+    assert!(mp4::validate(&oversized).is_err());
+(B[m[32m+    assert_eq!(
+(B[m[32m+        sandbox::filename("../../a\\secret\r\n.mp4", 0),
+(B[m[32m+        "secret.mp4"
+(B[m[32m+    );
+(B[m[32m+    assert!(sandbox::filename(&"界".repeat(100), 0).len() <= 160);
+(B[m[32m+    for value in [
+(B[m[32m+        json!({"success":true,"output":null}),
+(B[m[32m+        json!({"success":false,"output":{"stdout":"","stderr":"","exit_code":2,"files":null}}),
+(B[m[32m+    ] {
+(B[m[32m+        assert!(
+(B[m[32m+            sandbox::parse(&value.to_string(), "op")
+(B[m[32m+                .unwrap()
+(B[m[32m+                .files
+(B[m[32m+                .is_empty()
+(B[m[32m+        );
+(B[m[32m+    }
+(B[m     for content in ["YQ", "YQ==\n", "!@==", "YR=="] {
+[31m-        let value=json!({"success":true,"output":{"stdout":"","stderr":"","exit_code":0,"files":[{"path":"file","content":content}]}});
+(B[m[31m-        assert!(sandbox::parse(&value.to_string(),"op").is_err());
+(B[m[32m+        let value = json!({"success":true,"output":{"stdout":"","stderr":"","exit_code":0,"files":[{"path":"file","content":content}]}});
+(B[m[32m+        assert!(sandbox::parse(&value.to_string(), "op").is_err());
+(B[m     }
+[31m-    let mut value:serde_json::Value=serde_json::from_str(&body("x.png",PNG)).unwrap();value["output"]["files"][0]["error"]=json!("cannot read");assert!(sandbox::parse(&value.to_string(),"op").is_err());
+(B[m[31m-    assert!(sandbox::parse(&body("x.bin",&vec![0;sandbox::FILE_BYTES+1]),"op").is_err());
+(B[m[32m+    let mut value: serde_json::Value = serde_json::from_str(&body("x.png", PNG)).unwrap();
+(B[m[32m+    value["output"]["files"][0]["error"] = json!("cannot read");
+(B[m[32m+    assert!(sandbox::parse(&value.to_string(), "op").is_err());
+(B[m[32m+    assert!(sandbox::parse(&body("x.bin", &vec![0; sandbox::FILE_BYTES + 1]), "op").is_err());
+(B[m }
+ #[test]
+ fn status_identity_expiry_and_http_ranges_are_independent() {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/tests.rs:38:
+[31m-    let value=json!({"operation_id":"op","status":"succeeded","result_available":true,"version":1,"expires_at":(Utc::now()+Duration::minutes(1)).to_rfc3339()});
+(B[m[31m-    assert!(sandbox::status(&value,"op",Utc::now()).is_ok());
+(B[m[31m-    assert!(sandbox::status(&value,"wrong",Utc::now()).is_err());
+(B[m[31m-    assert!(matches!(sandbox::status(&value,"op",Utc::now()+Duration::minutes(2)),Err("result_expired")));
+(B[m[31m-    for (range,expected) in [("bytes=0-3",(0,3)),("bytes=5-",(5,9)),("bytes=-3",(7,9)),("bytes=2-100",(2,9)),("bytes=-100",(0,9))] {assert_eq!(http::single_range(range,10),Ok(expected));}
+(B[m[31m-    for range in ["bytes=10-","bytes=-0","bytes=4-2","bytes=0-1,2-3","bytes= 0-1","bytes=18446744073709551616-","items=1-2"] {assert!(http::single_range(range,10).is_err());}
+(B[m[32m+    let value = json!({"operation_id":"op","status":"succeeded","result_available":true,"version":1,"expires_at":(Utc::now()+Duration::minutes(1)).to_rfc3339()});
+(B[m[32m+    assert!(sandbox::status(&value, "op", Utc::now()).is_ok());
+(B[m[32m+    assert!(sandbox::status(&value, "wrong", Utc::now()).is_err());
+(B[m[32m+    assert!(matches!(
+(B[m[32m+        sandbox::status(&value, "op", Utc::now() + Duration::minutes(2)),
+(B[m[32m+        Err("result_expired")
+(B[m[32m+    ));
+(B[m[32m+    for (range, expected) in [
+(B[m[32m+        ("bytes=0-3", (0, 3)),
+(B[m[32m+        ("bytes=5-", (5, 9)),
+(B[m[32m+        ("bytes=-3", (7, 9)),
+(B[m[32m+        ("bytes=2-100", (2, 9)),
+(B[m[32m+        ("bytes=-100", (0, 9)),
+(B[m[32m+    ] {
+(B[m[32m+        assert_eq!(http::single_range(range, 10), Ok(expected));
+(B[m[32m+    }
+(B[m[32m+    for range in [
+(B[m[32m+        "bytes=10-",
+(B[m[32m+        "bytes=-0",
+(B[m[32m+        "bytes=4-2",
+(B[m[32m+        "bytes=0-1,2-3",
+(B[m[32m+        "bytes= 0-1",
+(B[m[32m+        "bytes=18446744073709551616-",
+(B[m[32m+        "items=1-2",
+(B[m[32m+    ] {
+(B[m[32m+        assert!(http::single_range(range, 10).is_err());
+(B[m[32m+    }
+(B[m }
+ #[tokio::test]
+ async fn maximum_encrypted_pending_document_fits_bson_and_rejects_oversize() {
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/generated_artifacts/tests.rs:47:
+[31m-    let keys=crate::test_utils::test_encryption_keys();
+(B[m[32m+    let keys = crate::test_utils::test_encryption_keys();
+(B[m     let mut row:PendingArtifact=bson::from_document(doc!{"_id":Uuid::new_v4().to_string(),"watch_id":"watch","user_id":"owner","conversation_id":"conversation","turn_id":"turn","operation_id":"operation","source_result_identity":"a".repeat(64),"artifact_index":0,"filename":"x".repeat(160),"source_path":"x".repeat(512),"content_type":"application/octet-stream","size":sandbox::FILE_BYTES as i64,"sha256":"a".repeat(64),"preview_kind":"download","content_revision":"1","state":"pending","assistant_attachment_id":Uuid::new_v4().to_string(),"created_at":bson::DateTime::now(),"expires_at":bson::DateTime::now()}).unwrap();
+[31m-    let bytes=zeroize::Zeroizing::new(vec![42;sandbox::FILE_BYTES]);
+(B[m[31m-    let path=context_path(&row);
+(B[m[31m-    row.data_encrypted=Some(keys.encrypt_record(&bytes,&RecordContext::new(ARTIFACTS,&row.id,&row.user_id,&path).unwrap()).await.unwrap());
+(B[m[31m-    assert!(bson::to_vec(&row).unwrap().len()<16*1024*1024);check_bson(&row).unwrap();
+(B[m[31m-    row.data_encrypted=Some(vec![0;16*1024*1024]);assert!(check_bson(&row).is_err());
+(B[m[32m+    let bytes = zeroize::Zeroizing::new(vec![42; sandbox::FILE_BYTES]);
+(B[m[32m+    let path = context_path(&row);
+(B[m[32m+    row.data_encrypted = Some(
+(B[m[32m+        keys.encrypt_record(
+(B[m[32m+            &bytes,
+(B[m[32m+            &RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path).unwrap(),
+(B[m[32m+        )
+(B[m[32m+        .await
+(B[m[32m+        .unwrap(),
+(B[m[32m+    );
+(B[m[32m+    assert!(bson::to_vec(&row).unwrap().len() < 16 * 1024 * 1024);
+(B[m[32m+    check_bson(&row).unwrap();
+(B[m[32m+    row.data_encrypted = Some(vec![0; 16 * 1024 * 1024]);
+(B[m[32m+    assert!(check_bson(&row).is_err());
+(B[m }
+ 
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/machine_activity_tests.rs:384:
+         .db
+         .collection::<AssistantAttachment>(ATTACHMENTS)
+         .insert_one(AssistantAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             secret_context_versions: Default::default(),
+             id: Uuid::new_v4().to_string(),
+             origin: "machine_preview".into(),
+Diff in /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/backend/src/services/platform_manager_journey_tests/outbound.rs:375:
+     saved
+         .attachments
+         .push(crate::models::assistant_conversation::TurnAttachment {
+[31m-        artifact: Default::default(),
+(B[m[32m+            artifact: Default::default(),
+(B[m             id: id.clone(),
+             origin: "tool".into(),
+             content_type: mime.into(),

@@ -1,0 +1,119 @@
+[WebServer] (node:35384) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] (node:35384) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+
+Running 2 tests using 1 worker
+
+(node:35401) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 10:28:05 AM [vite] (client) [console.error] TypeError: (machines.data ?? []).map is not a function
+[WebServer]     at ConversationMachineDesktops (http://localhost:49237/src/components/assistant/machine-desktop-panel.tsx:688:53)
+[WebServer]     at Object.react_stack_bottom_frame (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:12868:12)
+[WebServer]     at renderWithHooks (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:4213:19)
+[WebServer]     at updateFunctionComponent (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:5569:16)
+[WebServer]     at beginWork (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:6140:20)
+[WebServer]     at runWithFiberInDEV (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:851:66)
+[WebServer]     at performUnitOfWork (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:8429:92)
+[WebServer]     at workLoopSync (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:8325:37)
+[WebServer]     at renderRootSync (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:8309:6)
+[WebServer]     at performWorkOnRoot (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:7994:27)
+[WebServer] 
+[WebServer] The above error occurred in the <ConversationMachineDesktops> component.
+[WebServer] 
+[WebServer] React will try to recreate this component tree from scratch using the error boundary you provided, CatchBoundaryImpl.
+[WebServer] 
+[WebServer] 10:28:05 AM [vite] (client) [console.warn] Warning: Error in route match: /assistant/assistant
+  ✘  1 [chromium] › e2e/generated-artifacts.spec.ts:108:1 › private MP4 plays, pauses, downloads byte-identically and survives revisit with image regression (7.2s)
+(node:35425) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 10:28:13 AM [vite] (client) [console.error] TypeError: (machines.data ?? []).map is not a function
+[WebServer]     at ConversationMachineDesktops (http://localhost:49237/src/components/assistant/machine-desktop-panel.tsx:688:53)
+[WebServer]     at Object.react_stack_bottom_frame (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:12868:12)
+[WebServer]     at renderWithHooks (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:4213:19)
+[WebServer]     at updateFunctionComponent (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:5569:16)
+[WebServer]     at beginWork (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:6140:20)
+[WebServer]     at runWithFiberInDEV (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:851:66)
+[WebServer]     at performUnitOfWork (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:8429:92)
+[WebServer]     at workLoopSync (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:8325:37)
+[WebServer]     at renderRootSync (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:8309:6)
+[WebServer]     at performWorkOnRoot (http://localhost:49237/node_modules/.vite/deps/react-dom_client.js?v=99ef4fad:7994:27)
+[WebServer] 
+[WebServer] The above error occurred in the <ConversationMachineDesktops> component.
+[WebServer] 
+[WebServer] React will try to recreate this component tree from scratch using the error boundary you provided, CatchBoundaryImpl.
+[WebServer] 
+[WebServer] 10:28:13 AM [vite] (client) [console.warn] Warning: Error in route match: /assistant/assistant
+  ✘  2 [chromium] › e2e/generated-artifacts.spec.ts:182:1 › browser decoder failure removes playback while the exact download remains usable (7.6s)
+
+
+  1) [chromium] › e2e/generated-artifacts.spec.ts:108:1 › private MP4 plays, pauses, downloads byte-identically and survives revisit with image regression 
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: getByText('Your connected services are ready.').first()
+    Expected: visible
+    Timeout: 5000ms
+    Error: element(s) not found
+
+    Call log:
+      - Expect "toBeVisible" with timeout 5000ms
+      - waiting for getByText('Your connected services are ready.').first()
+
+
+      60 |       .getByText("Your connected services are ready.", { exact: false })
+      61 |       .first(),
+    > 62 |   ).toBeVisible();
+         |     ^
+      63 |   await page.evaluate(
+      64 |     ({ videoSize, imageSize }) => {
+      65 |       const state = JSON.parse(
+        at installArtifacts (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/frontend/e2e/generated-artifacts.spec.ts:62:5)
+        at /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/frontend/e2e/generated-artifacts.spec.ts:111:26
+
+    Error Context: test-results/generated-artifacts-privat-0c57e-visit-with-image-regression-chromium/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/generated-artifacts-privat-0c57e-visit-with-image-regression-chromium/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/generated-artifacts-privat-0c57e-visit-with-image-regression-chromium/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [chromium] › e2e/generated-artifacts.spec.ts:182:1 › browser decoder failure removes playback while the exact download remains usable 
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: getByText('Your connected services are ready.').first()
+    Expected: visible
+    Timeout: 5000ms
+    Error: element(s) not found
+
+    Call log:
+      - Expect "toBeVisible" with timeout 5000ms
+      - waiting for getByText('Your connected services are ready.').first()
+
+
+      60 |       .getByText("Your connected services are ready.", { exact: false })
+      61 |       .first(),
+    > 62 |   ).toBeVisible();
+         |     ^
+      63 |   await page.evaluate(
+      64 |     ({ videoSize, imageSize }) => {
+      65 |       const state = JSON.parse(
+        at installArtifacts (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/frontend/e2e/generated-artifacts.spec.ts:62:5)
+        at /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/frontend/e2e/generated-artifacts.spec.ts:185:3
+
+    Error Context: test-results/generated-artifacts-browse-ab626-act-download-remains-usable-chromium/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/generated-artifacts-browse-ab626-act-download-remains-usable-chromium/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/generated-artifacts-browse-ab626-act-download-remains-usable-chromium/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2 failed
+    [chromium] › e2e/generated-artifacts.spec.ts:108:1 › private MP4 plays, pauses, downloads byte-identically and survives revisit with image regression 
+    [chromium] › e2e/generated-artifacts.spec.ts:182:1 › browser decoder failure removes playback while the exact download remains usable 
