@@ -294,48 +294,16 @@ pub(crate) async fn migrate_checked(
         }
         for candidate in batch {
             cursor = candidate.id.clone();
-            let work_db = db.clone();
-            let fence = fence.clone();
-            let mut session = db.client().start_session().await?;
-            session.start_transaction().and_run2(async move |session| {
-                let result:AppResult<()>=async {
-                    renew_migration(&work_db,&fence,session).await?;
-                    let Some(mut run)=work_db.collection::<TriggerRun>(RUNS).find_one(doc!{"_id":&candidate.id,"outcome":{"$in":["pending","started","waiting"]},"continuation_protocol_version":{"$ne":2}}).session(&mut *session).await? else{return Ok(())};
-                    let Some(trigger)=work_db.collection::<Trigger>(TRIGGERS).find_one(doc!{"_id":&run.trigger_id,"delivery.type":"assistant"}).session(&mut *session).await? else{return Ok(())};
-                    let settings=work_db.collection::<crate::models::assistant_settings::AssistantSettings>(crate::models::assistant_settings::COLLECTION_NAME).find_one(doc!{"_id":&run.user_id}).session(&mut *session).await?.unwrap_or_else(||crate::models::assistant_settings::AssistantSettings::defaults(&run.user_id));
-                    run.continuation_protocol_version=2;
-                    run.continuation_limit=settings.max_auto_continuations.clamp(0,32) as u32;
-                    run.coordinator_deadline=Some(run.coordinator_deadline.unwrap_or(run.deadline+Duration::hours(1)).min(run.expires_at));
-                    if run.trigger_generation.is_none() {run.trigger_generation=Some(trigger.updated_at);}
-                    if run.outcome==RunOutcome::Waiting {
-                        if !run.waiting_for.is_empty() {run.wait_kind=Some(crate::models::trigger_run::RunWaitKind::Confirmation);run.coordinator_wait=None;}
-                        else if let Some(source)=source(&work_db,&run,session).await? {
-                            run.wait_kind=Some(crate::models::trigger_run::RunWaitKind::Coordinator);
-                            run.reason=Some("coordinator_pending".into());
-                            let thread=run.thread_id.as_deref().ok_or_else(||AppError::Conflict("trigger_thread_missing".into()))?;
-                            run.coordinator_wait=Some(CoordinatorWait{thread_id:thread.into(),source:source.into(),deadline_at:run.coordinator_deadline.expect("initialized deadline")});
-                        } else {
-                            run.outcome=RunOutcome::Failed;run.reason=Some("legacy_wait_unclassified".into());run.finished_at=Some(Utc::now());
-                            // Keep bounded recent IDs in the marker and every ambiguity
-                            // in a stable metadata-only row for operator review.
-                            work_db.collection::<Document>(MIGRATIONS).update_one(doc!{"_id":MIGRATION_ID,"fence":&fence},doc!{"$push":{"ambiguous":{"$each":[&run.id],"$slice":-1000}},"$inc":{"ambiguous_count":1_i64}}).session(&mut *session).await?;
-                            work_db.collection::<Document>(MIGRATIONS).update_one(doc!{"_id":format!("continuation-v2:ambiguous:{}",run.id)},doc!{"$setOnInsert":{"run_id":&run.id,"reason":"legacy_wait_unclassified"}}).upsert(true).session(&mut *session).await?;
-                            work_db.collection::<Document>(WORK).delete_one(doc!{"_id":&run.id}).session(&mut *session).await?;
-                        }
-                    }
-                    if matches!(run.outcome, RunOutcome::Started | RunOutcome::Waiting)
-                        && let Some(thread) = &run.thread_id
-                    {
-                        work_db.collection::<Document>(THREADS).update_one(doc!{"_id":thread,"user_id":&run.user_id},doc!{"$addToSet":{"coordinator_run_ids":&run.id}}).session(&mut *session).await?;
-                    }
-                    // Preserve fields owned by other writers and raw handoff/retry
-                    // markers that are deliberately absent from the public model.
-                    let changed: Document = bson::to_document(&run).map_err(|_| AppError::Internal("Encode migrated automation run".into()))?.into_iter().filter(|(key, _)| matches!(key.as_str(), "continuation_protocol_version" | "continuation_limit" | "continuation_count" | "coordinator_deadline" | "trigger_generation" | "wait_kind" | "coordinator_wait" | "reason" | "outcome" | "finished_at")).collect();
-                    work_db.collection::<Document>(RUNS).update_one(doc!{"_id":&run.id,"continuation_protocol_version":{"$ne":2}},doc!{"$set":changed}).session(&mut *session).await?;
-                    work_db.collection::<Document>(MIGRATIONS).update_one(doc!{"_id":MIGRATION_ID,"fence":&fence},doc!{"$inc":{"classified":1_i64}}).session(&mut *session).await?;
-                    Ok(())
-                }.await;transactions::transaction_result(result)
-            }).await.map_err(transactions::map_transaction_error)?;
+            let context = (db.clone(), candidate.id, fence.clone());
+            // Terminal audit is part of classification. Retry definite audit
+            // head/owner-fence collisions as well as Mongo write conflicts;
+            // unknown commits retry COMMIT only, never terminal side effects.
+            super::super::transaction_service::run_db_only(
+                db,
+                &context,
+                |session, (db, id, fence)| Box::pin(migrate_run_in_session(db, id, fence, session)),
+            )
+            .await?;
         }
     }
     let mut cursor = String::new();
@@ -388,6 +356,171 @@ pub(crate) async fn migrate_checked(
         .return_document(ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::Conflict("automation_migration_lease_lost".into()))
+}
+
+/// One classification unit. Exposed within the crate so the regression can
+/// abort this real transaction body before retrying the operator migration.
+pub(crate) async fn migrate_run_in_session(
+    db: &Database,
+    id: &str,
+    fence: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    renew_migration(db, fence, session).await?;
+    let Some(mut run) = db
+        .collection::<TriggerRun>(RUNS)
+        .find_one(
+            doc! {"_id": id, "outcome": {"$in": ["pending", "started", "waiting"]},
+            "continuation_protocol_version": {"$ne": 2}},
+        )
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    let Some(trigger) = db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {"_id": &run.trigger_id, "user_id": &run.user_id,
+        "delivery.type": "assistant"})
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    let settings = db
+        .collection::<crate::models::assistant_settings::AssistantSettings>(
+            crate::models::assistant_settings::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": &run.user_id})
+        .session(&mut *session)
+        .await?
+        .unwrap_or_else(|| {
+            crate::models::assistant_settings::AssistantSettings::defaults(&run.user_id)
+        });
+    run.continuation_protocol_version = 2;
+    run.continuation_limit = settings.max_auto_continuations.clamp(0, 32) as u32;
+    run.coordinator_deadline = Some(
+        run.coordinator_deadline
+            .unwrap_or(run.deadline + Duration::hours(1))
+            .min(run.expires_at),
+    );
+    if run.trigger_generation.is_none() {
+        run.trigger_generation = Some(trigger.updated_at);
+    }
+    let mut ambiguous = false;
+    if run.outcome == RunOutcome::Waiting {
+        if !run.waiting_for.is_empty() {
+            run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Confirmation);
+            run.coordinator_wait = None;
+        } else if let Some(source) = source(db, &run, session).await? {
+            run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Coordinator);
+            run.reason = Some("coordinator_pending".into());
+            let thread = run
+                .thread_id
+                .as_deref()
+                .ok_or_else(|| AppError::Conflict("trigger_thread_missing".into()))?;
+            run.coordinator_wait = Some(CoordinatorWait {
+                thread_id: thread.into(),
+                source: source.into(),
+                deadline_at: run.coordinator_deadline.expect("initialized deadline"),
+            });
+        } else {
+            ambiguous = true;
+        }
+    }
+    if !ambiguous
+        && matches!(run.outcome, RunOutcome::Started | RunOutcome::Waiting)
+        && let Some(thread) = &run.thread_id
+    {
+        db.collection::<Document>(THREADS)
+            .update_one(
+                doc! {"_id": thread, "user_id": &run.user_id},
+                doc! {"$addToSet": {"coordinator_run_ids": &run.id}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    // Preserve other writers' fields and internal handoff/retry markers. The
+    // terminal outcome below belongs exclusively to the normal finish path.
+    let changed: Document = bson::to_document(&run)
+        .map_err(|_| AppError::Internal("Encode migrated automation run".into()))?
+        .into_iter()
+        .filter(|(key, _)| {
+            matches!(
+                key.as_str(),
+                "continuation_protocol_version"
+                    | "continuation_limit"
+                    | "continuation_count"
+                    | "coordinator_deadline"
+                    | "trigger_generation"
+                    | "wait_kind"
+                    | "coordinator_wait"
+                    | "reason"
+            )
+        })
+        .collect();
+    if db
+        .collection::<Document>(RUNS)
+        .update_one(
+            doc! {"_id": &run.id, "user_id": &run.user_id, "outcome": run.outcome.as_str(),
+            "continuation_protocol_version": {"$ne": 2}},
+            doc! {"$set": changed},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict(
+            "automation_migration_run_changed".into(),
+        ));
+    }
+    if ambiguous {
+        // Stamp v2 before normal terminal cleanup reads the run. Terminal
+        // state, history, audit, work removal and progress commit together.
+        let finished = Box::pin(super::finish_update(
+            db,
+            doc! {"_id": &run.id, "user_id": &run.user_id, "trigger_id": &run.trigger_id,
+            "outcome": "waiting", "turn_id": &run.turn_id, "continuation_protocol_version": 2},
+            RunOutcome::Failed,
+            Some("legacy_wait_unclassified"),
+            "",
+            session,
+        ))
+        .await?
+        .ok_or_else(|| AppError::Conflict("automation_migration_run_changed".into()))?;
+        Box::pin(super::finish_record_with_session(
+            db,
+            &finished,
+            Some(&mut *session),
+        ))
+        .await?;
+        // Keep bounded recent IDs and a stable metadata-only row per ambiguity.
+        db.collection::<Document>(MIGRATIONS)
+            .update_one(
+                doc! {"_id": MIGRATION_ID, "fence": fence},
+                doc! {"$push": {"ambiguous": {"$each": [&run.id], "$slice": -1000}},
+                "$inc": {"ambiguous_count": 1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        db.collection::<Document>(MIGRATIONS)
+            .update_one(
+                doc! {"_id": format!("continuation-v2:ambiguous:{}", run.id)},
+                doc! {"$setOnInsert": {"run_id": &run.id, "reason": "legacy_wait_unclassified"}},
+            )
+            .upsert(true)
+            .session(&mut *session)
+            .await?;
+    }
+    db.collection::<Document>(MIGRATIONS)
+        .update_one(
+            doc! {"_id": MIGRATION_ID, "fence": fence},
+            doc! {"$inc": {"classified": 1_i64}},
+        )
+        .session(session)
+        .await?;
+    Ok(())
 }
 
 async fn renew_migration(db: &Database, fence: &str, session: &mut ClientSession) -> AppResult<()> {

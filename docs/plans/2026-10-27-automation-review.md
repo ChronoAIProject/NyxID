@@ -247,18 +247,25 @@ below describes drafted coverage, not a passing result.
 
 These commands are recorded for continuation, **not queued or executed**. Resume
 them after coordinator clearance through the shared-window handoff; the local
-tests are already authorized and require no new user approval. Use normal Cargo
-locking, the shared target and two jobs. Tests invoking assistant
+tests are already authorized and require no new user approval. The coordinator's
+latest policy keeps automation on **GLOBAL BACKEND HOLD**, with Telegram alone
+authorized for the next exclusive retry. No Cargo command may start or queue in
+this stream until coordinator clearance. Preserve normal Cargo locking, the
+shared target and two jobs; use the shared `--config` file below for every later
+test/build/check/clippy invocation. Its package-only nyxid dev/test overrides set
+`debug=0` and `incremental=false`, preserving optimization, assertions, overflow
+checks, dependencies and test coverage. Do not change profiles or reclaim outputs
+in this stream. Tests invoking assistant
 admission require `AUTOMATION_CONTINUATION_V2_ENABLED=true`; test database setup
 seeds a fresh completed marker, while the migration fixture removes/rebuilds its
 own marker and injects flag-off checks without changing process environment.
 
 ```sh
-CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo test -p nyxid automation_v2_ -- --nocapture
-CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo test -p nyxid trigger_scheduler::tests -- --nocapture
-CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo test -p nyxid assistant_group::tests -- --nocapture
-CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo test -p nyxid async_service_operation -- --nocapture
-CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo clippy --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid automation_v2_ -- --nocapture
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid trigger_scheduler::tests -- --nocapture
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid assistant_group::tests -- --nocapture
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid async_service_operation -- --nocapture
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' clippy --all-targets --all-features -- -D warnings
 ```
 
 After the first focused results, run the remaining applicable ordinary-event,
@@ -469,5 +476,93 @@ Exact files changed in this revision:
 - `backend/src/services/trigger_schedule.rs`
 - `backend/src/services/trigger_schedule/continuation.rs`
 - `backend/src/services/trigger_service.rs`
+- `docs/plans/2026-10-27-automation-review.md`
+- `docs/plans/2026-10-27-automation-status.json`
+
+## Astra personal review revision: F-7
+
+Revision base: `193a6f38f71f45928e1facd99f33c8071f45b054`. The containing
+commit's exact SHA is reported in the same-session handoff. Active and frozen
+revision-3 plan SHA-256 remains
+`5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7`.
+Astra review remains **IN PROGRESS**, implementation approval **PENDING**.
+
+**Terminal semantics.** The ambiguous legacy-wait branch now persists only its
+migration-owned protocol/allowance/classification fields, then calls the normal
+`finish_update` in that same session with the exact owner, trigger, run, turn,
+waiting outcome and v2 predicate. That path sets the failed outcome, reason,
+finish time and duration, claims `terminal_result_recorded`, evaluates the normal
+failure streak/pause policy under its existing live trigger-generation fence,
+and performs normal v2 terminal cleanup. Missing generations are initialized as
+before; an existing stale generation is preserved and cannot mutate the current
+generation's failure streak. Trigger lookup and last-run projection also match
+the run owner.
+
+`finish_record` now shares a session-aware body with migration for work removal,
+ordered `schedule_state.last_run` projection, metadata-only outcome audit and
+bounded history trimming. The ordinary completion path keeps its best-effort
+audit behavior. Migration passes its existing session, so its audit is required
+and its history trim joins the transaction without opening a nested transaction.
+The former direct work deletion is removed: only the shared terminal record body
+deletes that run's work row. Terminal effects, the v2 stamp, ambiguity metadata
+and progress commit or abort together.
+
+The production per-run migration uses the existing `run_db_only` helper with
+snapshot/majority concerns. It retries definite Mongo conflicts, owner-fence
+creation races and chained-audit head collisions. An unknown commit retries
+COMMIT on the same transaction, without replaying side effects. The nonterminal,
+non-v2 predicate makes a committed classification ineligible on migration replay;
+its audit, failure evaluation and metadata counters therefore commit once. The
+marker retains its 1,000-ID recent-ambiguity bound, and each stable ambiguity row
+contains only run ID and reason. No shared runtime signature, Permissions code,
+profile, lock or target was changed.
+
+**Focused regression assertions, drafted and NOT EXECUTED:**
+
+| Fixture | Assertions added |
+| --- | --- |
+| `automation_v2_migration_readiness_real_leases_confirmation_and_ambiguity` | Ambiguous run becomes `failed/legacy_wait_unclassified` with terminal flag, finish time and duration; real work row disappears; public history and `last_run` contain the failed terminal row; tracked thread run ID is removed; exactly one metadata-only outcome audit contains the truthful reason. Confirmation IDs and readiness checks remain. Migration replay preserves terminal timestamps and audit/progress counts. |
+| `automation_v2_migration_terminalization_is_atomic_and_generation_fenced` | Uses unique managed databases and a real Mongo session to execute the production classification body, inspect its provisional terminal row, and abort. Outside reads then assert that protocol/outcome/terminal flag, work row, projection, history trim, audit and ambiguity progress/metadata all rolled back. Expiring only the fixture lease permits full migration retry, followed by replay and a late ordinary completion attempt. Assertions cover one terminal audit, stable finish time, no revival, no work row, normal failure-policy evaluation for a current generation, preservation of the streak for a stale generation, and trimming 1,001 history rows to the existing 1,000-row bound. No sleep-only mock or model call is used. |
+
+The generation fixture reloads its trigger before constructing its run, so its
+generation comparisons use BSON millisecond precision. Static review covered
+new `CoordinatorWait`/`AuditActor` literals, moved candidate IDs, optional session
+reborrows, boxed future boundaries and both terminal-record call paths; no
+duplicate/misplaced fields or nested transaction were found. Existing
+`ChatAuthority`, `AgentEvent`, append/follower contracts and F-4 handoff seals
+are unchanged by this revision. This inspection is not Rust type checking.
+
+**Lightweight evidence:**
+
+| Command / inspection | Result | Evidence |
+| --- | --- | --- |
+| `rustfmt --edition 2024 --check backend/src/services/trigger_schedule.rs backend/src/services/trigger_schedule/continuation.rs backend/src/handlers/trigger_scheduler_completion_tests.rs` | PASS, exit 0 | `/tmp/nyxid-automation-2040-f7-rustfmt.log` |
+| `git diff --check`; staged and committed equivalents | PASS, exit 0 | `/tmp/nyxid-automation-2040-f7-diff-check.log`; repeated at commit |
+| Status JSON parse, active/frozen plan hash, approval-pending and `notify_on_finish=true` assertions, shared config existence | PASS, exit 0 | `/tmp/nyxid-automation-2040-f7-status-check.log` |
+| `df -h .` | 23 GiB available, rounded | Read-only observation; no installation, cleanup or build started |
+| Cargo formatting, compile, tests and clippy | NOT RUN / NOT QUEUED | Coordinator GLOBAL BACKEND HOLD; Telegram alone receives the next exclusive retry |
+| Frontend checks | Not rerun | No frontend files changed in F-7 |
+
+The coordinator reported reclaiming 16.49 GiB from superseded inactive outputs,
+with 23.40 GiB free. This stream performed no cleanup. The reserved-command
+section above now records the concrete shared resource config for every later
+backend invocation. Direct `rustfmt` does not substitute for the required
+workspace Cargo formatting/check/test/clippy evidence after coordinator
+clearance. Already-authorized local tests need no new user approval.
+
+Remaining verification: execute both migration regressions first after the
+shared-window handoff, then the earlier F-1/F-4/F-5 regressions, focused
+automation/confirmation/event/Stop checks, workspace formatting and required
+clippy. Rust types/`Send` bounds, transaction retries, audit-chain concurrency
+and fixture assumptions remain unverified by execution. Open acceptance-matrix
+rows and Astra's personal complete-diff review remain outstanding. No
+implementation approval is recorded. Completion notification attempts retain
+`notify_on_finish=true`; their delivery result is reported in the session handoff.
+
+Exact files changed for F-7:
+
+- `backend/src/handlers/trigger_scheduler_completion_tests.rs`
+- `backend/src/services/trigger_schedule.rs`
+- `backend/src/services/trigger_schedule/continuation.rs`
 - `docs/plans/2026-10-27-automation-review.md`
 - `docs/plans/2026-10-27-automation-status.json`

@@ -849,10 +849,38 @@ async fn automation_v2_migration_readiness_real_leases_confirmation_and_ambiguit
     ambiguous.id = Uuid::new_v4().to_string();
     ambiguous.outcome = RunOutcome::Waiting;
     ambiguous.continuation_protocol_version = 0;
+    ambiguous.scheduled_at = run.scheduled_at + Duration::milliseconds(1);
     state
         .db
         .collection::<TriggerRun>(RUNS)
         .insert_one(&ambiguous)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(schedules::WORK)
+        .insert_one(
+            doc! {"_id": &ambiguous.id, "kind": "run", "trigger_id": &trigger.id,
+            "user_id": OWNER, "at": schedules::date(Utc::now()), "fence": ""},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(TRIGGERS)
+        .update_one(
+            doc! {"_id": &trigger.id},
+            doc! {"$set": {"history_count": 2_i64}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$addToSet": {"coordinator_run_ids": &ambiguous.id}},
+        )
         .await
         .unwrap();
     state.db.collection::<Document>(RUNS).update_one(doc!{"_id":&run.id},doc!{"$set":{"outcome":"waiting","waiting_for":["preserved-confirmation"],"continuation_protocol_version":0},"$unset":{"continuation_limit":"","continuation_count":"","wait_kind":""}}).await.unwrap();
@@ -900,9 +928,54 @@ async fn automation_v2_migration_readiness_real_leases_confirmation_and_ambiguit
     let failed = completion_load(&state, &ambiguous.id).await;
     assert_eq!(failed.reason.as_deref(), Some("legacy_wait_unclassified"));
     assert_eq!(failed.outcome, RunOutcome::Failed);
+    assert!(failed.terminal_result_recorded);
+    assert!(failed.finished_at.is_some());
+    assert!(failed.duration_ms.is_some());
+    assert!(
+        state
+            .db
+            .collection::<Document>(schedules::WORK)
+            .find_one(doc! {"_id": &ambiguous.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let history = schedules::history(&state.db, &trigger, None, None)
+        .await
+        .unwrap();
+    assert_eq!(history[0].id, ambiguous.id);
+    assert!(history[0].terminal_result_recorded);
+    let projected = state
+        .db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {"_id": &trigger.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let last = projected.schedule_state.last_run.as_ref().unwrap();
+    assert_eq!(last.id, ambiguous.id);
+    assert_eq!(last.outcome, RunOutcome::Failed);
+    assert!(last.terminal_result_recorded);
+    assert!(
+        !engine::get(&state.db, OWNER, &row.id)
+            .await
+            .unwrap()
+            .coordinator_run_ids
+            .contains(&ambiguous.id)
+    );
+    let outcomes = state.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find(doc! {"user_id": OWNER, "event_type": "trigger_run_outcome", "event_data.run_id": &ambiguous.id})
+        .await.unwrap().try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(outcomes.len(), 1);
+    let metadata = outcomes[0].get_document("event_data").unwrap();
+    assert_eq!(metadata.get_str("outcome").unwrap(), "failed");
+    assert_eq!(
+        metadata.get_str("reason").unwrap(),
+        "legacy_wait_unclassified"
+    );
     assert_eq!(
         marker.get_array("ambiguous").unwrap()[0],
-        bson::Bson::String(ambiguous.id)
+        bson::Bson::String(ambiguous.id.clone())
     );
     let again = continuation_v2::migrate_checked(&state.db, drained, false)
         .await
@@ -910,6 +983,21 @@ async fn automation_v2_migration_readiness_real_leases_confirmation_and_ambiguit
     assert_eq!(
         again.get_i64("classified").unwrap(),
         marker.get_i64("classified").unwrap()
+    );
+    assert_eq!(again.get_i64("ambiguous_count").unwrap(), 1);
+    let replayed = completion_load(&state, &ambiguous.id).await;
+    assert_eq!(replayed.finished_at, failed.finished_at);
+    assert_eq!(replayed.duration_ms, failed.duration_ms);
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(
+                doc! {"event_type": "trigger_run_outcome", "event_data.run_id": &ambiguous.id}
+            )
+            .await
+            .unwrap(),
+        1
     );
     assert!(!continuation_v2::rollback_ready(&state.db).await.unwrap());
     schedules::finish(
@@ -931,6 +1019,295 @@ async fn automation_v2_migration_readiness_real_leases_confirmation_and_ambiguit
         .unwrap();
     assert_eq!(stored.get_i32("continuation_protocol_version").unwrap(), 2);
     server.abort();
+}
+
+#[tokio::test]
+async fn automation_v2_migration_terminalization_is_atomic_and_generation_fenced() {
+    for stale in [false, true] {
+        let (state, calls, server) = setup(&format!("auto2040_f7_atomic_{stale}")).await;
+        let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+        let trigger = automation(&state, &agent.id, None).await;
+        let trigger = trigger_service::get_for_actor(&state.db, OWNER, &trigger.id)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let mut legacy = schedules::new_run(&trigger, now, now + Duration::minutes(5));
+        legacy.outcome = RunOutcome::Waiting;
+        legacy.started_at = Some(now - Duration::minutes(1));
+        legacy.trigger_generation = Some(if stale {
+            trigger.updated_at - Duration::milliseconds(1)
+        } else {
+            trigger.updated_at
+        });
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .insert_one(&legacy)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<Document>(schedules::WORK)
+            .insert_one(
+                doc! {"_id": &legacy.id, "kind": "run", "trigger_id": &trigger.id,
+                "user_id": OWNER, "at": schedules::date(now), "fence": ""},
+            )
+            .await
+            .unwrap();
+        let old_count = if stale { 0 } else { schedules::HISTORY_LIMIT };
+        if old_count > 0 {
+            let history: Vec<_> = (1..=old_count)
+                .map(|n| {
+                    let at = now - Duration::minutes(n as i64);
+                    let mut old = schedules::new_run(&trigger, at, at);
+                    old.outcome = RunOutcome::Completed;
+                    old
+                })
+                .collect();
+            state
+                .db
+                .collection::<TriggerRun>(RUNS)
+                .insert_many(history)
+                .await
+                .unwrap();
+        }
+        state
+            .db
+            .collection::<Document>(TRIGGERS)
+            .update_one(
+                doc! {"_id": &trigger.id},
+                doc! {"$set": {
+                    "history_count": (old_count + 1) as i64,
+                    "schedule_state.terminal_failure_code": "credential_invalid",
+                    "schedule_state.terminal_failure_count": 2_i64,
+                }},
+            )
+            .await
+            .unwrap();
+        let fence = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<Document>(continuation_v2::MIGRATIONS)
+            .replace_one(
+                doc! {"_id": continuation_v2::MIGRATION_ID},
+                doc! {
+                    "_id": continuation_v2::MIGRATION_ID, "classified": 0_i64,
+                    "triggers": 0_i64, "ambiguous": [], "ambiguous_count": 0_i64,
+                    "fence": &fence, "lease_until": schedules::date(now + Duration::minutes(5)),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Execute the production body, verify its terminal write is visible
+        // in this real session, then abort as a process loss before commit.
+        let mut session = state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        continuation_v2::migrate_run_in_session(&state.db, &legacy.id, &fence, &mut session)
+            .await
+            .unwrap();
+        let provisional = state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .find_one(doc! {"_id": &legacy.id})
+            .session(&mut session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(provisional.outcome, RunOutcome::Failed);
+        assert!(provisional.terminal_result_recorded);
+        session.abort_transaction().await.unwrap();
+        let unchanged = completion_load(&state, &legacy.id).await;
+        assert_eq!(unchanged.outcome, RunOutcome::Waiting);
+        assert_eq!(unchanged.continuation_protocol_version, 0);
+        assert!(!unchanged.terminal_result_recorded);
+        assert!(
+            state
+                .db
+                .collection::<Document>(schedules::WORK)
+                .find_one(doc! {"_id": &legacy.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let before = state
+            .db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.schedule_state.terminal_failure_count, 2);
+        assert!(before.schedule_state.last_run.is_none());
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(RUNS)
+                .count_documents(doc! {"trigger_id": &trigger.id})
+                .await
+                .unwrap(),
+            old_count + 1
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(
+                    doc! {"event_type": "trigger_run_outcome", "event_data.run_id": &legacy.id}
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        let progress = state
+            .db
+            .collection::<Document>(continuation_v2::MIGRATIONS)
+            .find_one(doc! {"_id": continuation_v2::MIGRATION_ID})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress.get_i64("classified").unwrap(), 0);
+        assert_eq!(progress.get_i64("ambiguous_count").unwrap(), 0);
+        assert!(
+            state
+                .db
+                .collection::<Document>(continuation_v2::MIGRATIONS)
+                .find_one(doc! {"_id": format!("continuation-v2:ambiguous:{}", legacy.id)})
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Expire only this fixture's abandoned migration lease, then retry the
+        // full operator path. No sleep or mock replaces transaction behavior.
+        state
+            .db
+            .collection::<Document>(continuation_v2::MIGRATIONS)
+            .update_one(
+                doc! {"_id": continuation_v2::MIGRATION_ID},
+                doc! {"$set": {"lease_until": schedules::date(now - Duration::seconds(1))}},
+            )
+            .await
+            .unwrap();
+        let drained = now - Duration::seconds(2 * schedules::LEASE_SECONDS + 1);
+        let marker = continuation_v2::migrate_checked(&state.db, drained, false)
+            .await
+            .unwrap();
+        assert!(marker.contains_key("completed_at"));
+        assert_eq!(marker.get_i64("ambiguous_count").unwrap(), 1);
+        let failed = completion_load(&state, &legacy.id).await;
+        assert_eq!(failed.outcome, RunOutcome::Failed);
+        assert_eq!(failed.reason.as_deref(), Some("legacy_wait_unclassified"));
+        assert!(failed.terminal_result_recorded);
+        assert!(failed.finished_at.is_some());
+        assert!(failed.duration_ms.is_some_and(|duration| duration > 0));
+        assert_eq!(failed.trigger_generation, legacy.trigger_generation);
+        let projected = state
+            .db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let last = projected.schedule_state.last_run.as_ref().unwrap();
+        assert_eq!(last.id, legacy.id);
+        assert_eq!(last.outcome, RunOutcome::Failed);
+        assert_eq!(last.reason.as_deref(), Some("legacy_wait_unclassified"));
+        assert!(last.terminal_result_recorded);
+        assert_eq!(projected.status, TriggerStatus::Active);
+        assert!(projected.schedule_state.pause_reason.is_none());
+        assert_eq!(
+            projected.schedule_state.terminal_failure_count,
+            if stale { 2 } else { 0 }
+        );
+        assert_eq!(
+            projected.schedule_state.terminal_failure_code.as_deref(),
+            if stale {
+                Some("credential_invalid")
+            } else {
+                None
+            }
+        );
+        let expected_history = (old_count + 1).min(schedules::HISTORY_LIMIT);
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(RUNS)
+                .count_documents(doc! {"trigger_id": &trigger.id})
+                .await
+                .unwrap(),
+            expected_history
+        );
+        let raw = state
+            .db
+            .collection::<Document>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            raw.get_i64("history_count").unwrap(),
+            expected_history as i64
+        );
+        assert!(
+            state
+                .db
+                .collection::<Document>(schedules::WORK)
+                .find_one(doc! {"_id": &legacy.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // A completed migration replay must neither duplicate terminal audit
+        // nor evaluate a stale generation or trim another history page.
+        let replay = continuation_v2::migrate_checked(&state.db, drained, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            replay.get_i64("classified").unwrap(),
+            marker.get_i64("classified").unwrap()
+        );
+        assert_eq!(replay.get_i64("ambiguous_count").unwrap(), 1);
+        schedules::finish(
+            &state.db,
+            &legacy.id,
+            RunOutcome::Completed,
+            None,
+            &state.config.frontend_url,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(
+                    doc! {"event_type": "trigger_run_outcome", "event_data.run_id": &legacy.id}
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let final_run = completion_load(&state, &legacy.id).await;
+        assert_eq!(final_run.outcome, RunOutcome::Failed);
+        assert_eq!(
+            final_run.reason.as_deref(),
+            Some("legacy_wait_unclassified")
+        );
+        assert_eq!(final_run.finished_at, failed.finished_at);
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(RUNS)
+                .count_documents(doc! {"trigger_id": &trigger.id})
+                .await
+                .unwrap(),
+            expected_history
+        );
+        assert!(calls.lock().await.is_empty());
+        server.abort();
+    }
 }
 
 #[test]

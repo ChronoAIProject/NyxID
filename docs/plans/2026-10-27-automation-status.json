@@ -42,8 +42,8 @@
   },
   "astra_review": "in_progress_approval_pending",
   "astra_revision": {
-    "findings": ["F-4", "F-5", "F-6"],
-    "base_commit": "4683f9d76874768300ebb01d4b5c724f661b43c6",
+    "findings": ["F-7"],
+    "base_commit": "193a6f38f71f45928e1facd99f33c8071f45b054",
     "source_status": "fixes_and_focused_regressions_complete_lightweight_checked",
     "backend_regressions": "DRAFTED_NOT_EXECUTED_SHARED_WINDOW_DEFERRED",
     "completion_notification": "notify_on_finish=true; delivery result reported in session handoff"
@@ -61,5 +61,12 @@
   "plan_approval_commit": "2434ffc8c",
   "implementation_diff_base": "87158b6623e7ba2dab0ca0adbc2a60753812ed5c",
   "implementation_commit_reference": "The WIP automation #2040 handoff commit containing this status file; exact SHA is reported in the session handoff.",
-  "backend_verification": "NOT RUN: shared backend window reserved for another stream; resume already-authorized local tests after coordinator clearance through the shared-window handoff, without new user approval."
+  "backend_verification": "NOT RUN: coordinator GLOBAL BACKEND HOLD; no Cargo commands started or queued. Resume already-authorized local tests after coordinator clearance through the shared-window handoff, without new user approval.",
+  "backend_resource_policy": {
+    "window": "HOLD_TELEGRAM_ONLY_NEXT_EXCLUSIVE_RETRY",
+    "cargo_target_dir": "/Users/chronoai/Desktop/projects/nyxid/target",
+    "cargo_build_jobs": 2,
+    "cargo_config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+    "constraints": "Normal locking; no independent profile changes, cleanup, extra target, or extra flags. Shared config applies only nyxid dev/test debug=0 and incremental=false."
+  }
 }
