@@ -21,10 +21,10 @@
     "worktree_id": "01a17a96-885c-7042-bf1c-6e33531a2117"
   },
   "implementer_agent_id": "01a17afc-03c3-74f3-8206-1235e8b89954",
-  "head": "1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+  "head": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
   "plan_gate": "ASTRA_PLAN_APPROVED",
   "reviewer_error": "Failed to authenticate: OAuth session expired and could not be refreshed",
-  "astra_review": "SOURCE_REVIEW_COMPLETE_feature_plus_exact_A_R21_patch_A_R22_scope_and_I07_gap_personally_reviewed",
+  "astra_review": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_COMPLETE_exact_da9662a4_external_and_integration_open",
   "opus_implementation_gate": "SUPERSEDED_BY_USER",
   "acceptance": {
     "T1": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
@@ -35,14 +35,14 @@
     "T6": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
     "T7": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
     "G1": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
-    "G2": "PARTIAL_PASS_A_R21_SOURCE_REVIEW_COMPLETE_runtime_and_A_R22_exact_execution_pending",
+    "G2": "PASS_local_current_A_R21_A_R22_on_da9662a4_with_unchanged_prior_gateway_frontend_evidence",
     "G3": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
     "L1": "open",
     "L2": "open",
     "L3": "open",
     "I-07": "OPEN_integration_test_gap_actual_production_router_real_credentials_and_payload_rejection_proof_required"
   },
-  "updated_at": "2026-10-27T06:54:49.206175+00:00",
+  "updated_at": "2026-10-27T12:16:11.028493+00:00",
   "test_environment": {
     "cargo_target": "/Users/chronoai/Desktop/projects/nyxid/target",
     "cargo_build_jobs": 2,
@@ -551,20 +551,106 @@
       "implementation_commit": "1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
       "archived_logs": "docs/plans/2026-10-27-telegram-evidence/",
       "source_inputs_matched_exact_commit": 1288
+    },
+    "r21_narrow_validation": {
+      "source_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+      "current_head": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+      "status": " M docs/plans/2026-10-27-telegram-status.json\n",
+      "backend_source_manifest": ".tmp/telegram-r21-backend-input-sha256.json",
+      "backend_source_unchanged": true,
+      "binary_identity": {
+        "path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "sha256": "edc1de2486ad2319de2f3087abf17ec98e46194040d52276cb8e2b3cc3a157ec",
+        "size": 765254528,
+        "mtime_ns": 1793102613951993863,
+        "source_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+        "backend_manifest": ".tmp/telegram-r21-backend-input-sha256.json",
+        "backend_manifest_sha256": "3b0badec4785596286d242df871df990ad0a96a5c231236b29b94c6f58cd624c",
+        "backend_source_unchanged": true,
+        "captured_at": 1793102638.4527612
+      },
+      "compiled_tests": 10472,
+      "exact_tests": {
+        "services::telegram_new_tests::telegram_new_creation_webhook_completes_without_consent_or_browser_connect": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "seconds": 1.29
+        },
+        "services::nyxbot_channel_query_service::tests::current_channels_rank_live_then_latest_before_limiting_and_order_ties": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "seconds": 1.99
+        }
+      },
+      "commands": {
+        "build": {
+          "log": ".tmp/telegram-rust-r21-build.log",
+          "exit": 0,
+          "guard_stopped": false,
+          "min_free_bytes": 12657274880,
+          "last_free_bytes": 15701811200,
+          "last_children": []
+        },
+        "list": {
+          "log": ".tmp/telegram-rust-r21-list.log",
+          "exit": 0,
+          "guard_stopped": false,
+          "min_free_bytes": 15700570112,
+          "last_free_bytes": 15700570112,
+          "last_children": []
+        },
+        "completion": {
+          "log": ".tmp/telegram-rust-r21-completion.log",
+          "exit": 0,
+          "guard_stopped": false,
+          "min_free_bytes": 15700545536,
+          "last_free_bytes": 16774070272,
+          "last_children": []
+        },
+        "current-rows": {
+          "log": ".tmp/telegram-rust-r21-current-rows.log",
+          "exit": 0,
+          "guard_stopped": false,
+          "min_free_bytes": 16773193728,
+          "last_free_bytes": 16773193728,
+          "last_children": []
+        },
+        "clippy": {
+          "log": ".tmp/telegram-rust-r21-clippy.log",
+          "exit": 0,
+          "guard_stopped": false,
+          "min_free_bytes": 14613024768,
+          "last_free_bytes": 16761483264,
+          "last_children": []
+        }
+      },
+      "clippy": "all-targets -D warnings exit0 6m06s; config after clippy",
+      "compiler_options_summary": ".tmp/telegram-r21-compiler-options-summary.json",
+      "free_bytes": 16760188928,
+      "heavy_processes": [],
+      "mongo_open_entries": 228,
+      "mongo_health": {
+        "primary": true,
+        "setName": "nyxidTelegramReview"
+      },
+      "at": 1793103093.813169,
+      "astra_independently_inspected": true
     }
   },
   "opus_plan_gate": "SUPERSEDED_BY_USER",
   "workflow": "astra_sol",
   "user_amendment": "lets skip opus authenthication entirely for now. lets just roll with a pure ASTRA - SOL approach",
   "implementer_session_id": "01a17afc-03c3-74f3-8206-125edb599f7c",
-  "implementation": "committed_candidate_387_unique_pass_followup_copy_correction_uncommitted_validation_pending",
+  "implementation": "committed_source_reviewed_and_locally_validated_da9662a4_final_acceptance_blocked",
   "implementer_verified": {
     "provider": "codex",
     "model": "gpt-6.1-sol",
     "effort": "x_high",
     "mode": "full-access",
     "worktree_id": "01a17a96-885c-7042-bf1c-6e33531a2117",
-    "state_at_verification": "running"
+    "state_at_verification": "idle_before_same_session_resume"
   },
   "plan_history": [
     {
@@ -597,11 +683,8 @@
       "superseded_by": "v6"
     }
   ],
-  "open_findings": [
-    "A-R21",
-    "A-R22"
-  ],
-  "build_window": "HOLD_Automation_current_Artifacts_next_Telegram_later_narrow_window_no_heavy_command_queued",
+  "open_findings": [],
+  "build_window": "RELEASED_after_exit0_guard_false_owned_children_empty_Permissions_now_exclusive_no_Telegram_heavy_queue",
   "resource_state": "coordinator_fourth_reclaim_and_explicit_package_only_profile_clearance",
   "resolved_findings": [
     "A-R04",
@@ -623,7 +706,9 @@
     "A-R13",
     "A-R18",
     "A-R20",
-    "A-R19"
+    "A-R19",
+    "A-R21",
+    "A-R22"
   ],
   "candidate_closure_sha256": {
     "frontend/src/pages/channel-connect-link.tsx": "639fe3d4eaa542fb631f79cec5727dc49cd586da4779f8eb4c8a2e02a38906d9",
@@ -632,8 +717,8 @@
     "frontend/e2e/channel-telegram-new.spec.ts": "775f328c1f83bd579cb9f41ef49133909617915c389b521a1f4d9f1285f825e9",
     "docs/TELEGRAM_NEW.md": "023ceffd122369199f4e23a722cbe91ac26c7a176c91aa3797c8304e44ee3f79"
   },
-  "next_backend_command": "CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test --manifest-path backend/Cargo.toml telegram_new --no-run",
-  "implementer_state": "same_sol_evidence_correction_completed_source_ready_runtime_pending",
+  "next_backend_command": null,
+  "implementer_state": "same_sol_finished_narrow_checks_and_evidence_no_heavy_queued",
   "finding_closure_evidence": {
     "A-R01": {
       "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
@@ -695,10 +780,32 @@
       "tests": "login10/Lark15/pool1/exact_node_exclusion1 plus release32",
       "clippy": "PASS_all_targets_D_warnings",
       "reviewer": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61"
+    },
+    "A-R21": {
+      "implementation_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+      "test": "services::telegram_new_tests::telegram_new_creation_webhook_completes_without_consent_or_browser_connect",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "binary_sha256": "edc1de2486ad2319de2f3087abf17ec98e46194040d52276cb8e2b3cc3a157ec",
+      "build": "PASS_exit0_10m13s",
+      "clippy": "PASS_all_targets_D_warnings_exit0_6m06s",
+      "reviewer": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61"
+    },
+    "A-R22": {
+      "implementation_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+      "test": "services::nyxbot_channel_query_service::tests::current_channels_rank_live_then_latest_before_limiting_and_order_ties",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "binary_sha256": "edc1de2486ad2319de2f3087abf17ec98e46194040d52276cb8e2b3cc3a157ec",
+      "build": "PASS_exit0_10m13s",
+      "clippy": "PASS_all_targets_D_warnings_exit0_6m06s",
+      "reviewer": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61"
     }
   },
   "base_sha": "b1dd6548ade04ec4f0051203e1353796331c7f87",
-  "implementation_commit": "1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+  "implementation_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
   "prerequisite_commit": "336405f8e667ea2eb2c6513effec3d15fd960b02",
   "prerequisite_review": "APPROVED_exact_commit_personal_diff_surroundings_27_regressions_release32_clippy",
   "implementation_gate": "OPEN",
@@ -709,7 +816,7 @@
   },
   "current_reviewer_agent_id": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61",
   "followup_candidate": {
-    "state": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_COMPLETE_false_uncommitted",
+    "state": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_COMPLETE_true",
     "files": {
       "backend/src/services/telegram_new_connect.rs": "e2518da7899d5df5ca37dc895dfb918b54b05ef370e4189ee335e0f1d0b4418a",
       "backend/src/services/telegram_new_tests.rs": "e4b87725278874aedfed2d385d1383c5c2bc833bea0a71dde441455d1a22761c"
@@ -728,11 +835,14 @@
       "nyxbot_channel_query_service list_current and exact regression",
       "production route/auth composition and current fixture limitations"
     ],
-    "runtime_validation": "pending_new_explicit_backend_window",
-    "new_production_defects": []
+    "runtime_validation": "PASS_build_two_exact_tests_all_target_Clippy_on_da9662a4",
+    "new_production_defects": [],
+    "implementation_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+    "validated_at": "2026-10-27T12:16:11.028493+00:00",
+    "evidence_manifest": "docs/plans/2026-10-27-telegram-evidence/followup-r21/manifest.json"
   },
   "source_review_complete": true,
-  "local_validation_complete": false,
+  "local_validation_complete": true,
   "integration_review": {
     "id": "I-07",
     "classification": "integration_test_gap_not_established_runtime_defect",
@@ -751,5 +861,20 @@
     "result": "evidence_only_correction_completed",
     "reported_evidence_sha256": "1b13296be8397cf7f3d62dc08837e96ea04fa0178fa7de335b7111bfa1c1d3fa",
     "personally_verified": true
-  }
+  },
+  "historical_full_batch_implementation_commit": "1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+  "pull_request": {
+    "url": "https://github.com/ChronoAIProject/NyxID/pull/2057",
+    "draft": true,
+    "base": "main",
+    "published_implementation_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+    "publication_owner": "coordinator"
+  },
+  "remaining_acceptance": [
+    "L1",
+    "L2",
+    "L3",
+    "I-07"
+  ],
+  "next_backend_action": "none_for_local_candidate; combined_I07_requires_coordinator_integration_assignment"
 }

@@ -4,9 +4,11 @@ Implementer: persistent Heca agent `01a17afc-03c3-74f3-8206-1235e8b89954`, sessi
 
 Approved plan v2 hash verified initially: `8eaf1ef5d3e584715496114ddccc2255edf112716c2ccbffdfb6283de958be6e`. Sol reported the absent hosted-origin/provenance ambiguity; Astra assessed and approved v3, verified in full at SHA-256 `cec3fc2c74c3ec14013ceeac7c7d2da154629d8bb7539ff3325b7e6aedd4f69b`. PM owns plan/review/status; source/tests and this evidence are Sol-owned.
 
-Current checkpoint: `SOURCE_REVIEW_COMPLETE` for the exact A-R21 two-file patch in `telegram_new_connect.rs` and `telegram_new_tests.rs`, personally accepted by Astra. `LOCAL_VALIDATION_COMPLETE=false` until the same-config rebuild, fresh executable/source identity and compiled inventory, two exact completion/current-row tests, and required all-target warnings-denied Clippy complete. The historical 387 unique passing tests and Clippy proof below apply exclusively to feature commit `1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca` and its captured executable/source identity; they do not validate the current A-R21 patch or supply the omitted A-R22 current-row execution. Both tickets and final exact-commit implementation approval remain BLOCKED, including native L1–L3 and I-07. Fixture/browser success is not Telegram client acceptance or actual reply proof. Historical failures, interrupted runs, results and identities are preserved chronologically below.
+Current checkpoint: `SOURCE_REVIEW_COMPLETE` for the exact A-R21 two-file patch in `telegram_new_connect.rs` and `telegram_new_tests.rs`, personally accepted by Astra. `LOCAL_VALIDATION_COMPLETE=true` for the authorized narrow A-R21/A-R22 follow-up on source commit `da9662a4980b852df8543c588cc1ebe631f3bf1b`: same-config fresh build, executable/source identity and inventory, both exact regressions (1 passed / 0 failed / 0 ignored each), and required all-target warnings-denied Clippy passed. Exact commands and evidence are appended below. The historical 387 unique passing tests and Clippy proof remain bound exclusively to feature commit `1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca` and its captured executable/source identity; those suites were not repeated. Both tickets and final exact-commit implementation approval remain BLOCKED, including native L1–L3 and I-07. Fixture/browser success is not Telegram client acceptance or actual reply proof. Historical failures, interrupted runs, results and identities are preserved chronologically below.
 
-## A-R21/A-R22 review follow-up — runtime validation pending
+## Historical A-R21/A-R22 checkpoint before authorized revalidation
+
+This section preserves the source-ready checkpoint before the narrow backend window. The completed revalidation on `da9662a4980b852df8543c588cc1ebe631f3bf1b` is appended at the end of this document.
 
 The 387-test and Clippy proof below is preserved and bound exclusively to feature commit `1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca` and its captured executable/source identity. Astra's exact-commit review found A-R21, a registration-completion copy gap, and A-R22, an unexecuted existing current-row projection regression. Astra accepted the exact A-R21 source/test correction after personal review (`SOURCE_REVIEW_COMPLETE`); it has not been rebuilt or runtime-tested (`LOCAL_VALIDATION_COMPLETE=false`). G2 current-row execution and final validation remain OPEN. Telegram remains under the coordinator backend hold; no build/test/check/Clippy is started or queued for this follow-up.
 
@@ -253,3 +255,49 @@ frontend/src/pages/channel-connect-link.tsx
 frontend/src/schemas/telegram-new.test.ts
 frontend/src/schemas/telegram-new.ts
 ```
+
+## A-R21/A-R22 authorized narrow validation on da9662a4
+
+Astra explicitly assigned the exclusive narrow backend window for source commit `da9662a4980b852df8543c588cc1ebe631f3bf1b`, branch `fix/telegram-onboarding-2045-1974`, in the same persistent session/worktree/settings. No production source or tests changed during this window. Initial status was clean; the later identity snapshot observed only PM-owned `telegram-status.json` being updated by Astra. Sol did not edit PM files. Historical 387-test/Clippy results above remain bound to `1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca`; no historical suite or frontend check was repeated.
+
+Preflight found no Cargo/rustc/Clippy/linker processes and approximately15.8GiB free. Own Mongo8 PID61027 remained at `127.0.0.1:27457`, writable primary in `nyxidTelegramReview`. A uniquely named database passed an actual transactional insert/abort probe, verified the aborted row absent, then removed only that probe database. The retained Mongo process is the same PID previously launched with captured process-local soft nofile65536; current connection capacity26214 remains consistent with that inherited limit. Privileged live limit inspection was unavailable; no limit, restart, sibling Mongo or topology change was made. Open entries were396 after the two exact tests and228 at release, below the retained limit.
+
+The existing ignored runner `.tmp/run-telegram-backend.py` was reused with its child-argv capture extended to include `clippy-driver`. It set the required target/jobs/own Mongo environment, used normal Cargo locking, started each command serially, sampled disk/owned children every5s, and would SIGINT only its owned process group below2GiB. Each invocation had a distinct log/resource/options file. Every command exited0, no guard fired, and every runner reported no surviving owned children. No cache, dependency, flags, shared profile or target changes were made.
+
+Fresh build command from the worktree root:
+
+```sh
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test --manifest-path backend/Cargo.toml telegram_new --no-run
+```
+
+This passed exit0 in10m13s, log `.tmp/telegram-rust-r21-build.log`, producing `/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a`. No old shared binary was executed before this fresh build. The first build result was sent immediately to Astra with options/log/headroom and verified child exit. Sampled build minimum free space was12,657,274,880bytes (~11.79GiB); completion free space was15,701,807,104bytes. The guard covered code generation and linking.
+
+Fresh identity `.tmp/telegram-test-binary-r21-identity.json` binds this executable to source commit `da9662a4980b852df8543c588cc1ebe631f3bf1b`: SHA-256 `edc1de2486ad2319de2f3087abf17ec98e46194040d52276cb8e2b3cc3a157ec`, size765254528bytes, mtime_ns1793102613951993863. The1288-input backend manifest `.tmp/telegram-r21-backend-input-sha256.json` has SHA-256 `3b0badec4785596286d242df871df990ad0a96a5c231236b29b94c6f58cd624c`. Compared with the historical387 source manifest, only `telegram_new_connect.rs` and `telegram_new_tests.rs` differ. All1288 source hashes plus executable hash/mtime were checked stable after build, between exact tests, and after Clippy. A separate all-tracked snapshot `.tmp/telegram-r21-compiled-source-sha256.json` retains the broader initial file state; the backend manifest supplies the stable source binding independently of PM documentation edits.
+
+The following direct commands ran serially with cwd `backend`, `NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27457/?directConnection=true'`, and the freshly identified executable. Direct execution of the fresh candidate preserves the previously assessed Cargo unit-test cwd while avoiding the known package-local `.git` rebuild trigger.
+
+```sh
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27457/?directConnection=true' /Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a --list
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27457/?directConnection=true' /Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a services::telegram_new_tests::telegram_new_creation_webhook_completes_without_consent_or_browser_connect --exact --test-threads=2
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27457/?directConnection=true' /Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a services::nyxbot_channel_query_service::tests::current_channels_rank_live_then_latest_before_limiting_and_order_ties --exact --test-threads=2
+```
+
+| Command | Actual result | Log |
+| --- | --- | --- |
+| Compiled inventory | Exit0;10472tests,0benchmarks; each requested exact name appears once | `.tmp/telegram-rust-r21-list.log`, `.tmp/telegram-r21-exact-inventory.json` |
+| A-R21 registration completion | Exit0;1passed,0failed,0ignored,0measured;10471filtered;1.29s | `.tmp/telegram-rust-r21-completion.log` |
+| A-R22 current-row ranking | Exit0;1passed,0failed,0ignored,0measured;10471filtered;1.99s | `.tmp/telegram-rust-r21-current-rows.log` |
+
+These are two actual executed regressions with no fixture skips or zero-match passes. A-R21 now has execution proof for registration/agent-prerequisite/existing-setup/first-message wording and retained lifecycle/button/recipient assertions. A-R22 supplies the previously omitted G2 visible current-row execution: live precedence, per-owner/per-bot winner, failed history, ties, disconnection and50limit. Its scope remains visible-row selection, not remote duplicate-create prevention or live Telegram reconnect behavior.
+
+Required final lint command from the worktree root, with config after the external Clippy subcommand:
+
+```sh
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo clippy --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' --manifest-path backend/Cargo.toml --all-targets -- -D warnings
+```
+
+Clippy passed exit0 in6m06s with no diagnostics, log `.tmp/telegram-rust-r21-clippy.log`; no allowances, suppressions or reduced checks. Actual backend test rustc and binary/test clippy-driver argv are captured in `.tmp/telegram-rust-r21-build-rustc-options.log` and `.tmp/telegram-rust-r21-clippy-rustc-options.log`, with checked projection `.tmp/telegram-r21-compiler-options-summary.json`. All three invocations have no debuginfo/incremental/opt-level/debug-assertions/overflow-checks overrides: rustc defaults are debug0, no incremental, opt0, enabled debug assertions and enabled overflow checks. Selected `-C` arguments are only embed-bitcode=no, metadata, extra-filename and the existing Swift rpath. The workspace summary's `+ debuginfo` still reflects unchanged dependencies; actual backend argv proves the package override.
+
+Final machine summary `.tmp/telegram-r21-validation-summary.json` records exact results, logs, stable source/binary identity and resource samples. After Clippy, an independent process scan found no Cargo/cargo-clippy/rustc/clippy-driver/cc/ld/clang; Mongo remained writable primary,228open entries, free16,760,188,928bytes (~15.61GiB). Astra received the complete results and explicit window release immediately, before this evidence update. No more heavy commands are queued. Only this Sol evidence file was edited for the handoff; source/tests/PM files were untouched.
+
+`LOCAL_VALIDATION_COMPLETE=true` is limited to this authorized A-R21/A-R22 follow-up. Astra owns exact-commit review and per-ticket sign-off. Native L1–L3 and I-07 remain OPEN, both tickets/final approval remain BLOCKED, and no live Telegram creation, message, reply, merge, deployment, push, PR or issue closure is claimed.

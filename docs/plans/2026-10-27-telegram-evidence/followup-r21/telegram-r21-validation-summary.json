@@ -1,0 +1,85 @@
+{
+  "source_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+  "current_head": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+  "status": " M docs/plans/2026-10-27-telegram-status.json\n",
+  "backend_source_manifest": ".tmp/telegram-r21-backend-input-sha256.json",
+  "backend_source_unchanged": true,
+  "binary_identity": {
+    "path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "sha256": "edc1de2486ad2319de2f3087abf17ec98e46194040d52276cb8e2b3cc3a157ec",
+    "size": 765254528,
+    "mtime_ns": 1793102613951993863,
+    "source_commit": "da9662a4980b852df8543c588cc1ebe631f3bf1b",
+    "backend_manifest": ".tmp/telegram-r21-backend-input-sha256.json",
+    "backend_manifest_sha256": "3b0badec4785596286d242df871df990ad0a96a5c231236b29b94c6f58cd624c",
+    "backend_source_unchanged": true,
+    "captured_at": 1793102638.4527612
+  },
+  "compiled_tests": 10472,
+  "exact_tests": {
+    "services::telegram_new_tests::telegram_new_creation_webhook_completes_without_consent_or_browser_connect": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": 1.29
+    },
+    "services::nyxbot_channel_query_service::tests::current_channels_rank_live_then_latest_before_limiting_and_order_ties": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": 1.99
+    }
+  },
+  "commands": {
+    "build": {
+      "log": ".tmp/telegram-rust-r21-build.log",
+      "exit": 0,
+      "guard_stopped": false,
+      "min_free_bytes": 12657274880,
+      "last_free_bytes": 15701811200,
+      "last_children": []
+    },
+    "list": {
+      "log": ".tmp/telegram-rust-r21-list.log",
+      "exit": 0,
+      "guard_stopped": false,
+      "min_free_bytes": 15700570112,
+      "last_free_bytes": 15700570112,
+      "last_children": []
+    },
+    "completion": {
+      "log": ".tmp/telegram-rust-r21-completion.log",
+      "exit": 0,
+      "guard_stopped": false,
+      "min_free_bytes": 15700545536,
+      "last_free_bytes": 16774070272,
+      "last_children": []
+    },
+    "current-rows": {
+      "log": ".tmp/telegram-rust-r21-current-rows.log",
+      "exit": 0,
+      "guard_stopped": false,
+      "min_free_bytes": 16773193728,
+      "last_free_bytes": 16773193728,
+      "last_children": []
+    },
+    "clippy": {
+      "log": ".tmp/telegram-rust-r21-clippy.log",
+      "exit": 0,
+      "guard_stopped": false,
+      "min_free_bytes": 14613024768,
+      "last_free_bytes": 16761483264,
+      "last_children": []
+    }
+  },
+  "clippy": "all-targets -D warnings exit0 6m06s; config after clippy",
+  "compiler_options_summary": ".tmp/telegram-r21-compiler-options-summary.json",
+  "free_bytes": 16760188928,
+  "heavy_processes": [],
+  "mongo_open_entries": 228,
+  "mongo_health": {
+    "primary": true,
+    "setName": "nyxidTelegramReview"
+  },
+  "at": 1793103093.813169
+}
