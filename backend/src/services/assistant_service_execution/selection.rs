@@ -140,10 +140,13 @@ pub(super) fn scope(chat: &acks::ChatAuthority) -> AppResult<Document> {
 /// Closed syntax, interpreted only on admission of an authenticated owner's
 /// message. Quoted text, model arguments and webhook input cannot select.
 pub fn owner_selector(text: &str) -> Option<&str> {
-    let first = text.lines().next()?;
-    let value = first.strip_prefix("/service ")?.trim();
-    (!value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_whitespace))
-        .then_some(value)
+    let value = owner_selector_args(text)?.split_whitespace().next()?;
+    (value.len() <= 128).then_some(value)
+}
+
+fn owner_selector_args(text: &str) -> Option<&str> {
+    let rest = text.lines().next()?.strip_prefix("/service")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(rest)
 }
 
 /// Selection is distinct from consent and lasts for this one admitted turn.
@@ -220,29 +223,97 @@ pub async fn bind_owner_selection(
         }
         return Ok(());
     }
-    let Some(reference) = owner_selector(&start.text) else {
+    // Shared channel messages carry a server-added sender prefix in `text`.
+    // `question` is the bounded original message, supplied by the verified
+    // channel ingress. Never read it for web turns or untrusted event/guest input.
+    let selector_text = if start.origin == TurnOrigin::Channel {
+        start.question.as_deref().unwrap_or(&start.text)
+    } else {
+        &start.text
+    };
+    let Some(reference) = owner_selector(selector_text) else {
+        if owner_selector_args(selector_text).is_some() {
+            return Err(AppError::ServiceSelectionInvalid {
+                reason: "invalid_selector",
+                message: "Put a connection UUID or unambiguous connection slug (at most 128 bytes) after /service on the first line, then add your request on that line or the next. No account was selected.",
+            });
+        }
         return Ok(());
     };
+    let memberships =
+        crate::services::org_service::list_memberships_for_member(db, &row.user_id, false).await?;
     let visible =
-        crate::services::user_service_service::list_user_services_with_sources(db, &row.user_id)
-            .await?;
-    let choices: Vec<_> = visible
-        .iter()
-        .filter(|item| {
-            !matches!(
-                item.source,
-                crate::services::user_service_service::CredentialSource::Org { allowed: false, .. }
-            ) && (item.service.id == reference || item.service.slug == reference)
-        })
-        .collect();
-    if choices.len() != 1 {
-        return Err(AppError::ValidationError("Select one exact accessible connection UUID; this service name is missing or ambiguous".into()));
+        crate::services::user_service_service::list_user_services_with_sources_including_disabled(
+            db,
+            &row.user_id,
+            &memberships,
+        )
+        .await?;
+    let choices: Vec<_> =
+        if let Some(exact) = visible.iter().find(|item| item.service.id == reference) {
+            vec![exact]
+        } else {
+            // Preserve legacy unambiguous active-slug selection. Disabled or denied
+            // rows are considered only to explain a choice that cannot be used.
+            let matching: Vec<_> = visible
+                .iter()
+                .filter(|item| item.service.slug == reference)
+                .collect();
+            let usable: Vec<_> = matching
+                .iter()
+                .copied()
+                .filter(|item| {
+                    item.service.is_active
+                        && !matches!(
+                            item.source,
+                            crate::services::user_service_service::CredentialSource::Org {
+                                allowed: false,
+                                ..
+                            }
+                        )
+                })
+                .collect();
+            if usable.is_empty() { matching } else { usable }
+        };
+    if choices.is_empty() {
+        return Err(AppError::ServiceSelectionInvalid {
+            reason: "connection_unavailable",
+            message: "The selected connection no longer exists or is not accessible. Reconnect it or restore access in Connections. Use the connection ID, not a credential key or catalog service ID; no other account was selected.",
+        });
+    }
+    if choices.len() > 1 {
+        return Err(AppError::ServiceSelectionInvalid {
+            reason: "ambiguous_selection",
+            message: "This connection name identifies multiple accounts. Choose the exact connection UUID from Connections; no account was selected.",
+        });
+    }
+    if matches!(
+        choices[0].source,
+        crate::services::user_service_service::CredentialSource::Org { allowed: false, .. }
+    ) {
+        return Err(AppError::ServiceSelectionInvalid {
+            reason: "connection_access_denied",
+            message: "Your current organization role does not allow using this connection. Ask an organization admin to restore access or explicitly choose an accessible account.",
+        });
+    }
+    if !choices[0].service.is_active {
+        return Err(AppError::ServiceSelectionInvalid {
+            reason: "connection_disabled",
+            message: "The selected connection is disabled. Enable it in Connections or explicitly choose a different account; no other account was selected.",
+        });
     }
     let turn = row
         .active_turn
         .as_ref()
         .ok_or(AppError::AssistantTurnRequired)?;
     let connection = &choices[0].service;
+    // Identity choice is not consent. Keep it throughout the bounded logical
+    // turn, including automatic continuations that renew the active lease.
+    // Old replicas enforce this unchanged schema and the same live turn fence.
+    let selection_lifetime =
+        Duration::from_std(crate::services::assistant_nyxagent_runtime::STREAM_BOUNDS.turn_cap)
+            .expect("bounded turn duration")
+            + Duration::seconds(crate::services::assistant_nyxagent::ACTIVE_TURN_TTL_SECS);
     // A human selector chooses an identity, not an execution/credential grant.
     // In particular the conversation key can still be uncommitted here. Bind
     // owner and catalog identity now; concrete execution gets its full live
@@ -252,7 +323,7 @@ pub async fn bind_owner_selection(
         "conversation_id": &row.id, "api_key_id": &row.credential_api_key_id, "turn_id": &turn.turn_id,
         "connection_id": &connection.id, "selection_source": "owner",
         "owner_id": &connection.user_id, "catalog_service_id": &connection.catalog_service_id,
-        "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(35)),
+        "expires_at": bson::DateTime::from_chrono(Utc::now() + selection_lifetime),
     }).session(session).await?;
     Ok(())
 }

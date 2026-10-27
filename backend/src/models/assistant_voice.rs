@@ -57,6 +57,12 @@ pub enum RequestState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
+    /// Already written by claim; legacy requests may not have a start time.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub started_at: Option<DateTime<Utc>>,
+    /// Stable admission failure only; never provider messages or request text.
+    #[serde(default)]
+    pub terminal_error_code: Option<String>,
     /// The initial reply only submitted background work; it is not a result.
     #[serde(default)]
     pub async_operation_pending: bool,

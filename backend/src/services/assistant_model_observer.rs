@@ -138,15 +138,23 @@ impl ModelRequest {
     }
 
     pub async fn refusal(&self, error: &AppError) -> AppResult<()> {
-        let Some(code) = refusal_code(error) else {
+        if refusal_code(error).is_none() {
             return self.complete().await;
-        };
+        }
+        self.rejected(error).await
+    }
+
+    /// Only stable AppError metadata, never Display/debug strings or bodies.
+    /// Called around the whole model proxy so pre-billing refusals are visible.
+    pub async fn rejected(&self, error: &AppError) -> AppResult<()> {
         self.db
             .collection::<bson::Document>(COLLECTION_NAME)
             .update_one(
                 self.fence(),
                 doc! {"$set": {"active_turn.model_refusal": {
-                    "code": code, "attempt_id": &self.attempt, "at": bson::DateTime::now()
+                    "code": error.error_key(), "http_status": i32::from(error.status_code().as_u16()),
+                    "error_code": i64::from(error.error_code()),
+                    "attempt_id": &self.attempt, "at": bson::DateTime::now()
                 }}},
             )
             .await?;
@@ -246,6 +254,48 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
     attributed.code = classified.code;
     attributed.message = classified.message;
     attributed
+}
+
+/// A recent, unambiguous failure of this turn's exact model attempt explains a
+/// generic NyxAgent failure. Success clears it; old/parallel attempts never do.
+pub fn failure_reason(
+    error: &TurnError,
+    turn: &ActiveTurn,
+    now: DateTime<Utc>,
+) -> Option<Box<crate::models::assistant_message::TurnFailureReason>> {
+    use crate::models::assistant_message::TurnFailureReason;
+    if matches!(error.stage, "stream" | "upstream_response")
+        && matches!(
+            error.upstream_code.as_deref(),
+            Some("turn_failed" | "nyxid_error")
+        )
+        && !turn.model_attribution_uncertain
+        && let Some(fact) = turn.model_refusal.as_ref().filter(|fact| {
+            turn.model_attempt_id.as_deref() == Some(&fact.attempt_id)
+                && fact.at <= now
+                && now.signed_duration_since(fact.at)
+                    <= chrono::Duration::from_std(MODEL_ATTRIBUTION_WINDOW).expect("bounded window")
+                && fact.http_status.is_some()
+                && fact.error_code.is_some()
+        })
+    {
+        return Some(Box::new(TurnFailureReason {
+            source: "nyxid".into(),
+            stage: "model_proxy".into(),
+            code: fact.code.clone(),
+            http_status: fact.http_status,
+            nyxid_error_code: fact.error_code,
+        }));
+    }
+    error.upstream_code.as_ref().map(|code| {
+        Box::new(TurnFailureReason {
+            source: "nyxagent".into(),
+            stage: error.stage.into(),
+            code: code.to_string(),
+            http_status: error.http_status,
+            nyxid_error_code: None,
+        })
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

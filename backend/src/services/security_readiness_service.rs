@@ -40,6 +40,7 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:generated-artifacts",
     "assistant:org-agents",
     "assistant:operation-scopes",
+    "assistant:guest-operation-scopes",
     "assistant:machine-capabilities",
     "assistant:machine-contexts",
     "assistant:live-turn-gate",

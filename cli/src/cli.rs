@@ -1099,6 +1099,11 @@ pub enum MfaCommands {
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
+    /// Show the current account session's rolling and absolute expiry
+    Status {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List active sessions
     List {
         #[command(flatten)]

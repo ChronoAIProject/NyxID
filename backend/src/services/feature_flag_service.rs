@@ -177,6 +177,13 @@ const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const GUEST_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:guest-operation-scopes";
+const GUEST_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: GUEST_OPERATION_SCOPES_FLAG_KEY,
+    description: "Configure guest-only operation limits after all replicas enforce them. Saved limits are always enforced.",
+    default_enabled: false,
+};
+
 pub const AGENT_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:operation-scopes";
 const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: AGENT_OPERATION_SCOPES_FLAG_KEY,
@@ -328,6 +335,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
+    GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -368,6 +376,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
+    GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -2871,6 +2880,7 @@ mod tests {
                 "nyxbot:thread-follow",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:guest-operation-scopes",
                 "assistant:channel-media",
                 "assistant:attachment-writes",
                 "assistant:live-turn-gate",

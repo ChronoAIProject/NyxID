@@ -1299,6 +1299,12 @@ fn dispatch<'a>(
     args: &'a Value,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
+        "task_status" => Box::pin(async move {
+            Ok((
+                crate::services::assistant_task_status::read(&state.db, chat, args).await?,
+                false,
+            ))
+        }),
         "create_schedule" | "list_schedules" | "update_schedule" | "delete_schedule"
         | "run_schedule_now" => Box::pin(async move {
             Ok((
@@ -1664,7 +1670,11 @@ async fn dispatch_operation_scopes(
                 ));
             }
             (
-                json!({"services": Box::pin(crate::services::agent_operation_scope_service::options(db, &state.node_ws_manager, owner, &agent.id)).await?}),
+                json!({"services": if args["guests"].as_bool() == Some(true) {
+                    Box::pin(crate::services::agent_operation_scope_service::guest_options(db, owner, &agent.id)).await?
+                } else {
+                    Box::pin(crate::services::agent_operation_scope_service::options(db, &state.node_ws_manager, owner, &agent.id)).await?
+                }}),
                 false,
             )
         }
@@ -1865,10 +1875,17 @@ async fn dispatch_agent_settings(
     Ok(match name {
         "set_guest_access" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
-            let access = args["access"]
-                .as_str()
-                .and_then(GuestAccess::parse)
-                .ok_or_else(|| AppError::ValidationError("access is read, use or all".into()))?;
+            let none = args["access"].as_str() == Some("none");
+            let access = if none {
+                GuestAccess::Use
+            } else {
+                args["access"]
+                    .as_str()
+                    .and_then(GuestAccess::parse)
+                    .ok_or_else(|| {
+                        AppError::ValidationError("access is none, read, use or all".into())
+                    })?
+            };
             let granted: Vec<&String> = agent
                 .grants
                 .service_ids
@@ -1914,13 +1931,50 @@ async fn dispatch_agent_settings(
                     true,
                 ));
             }
+            if none {
+                // `none` withholds through an empty guest selection only. Keep
+                // the stored level, so clearing that selection later restores
+                // exactly the owner's earlier level, never the wider default.
+                for (id, level) in levels.iter_mut() {
+                    *level = agent.guest_access.get(id).copied().unwrap_or_default();
+                }
+            }
+            let mut selections = BTreeMap::new();
+            if none || args.get("selection").is_some() {
+                if levels.len() != 1 || requested.len() != 1 {
+                    return Err(AppError::ValidationError(
+                        "Name exactly one service for guest operation limits".into(),
+                    ));
+                }
+                let id = levels.keys().next().expect("one service").clone();
+                let mut selection: crate::models::agent_operation_scope::OperationSelection =
+                    serde_json::from_value(args["selection"].clone()).map_err(|_| AppError::ValidationError(
+                        "Provide selection.expected_revision from get_agent_operations with guests=true".into()))?;
+                if none {
+                    selection.all_operations = false;
+                    selection.endpoint_ids.clear();
+                    selection.rules.clear();
+                    selection.inputs.clear();
+                }
+                selections.insert(id, selection);
+            }
+            let configured_services: Vec<String> = levels.keys().cloned().collect();
+            let base = team::GrantChange::Guests(levels);
+            let change = if selections.is_empty() {
+                base
+            } else {
+                team::GrantChange::GuestOperations {
+                    base: Box::new(base),
+                    selections,
+                }
+            };
             let agent = Box::pin(team::set_grants_as(
                 db,
                 owner,
                 &chat.user_id,
                 Some(&chat.api_key_id),
                 &agent.id,
-                team::GrantChange::Guests(levels),
+                change,
             ))
             .await?;
             let summary = team::summaries(db, owner, false, false, 0)
@@ -1928,7 +1982,14 @@ async fn dispatch_agent_settings(
                 .into_iter()
                 .find(|summary| summary.id == agent.id);
             let mut result = json!({"subagent": agent.name,
-                "guest_access": summary.map(|summary| summary.guest_access)});
+                "guest_access": summary.map(|summary| summary.guest_access),
+                "guest_operations": configured_services.iter().map(|id| {
+                    let scope = agent.guest_operation_scopes.get(id);
+                    json!({"service_id": id,
+                        "revision": agent.guest_operation_scope_revisions.get(id).copied().unwrap_or(0),
+                        "all_operations": scope.is_none(),
+                        "endpoint_ids": scope.map(|scope| scope.operations.iter().filter_map(|op| op.endpoint_id.as_deref()).collect::<Vec<_>>()).unwrap_or_default()})
+                }).collect::<Vec<_>>()});
             if access == GuestAccess::All {
                 result["note"] = json!(
                     "Guests may now also change and delete with these \
@@ -3513,6 +3574,45 @@ pub(crate) async fn operation_owner_card(
 #[cfg(test)]
 #[path = "assistant_team_tests.rs"]
 mod tests;
+
+pub async fn guest_operations(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<crate::services::agent_operation_scope_service::ServiceOptions>>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    Ok(Json(
+        Box::pin(
+            crate::services::agent_operation_scope_service::guest_options(&state.db, &owner, &id),
+        )
+        .await?,
+    ))
+}
+
+pub async fn set_guest_operations(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, service_id)): Path<(String, String)>,
+    Json(selection): Json<crate::models::agent_operation_scope::OperationSelection>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let agent = Box::pin(team::set_grants(
+        &state.db,
+        &owner,
+        &id,
+        team::GrantChange::GuestOperations {
+            base: Box::new(team::GrantChange::Guests(BTreeMap::new())),
+            selections: BTreeMap::from([(service_id.clone(), selection)]),
+        },
+    ))
+    .await?;
+    Ok(Json(json!({"agent_id":agent.id,"service_id":service_id,
+        "revision":agent.guest_operation_scope_revisions.get(&service_id)})))
+}
 
 #[cfg(test)]
 mod future_size_tests {

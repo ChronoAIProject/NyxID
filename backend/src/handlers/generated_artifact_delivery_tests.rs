@@ -383,6 +383,64 @@ fn check_artifact_chat_recovery<'a>(
 
 #[tokio::test]
 async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_lineage() {
+    // Compare complete saved lineage rows, not just counts: refusals must not
+    // create, delete, relabel, or rewrite delivery/message/attachment associations.
+    fn saved_associations(
+        db: &mongodb::Database,
+    ) -> futures::future::BoxFuture<'_, Vec<Vec<bson::Document>>> {
+        Box::pin(async move {
+            let mut rows = Vec::new();
+            for collection in [
+                DELIVERIES,
+                crate::models::assistant_message::COLLECTION_NAME,
+                crate::models::assistant_attachment::COLLECTION_NAME,
+            ] {
+                let saved: Vec<bson::Document> = db
+                    .collection(collection)
+                    .find(doc! {})
+                    .sort(doc! {"_id": 1})
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                rows.push(saved);
+            }
+            rows
+        })
+    }
+
+    fn assert_private_refusal<'a>(
+        a: &'a AsyncFixture,
+        response: axum::response::Response,
+        expected_rows: &'a [Vec<bson::Document>],
+        expected_calls: &'a [String],
+        private_markers: &'a [String],
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert!(!body.windows(MP4.len()).any(|bytes| bytes == MP4));
+            assert!(!body.windows(12).any(|bytes| bytes == &MP4[4..16]));
+            for marker in private_markers {
+                assert!(!marker.is_empty());
+                assert!(
+                    !body
+                        .windows(marker.len())
+                        .any(|bytes| bytes == marker.as_bytes()),
+                    "refusal disclosed saved artifact metadata or encoded bytes"
+                );
+            }
+            let rows = saved_associations(&a.f.state.db).await;
+            assert!(
+                rows.as_slice() == expected_rows,
+                "refusal changed saved delivery/message/attachment associations"
+            );
+            assert_eq!(a.calls.lock().unwrap().as_slice(), expected_calls);
+        })
+    }
+
     let a = boxed_generated().await;
     a.submit().await;
     complete(&a).await;
@@ -482,16 +540,58 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         "/api/v1/assistant/nyxagent/conversations/{}/messages/{}/artifact-delivery",
         a.f.row.id, message.id
     );
-    a.f
-        .state
+    let source = a.watch().await;
+    let manifest = source.artifact_result.as_ref().unwrap();
+    let private_markers = vec![
+        a.f.row.id.clone(),
+        message.id.clone(),
+        event_turn_id.clone(),
+        attachment.id.clone(),
+        source.id.clone(),
+        source.operation_id.clone().expect("the saved operation ID"),
+        manifest.source_result_identity.clone(),
+        manifest.content_revision.clone(),
+        attachment
+            .artifact
+            .filename
+            .clone()
+            .expect("the saved filename"),
+        "/tmp/movie.mp4".into(),
+        base64::engine::general_purpose::STANDARD.encode(MP4),
+    ];
+    let associations = saved_associations(&a.f.state.db).await;
+    assert_eq!(associations[0].len(), 1, "the saved delivery association");
+    let calls_before_refusals = a.calls.lock().unwrap().clone();
+    let calls_before_recovery = calls_before_refusals.len();
+
+    // Only the fixture changes expiry. Keep a separate expected snapshot so
+    // neither an expired GET nor recovery can hide a persistent lineage write.
+    let expired_at = bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(1));
+    let mut expired_associations = associations.clone();
+    let expired_attachment = expired_associations[2]
+        .iter_mut()
+        .find(|row| row.get_str("_id").unwrap() == attachment.id)
+        .unwrap();
+    assert_eq!(
+        expired_attachment.insert("expires_at", expired_at),
+        Some(bson::Bson::DateTime(bson::DateTime::from_chrono(
+            saved_expiry
+        )))
+    );
+    a.f.state
         .db
         .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
         .update_one(
             doc! {"_id": &attachment.id},
-            doc! {"$set": {"expires_at": bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(1))}},
+            doc! {"$set": {"expires_at": expired_at}},
         )
         .await
         .unwrap();
+    assert!(
+        saved_associations(&a.f.state.db).await == expired_associations,
+        "the expiry fixture must change only the saved attachment expiry"
+    );
+    assert_eq!(*a.calls.lock().unwrap(), calls_before_refusals);
     let expired = app
         .clone()
         .oneshot(
@@ -504,6 +604,14 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         .await
         .unwrap();
     assert_eq!(expired.status(), axum::http::StatusCode::GONE);
+    assert_private_refusal(
+        &a,
+        expired,
+        &expired_associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
     let expired_recovery = app
         .clone()
         .oneshot(
@@ -517,10 +625,14 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         .await
         .unwrap();
     assert_eq!(expired_recovery.status(), axum::http::StatusCode::GONE);
-    let expired_recovery_body = axum::body::to_bytes(expired_recovery.into_body(), 1024)
-        .await
-        .unwrap();
-    assert!(!String::from_utf8_lossy(&expired_recovery_body).contains("movie.mp4"));
+    assert_private_refusal(
+        &a,
+        expired_recovery,
+        &expired_associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
     a.f.state
         .db
         .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
@@ -530,7 +642,11 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         )
         .await
         .unwrap();
-    let calls_before_recovery = a.calls.lock().unwrap().len();
+    assert!(
+        saved_associations(&a.f.state.db).await == associations,
+        "the expiry fixture must restore the original saved associations"
+    );
+    assert_eq!(*a.calls.lock().unwrap(), calls_before_refusals);
 
     // Missing credentials and a foreign first-party token are rejected before
     // bytes or recovery effects can be disclosed.
@@ -545,6 +661,14 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), axum::http::StatusCode::UNAUTHORIZED);
+    assert_private_refusal(
+        &a,
+        unauthorized,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
     let foreign = uuid::Uuid::new_v4().to_string();
     a.f.state
         .db
@@ -582,10 +706,14 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         foreign_response.status(),
         axum::http::StatusCode::FORBIDDEN | axum::http::StatusCode::NOT_FOUND
     ));
-    let foreign_body = axum::body::to_bytes(foreign_response.into_body(), 1024)
-        .await
-        .unwrap();
-    assert!(!String::from_utf8_lossy(&foreign_body).contains("movie.mp4"));
+    assert_private_refusal(
+        &a,
+        foreign_response,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
 
     // Delegated account reads are denied by the existing assistant route
     // policy before the handler can disclose attachment bytes.
@@ -610,11 +738,18 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         )
         .await
         .unwrap();
-    assert!(delegated_response.status().is_client_error());
-    let delegated_body = axum::body::to_bytes(delegated_response.into_body(), 1024)
-        .await
-        .unwrap();
-    assert!(!String::from_utf8_lossy(&delegated_body).contains("movie.mp4"));
+    assert_eq!(
+        delegated_response.status(),
+        axum::http::StatusCode::FORBIDDEN
+    );
+    assert_private_refusal(
+        &a,
+        delegated_response,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
 
     let credential = crate::services::assistant_agent_credential_service::load_for_conversation(
         &a.f.state.db,
@@ -636,11 +771,15 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         )
         .await
         .unwrap();
-    assert!(api_key_response.status().is_client_error());
-    let api_key_body = axum::body::to_bytes(api_key_response.into_body(), 1024)
-        .await
-        .unwrap();
-    assert!(!String::from_utf8_lossy(&api_key_body).contains("movie.mp4"));
+    assert_eq!(api_key_response.status(), axum::http::StatusCode::FORBIDDEN);
+    assert_private_refusal(
+        &a,
+        api_key_response,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
 
     let (service_account, service_secret) =
         crate::services::service_account_service::create_service_account(
@@ -693,11 +832,15 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
             )
             .await
             .unwrap();
-        assert!(rejected.status().is_client_error());
-        let body = axum::body::to_bytes(rejected.into_body(), 1024)
-            .await
-            .unwrap();
-        assert!(!String::from_utf8_lossy(&body).contains("movie.mp4"));
+        assert_eq!(rejected.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_private_refusal(
+            &a,
+            rejected,
+            &associations,
+            &calls_before_refusals,
+            &private_markers,
+        )
+        .await;
     }
     assert_eq!(a.calls.lock().unwrap().len(), calls_before_recovery);
 
@@ -719,10 +862,14 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         recovery_unauthorized.status(),
         axum::http::StatusCode::UNAUTHORIZED
     );
-    let recovery_unauthorized_body = axum::body::to_bytes(recovery_unauthorized.into_body(), 1024)
-        .await
-        .unwrap();
-    assert!(!String::from_utf8_lossy(&recovery_unauthorized_body).contains("movie.mp4"));
+    assert_private_refusal(
+        &a,
+        recovery_unauthorized,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
 
     let recovery_foreign = app
         .clone()
@@ -740,10 +887,14 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         recovery_foreign.status(),
         axum::http::StatusCode::FORBIDDEN | axum::http::StatusCode::NOT_FOUND
     ));
-    let recovery_foreign_body = axum::body::to_bytes(recovery_foreign.into_body(), 1024)
-        .await
-        .unwrap();
-    assert!(!String::from_utf8_lossy(&recovery_foreign_body).contains("movie.mp4"));
+    assert_private_refusal(
+        &a,
+        recovery_foreign,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
 
     let recovery_delegated = app
         .clone()
@@ -757,11 +908,40 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         )
         .await
         .unwrap();
-    assert!(recovery_delegated.status().is_client_error());
-    let recovery_delegated_body = axum::body::to_bytes(recovery_delegated.into_body(), 1024)
+    assert_eq!(
+        recovery_delegated.status(),
+        axum::http::StatusCode::FORBIDDEN
+    );
+    assert_private_refusal(
+        &a,
+        recovery_delegated,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
+
+    let recovery_api_key = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(&recovery_path)
+                .header("x-api-key", credential.raw_key.as_str())
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert!(!String::from_utf8_lossy(&recovery_delegated_body).contains("movie.mp4"));
+    assert_eq!(recovery_api_key.status(), axum::http::StatusCode::FORBIDDEN);
+    assert_private_refusal(
+        &a,
+        recovery_api_key,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
 
     // Recovery is first-party human only; service-account and relay bearer
     // classes are rejected before the saved association can be touched.
@@ -778,11 +958,15 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
             )
             .await
             .unwrap();
-        assert!(rejected.status().is_client_error());
-        let body = axum::body::to_bytes(rejected.into_body(), 1024)
-            .await
-            .unwrap();
-        assert!(!String::from_utf8_lossy(&body).contains("movie.mp4"));
+        assert_eq!(rejected.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_private_refusal(
+            &a,
+            rejected,
+            &associations,
+            &calls_before_refusals,
+            &private_markers,
+        )
+        .await;
     }
     assert_eq!(a.calls.lock().unwrap().len(), calls_before_recovery);
 
@@ -798,11 +982,18 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         )
         .await
         .unwrap();
-    assert!(recovery_nonempty.status().is_client_error());
-    let recovery_nonempty_body = axum::body::to_bytes(recovery_nonempty.into_body(), 1024)
-        .await
-        .unwrap();
-    assert!(!String::from_utf8_lossy(&recovery_nonempty_body).contains("movie.mp4"));
+    assert_eq!(
+        recovery_nonempty.status(),
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_private_refusal(
+        &a,
+        recovery_nonempty,
+        &associations,
+        &calls_before_refusals,
+        &private_markers,
+    )
+    .await;
     assert_eq!(a.calls.lock().unwrap().len(), calls_before_recovery);
 
     let recovery = app
@@ -826,6 +1017,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         "materialized"
     );
     assert_eq!(a.calls.lock().unwrap().len(), calls_before_recovery);
+    assert_eq!(*a.calls.lock().unwrap(), calls_before_refusals);
 }
 
 #[tokio::test]

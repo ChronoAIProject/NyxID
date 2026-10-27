@@ -43,6 +43,16 @@ impl Admission {
         connection: &str,
         target: Option<&crate::services::proxy_service::ProxyTarget>,
     ) -> AppResult<()> {
+        if self.chat.guest && self.operation_identity["kind"] == "raw_inference" {
+            super::guest_model::require(
+                db,
+                &self.chat,
+                Some(connection),
+                target.ok_or(AppError::GuestModelRouteRequired)?,
+                &mut self.operation_identity.clone(),
+            )
+            .await?;
+        }
         if let Some(pool) = self.operation_identity["pool_id"].as_str()
             && let Some(revision) = self.operation_identity["pool_revision"].as_i64()
             && db

@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::crypto::jwt::{self, JwtKeys};
 use crate::crypto::token::{generate_random_token, hash_token};
+use crate::errors::refresh::RefreshRefusalReason as Refusal;
 use crate::errors::{AppError, AppResult};
 use crate::models::mcp_session::McpSessionStore;
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
@@ -102,6 +103,30 @@ async fn follow_active_replacement_chain(
     }
 
     Ok(None)
+}
+
+/// One metadata-only batch for the session list; no JWTs or token identifiers.
+/// Browser-only and old unbound sessions have no known refresh expiry.
+pub async fn session_refresh_expiries(
+    db: &mongodb::Database,
+    user_id: &str,
+    session_ids: &[String],
+) -> AppResult<std::collections::HashMap<String, chrono::DateTime<Utc>>> {
+    use futures::TryStreamExt;
+    let mut expiries = std::collections::HashMap::new();
+    if session_ids.is_empty() {
+        return Ok(expiries);
+    }
+    let mut rows = db.collection::<RefreshToken>(REFRESH_TOKENS).aggregate(vec![
+        doc! {"$match": {"user_id": user_id, "client_id": Uuid::nil().to_string(), "session_id": {"$in": session_ids}, "revoked": false}},
+        doc! {"$group": {"_id": "$session_id", "expires_at": {"$max": "$expires_at"}}},
+    ]).await?;
+    while let Some(row) = rows.try_next().await? {
+        if let (Ok(id), Ok(expiry)) = (row.get_str("_id"), row.get_datetime("expires_at")) {
+            expiries.insert(id.to_owned(), expiry.to_chrono());
+        }
+    }
+    Ok(expiries)
 }
 
 async fn touch_session_last_active(
@@ -588,7 +613,13 @@ pub async fn refresh_tokens(
     requested_resources: Option<&[String]>,
 ) -> AppResult<IssuedTokens> {
     // Verify the refresh JWT
-    let claims = jwt::verify_token(jwt_keys, config, refresh_token_str)?;
+    let claims = jwt::verify_token(jwt_keys, config, refresh_token_str).map_err(|error| {
+        if matches!(error, AppError::TokenExpired) {
+            Refusal::RefreshExpired.with_error(error)
+        } else {
+            error
+        }
+    })?;
 
     if claims.token_type != "refresh" {
         return Err(AppError::Unauthorized("Expected refresh token".to_string()));
@@ -599,7 +630,7 @@ pub async fn refresh_tokens(
         .collection::<RefreshToken>(REFRESH_TOKENS)
         .find_one(doc! { "jti": &claims.jti })
         .await?
-        .ok_or_else(|| AppError::Unauthorized("Refresh token not found".to_string()))?;
+        .ok_or_else(|| Refusal::RefreshNotFound.unauthorized("Refresh token not found"))?;
 
     // A signed-out device is no longer authority, even when its refresh row
     // was batch-revoked. Reject before reuse detection can cascade again.
@@ -610,7 +641,7 @@ pub async fn refresh_tokens(
     }
 
     // Re-validate the issuing OAuth client. First-party login flows
-    // (`auth_service::login_with_password`, `refresh_session_with_token`)
+    // (`auth_service::login_with_password`, `create_session_and_issue_tokens`)
     // store `client_id = Uuid::nil()` as a sentinel and have no
     // `OauthClient` row -- skip the lookup for those. Real OAuth clients
     // must still exist AND be active; without this check, a refresh
@@ -661,9 +692,7 @@ pub async fn refresh_tokens(
         stored.client_id != Uuid::nil().to_string() && stored.protected_consent.is_none();
     if legacy_upgrade {
         if stored.revoked || stored.expires_at <= Utc::now() {
-            return Err(AppError::Unauthorized(
-                "Refresh token has expired or been revoked".into(),
-            ));
+            return Err(refresh_row_refusal(&stored));
         }
         let consent =
             super::consent_service::check_consent(db, &stored.user_id, &stored.client_id, "")
@@ -788,9 +817,9 @@ pub async fn refresh_tokens(
                         if let Some(ref session_id) = stored.session_id {
                             revoke_session(db, session_id, mcp_sessions).await?;
                         }
-                        return Err(AppError::Unauthorized(
-                            "Refresh token has been revoked".to_string(),
-                        ));
+                        return Err(
+                            Refusal::RefreshReused.unauthorized("Refresh token has been revoked")
+                        );
                     }
                 }
             }
@@ -804,9 +833,7 @@ pub async fn refresh_tokens(
                 if let Some(ref session_id) = stored.session_id {
                     revoke_session(db, session_id, mcp_sessions).await?;
                 }
-                return Err(AppError::Unauthorized(
-                    "Refresh token has been revoked".to_string(),
-                ));
+                return Err(Refusal::RefreshRevoked.unauthorized("Refresh token has been revoked"));
             }
             (Some(_), false) => {
                 // Outside grace period -- too old to be a legitimate retry.
@@ -818,9 +845,7 @@ pub async fn refresh_tokens(
                 if let Some(ref session_id) = stored.session_id {
                     revoke_session(db, session_id, mcp_sessions).await?;
                 }
-                return Err(AppError::Unauthorized(
-                    "Refresh token has been revoked".to_string(),
-                ));
+                return Err(Refusal::RefreshReused.unauthorized("Refresh token has been revoked"));
             }
         }
     } else {
@@ -1073,19 +1098,59 @@ async fn bind_legacy_refresh_session(
     token: &RefreshToken,
 ) -> AppResult<String> {
     let context = (db.clone(), token.id.clone(), token.user_id.clone());
-    super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
-        let (db, id, user) = c;
-        let row = db.collection::<RefreshToken>(REFRESH_TOKENS).find_one(doc! {
-            "_id": id, "user_id": user, "revoked": false, "expires_at": {"$gt": bson::DateTime::now()}
-        }).session(&mut *tx).await?.ok_or_else(|| AppError::Unauthorized("Refresh token has expired or been revoked".into()))?;
-        if let Some(sid) = row.session_id { return Ok(sid); }
-        let issued = create_session_with_transaction(db, user, None, None, Some(&mut *tx)).await?;
-        db.collection::<bson::Document>(SESSIONS).update_one(doc! {"_id": &issued.session_id},
-            doc! {"$set": {"mfa_exemption": "legacy_migration"}}).session(&mut *tx).await?;
-        db.collection::<RefreshToken>(REFRESH_TOKENS).update_one(doc! {"_id": id},
-            doc! {"$set": {"session_id": &issued.session_id}}).session(&mut *tx).await?;
-        Ok(issued.session_id)
-    })).await
+    super::transaction_service::run_db_only(db, &context, |tx, c| {
+        Box::pin(async move {
+            let (db, id, user) = c;
+            let row = db
+                .collection::<RefreshToken>(REFRESH_TOKENS)
+                .find_one(doc! {
+                    "_id": id, "user_id": user
+                })
+                .session(&mut *tx)
+                .await?
+                .ok_or_else(|| {
+                    Refusal::RefreshNotFound
+                        .unauthorized("Refresh token has expired or been revoked")
+                })?;
+            if row.revoked || row.expires_at <= Utc::now() {
+                return Err(refresh_row_refusal(&row));
+            }
+            if let Some(sid) = row.session_id {
+                return Ok(sid);
+            }
+            let issued =
+                create_session_with_transaction(db, user, None, None, Some(&mut *tx)).await?;
+            db.collection::<bson::Document>(SESSIONS)
+                .update_one(
+                    doc! {"_id": &issued.session_id},
+                    doc! {"$set": {"mfa_exemption": "legacy_migration"}},
+                )
+                .session(&mut *tx)
+                .await?;
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .update_one(
+                    doc! {"_id": id},
+                    doc! {"$set": {"session_id": &issued.session_id}},
+                )
+                .session(&mut *tx)
+                .await?;
+            Ok(issued.session_id)
+        })
+    })
+    .await
+}
+
+fn refresh_row_refusal(token: &RefreshToken) -> AppError {
+    let reason = if token.revoked {
+        if token.replaced_by.is_some() {
+            Refusal::RefreshReused
+        } else {
+            Refusal::RefreshRevoked
+        }
+    } else {
+        Refusal::RefreshExpired
+    };
+    reason.unauthorized("Refresh token has expired or been revoked")
 }
 
 async fn validate_refresh_session(db: &mongodb::Database, token: &RefreshToken) -> AppResult<()> {
@@ -1098,11 +1163,17 @@ async fn validate_refresh_session(db: &mongodb::Database, token: &RefreshToken) 
     let live = db
         .collection::<Session>(SESSIONS)
         .find_one(super::session_authority::authenticated(doc! {
-            "_id": &token.session_id, "user_id": &token.user_id, "revoked": false,
-            "expires_at": {"$gt": bson::DateTime::now()}
+            "_id": &token.session_id, "user_id": &token.user_id
         }))
         .await?;
-    let live = live.ok_or_else(|| AppError::Unauthorized("Session expired or revoked".into()))?;
+    let live =
+        live.ok_or_else(|| Refusal::SessionUnavailable.unauthorized("Session expired or revoked"))?;
+    if live.revoked {
+        return Err(Refusal::SessionRevoked.unauthorized("Session expired or revoked"));
+    }
+    if live.expires_at <= Utc::now() {
+        return Err(Refusal::SessionExpired.unauthorized("Session expired or revoked"));
+    }
     if user.mfa_enabled && !super::session_authority::satisfies_mfa(&live) {
         super::session_authority::reject_unassured(
             db,
@@ -1262,7 +1333,7 @@ mod tests {
                 .unwrap();
             assert!(
                 matches!(refresh_tokens(&db, &state.config, &state.jwt_keys, &tokens.refresh_token,
-                Some(&state.mcp_sessions), None).await,
+                Some(&state.mcp_sessions), None).await.map_err(AppError::into_refresh_source),
                 Err(AppError::Unauthorized(message)) if message == "Session expired or revoked")
             );
             assert!(
@@ -1303,11 +1374,11 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(refresh_tokens(&db, &state.config, &state.jwt_keys, &tokens.refresh_token, None, None).await,
+            matches!(refresh_tokens(&db, &state.config, &state.jwt_keys, &tokens.refresh_token, None, None).await.map_err(AppError::into_refresh_source),
             Err(AppError::Unauthorized(message)) if message == "MFA verification required; sign in again")
         );
         assert!(
-            matches!(refresh_tokens(&db, &state.config, &state.jwt_keys, &tokens.refresh_token, None, None).await,
+            matches!(refresh_tokens(&db, &state.config, &state.jwt_keys, &tokens.refresh_token, None, None).await.map_err(AppError::into_refresh_source),
             Err(AppError::Unauthorized(message)) if message == "Session expired or revoked")
         );
         assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
@@ -1952,3 +2023,7 @@ mod tests {
 #[cfg(test)]
 #[path = "token_service/legacy_tests.rs"]
 mod legacy_tests;
+
+#[cfg(test)]
+#[path = "token_service/refresh_diagnostics_tests.rs"]
+mod refresh_diagnostics_tests;

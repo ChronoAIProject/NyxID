@@ -125,6 +125,7 @@ describe("feature flag catalog", () => {
       MACHINE_CAPABILITIES: "assistant:machine-capabilities",
       MACHINE_CONTEXTS: "assistant:machine-contexts",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
+  GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
       CHANNEL_MEDIA: "assistant:channel-media",
       ATTACHMENT_WRITES: "assistant:attachment-writes",
       AGENT_LEARNING: "assistant:agent-learning",
