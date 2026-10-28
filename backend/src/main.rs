@@ -787,7 +787,7 @@ async fn server_main() {
             .pool_idle_timeout(std::time::Duration::from_secs(90)),
         services::telegram_new_api::app_redirect_policy(),
     )
-        .expect("Failed to create HTTP client");
+    .expect("Failed to create HTTP client");
 
     // Create MCP session store with MongoDB persistence
     let mcp_sessions = Arc::new(McpSessionStore::with_db_options(

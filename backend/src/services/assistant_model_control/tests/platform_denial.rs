@@ -403,35 +403,92 @@ async fn model_deny_unproven_or_expired_captured_destination_never_uses_current_
 /// platform claim cannot publish recorder coverage for a turn that never began.
 #[tokio::test]
 async fn platform_recorder_admission_abort_and_same_input_retry_commit_exact_new_turn_marker() {
-    let j=Journey::new().await;j.link().await;
+    let j = Journey::new().await;
+    j.link().await;
     crate::services::security_readiness_service::ready_test_replica(&j.state.db).await;
-    let update=j.update(1980,"Please manage my account",false);
-    let verified=dispatch::verified_message(&j.profile.id,"100",100,"test-observation",&update).unwrap();
-    let IngressAdmission::Claimed {audience:ManagerAudience::Personal(admitted),..}=j.producers.transport
-        .admit_manager_update(&j.state.db,&verified).await.unwrap() else {panic!("real personal ingress required");};
-    let agent=crate::services::assistant_team_service::ensure_nyxbot(&j.state.db,&j.owner).await.unwrap();
-    let ids=engine::OwnerTurnIds {conversation_id:format!("nyxa-{}",uuid::Uuid::new_v4().simple()),turn_id:uuid::Uuid::new_v4().to_string(),message_id:uuid::Uuid::new_v4().to_string()};
-    let start=engine::TurnStart::from(&engine::parse_turn(br#"{"text":"Please manage my account"}"#).unwrap());
-    let markers=j.state.db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION);
-    let scope=||doc! {"kind":"model_control_recorder_admission","user_id":&j.owner,"conversation_id":&ids.conversation_id,"turn_id":&ids.turn_id};
-    for commit in [false,true] {
-        let mut session=j.state.db.client().start_session().await.unwrap();session.start_transaction().await.unwrap();
-        let claim=Box::pin(personal::claim_personal_turn_in_session(&j.state.db,&mut session,&j.state.encryption_keys,
+    let update = j.update(1980, "Please manage my account", false);
+    let verified =
+        dispatch::verified_message(&j.profile.id, "100", 100, "test-observation", &update).unwrap();
+    let IngressAdmission::Claimed {
+        audience: ManagerAudience::Personal(admitted),
+        ..
+    } = j
+        .producers
+        .transport
+        .admit_manager_update(&j.state.db, &verified)
+        .await
+        .unwrap()
+    else {
+        panic!("real personal ingress required");
+    };
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&j.state.db, &j.owner)
+        .await
+        .unwrap();
+    let ids = engine::OwnerTurnIds {
+        conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
+        turn_id: uuid::Uuid::new_v4().to_string(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let start = engine::TurnStart::from(
+        &engine::parse_turn(br#"{"text":"Please manage my account"}"#).unwrap(),
+    );
+    let markers = j
+        .state
+        .db
+        .collection::<Document>(crate::services::assistant_service_execution::COLLECTION);
+    let scope = || doc! {"kind":"model_control_recorder_admission","user_id":&j.owner,"conversation_id":&ids.conversation_id,"turn_id":&ids.turn_id};
+    for commit in [false, true] {
+        let mut session = j.state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let claim = Box::pin(personal::claim_personal_turn_in_session(
+            &j.state.db,
+            &mut session,
+            &j.state.encryption_keys,
             &crate::services::platform_personal_binding_service::IdentityProducer,
-            &crate::services::platform_manager_ingress_service::IngressTurnStore,&admitted,&start,&ids,&agent)).await.unwrap();
-        assert_eq!(claim.conversation.active_turn.as_ref().unwrap().turn_id,ids.turn_id);
-        let marker=markers.find_one(scope()).session(&mut session).await.unwrap().unwrap();
-        assert_eq!(marker.get_str("api_key_id").unwrap(),claim.conversation.credential_api_key_id);
-        assert_eq!(marker.get_str("revision").unwrap(),crate::services::assistant_model_control::READINESS_CAPABILITY);
+            &crate::services::platform_manager_ingress_service::IngressTurnStore,
+            &admitted,
+            &start,
+            &ids,
+            &agent,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            claim.conversation.active_turn.as_ref().unwrap().turn_id,
+            ids.turn_id
+        );
+        let marker = markers
+            .find_one(scope())
+            .session(&mut session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            marker.get_str("api_key_id").unwrap(),
+            claim.conversation.credential_api_key_id
+        );
+        assert_eq!(
+            marker.get_str("revision").unwrap(),
+            crate::services::assistant_model_control::READINESS_CAPABILITY
+        );
         assert!(!marker.contains_key("expires_at"));
-        if commit {session.commit_transaction().await.unwrap();} else {
+        if commit {
+            session.commit_transaction().await.unwrap();
+        } else {
             session.abort_transaction().await.unwrap();
             assert!(markers.find_one(scope()).await.unwrap().is_none());
-            assert!(j.state.db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-                .find_one(doc! {"_id":&ids.conversation_id}).await.unwrap().is_none());
+            assert!(
+                j.state
+                    .db
+                    .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&ids.conversation_id})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
-    assert_eq!(markers.count_documents(scope()).await.unwrap(),1);
-    assert_eq!(j.sends().await.len(),0);
+    assert_eq!(markers.count_documents(scope()).await.unwrap(), 1);
+    assert_eq!(j.sends().await.len(), 0);
     j.state.db.drop().await.unwrap();
 }

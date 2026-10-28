@@ -40,9 +40,9 @@ fn user(text: &str) -> Value {
 
 impl Controlled {
     async fn new(name: &str) -> Self {
-        Self::configured(name,true).await
+        Self::configured(name, true).await
     }
-    async fn configured(name:&str,issue_control:bool)->Self {
+    async fn configured(name: &str, issue_control: bool) -> Self {
         let mut f = orchestrator_fixture(name).await;
         f.state.config.assistant_model_control_v1_enabled = issue_control;
         super::super::assistant_settings_service::update(
@@ -107,7 +107,7 @@ impl Controlled {
         )
         .await
         .unwrap();
-        let token = if let Some(token)=token {
+        let token = if let Some(token) = token {
             assert!(issue_control);
             assert!(token.for_target("replaced-runtime-row").is_err());
             assert!(token.for_target(&catalog_id).is_ok());
@@ -318,12 +318,14 @@ async fn negotiated_unactivated_compact_and_translated_callbacks_keep_exact_only
             .await
             .is_err()
     );
-    let (_,private,_)=persistence::authenticated(&c.f.state,&c.f.chat,&c.token,None).await.unwrap();
+    let (_, private, _) = persistence::authenticated(&c.f.state, &c.f.chat, &c.token, None)
+        .await
+        .unwrap();
     assert!(private.preconsent.ineligible);
     c.f.state.db.drop().await.unwrap();
     // Activation negatives use a pristine distinct turn, rather than erasing
     // the durable ineligibility deliberately established above.
-    let mut c=Controlled::new("p2_exact_only_active_callback").await;
+    let mut c = Controlled::new("p2_exact_only_active_callback").await;
     c.observe().await;
     assert!(
         c.callback("responses/compact", &body, &c.headers(), true)
@@ -868,10 +870,12 @@ async fn negotiated_ineligible_routes_preserve_baseline_and_active_lineage_canno
                 0
             );
         }
-        let (_,private,_)=persistence::authenticated(&c.f.state,&c.f.chat,&c.token,None).await.unwrap();
-        assert!(private.preconsent.ineligible,"{kind}");
+        let (_, private, _) = persistence::authenticated(&c.f.state, &c.f.chat, &c.token, None)
+            .await
+            .unwrap();
+        assert!(private.preconsent.ineligible, "{kind}");
         c.f.state.db.drop().await.unwrap();
-        let c=Controlled::new("p2_ineligible_route_active").await;
+        let c = Controlled::new("p2_ineligible_route_active").await;
         c.observe().await;
         assert!(
             ineligible_route(&c, kind, true).await.is_err(),

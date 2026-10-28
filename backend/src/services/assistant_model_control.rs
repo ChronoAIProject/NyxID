@@ -24,8 +24,8 @@ pub(crate) use tools::{tool_claim, tool_complete, tool_prepare, tool_status};
 mod observer;
 mod persistence;
 mod read_observation;
-pub(crate) use read_observation::unobserved_http;
 pub(crate) use read_observation::admit_recorder_in_session;
+pub(crate) use read_observation::unobserved_http;
 mod redirect_observation;
 pub use redirect_observation::HttpClient;
 mod initial_compact;
@@ -108,20 +108,36 @@ struct RootPrivate {
     initial_request_binding: Option<String>,
 }
 impl RootPrivate {
-    fn tool_steps(&self) -> impl Iterator<Item=&Step> {
-        self.steps.iter().chain(self.preconsent.reads.iter().map(|read| &read.record))
+    fn tool_steps(&self) -> impl Iterator<Item = &Step> {
+        self.steps
+            .iter()
+            .chain(self.preconsent.reads.iter().map(|read| &read.record))
     }
     fn active_tool_step_mut(&mut self, phase: &str, control: &str) -> AppResult<&mut Step> {
-        if phase == "allowed" { return self.steps.last_mut().ok_or_else(conflict); }
+        if phase == "allowed" {
+            return self.steps.last_mut().ok_or_else(conflict);
+        }
         if phase == "unactivated" && !self.preconsent.ineligible {
-            let read = self.preconsent.reads.last_mut().filter(|read|read.control_hash==control).ok_or_else(conflict)?;
+            let read = self
+                .preconsent
+                .reads
+                .last_mut()
+                .filter(|read| read.control_hash == control)
+                .ok_or_else(conflict)?;
             return Ok(&mut read.record);
         }
         Err(conflict())
     }
     fn tool_step_mut(&mut self, id: &str) -> AppResult<&mut Step> {
-        if let Some(step)=self.steps.iter_mut().find(|step|step.id==id) { return Ok(step); }
-        self.preconsent.reads.iter_mut().find(|read|read.record.id==id).map(|read|&mut read.record).ok_or_else(conflict)
+        if let Some(step) = self.steps.iter_mut().find(|step| step.id == id) {
+            return Ok(step);
+        }
+        self.preconsent
+            .reads
+            .iter_mut()
+            .find(|read| read.record.id == id)
+            .map(|read| &mut read.record)
+            .ok_or_else(conflict)
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -242,13 +258,19 @@ pub(crate) struct PreparedDispatch {
     read_observation: bool,
 }
 impl PreparedDispatch {
-    pub(crate) fn matches_read_admission(&self,connection:&str,binding:&str)->bool {
-        self.read_observation && self.connection_id==connection && self.connection_binding==binding
+    pub(crate) fn matches_read_admission(&self, connection: &str, binding: &str) -> bool {
+        self.read_observation
+            && self.connection_id == connection
+            && self.connection_binding == binding
     }
-    pub(crate) fn requires_no_redirect(&self) -> bool { !self.read_observation }
+    pub(crate) fn requires_no_redirect(&self) -> bool {
+        !self.read_observation
+    }
 
     pub(crate) async fn disable_observation(&self) -> AppResult<()> {
-        if !self.read_observation { return Err(conflict()); }
+        if !self.read_observation {
+            return Err(conflict());
+        }
         read_observation::disable(&self.state, &self.chat, &self.root_id).await
     }
     pub(crate) async fn claim(&self) -> AppResult<CompletionObserver> {
@@ -304,10 +326,18 @@ pub(crate) async fn status(
     if row.id != request.root_id {
         return Err(invalid());
     }
-    if row.phase == "unactivated" && request.step_id.is_none() && request.request_binding.is_some() {
-        return Ok(read_observation::status(&private, request.request_binding.as_deref(), &token_hash(token.expose())));
+    if row.phase == "unactivated" && request.step_id.is_none() && request.request_binding.is_some()
+    {
+        return Ok(read_observation::status(
+            &private,
+            request.request_binding.as_deref(),
+            &token_hash(token.expose()),
+        ));
     }
-    if row.phase == "allowed" && private.steps.is_empty() && private.initial_operation == StepOperation::Compact {
+    if row.phase == "allowed"
+        && private.steps.is_empty()
+        && private.initial_operation == StepOperation::Compact
+    {
         return Ok(wire::PrepareReply::InitialCompact);
     }
     if let Some(id) = request.step_id.as_deref() {
@@ -445,7 +475,9 @@ pub(crate) async fn prepare(
             return Err(conflict());
         }
         if operation == StepOperation::Compact {
-            if private.initial_request_binding.as_deref() != Some(binding.as_str()) || input != private.initial_input {
+            if private.initial_request_binding.as_deref() != Some(binding.as_str())
+                || input != private.initial_input
+            {
                 return Err(conflict());
             }
         } else {
