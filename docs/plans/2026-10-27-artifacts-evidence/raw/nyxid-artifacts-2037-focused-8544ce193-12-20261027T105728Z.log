@@ -1,6 +1,0 @@
-
-running 1 test
-test services::generated_artifacts::tests::owner_http_preserves_legacy_document_upload_and_image_contracts ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10471 filtered out; finished in 0.41s
-

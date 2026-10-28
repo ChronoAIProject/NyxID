@@ -1,1 +1,0 @@
-2026-10-27T10:57:16.136016+00:00 57347 57344 57347 /Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a services::generated_artifacts::tests::maximum_encrypted_pending_document_fits_bson_and_rejects_oversize --exact --test-threads=1 --nocapture
