@@ -40,7 +40,7 @@ export function TokenUsageValue({
             event.preventDefault();
             setOpen(true);
           }}
-          className="cursor-help rounded-sm text-left font-display text-28 font-medium leading-none tracking-tight tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+          className="cursor-pointer rounded-sm text-left font-display text-28 font-medium leading-none tracking-tight tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
         >
           {formatAnalyticsValue(value, "tokens", true)}
         </button>

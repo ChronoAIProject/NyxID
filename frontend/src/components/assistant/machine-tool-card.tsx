@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { RECEIPT_MAX_W } from "@/lib/assistant/banner";
 import { useMachinePreviewPolicy } from "@/hooks/use-machine-activity";
 import { File, Globe, Terminal, Monitor } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
@@ -53,7 +54,7 @@ export function MachineToolCard({
   return (
     <section
       aria-label="Machine action"
-      className="my-2 min-w-0 space-y-2 rounded-lg border border-hairline bg-overlay/35 p-3 text-xs"
+      className={`${RECEIPT_MAX_W} my-2 min-w-0 space-y-2 rounded-lg border border-hairline bg-overlay/35 p-3 text-xs`}
     >
       <div className="flex flex-wrap items-center gap-2">
         <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />

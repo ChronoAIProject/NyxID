@@ -1,3 +1,4 @@
+import { markConnectionLost, markConnectionOk } from "@/lib/assistant/connection-state";
 import { ApiError, apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { WireBodyCapture } from "@/lib/assistant/wire-body-capture";
 import {
@@ -238,6 +239,7 @@ async function withNetworkError<T>(
       error_code: -1,
       message: assistantRequestErrorMessage(0),
     });
+    markConnectionLost();
     report?.(failure);
     throw failure;
   }
@@ -287,6 +289,7 @@ export async function assistantHttp(
     reportError,
   ));
   options.authorityGuard?.();
+  markConnectionOk();
 
   void captureResponse(endpoint, method, response).catch(() => undefined);
   if (response.ok) return response;

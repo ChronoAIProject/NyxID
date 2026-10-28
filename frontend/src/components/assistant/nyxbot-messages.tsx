@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { Link } from "@tanstack/react-router";
 import {
   BellRing,
+  CalendarClock,
   ChevronRight,
+  ListChecks,
   MessageCircle,
   MessageSquareReply,
   PlugZap,
@@ -20,6 +23,7 @@ import {
   type EventNoticeTone,
 } from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
+import { ACCORDION_MAX_W, BANNER_CHEVRON, BANNER_FRAME, BANNER_NEUTRAL, BANNER_ROW } from "@/lib/assistant/banner";
 
 const TONE: Record<EventNoticeTone, string> = {
   neutral: "text-text-tertiary",
@@ -48,66 +52,104 @@ function NoticeIcon({ notice }: { readonly notice: EventNotice }) {
       return <Radio aria-hidden="true" className={className} />;
     case "message":
       return <MessageCircle aria-hidden="true" className={className} />;
+    case "task":
+      return <ListChecks aria-hidden="true" className={className} />;
     case "notice":
       return <BellRing aria-hidden="true" className={className} />;
   }
 }
 
-/** One NyxID notice as a compact activity card: icon, one line, details on demand. */
-function EventCard({ notice }: { readonly notice: EventNotice }) {
+/** One NyxID notice as a compact row: icon, one line, details on demand. */
+function EventRow({
+  notice,
+  icon,
+  action,
+}: {
+  readonly notice: EventNotice;
+  readonly icon?: ReactNode;
+  readonly action?: ReactNode;
+}) {
   const [open, setOpen] = useState(false);
   const head = (
     <>
-      <NoticeIcon notice={notice} />
+      {icon ?? <NoticeIcon notice={notice} />}
       <span className="min-w-0 flex-1 truncate text-muted-foreground">{notice.summary}</span>
     </>
   );
   return (
-    <div
-      role="note"
-      aria-label={`NyxID event: ${notice.summary}`}
-      className="overflow-hidden rounded-lg border border-hairline bg-overlay/35 text-11"
-    >
+    <div role="note" aria-label={`NyxID event: ${notice.summary}`}>
       {notice.detail ? (
         <button
           type="button"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-overlay"
+          className={cn(BANNER_ROW, "transition-colors hover:bg-overlay")}
         >
           {head}
           <ChevronRight
             aria-hidden="true"
-            className={cn(
-              "h-3 w-3 shrink-0 text-text-tertiary transition-transform",
-              open && "rotate-90",
-            )}
+            className={cn(BANNER_CHEVRON, open && "rotate-90")}
           />
         </button>
       ) : (
-        <div className="flex items-center gap-2 px-3 py-1.5">{head}</div>
+        <div className={BANNER_ROW}>{head}</div>
       )}
       {open && notice.detail ? (
-        <p className="whitespace-pre-wrap break-words border-t border-hairline px-3 py-2 leading-relaxed text-muted-foreground">
-          {notice.detail}
-        </p>
+        <div className="border-t border-hairline px-3 py-2">
+          <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words leading-relaxed text-muted-foreground">
+            {notice.detail}
+          </p>
+          {action}
+        </div>
       ) : null}
     </div>
   );
 }
 
+/** The message an automation run starts with: its name, the instruction on demand. */
+function AutomationNotice({ message }: { readonly message: ChatMessage }) {
+  // A webhook automation records the event payload as its own message.
+  const payload = message.id.startsWith("trigger-event:");
+  const label = message.automation?.label;
+  const summary = `${payload ? "Webhook event" : "Automation"}${label ? ` · ${label}` : " run"}`;
+  return (
+    <div role="group" aria-label="NyxID updates" className={cn(ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL)}>
+      <EventRow
+        notice={{ kind: "notice", tone: "neutral", summary, detail: message.content.trim() || undefined }}
+        icon={<CalendarClock aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />}
+        action={
+          <Link
+            to="/assistant/automations"
+            className="mt-2 inline-block text-11 text-muted-foreground underline hover:text-foreground"
+          >
+            Open Automations
+          </Link>
+        }
+      />
+    </div>
+  );
+}
+
 /**
- * A NyxID notice that woke the agent (a specialist replied or asked for
- * access, a decision was made, a connection or channel bot finished). It is
- * not something the user said, so each notice is a compact activity card
+ * The NyxID notices that woke the agent (a specialist replied or asked for
+ * access, a decision was made, a connection or channel bot finished, a
+ * background task returned) or the automation run that started it. Not
+ * something the user said, so it is one compact frame with a row per notice
  * rather than a bubble.
  */
 export function NyxBotEventNotice({ message }: { readonly message: ChatMessage }) {
+  if (message.origin === "trigger" || message.automation) {
+    return <AutomationNotice message={message} />;
+  }
   const notices = eventNotices(message.content).map(describeEventNotice);
   return (
-    <div role="group" aria-label="NyxID updates" className="space-y-1.5">
+    <div
+      role="group"
+      aria-label="NyxID updates"
+      className={cn(ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL, "divide-y divide-hairline")}
+    >
       {notices.map((notice, index) => (
-        <EventCard key={index} notice={notice} />
+        <EventRow key={index} notice={notice} />
       ))}
     </div>
   );

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { z } from "zod";
 import {
   AlertTriangle,
@@ -760,7 +761,7 @@ export function ActionCard({
   }
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <section className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-xl border border-border bg-card shadow-sm`}>
       <div className="flex items-start gap-3 px-4 py-3.5">
         <div
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${
