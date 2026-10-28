@@ -528,14 +528,18 @@ async fn check_http_projected_inner(
         && let Ok(parsed) = serde_json::from_slice::<Value>(body)
         && let Some(reason) = super::request_identity::inference_fallback_reason(path, &parsed)
     {
-        super::request_identity::record_fallback_reason(
+        if super::request_identity::record_fallback_reason(
             &state.db,
             chat,
             &operation,
             reason,
             control.is_some(),
         )
-        .await?;
+        .await
+        .is_err()
+        {
+            tracing::warn!("Assistant model fallback diagnostics deferred");
+        }
         summary.push_str(". ");
         summary.push_str(if control.is_some() {
             reason.reusable_message()
