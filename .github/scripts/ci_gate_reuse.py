@@ -207,6 +207,9 @@ class JobIdentity:
     reusable: bool
     supported: bool
     dynamic_prefix: str | None = None
+    # Leaves a reusable child declares but disables for these static inputs.
+    # GitHub still lists them; they are tolerated only as ``skipped``.
+    skipped_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,7 @@ class WorkflowIdentity:
     candidates: tuple[str, ...]
     leaf_names: tuple[str, ...]
     complete: bool
+    skipped_leaf_names: tuple[str, ...] = ()
 
 
 _EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
@@ -446,10 +450,16 @@ def analyze_workflow(
 
     specs: list[JobIdentity] = []
     candidates: list[str] = []
+    skipped_leaf_names: list[str] = []
     for job_id, raw_job in jobs.items():
         if not isinstance(raw_job, Mapping):
             raise WorkflowIdentityError("workflow_identity_job_mapping")
         if nested and not _nested_job_enabled(raw_job, input_values):
+            # Only a plain static name can be matched to the API's skipped job.
+            skipped_name = raw_job.get("name", job_id)
+            if not isinstance(skipped_name, str) or not skipped_name or "${{" in skipped_name:
+                raise WorkflowIdentityError("workflow_identity_skipped_job_name")
+            skipped_leaf_names.append(skipped_name)
             continue
         if "if" in raw_job and not isinstance(raw_job.get("if"), str):
             raise WorkflowIdentityError("workflow_identity_if_expression")
@@ -484,7 +494,8 @@ def analyze_workflow(
                 supported = child.complete and bool(names)
                 spec = JobIdentity(job_id, names if supported else (), prefix,
                                    eligible and supported and not event_sensitive, supported,
-                                   None if supported else prefix)
+                                   None if supported else prefix,
+                                   tuple(f"{prefix}{name}" for name in child.skipped_leaf_names))
         else:
             names, supported, dynamic_prefix = _expand_direct_names(job_id, raw_job)
             spec = JobIdentity(job_id, names if supported else (), None,
@@ -497,7 +508,8 @@ def analyze_workflow(
     reusable = {spec.job_id: spec for spec in specs if spec.reusable}
     leaf_names = tuple(name for spec in specs for name in spec.exact_names)
     complete = all(spec.supported for spec in specs)
-    return WorkflowIdentity(tuple(specs), reusable, tuple(sorted(candidates)), leaf_names, complete)
+    return WorkflowIdentity(tuple(specs), reusable, tuple(sorted(candidates)), leaf_names, complete,
+                            tuple(skipped_leaf_names))
 
 
 def expected_job_names(
@@ -533,6 +545,13 @@ def _reusable_job_ids_from_analysis(
             group_prefix = f"{prefix}{spec.prefix}"
             matching = [name for name in names if name.startswith(group_prefix)]
             unexpected = set(matching) - set(expected)
+            # A leaf disabled by static inputs (e.g. the ordinary-only billing
+            # smoke under coverage) is listed by GitHub as skipped. Accept it
+            # only with that exact name and a ``skipped`` conclusion.
+            unexpected -= {
+                name for name in unexpected
+                if name in spec.skipped_names and by_name[name].get("conclusion") == "skipped"
+            }
             if unexpected:
                 raise WorkflowIdentityError("api_unexpected_reusable_job")
         if any(counts.get(name, 0) > 1 for name in expected):

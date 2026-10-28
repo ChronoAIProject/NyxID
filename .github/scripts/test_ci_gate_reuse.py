@@ -76,6 +76,44 @@ class GateReuseTests(unittest.TestCase):
         self.assertIn("Backend Test / Billing route coverage smoke", backend)
         self.assertNotIn("Coverage (Backend) / Billing route coverage smoke", coverage)
 
+    def test_input_disabled_leaf_listed_as_skipped_is_tolerated(self):
+        # GitHub lists a reusable child's disabled job as skipped (seen on
+        # main b6ae99ce8 / PR #2070); it must not block reuse.
+        jobs = decision_jobs() + [
+            job("Coverage (Backend) / Billing route coverage smoke", conclusion="skipped"),
+        ]
+        decision = assess_tree_and_jobs(
+            workflow=WORKFLOW, reusable_workflows=WORKFLOWS,
+            current_tree="tree", tested_tree="tree", jobs=jobs,
+            source="pull_request", run={"id": 7},
+        )
+        self.assertTrue(decision.reuse)
+        self.assertEqual(set(decision.jobs), {"frontend", "backend-test", "coverage-backend"})
+
+    def test_input_disabled_leaf_that_actually_ran_fails_closed(self):
+        for conclusion in ("success", "failure", "cancelled", None):
+            jobs = decision_jobs() + [
+                job("Coverage (Backend) / Billing route coverage smoke", conclusion=conclusion),
+            ]
+            decision = assess_tree_and_jobs(
+                workflow=WORKFLOW, reusable_workflows=WORKFLOWS,
+                current_tree="tree", tested_tree="tree", jobs=jobs,
+                source="pull_request", run={"id": 7},
+            )
+            self.assertNotIn("coverage-backend", decision.jobs, conclusion)
+            self.assertFalse(decision.reuse and "coverage-backend" in decision.jobs)
+
+    def test_unknown_skipped_leaf_under_prefix_still_fails_closed(self):
+        jobs = decision_jobs() + [
+            job("Coverage (Backend) / Something unexpected", conclusion="skipped"),
+        ]
+        decision = assess_tree_and_jobs(
+            workflow=WORKFLOW, reusable_workflows=WORKFLOWS,
+            current_tree="tree", tested_tree="tree", jobs=jobs,
+            source="pull_request", run={"id": 7},
+        )
+        self.assertNotIn("coverage-backend", decision.jobs)
+
     def test_tree_match_reuses_complete_direct_and_nested_jobs(self):
         decision = assess_tree_and_jobs(
             workflow=WORKFLOW, reusable_workflows=WORKFLOWS,
