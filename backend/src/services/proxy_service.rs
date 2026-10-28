@@ -4856,13 +4856,12 @@ async fn forward_request_with_egress_guard_inner(
         .is_some_and(|observer| !observer.requires_no_redirect())
         && !known_no_redirect
         && redirect_probe.is_none()
+        && let Some(passive) = observer.take()
     {
-        if let Some(passive) = observer.take() {
-            // The successful live-authority claim already persisted an
-            // incomplete passive intent (or found durable ineligibility).
-            // Losing this retirement write cannot resurrect an older receipt.
-            let _ = passive.disable_observation().await;
-        }
+        // The successful live-authority claim already persisted an
+        // incomplete passive intent (or found durable ineligibility).
+        // Losing this retirement write cannot resurrect an older receipt.
+        let _ = passive.disable_observation().await;
     }
     // Cancellation, panic or any transport error after the CAS leaves the
     // durable Dispatched tombstone intact. Nothing here resets it to Prepared.

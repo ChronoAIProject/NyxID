@@ -570,13 +570,13 @@ async fn check_http_projected_inner(
     if let Some(admission) = decision.admission.as_ref() {
         admission.revalidate(&state.db, id, Some(target)).await?;
     }
-    if let (Some(admission), Some(observation)) = (decision.admission.as_mut(), read_observation) {
-        if let Some(prepared) = observation.prepared() {
-            if prepared.matches_read_admission(id, &admission.binding) {
-                admission.model_control = Some(prepared);
-            } else {
-                prepared.disable_observation().await?;
-            }
+    if let (Some(admission), Some(observation)) = (decision.admission.as_mut(), read_observation)
+        && let Some(prepared) = observation.prepared()
+    {
+        if prepared.matches_read_admission(id, &admission.binding) {
+            admission.model_control = Some(prepared);
+        } else {
+            prepared.disable_observation().await?;
         }
     }
     if model_transport

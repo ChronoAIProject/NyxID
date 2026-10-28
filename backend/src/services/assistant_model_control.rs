@@ -201,7 +201,7 @@ enum StepPhase {
         dispatch_id: String,
     },
     Completed {
-        completion: ObservedCompletion,
+        completion: Box<ObservedCompletion>,
         receipt: wire::CompletionReceipt,
     },
     OutcomeUnknown {

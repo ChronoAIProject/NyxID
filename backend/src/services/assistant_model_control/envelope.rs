@@ -265,16 +265,15 @@ fn responses_configuration(object: &serde_json::Map<String, Value>) -> AppResult
             }
         }
     }
-    if let Some(choice) = object.get("tool_choice") {
-        if !matches!(choice.as_str(), Some("none" | "auto" | "required"))
-            && !(choice.as_object().is_some_and(|o| o.len() == 2)
-                && choice["type"] == "function"
-                && choice["name"]
-                    .as_str()
-                    .is_some_and(|name| names.contains(name)))
-        {
-            return Err(unsupported());
-        }
+    if let Some(choice) = object.get("tool_choice")
+        && !matches!(choice.as_str(), Some("none" | "auto" | "required"))
+        && !(choice.as_object().is_some_and(|o| o.len() == 2)
+            && choice["type"] == "function"
+            && choice["name"]
+                .as_str()
+                .is_some_and(|name| names.contains(name)))
+    {
+        return Err(unsupported());
     }
     Ok(())
 }

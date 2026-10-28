@@ -799,8 +799,10 @@ async fn ineligible_route(
     if kind == "override" {
         headers.insert("x-http-method-override", "DELETE".parse().unwrap());
     }
-    let mut projection = crate::services::assistant_service_execution::HttpProjection::default();
-    projection.model_control_ineligible = kind == "node";
+    let projection = crate::services::assistant_service_execution::HttpProjection {
+        model_control_ineligible: kind == "node",
+        ..Default::default()
+    };
     let mut body = request(vec![user("initial")]).body;
     if kind == "catalog" {
         body.as_object_mut().unwrap().remove("client_metadata");
