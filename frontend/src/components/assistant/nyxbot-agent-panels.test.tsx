@@ -26,6 +26,14 @@ it("shows NyxBot's kind badge", () => {
   expect(screen.getAllByText("NyxBot")).toHaveLength(2);
 });
 
+it("reserves the loading agent's space without showing a NyxBot identity", () => {
+  const view = render(<ThreadHeader name="Loading agent…" kind="nyxbot" loading destroyed={false} title="Morning briefing" />);
+  expect(screen.getByRole("heading", { name: "Morning briefing" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Loading agent…" })).toBeVisible();
+  expect(screen.queryByText("NyxBot")).not.toBeInTheDocument();
+  expect(view.container.querySelector("svg")).toBeNull();
+});
+
 it("notes queued updates only when there are some", () => {
   const view = render(<PendingEventsNote count={0} agentName="NyxBot" />);
   expect(view.container).toBeEmptyDOMElement();

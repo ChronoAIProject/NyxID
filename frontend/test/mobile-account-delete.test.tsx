@@ -35,6 +35,7 @@ function harness() {
     StyleSheet: { create: (styles: unknown) => styles },
     Switch: () => <input type="checkbox" readOnly />,
     Text: ({ children }: NativeProps) => <span>{children}</span>,
+    useWindowDimensions: () => ({ width: 390, height: 844, scale: 3, fontScale: 1 }),
     View: box,
   };
 
@@ -51,12 +52,13 @@ function harness() {
       process: { env: { EXPO_PUBLIC_API_BASE_URL: "https://mobile.example.test/api/v1" } },
       fetch: transport,
       __DEV__: false,
-      setTimeout, clearTimeout, URL,
+      setTimeout, clearTimeout, URL, requestAnimationFrame, cancelAnimationFrame,
       require: (name: string): unknown => {
         if (name === "react") return React;
         if (name === "react/jsx-runtime") return jsxRuntime;
         if (name === "@tanstack/react-query") return query;
         if (name === "react-native") return native;
+        if (name === "lucide-react-native") return { ChevronRight: () => null, Minus: () => null, Plus: () => null };
         if (name === "@react-native-async-storage/async-storage") return { __esModule: true, default: {
           getItem: async (key: string) => deviceStorage.get(key) ?? null,
           setItem: async (key: string, value: string) => { deviceStorage.set(key, value); },
@@ -64,6 +66,7 @@ function harness() {
         } };
         if (name === "react-native-svg") return { __esModule: true, default: box, Circle: () => null, Path: () => null };
         if (name === "expo-linear-gradient") return { LinearGradient: box };
+        if (name === "expo/fetch") return { fetch: transport };
         if (name === "expo-constants") return { __esModule: true, default: { expoConfig: { version: "test" } } };
         if (name.endsWith("/ThemeContext")) return { useTheme: () => ({ colors: load(resolve(mobileRoot, "theme/mobileTheme.ts")).darkColors, mode: "dark", preference: "dark", setPreference: vi.fn() }) };
         if (name.endsWith("/AuthSessionContext")) return { useAuthSession: () => ({ signOut: vi.fn() }) };

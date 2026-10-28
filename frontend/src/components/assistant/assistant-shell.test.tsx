@@ -44,8 +44,8 @@ it.each([true, false])("has one title and Rename for legacy, workspace, loading 
   view.rerender(<AssistantShell title="Loading thread" sidebar={null} onRenameTitle={rename}><p>Loading agent</p></AssistantShell>);
   expect(screen.getAllByText("Loading thread")).toHaveLength(1);
   expect(screen.getAllByRole("button", { name: "Rename chat" })).toHaveLength(1);
-  view.rerender(<AssistantShell title="Resolved thread" contentTitle sidebar={null} onRenameTitle={rename}>
-    <ThreadHeader name="NyxBot" kind="nyxbot" destroyed={false} title="Resolved thread" onRenameTitle={rename} />
+  view.rerender(<AssistantShell title="Resolved thread" contentTitle={desktop} sidebar={null} onRenameTitle={rename}>
+    <ThreadHeader name="NyxBot" kind="nyxbot" destroyed={false} title={desktop ? "Resolved thread" : undefined} onRenameTitle={rename} />
   </AssistantShell>);
   expect(screen.getAllByText("Resolved thread")).toHaveLength(1);
   expect(screen.getAllByRole("button", { name: "Rename chat" })).toHaveLength(1);

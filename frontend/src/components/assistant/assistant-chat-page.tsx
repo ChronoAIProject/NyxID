@@ -848,6 +848,7 @@ function NyxAgentThreadPage() {
   // them per thread.
   const machineConversation = showHome ? "" : (chat.session.conversationId ?? "");
   const desktops = useConversationDesktops(machineConversation, chat.isStreaming);
+  const desktop = useMediaQuery("(min-width: 768px)");
   const wideScreen = useMediaQuery("(min-width: 1024px)");
   const machineHidden = useMachinePaneStore((state) => state.hidden.includes(machineConversation));
   const setMachineHidden = useMachinePaneStore((state) => state.setHidden);
@@ -919,11 +920,12 @@ function NyxAgentThreadPage() {
         name={headerAgent ? agentName : "Loading agent…"}
         handle={headerNamed ? agentHandle(headerNamed) : undefined}
         kind={headerAgent?.kind ?? "nyxbot"}
+        loading={!headerAgent}
         agentId={headerAgent?.id}
         destroyed={destroyed}
         channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
         onOpenDetails={headerAgent ? () => setDetailsAgentId(headerAgent.id) : undefined}
-        title={chat.session.title}
+        title={desktop ? chat.session.title : undefined}
         titleKey={selectedId}
         onRenameTitle={
           selectedId && !destroyed
@@ -961,7 +963,7 @@ function NyxAgentThreadPage() {
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
       title={showHome ? "Home" : chat.session.title}
-      contentTitle
+      contentTitle={desktop}
       titleKey={selectedId}
       onRenameTitle={
         selectedId && !destroyed

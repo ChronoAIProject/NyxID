@@ -24,6 +24,7 @@ const state = vi.hoisted(() => ({
   override: null as NyxAgentAccessMode | null,
   staleCard: false,
   agentLoaded: true,
+  desktop: true,
   voice: false,
   savedVoice: true,
   voiceMounts: 0,
@@ -54,6 +55,7 @@ vi.mock("@tanstack/react-router", async (original) => ({
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: (name: string) => name === "assistant:voice" && state.voice,
 }));
+vi.mock("@/hooks/use-media-query", () => ({ useMediaQuery: () => state.desktop }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } : undefined }),
   selectedAgentOf: (rows?: unknown[]) => rows?.[0],
@@ -79,7 +81,7 @@ vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children, contentTitle 
 vi.mock("./assistant-engine-sidebar", () => ({ AssistantEngineSidebar: () => null }));
 vi.mock("./nyxbot-agent-panels", () => ({
   ThreadPanels: ({ children }: { children: ReactNode }) => <>{children}</>,
-  ThreadHeader: ({ controls }: { controls?: ReactNode }) => <header data-testid="thread-header">{controls}</header>,
+  ThreadHeader: ({ controls, title, loading }: { controls?: ReactNode; title?: string; loading?: boolean }) => <header data-testid="thread-header" data-title={title} data-loading={loading}>{controls}</header>,
   PendingEventsNote: () => null, WaitingNote: () => null, ChannelBadge: () => null,
 }));
 vi.mock("./nyxbot-agent-details", () => ({ AgentDetailsSheet: () => null }));
@@ -116,24 +118,34 @@ beforeEach(() => {
   state.override = null;
   state.staleCard = false;
   state.agentLoaded = true;
+  state.desktop = true;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
 function mount() {
   return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
-it.each([{ draft: true }, { c: conversation.id }])("owns the title before and after thread identity resolves: %j", (search) => {
+it.each([
+  { search: { draft: true }, desktop: true },
+  { search: { c: conversation.id }, desktop: true },
+  { search: { draft: true }, desktop: false },
+  { search: { c: conversation.id }, desktop: false },
+])("keeps one title owner before and after thread identity resolves: %j", ({ search, desktop }) => {
   state.search = search;
+  state.desktop = desktop;
   state.agentLoaded = false;
   const view = mount();
-  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
-  expect(screen.getByTestId("thread-header")).toBeInTheDocument();
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-loading", "true");
+  if (desktop) expect(screen.getByTestId("thread-header")).toHaveAttribute("data-title", "Thread");
+  else expect(screen.getByTestId("thread-header")).not.toHaveAttribute("data-title");
   state.streaming = true;
   view.rerender(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
-  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
   expect(screen.getByTestId("thread-header")).toBeInTheDocument();
   state.agentLoaded = true;
   view.rerender(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
-  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-loading", "false");
   expect(screen.getAllByTestId("thread-header")).toHaveLength(1);
 });
 it.each([{}, { draft: true }, { draft: true, agent: agent.id }])("puts combined settings in the home/draft composer %j", (search) => {
