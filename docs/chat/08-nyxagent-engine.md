@@ -2223,10 +2223,13 @@ precise population, ranking, and coverage contract.
 
 The default-off personal flag `assistant:generated-artifacts` admits files only
 when a declared Sandbox submission is made in an owner Web user turn. Admission
-saves `artifact_mode: generated_artifact_v1` on the async watch, the original
-user turn, and Web-only delivery provenance. Channel, group, scheduled/event,
-trigger, invocation and voice destinations cannot opt into this mode. An old
-watch without the marker continues through the existing 16 KiB text path.
+saves `artifact_mode: generated_artifact_v1`, the trusted resolved Sandbox catalog
+ID, the original user turn, and Web-only delivery provenance on the async watch.
+Workers revalidate that immutable catalog snapshot and the exact operation
+contract before source access; endpoint names alone confer no artifact authority.
+Channel, group, scheduled/event, trigger, invocation and voice destinations cannot
+opt into this mode. An old watch without the marker continues through the existing
+16 KiB text path.
 Disabling the flag stops new admission; it does not prevent upgraded workers
 from draining an already admitted watch.
 
@@ -2238,15 +2241,23 @@ attachment slots remain the limit. Materialization inserts encrypted private
 attachments, appends their metadata to the active turn, and clears pending
 ciphertext atomically. Settlement copies the metadata to the assistant message
 and idempotently writes its exact recovery association before consuming the
-watch. A materialized association uses the minimum persisted attachment expiry;
-recovery fences current retention, source message state and attachment lineage
-in the same transaction. Async execution completion and attachment delivery are separate facts;
-only a materialized, currently readable attachment permits an attached/download
-claim. The bounded result context includes the server delivery state and count.
+watch. Materialized files use ordinary attachment retention independently of the
+source acquisition deadline. The association and shared watch lineage survive
+through the maximum saved attachment expiry; recovery checks each file's current
+retention, source message state and attachment lineage in the same transaction,
+without extending or recreating expired peers. Parsed file refusals and genuinely
+missing settlement files leave explicit saved outcomes while valid peers remain
+deliverable; contradictory lineage still fails. Async execution completion and
+attachment delivery are separate facts; only a materialized, currently readable
+attachment permits an attached/download claim. The bounded result context
+includes the server delivery state and count.
 
 History adds optional safe attachment filename, source, local `result_version`,
-preview kind and expiry, plus a message `artifact_delivery` state. Internal watch,
-operation and content-digest identifiers are never exposed as retrieval URLs.
+preview kind and expiry, plus a message `artifact_delivery` state. Content revisions
+belong to an owner/conversation/trusted-catalog/canonical-path series: successful
+changed bytes advance the label, while replay, unchanged bytes and failed
+modification never relabel a saved file. Internal watch, operation and content-digest
+identifiers are never exposed as retrieval URLs.
 Legacy tool-image delivery and the live AG-UI media path retain their contracts.
 See [uploads](10-uploads.md#generated-result-storage-and-owner-delivery) for
 limits, encryption, recovery, retention and rollout.
