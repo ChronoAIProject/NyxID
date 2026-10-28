@@ -116,15 +116,18 @@ export function NyxAgentAssistantEntry({
   conversationId,
   retry,
   checkRecovery,
+  selectedDecisionId,
 }: {
   readonly message: import("@/lib/assistant/chat-types").ChatMessage;
   readonly conversationId: string | undefined;
   readonly retry: (messageId: string) => Promise<void>;
   readonly checkRecovery: (messageId: string) => Promise<unknown>;
+  readonly selectedDecisionId?: string;
 }) {
   return (
     <ChatMessageEntry
       message={message}
+      selectedDecisionId={selectedDecisionId}
       conversationId={conversationId}
       feedbackEnabled
       onRetry={message.status === "error" && message.recovery?.status === "available"
@@ -958,6 +961,7 @@ function NyxAgentThreadPage() {
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
       title={showHome ? "Home" : chat.session.title}
+      contentTitle={showHome || Boolean(headerAgent && selectedId)}
       titleKey={selectedId}
       onRenameTitle={
         selectedId && !destroyed
@@ -1094,6 +1098,7 @@ function NyxAgentThreadPage() {
                 if (message.role === "assistant") {
                   return (
                     <NyxAgentAssistantEntry
+                      selectedDecisionId={search.card}
                       message={
                         turnError && message.id === lastReply?.id
                           ? {

@@ -593,6 +593,19 @@ async fn attach_automations(
     db: &mongodb::Database,
     user_id: &str,
     messages: &mut [MessageResponse],
+) {
+    if try_attach_automations(db, user_id, messages).await.is_err() {
+        tracing::warn!(
+            message_count = messages.len(),
+            "Could not attach automation names to history"
+        );
+    }
+}
+
+async fn try_attach_automations(
+    db: &mongodb::Database,
+    user_id: &str,
+    messages: &mut [MessageResponse],
 ) -> AppResult<()> {
     use futures::TryStreamExt;
     use mongodb::bson::Document;
@@ -605,13 +618,13 @@ async fn attach_automations(
     if keys.is_empty() {
         return Ok(());
     }
-    // (run id, trigger id, turn id)
-    let runs: Vec<(String, String, Option<String>)> = db
+    // (run id, trigger id, turn id, snapshotted label)
+    let runs: Vec<(String, String, Option<String>, Option<String>)> = db
         .collection::<Document>(crate::models::trigger_run::COLLECTION_NAME)
         .find(doc! {"user_id": user_id, "$or": [
             {"_id": {"$in": &keys}}, {"turn_id": {"$in": &keys}},
         ]})
-        .projection(doc! {"_id": 1, "trigger_id": 1, "turn_id": 1})
+        .projection(doc! {"_id": 1, "trigger_id": 1, "turn_id": 1, "label": 1})
         .await?
         .try_collect::<Vec<_>>()
         .await?
@@ -621,6 +634,10 @@ async fn attach_automations(
                 run.get_str("_id").ok()?.to_owned(),
                 run.get_str("trigger_id").ok()?.to_owned(),
                 run.get_str("turn_id").ok().map(str::to_owned),
+                run.get_str("label")
+                    .ok()
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned),
             ))
         })
         .collect();
@@ -629,30 +646,34 @@ async fn attach_automations(
     }
     let trigger_ids: Vec<&str> = runs
         .iter()
-        .map(|(_, trigger, _)| trigger.as_str())
+        .filter(|(_, _, _, label)| label.is_none())
+        .map(|(_, trigger, _, _)| trigger.as_str())
         .collect();
-    let labels: HashMap<String, String> = db
-        .collection::<Document>(crate::models::trigger::COLLECTION_NAME)
-        .find(doc! {"_id": {"$in": trigger_ids}, "user_id": user_id})
-        .projection(doc! {"_id": 1, "label": 1})
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?
-        .into_iter()
-        .filter_map(|t| {
-            Some((
-                t.get_str("_id").ok()?.to_owned(),
-                t.get_str("label").ok()?.to_owned(),
-            ))
-        })
-        .collect();
+    let labels: HashMap<String, String> = if trigger_ids.is_empty() {
+        HashMap::new()
+    } else {
+        db.collection::<Document>(crate::models::trigger::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": trigger_ids}, "user_id": user_id})
+            .projection(doc! {"_id": 1, "label": 1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .filter_map(|t| {
+                Some((
+                    t.get_str("_id").ok()?.to_owned(),
+                    t.get_str("label").ok()?.to_owned(),
+                ))
+            })
+            .collect()
+    };
     for message in messages.iter_mut().filter(|m| m.origin == trigger_origin) {
-        let Some((run_id, trigger_id, _)) = runs.iter().find(|(run, _, turn)| {
+        let Some((run_id, trigger_id, _, snapshot)) = runs.iter().find(|(run, _, turn, _)| {
             *run == message.turn_id || turn.as_deref() == Some(message.turn_id.as_str())
         }) else {
             continue;
         };
-        let Some(label) = labels.get(trigger_id) else {
+        let Some(label) = snapshot.as_ref().or_else(|| labels.get(trigger_id)) else {
             continue;
         };
         message.automation = Some(AutomationRunResponse {
@@ -960,7 +981,7 @@ pub async fn history(
     for message in &mut messages {
         message.recovery = recovery.get(&message.id).cloned().map(Into::into);
     }
-    Box::pin(attach_automations(&state.db, &user_id, &mut messages)).await?;
+    Box::pin(attach_automations(&state.db, &user_id, &mut messages)).await;
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let feedback =
         crate::services::assistant_feedback_service::states_for_messages(&state.db, &user_id, &ids)

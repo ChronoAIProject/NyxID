@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api-client";
-import { useAssistantFeedback } from "./use-assistant-feedback";
+import { useAssistantFeedback, useReplyFeedback } from "./use-assistant-feedback";
 
 vi.mock("@/lib/api-client", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/api-client")>(),
@@ -16,6 +16,19 @@ describe("useAssistantFeedback", () => {
       {children}
     </QueryClientProvider>
   );
+
+  it("edits a group reply's saved comment through PUT without withdrawing", async () => {
+    vi.mocked(api.put).mockResolvedValue({ vote: "down", comment: "Updated group comment" });
+    const { result } = renderHook(() => useReplyFeedback({ scope: "group", parentId: "g", messageId: "m", initialVote: "down", initialComment: "Saved group comment" }), { wrapper });
+    act(() => result.current.edit());
+    expect(result.current.formOpen).toBe(true);
+    expect(result.current.comment).toBe("Saved group comment");
+    await act(async () => { await result.current.send("Updated group comment"); });
+    expect(api.put).toHaveBeenLastCalledWith("/assistant/nyxagent/groups/g/messages/m/feedback", { vote: "down", comment: "Updated group comment" });
+    expect(result.current.vote).toBe("down");
+    expect(result.current.comment).toBe("Updated group comment");
+    expect(result.current.formOpen).toBe(false);
+  });
 
   it("uses PUT for a vote and DELETE to withdraw", async () => {
     vi.mocked(api.put).mockResolvedValue({ vote: "up" });

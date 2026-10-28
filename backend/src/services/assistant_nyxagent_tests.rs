@@ -4288,6 +4288,35 @@ fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
 }
 
 #[test]
+fn events_text_indents_excerpt_bullets_and_splits_after_truncated_quotes() {
+    let first = crate::services::assistant_team_service::event(
+        "reply",
+        format!(
+            "Specialist a replied. Reply excerpt: \"Line one\n- bullet\n{}\"",
+            "x".repeat(1300)
+        ),
+        None,
+    );
+    let second = crate::services::assistant_team_service::event(
+        "notice",
+        "The user approved a request.".into(),
+        None,
+    );
+    let rendered = events_text(&[first, second]);
+    assert!(rendered.contains("continuation lines are indented"));
+    assert!(rendered.contains("\n  - bullet\n  "));
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .count(),
+        2
+    );
+    assert_eq!(rendered.matches('"').count(), 1);
+    assert!(rendered.ends_with("\n- The user approved a request."));
+}
+
+#[test]
 fn upstream_model_rejections_report_model_unavailable_with_guidance() {
     for code in [
         "model_not_found",

@@ -140,6 +140,7 @@ export function GroupMessageRow({
     parentId: groupId,
     messageId: message.id,
     initialVote: message.feedback?.vote,
+    initialComment: message.feedback?.comment,
   });
   if (message.role === "notice") {
     return (
@@ -789,6 +790,7 @@ export function NyxAgentGroupPage({
     <AssistantShell
       resizableContent
       title={group?.name ?? "Group"}
+      contentTitle={Boolean(group)}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"

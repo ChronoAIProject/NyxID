@@ -2315,6 +2315,44 @@ async fn history_names_the_automation_behind_an_automation_turn() {
             .filter(|m| m["turn_id"] != "automation-turn")
             .all(|m| m["automation"].is_null())
     );
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "run-1"},
+            doc! {"$set": {"label": "Original run label"}},
+        )
+        .await
+        .unwrap();
+    let mut named = vec![MessageResponse::from(message.clone())];
+    attach_automations(&f.state.db, &f.owner, &mut named).await;
+    assert_eq!(
+        named[0].automation.as_ref().unwrap().label,
+        "Original run label"
+    );
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .delete_one(doc! {"_id": "trigger-1"})
+        .await
+        .unwrap();
+    named[0].automation = None;
+    attach_automations(&f.state.db, &f.owner, &mut named).await;
+    assert_eq!(
+        named[0].automation.as_ref().unwrap().label,
+        "Original run label"
+    );
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .delete_one(doc! {"_id": "run-1"})
+        .await
+        .unwrap();
+    named[0].automation = None;
+    attach_automations(&f.state.db, &f.owner, &mut named).await;
+    assert!(named[0].automation.is_none());
+
+    let client =
+        mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=50")
+            .await
+            .unwrap();
+    attach_automations(&client.database("unavailable"), &f.owner, &mut named).await;
+    assert!(named[0].automation.is_none());
+    assert_eq!(named[0].text, message.text);
 }
 
 #[tokio::test]

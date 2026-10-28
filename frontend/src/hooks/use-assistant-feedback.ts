@@ -56,6 +56,8 @@ export function useAssistantFeedback(
 
 export interface ReplyFeedback {
   readonly vote: AssistantFeedbackVote | undefined;
+  readonly comment: string;
+  readonly edit: () => void;
   readonly pending: boolean;
   readonly formOpen: boolean;
   /** The vote itself failed to save. */
@@ -75,16 +77,19 @@ export function useReplyFeedback({
   parentId,
   messageId,
   initialVote,
+  initialComment = "",
   onVoted,
 }: {
   readonly scope: "conversation" | "group";
   readonly parentId: string;
   readonly messageId: string;
   readonly initialVote: AssistantFeedbackVote | undefined;
+  readonly initialComment?: string | null;
   readonly onVoted?: (vote: AssistantFeedbackVote) => void;
 }): ReplyFeedback {
   const feedback = useAssistantFeedback(scope, parentId, messageId);
   const [vote, setVote] = useState(initialVote);
+  const [savedComment, setComment] = useState(initialComment ?? "");
   const [formOpen, setFormOpen] = useState(false);
   const [error, setError] = useState(false);
   const toggle = async (next: AssistantFeedbackVote) => {
@@ -93,7 +98,8 @@ export function useReplyFeedback({
     setVote(selected);
     setFormOpen(Boolean(selected));
     try {
-      await feedback.mutateAsync(selected ? { vote: selected } : {});
+      await feedback.mutateAsync(selected ? { vote: selected, ...(savedComment ? { comment: savedComment } : {}) } : {});
+      if (!selected) setComment("");
       setError(false);
     } catch {
       setVote(previous);
@@ -105,10 +111,10 @@ export function useReplyFeedback({
   };
   const send = async (comment: string) => {
     if (!vote) return false;
-    // The vote is already saved; empty details leave it as it is.
-    if (comment) {
+    if (comment !== savedComment) {
       try {
         await feedback.mutateAsync({ vote, comment });
+        setComment(comment);
       } catch {
         return false;
       }
@@ -118,6 +124,8 @@ export function useReplyFeedback({
   };
   return {
     vote,
+    comment: savedComment,
+    edit: () => { if (vote) setFormOpen(true); },
     pending: feedback.isPending,
     formOpen,
     error,

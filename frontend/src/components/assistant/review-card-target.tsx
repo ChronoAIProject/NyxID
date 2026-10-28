@@ -1,8 +1,9 @@
 import { useEffect, useRef, type ReactNode } from "react";
 
 /** History mounts cards after loading, including cards in hidden member threads. */
-export function ReviewCardTarget({ selected, children }: {
+export function ReviewCardTarget({ selected, selectionKey, children }: {
   readonly selected: boolean;
+  readonly selectionKey?: string;
   readonly children: ReactNode;
 }) {
   const target = useRef<HTMLDivElement>(null);
@@ -20,6 +21,6 @@ export function ReviewCardTarget({ selected, children }: {
       if (timer !== undefined) window.clearTimeout(timer);
       element.classList.remove("ring-2", "ring-input-focus");
     };
-  }, [selected]);
+  }, [selected, selectionKey]);
   return <div ref={target} className="scroll-m-4 rounded-xl">{children}</div>;
 }

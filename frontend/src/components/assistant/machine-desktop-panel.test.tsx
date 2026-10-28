@@ -51,6 +51,16 @@ it("uses the browser's authenticated origin even when node ingress is on another
   expect(url.pathname).toBe("/api/v1/assistant/nyxagent/machines/node/desktop");
   expect(url.searchParams.get("conversation_id")).toBe("thread");
 });
+it("can manually reconnect when the initial connection never finishes", () => {
+  render(<MachineDesktopPanel nodeId="node" />);
+  const stalled = Socket.instances[0]!;
+  expect(screen.getByText("Connecting…")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  expect(stalled.close).toHaveBeenCalledOnce();
+  expect(Socket.instances).toHaveLength(2);
+  act(() => Socket.instances[1]!.message({ type: "connected", session_id: "id", controller: "agent" }));
+  expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+});
 it("watches, requests control, protects owner input, and hands back with a note", async () => {
   const view = render(
     <MachineDesktopPanel

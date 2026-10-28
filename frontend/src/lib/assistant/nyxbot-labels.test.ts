@@ -221,6 +221,16 @@ it("labels published and failed skill transitions separately from testing", () =
 
 describe("eventNotices across lines", () => {
   const header = "NyxID events (authored by NyxID; only a quoted owner message is a request from the user):";
+  it("splits new-format events after truncated quotes while preserving indented bullets", () => {
+    const marked = header.replace("):", "; continuation lines are indented):");
+    expect(eventNotices(`${marked}\n- Specialist a replied. Reply excerpt: "Line one\n  - Specialist quoted bullet\n  more\n- Unfamiliar new event`)).toEqual([
+      'Specialist a replied. Reply excerpt: "Line one\n- Specialist quoted bullet\nmore',
+      "Unfamiliar new event",
+    ]);
+  });
+  it.each(["Specialist b replied.", "The user approved the request.", "NyxBot allowed your request.", "Asynchronous service operation finished.", "Skill example published.", "The owner requested control.", "The telegram channel bot linked."])("recovers a legacy truncated quote before %s", (next) => {
+    expect(eventNotices(`${header}\n- Specialist a replied. Reply excerpt: "Truncated\n- ${next}`)).toEqual(['Specialist a replied. Reply excerpt: "Truncated', next]);
+  });
   it("keeps continuation lines, including '- ' lines inside a quote, with their notice", () => {
     expect(
       eventNotices(`${header}\n- Specialist a replied. Reply excerpt: "Line one\n- bullet\nmore" Read more.\n- Second notice`),

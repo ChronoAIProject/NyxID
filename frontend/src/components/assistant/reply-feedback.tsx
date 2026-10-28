@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { Check, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, MessageSquare, ThumbsDown, ThumbsUp } from "lucide-react";
 import { toast } from "sonner";
 import type {
   AssistantFeedbackVote,
@@ -36,11 +36,6 @@ function feedbackComment(reasons: readonly string[], note: string): string {
   return tags && text ? `${tags} — ${text}` : tags || text;
 }
 
-/** Room left for the reader's words once every reason is chosen. */
-function noteLimit(vote: AssistantFeedbackVote): number {
-  return COMMENT_LIMIT - FEEDBACK_REASONS[vote].join(", ").length - " — ".length;
-}
-
 /** Helpful and Not helpful, for a reply's action line. */
 export function ReplyFeedbackVotes({ feedback }: { readonly feedback: ReplyFeedback }) {
   return (
@@ -64,6 +59,11 @@ export function ReplyFeedbackVotes({ feedback }: { readonly feedback: ReplyFeedb
           </button>
         );
       })}
+      {feedback.vote ? (
+        <button type="button" aria-label={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} title={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} disabled={feedback.pending} onClick={feedback.edit} className="rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50">
+          <MessageSquare className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -82,10 +82,11 @@ export function ReplyFeedbackFollowUp({ feedback }: { readonly feedback: ReplyFe
           if (!open) feedback.close();
         }}
       >
-        {vote ? (
+        {vote && feedback.formOpen ? (
           <FeedbackDetails
             key={vote}
             vote={vote}
+            initialComment={feedback.comment}
             pending={feedback.pending}
             onSend={feedback.send}
             onClose={feedback.close}
@@ -103,26 +104,28 @@ export function ReplyFeedbackFollowUp({ feedback }: { readonly feedback: ReplyFe
 
 function FeedbackDetails({
   vote,
+  initialComment,
   pending,
   onSend,
   onClose,
 }: {
   readonly vote: AssistantFeedbackVote;
+  readonly initialComment: string;
   readonly pending: boolean;
   readonly onSend: (comment: string) => Promise<boolean>;
   readonly onClose: () => void;
 }) {
   const fieldId = useId();
   const [chosen, setChosen] = useState<readonly string[]>([]);
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState(initialComment);
   const [submitting, setSubmitting] = useState(false);
   const [failed, setFailed] = useState(false);
   const options = FEEDBACK_REASONS[vote];
+  const comment = feedbackComment(options.filter((reason) => chosen.includes(reason)), note);
   const submit = async () => {
+    if (pending || submitting || comment.length > COMMENT_LIMIT) return;
     setSubmitting(true);
-    const saved = await onSend(
-      feedbackComment(options.filter((reason) => chosen.includes(reason)), note),
-    );
+    const saved = await onSend(comment);
     setSubmitting(false);
     setFailed(!saved);
     if (saved) toast.success("Thanks for the feedback.");
@@ -170,7 +173,7 @@ function FeedbackDetails({
         <Textarea
           id={fieldId}
           value={note}
-          maxLength={noteLimit(vote)}
+          maxLength={COMMENT_LIMIT}
           onChange={(event) => setNote(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !pending && !submitting) {
@@ -198,7 +201,7 @@ function FeedbackDetails({
         <Button
           type="button"
           variant="primary"
-          disabled={pending}
+          disabled={pending || comment.length > COMMENT_LIMIT}
           isLoading={submitting}
           onClick={() => void submit()}
         >
