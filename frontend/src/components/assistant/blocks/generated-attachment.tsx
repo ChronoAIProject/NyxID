@@ -22,13 +22,20 @@ export function GeneratedAttachment({
   );
   const expired = attachment.expired || locallyExpired;
   useEffect(() => {
-    if (!attachment.expiresAt) return;
-    const remaining = Date.parse(attachment.expiresAt) - Date.now();
-    if (!Number.isFinite(remaining)) return;
-    const timeout = setTimeout(
-      () => setLocallyExpired(true),
-      Math.max(0, Math.min(remaining, 2_147_483_647)),
-    );
+    const deadline = Date.parse(attachment.expiresAt ?? "");
+    if (!Number.isFinite(deadline)) {
+      setLocallyExpired(false);
+      return;
+    }
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const checkExpiry = () => {
+      const remaining = deadline - Date.now();
+      setLocallyExpired(remaining <= 0);
+      if (remaining > 0) {
+        timeout = setTimeout(checkExpiry, Math.min(remaining, 2_147_483_647));
+      }
+    };
+    checkExpiry();
     return () => clearTimeout(timeout);
   }, [attachment.expiresAt]);
   const name = attachment.filename ?? "Generated file";

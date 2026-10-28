@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ToolImage } from "./tool-image";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
@@ -137,4 +137,71 @@ it("does not fetch retained-expiry metadata and cancels a pending request on unm
   const signal = vi.mocked(assistantHttp).mock.calls[0]![1]!.signal!;
   pending.unmount();
   expect(signal.aborted).toBe(true);
+});
+
+it("keeps a thirty-day attachment available across the timer limit until its actual deadline", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-01T00:00:00Z"));
+  const retention = 30 * 24 * 60 * 60 * 1000;
+  const maximumDelay = 2_147_483_647;
+  const { unmount } = render(<ToolImage image={{
+    ...video, previewKind: "download", expiresAt: new Date(Date.now() + retention).toISOString(),
+  }} />);
+  try {
+    act(() => vi.advanceTimersByTime(maximumDelay));
+    expect(screen.getByRole("button", { name: "Download movie.mp4" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).not.toHaveTextContent("expired");
+    expect(vi.getTimerCount()).toBe(1);
+    act(() => vi.advanceTimersByTime(retention - maximumDelay - 1));
+    expect(screen.getByRole("button", { name: "Download movie.mp4" })).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByRole("status")).toHaveTextContent("expired");
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(assistantHttp).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
+});
+
+it("expires a short-lived preview at its deadline and releases its private source", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-01T00:00:00Z"));
+  vi.mocked(assistantHttp).mockResolvedValue({ blob: async () => new Blob(["fixture"]) } as Response);
+  const { unmount } = render(<ToolImage image={{ ...video, expiresAt: new Date(Date.now() + 1000).toISOString() }} />);
+  try {
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByLabelText("Preview movie.mp4")).toBeInTheDocument();
+    const signal = vi.mocked(assistantHttp).mock.calls[0]![1]!.signal!;
+    act(() => vi.advanceTimersByTime(999));
+    expect(signal.aborted).toBe(false);
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByRole("status")).toHaveTextContent("expired");
+    expect(screen.queryByLabelText("Preview movie.mp4")).not.toBeInTheDocument();
+    expect(signal.aborted).toBe(true);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:private2037");
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
+});
+
+it("replaces the expiry schedule and cancels its remaining timer on unmount", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-01T00:00:00Z"));
+  const attachment = { ...video, previewKind: "download" as const, expiresAt: new Date(Date.now() + 1000).toISOString() };
+  const { rerender, unmount } = render(<ToolImage image={attachment} />);
+  try {
+    rerender(<ToolImage image={{ ...attachment, expiresAt: new Date(Date.now() + 2000).toISOString() }} />);
+    expect(vi.getTimerCount()).toBe(1);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByRole("button", { name: "Download movie.mp4" })).toBeInTheDocument();
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
 });
