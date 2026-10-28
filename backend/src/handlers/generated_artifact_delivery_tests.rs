@@ -1512,7 +1512,7 @@ fn check_artifact_catalog_revalidation(
             &a.f.state.db,
             &a.f.row.user_id,
             &a.f.row.id,
-            &[message.id.clone()],
+            std::slice::from_ref(&message.id),
         )
         .await
         .unwrap();
