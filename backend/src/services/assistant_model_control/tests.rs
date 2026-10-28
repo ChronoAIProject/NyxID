@@ -638,6 +638,7 @@ fn capture_derived_next_input_uses_complete_serialization_and_bound_host_result(
         response_id: observed.response_id,
         output: observed.output,
         calls: observed.calls,
+        compaction: None,
     };
     let raw_binding = digest(json!(completion.output));
     let call = &completion.calls[0];
@@ -693,6 +694,7 @@ fn capture_derived_next_input_uses_complete_serialization_and_bound_host_result(
         response_id: verified.response_id,
         output: verified.output,
         calls: verified.calls,
+        compaction: None,
     };
     let mut projected = message_completion.output.clone();
     projected[0].as_object_mut().unwrap().remove("status");

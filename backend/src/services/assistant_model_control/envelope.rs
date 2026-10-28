@@ -8,9 +8,52 @@ pub(super) struct Envelope {
     pub path: String,
     pub query: Option<String>,
     pub headers: Vec<(String, String)>,
+    /// Explicit operation family sealed before consent. Absent on retained old
+    /// envelopes; a later callback cannot add compact authority to those rows.
+    #[serde(default)]
+    pub compact: Option<compact::Configuration>,
 }
 
 pub(super) fn envelope(candidate: &wire::PrepareRequest) -> AppResult<(Envelope, Vec<Value>)> {
+    let (mut envelope, input) = generation(candidate)?;
+    if input.iter().any(|item| item["type"] == "compaction") {
+        return Err(unsupported());
+    }
+    envelope.compact = Some(compact::seal(&envelope.fixed));
+    Ok((envelope, input))
+}
+
+/// The candidate may use only the family the actual resolved callback sealed
+/// before Allow. Prepare never learns a new endpoint, tools or configuration.
+pub(super) fn within_family(
+    saved: &Envelope,
+    candidate: &wire::PrepareRequest,
+) -> AppResult<(StepOperation, Vec<Value>)> {
+    if candidate.relative_path == "responses/compact" {
+        let input = compact::input(saved.compact.as_ref().ok_or_else(unsupported)?, candidate)?;
+        let mut headers = candidate.semantic_headers.clone();
+        for (name, _) in &mut headers {
+            name.make_ascii_lowercase();
+        }
+        headers.sort();
+        if headers != saved.headers {
+            return Err(unsupported());
+        }
+        validate_items(&input)?;
+        return Ok((StepOperation::Compact, input));
+    }
+    let (mut envelope, input) = generation(candidate)?;
+    if saved.compact.is_none() && input.iter().any(|item| item["type"] == "compaction") {
+        return Err(unsupported());
+    }
+    envelope.compact = saved.compact.clone();
+    if &envelope != saved {
+        return Err(unsupported());
+    }
+    Ok((StepOperation::Generation, input))
+}
+
+fn generation(candidate: &wire::PrepareRequest) -> AppResult<(Envelope, Vec<Value>)> {
     if candidate.protocol != wire::PROTOCOL
         || candidate.relative_path.trim_matches('/') != "responses"
         || candidate.query.is_some()
@@ -102,6 +145,7 @@ pub(super) fn envelope(candidate: &wire::PrepareRequest) -> AppResult<(Envelope,
             path: "responses".into(),
             query: None,
             headers,
+            compact: None,
         },
         input,
     ))
@@ -228,7 +272,7 @@ fn responses_configuration(object: &serde_json::Map<String, Value>) -> AppResult
     Ok(())
 }
 
-fn validate_items(items: &[Value]) -> AppResult<()> {
+pub(super) fn validate_items(items: &[Value]) -> AppResult<()> {
     if items.len() > wire::MAX_ITEMS {
         return Err(unsupported());
     }
@@ -239,6 +283,7 @@ fn validate_items(items: &[Value]) -> AppResult<()> {
             return Err(unsupported());
         }
         match item["type"].as_str() {
+            Some("compaction") => compact::validate_item(item)?,
             Some("function_call") => {
                 closed_keys(
                     item,

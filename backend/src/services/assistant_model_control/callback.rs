@@ -12,7 +12,7 @@ impl Callback {
     pub(crate) fn operation(&self) -> Value {
         json!({"kind":"legacy_inference","protocol":wire::PROTOCOL,"root_id":self.root.id,
             "envelope":digest(serde_json::to_value(&self.private.envelope).unwrap_or(Value::Null)),
-            "method":"POST","path":"responses","query":self.candidate.query,
+            "method":"POST","path":self.candidate.relative_path,"query":self.candidate.query,
             "model":self.candidate.body["model"],"provider":self.private.catalog_id})
     }
     pub(crate) fn prepared(&self) -> Option<PreparedDispatch> {
@@ -159,6 +159,8 @@ pub(crate) async fn callback(
     };
     let token = wire::SecretToken::parse(raw.into()).map_err(|_| invalid())?;
     let (row, mut private, _) = persistence::authenticated(state, chat, &token, None).await?;
+    let path = path.trim_matches('/');
+    let path = path.strip_prefix("v1/").unwrap_or(path);
     // Negotiation alone must not change legacy exact-only callbacks. Validate
     // the control even on an unsupported shape, and never accept a step before
     // activation. Once activated, every callback stays inside the protocol.
@@ -172,11 +174,8 @@ pub(crate) async fn callback(
             "none" | "header" | "bearer" | "basic" | "query"
         )
         || method != "POST"
-        || path
-            .trim_matches('/')
-            .strip_prefix("v1/")
-            .unwrap_or(path.trim_matches('/'))
-            != "responses"
+        || !matches!(path, "responses" | "responses/compact")
+        || (path == "responses/compact" && row.phase == "unactivated")
     {
         return exact_only_before_activation(&row);
     }
@@ -189,7 +188,7 @@ pub(crate) async fn callback(
     };
     let candidate = wire::PrepareRequest {
         protocol: wire::PROTOCOL.into(),
-        relative_path: "responses".into(),
+        relative_path: path.into(),
         query: query.map(str::to_owned),
         semantic_headers: super::super::proxy_service::collect_forward_headers_with_defaults(
             headers,
@@ -207,7 +206,17 @@ pub(crate) async fn callback(
     {
         return Ok(None);
     }
-    let (envelope, input) = match envelope::envelope(&candidate) {
+    let parsed = match private
+        .envelope
+        .as_ref()
+        .filter(|_| row.phase != "unactivated")
+    {
+        Some(saved) => envelope::within_family(saved, &candidate)
+            .map(|(operation, input)| (saved.clone(), input, operation)),
+        None => envelope::envelope(&candidate)
+            .map(|(envelope, input)| (envelope, input, StepOperation::Generation)),
+    };
+    let (envelope, input, operation) = match parsed {
         Ok(candidate) => candidate,
         Err(_) if row.phase == "unactivated" => return Ok(None),
         Err(error) => return Err(error),
@@ -259,6 +268,7 @@ pub(crate) async fn callback(
             .filter(|s| {
                 s.capability_hash == token_hash(raw)
                     && s.request_binding == envelope::request_binding(&candidate)
+                    && s.operation == operation
                     && matches!(s.phase, StepPhase::Prepared)
             })
             .ok_or_else(conflict)?;
@@ -272,6 +282,7 @@ pub(crate) async fn callback(
             chat: chat.clone(),
             connection_id: connection.into(),
             connection_binding: binding,
+            operation,
         })
     };
     Ok(Some(Callback {
@@ -323,7 +334,7 @@ pub(crate) async fn observe(
             let model=super::super::assistant_nyxagent::identifier(callback.candidate.body["model"].as_str().ok_or_else(invalid)?);
             let cause=super::super::assistant_service_execution::inference_fallback_reason("responses",&callback.candidate.body)
                 .ok_or_else(invalid)?;
-            let summary=format!("Connection {label} ({}), model {model}. {} Approval includes the same exact opaque provider metadata options; they are not treated as automatic Read. Only saved Allow narration and server-observed output/host-tool results may advance the transcript. Changed configuration or metadata and unsupported compaction require separate review.",connection.id,cause.reusable_message());
+            let summary=format!("Connection {label} ({}), model {model}. {} Approval covers this Responses generation and standalone compact family: exact generation configuration and declared host tools stay fixed; compact sends the same model and exact instructions, with no generation-only options or tools. Approval includes the same exact opaque generation metadata options; they are not treated as automatic Read. Only saved Allow narration and server-observed output/host-tool results may advance the transcript. Complete observed compact output must replace the entire next input without pruning. Changed configuration, metadata or unsealed compact-first/native transitions require separate review.",connection.id,cause.reusable_message());
             let mut card = acks::request_in_session(&state.db, chat, acks::Request {
                 kind:"action",service:Some((&connection.id,&label,&label)),tool:Some("nyxid.model_control_v1"),arguments:Some(&args),
                 summary:&summary,platform:false,
@@ -374,7 +385,7 @@ pub(crate) async fn decision_in_session(
         // Pending cards from the retired wire revision may still be Denied.
         // Allow cannot migrate their saved consent into the new protocol.
         || !(saved["protocol"] == wire::PROTOCOL
-            || (row.status == "denied" && saved["protocol"] == wire::RETIRED_PROTOCOL))
+            || (row.status == "denied" && saved["protocol"].as_str().is_some_and(wire::is_retired)))
         || row.arguments_digest.as_deref() != Some(acks::arguments_digest(saved).as_str())
     {
         return Err(invalid());
