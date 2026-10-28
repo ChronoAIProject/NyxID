@@ -39,29 +39,42 @@ export function ShareAgentDialog({ agent }: { readonly agent: AssistantAgent }) 
 function SharingEditor({ id, policy }: { readonly id: string; readonly policy: Sharing }) {
   const save = useSaveAgentSharing(id);
   const form = useAppForm<SharingForm>({ resolver: zodResolver(sharingFormSchema), defaultValues: {
-    enabled: policy.enabled, audience: policy.audience, shared_access: policy.shared_access,
+    enabled: policy.enabled,
+    audience: policy.audience.map(({ subject_kind, subject_id, role }) => ({ subject_kind, subject_id, role })),
+    shared_access: policy.shared_access,
   } });
   const audience = form.watch("audience");
   const levels = form.watch("shared_access");
   const [subject, setSubject] = useState("");
   const [kind, setKind] = useState<"person" | "org">("person");
   const [role, setRole] = useState<"user" | "manager">("user");
-  const validSubject = z.uuid().safeParse(subject.trim()).success && !audience.some((a) => a.subject_id === subject.trim());
+  const normalizedSubject = subject.trim().toLowerCase();
+  const validSubject = kind === "person"
+    ? z.email().safeParse(normalizedSubject).success
+      && !audience.some((a) => a.email === normalizedSubject || a.subject_id === normalizedSubject)
+    : z.uuid().safeParse(normalizedSubject).success
+      && !audience.some((a) => a.subject_id === normalizedSubject);
+  const audienceLabel = (entry: SharingForm["audience"][number]) => {
+    const view = policy.audience.find((candidate) => candidate.subject_id === entry.subject_id);
+    if (entry.email) return entry.email;
+    if (entry.subject_kind === "org") return [view?.slug, view?.name].filter(Boolean).join(" · ") || entry.subject_id;
+    return view?.email || entry.subject_id;
+  };
   return <Form {...form}><form className="space-y-5" onSubmit={form.handleSubmit((values) => save.mutate({ ...values, expected_version: policy.version }))}>
     <label className="flex items-center justify-between text-13">Enable sharing<Switch checked={form.watch("enabled")} onCheckedChange={(value) => form.setValue("enabled", value)} /></label>
     <div className="space-y-2">
       <p className="text-13 font-medium">People and organizations</p>
       <p className="text-12 text-muted-foreground">Users can chat. Managers can also edit the profile, persona and published team memory. Organization access applies to active Admins and Members.</p>
-      {audience.map((entry) => <div key={entry.subject_id} className="flex items-center gap-2 rounded-lg border border-border p-2 text-12">
-        <span className="min-w-0 flex-1 break-all">{entry.subject_kind === "org" ? "Organization" : "Person"} · {entry.subject_id}<br />{entry.role === "manager" ? "Manager" : "User"}</span>
-        <Button type="button" variant="ghost" onClick={() => form.setValue("audience", audience.filter((a) => a.subject_id !== entry.subject_id))}>Remove</Button>
+      {audience.map((entry, index) => <div key={entry.subject_id ?? entry.email ?? index} className="flex items-center gap-2 rounded-lg border border-border p-2 text-12">
+        <span className="min-w-0 flex-1 break-all">{entry.subject_kind === "org" ? "Organization" : "Person"} · {audienceLabel(entry)}<br />{entry.role === "manager" ? "Manager" : "User"}</span>
+        <Button type="button" variant="ghost" onClick={() => form.setValue("audience", audience.filter((_, candidate) => candidate !== index))}>Remove</Button>
       </div>)}
       <div className="flex gap-2">
         <Select value={kind} onValueChange={(v: "person" | "org") => { setKind(v); if (v === "org") setRole("user"); }}><SelectTrigger aria-label="Audience type"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="person">Person</SelectItem><SelectItem value="org">Organization</SelectItem></SelectContent></Select>
         <Select value={role} onValueChange={(v: "user" | "manager") => setRole(v)} disabled={kind === "org"}><SelectTrigger aria-label="Sharing role"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="user">User</SelectItem><SelectItem value="manager">Manager</SelectItem></SelectContent></Select>
       </div>
-      <label className="block space-y-1 text-12"><span>{kind === "org" ? "Organization ID" : "NyxID user ID"}</span><Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="UUID" /></label>
-      <Button type="button" disabled={!validSubject || audience.length >= 500} onClick={() => { form.setValue("audience", [...audience, { subject_kind: kind, subject_id: subject.trim(), role }]); setSubject(""); }}>Add to audience</Button>
+      <label className="block space-y-1 text-12"><span>{kind === "org" ? "Organization ID" : "Person email"}</span><Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder={kind === "org" ? "Organization UUID" : "person@example.com"} type={kind === "person" ? "email" : "text"} /></label>
+      <Button type="button" disabled={!validSubject || audience.length >= 500} onClick={() => { form.setValue("audience", [...audience, kind === "person" ? { subject_kind: kind, email: normalizedSubject, role } : { subject_kind: kind, subject_id: normalizedSubject, role }]); setSubject(""); }}>Add to audience</Button>
     </div>
     <div className="space-y-2">
       <p className="text-13 font-medium">Services for shared users</p>

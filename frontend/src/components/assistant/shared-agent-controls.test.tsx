@@ -24,10 +24,10 @@ it("starts withheld and saves an explicit audience only after edits", async () =
   await user.click(screen.getByRole("button", { name: "Share agent" }));
   expect(screen.getByRole("combobox", { name: "Calendar" })).toHaveTextContent("Withheld");
   expect(screen.getByRole("button", { name: "Save sharing" })).toBeDisabled();
-  await user.type(screen.getByLabelText("NyxID user ID"), "ec3391ab-f7c9-4422-9e2e-497f8b01285f");
+  await user.type(screen.getByLabelText("Person email"), "person@example.com");
   await user.click(screen.getByRole("button", { name: "Add to audience" }));
   await user.click(screen.getByRole("button", { name: "Save sharing" }));
-  await waitFor(() => expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ expected_version: 0, shared_access: {}, audience: [{ subject_kind: "person", subject_id: "ec3391ab-f7c9-4422-9e2e-497f8b01285f", role: "user" }] })));
+  await waitFor(() => expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ expected_version: 0, shared_access: {}, audience: [{ subject_kind: "person", email: "person@example.com", role: "user" }] })));
 });
 
 it("hides publishing when the flag is off or the agent is organization owned", () => {

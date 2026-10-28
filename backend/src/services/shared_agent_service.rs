@@ -7,7 +7,7 @@ use mongodb::{
     ClientSession, Database,
     bson::{self, doc},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use uuid::Uuid;
 
 use crate::{
@@ -537,12 +537,64 @@ pub async fn personal_owner(db: &Database, actor: &str, id: &str) -> AppResult<A
     Ok(agent)
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Audience {
     pub subject_kind: ShareSubject,
     pub subject_id: String,
     pub role: ShareRole,
+}
+
+const EMAIL_MARKER: &str = "email:";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudienceInput {
+    subject_kind: ShareSubject,
+    #[serde(default)]
+    subject_id: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    role: ShareRole,
+}
+
+fn normalize_email(value: &str) -> Option<String> {
+    let value = value.trim().to_lowercase();
+    if value.is_empty() || value.len() > 320 || !value.contains('@') {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn email_marker(value: &str) -> String {
+    format!("{EMAIL_MARKER}{value}")
+}
+
+fn requested_email(subject_id: &str) -> Option<&str> {
+    subject_id.strip_prefix(EMAIL_MARKER)
+}
+
+impl<'de> Deserialize<'de> for Audience {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let input = AudienceInput::deserialize(deserializer)?;
+        let subject_id = match (input.subject_id, input.email) {
+            (Some(id), None) if !id.trim().is_empty() => id.trim().to_owned(),
+            (None, Some(email)) if input.subject_kind == ShareSubject::Person => {
+                let email = normalize_email(&email)
+                    .ok_or_else(|| de::Error::custom("invalid sharing audience"))?;
+                email_marker(&email)
+            }
+            _ => return Err(de::Error::custom("invalid sharing audience")),
+        };
+        Ok(Self {
+            subject_kind: input.subject_kind,
+            subject_id,
+            role: input.role,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -615,6 +667,16 @@ pub struct SharingPreview {
     pub summary: String,
 }
 
+#[derive(Clone, Debug)]
+struct ResolvedAudience {
+    audience: Audience,
+    /// Person email, captured from the owner-supplied input or the existing
+    /// owner-visible audience row. Org labels are resolved separately from
+    /// the owner's active membership.
+    owner_email: Option<String>,
+    owner_label: String,
+}
+
 fn clean_summary_text(value: &str, max_chars: usize) -> String {
     let mut cleaned = String::with_capacity(value.len().min(max_chars));
     let mut pending_space = false;
@@ -649,45 +711,175 @@ fn summary_label(value: &str) -> String {
     clean_summary_text(value, 80)
 }
 
-fn summary_subject_label(subject: &Audience, users: &[User]) -> String {
-    let Some(user) = users.iter().find(|user| {
-        user.id == subject.subject_id
-            && user.is_active
-            && match subject.subject_kind {
-                ShareSubject::Person => user.user_type.is_person(),
-                ShareSubject::Org => user.user_type.is_org(),
-            }
-    }) else {
-        return summary_label(&subject.subject_id);
-    };
-    match subject.subject_kind {
-        ShareSubject::Person => {
-            let email = summary_label(&user.email);
-            let display = user
-                .display_name
-                .as_deref()
-                .map(summary_label)
-                .filter(|display| !display.is_empty());
-            match display {
-                Some(display) => format!("{email} (self-chosen name '{display}')"),
-                None => email,
-            }
+fn unavailable_audience() -> AppError {
+    AppError::ValidationError("Sharing audience is unavailable".into())
+}
+
+/// Resolve only identities the owner supplied directly or already has in the
+/// agent's audience. This is deliberately session-bound: preview and write
+/// use the same policy/share snapshot and never turn an arbitrary UUID into a
+/// discoverable person label.
+async fn resolve_audience_in_session(
+    db: &Database,
+    actor: &str,
+    input: &[Audience],
+    previous_shares: &[AgentShare],
+    session: &mut ClientSession,
+) -> AppResult<Vec<ResolvedAudience>> {
+    if input.len() > MAX_SHARES {
+        return Err(AppError::ValidationError(
+            "Sharing audience is unavailable".into(),
+        ));
+    }
+    let existing_people: HashSet<&str> = previous_shares
+        .iter()
+        .filter(|row| row.subject_kind == ShareSubject::Person)
+        .map(|row| row.subject_id.as_str())
+        .collect();
+    let mut person_ids = Vec::new();
+    let mut emails = Vec::new();
+    let mut org_ids = Vec::new();
+    for subject in input {
+        if subject.subject_kind == ShareSubject::Org && subject.role != ShareRole::User {
+            return Err(unavailable_audience());
         }
-        ShareSubject::Org => {
-            let slug = user
-                .slug
-                .as_deref()
-                .map(summary_label)
-                .filter(|slug| !slug.is_empty())
-                .unwrap_or_else(|| summary_label(&subject.subject_id));
-            let name = user
-                .display_name
-                .as_deref()
-                .map(summary_label)
-                .filter(|name| !name.is_empty());
-            name.map_or(slug.clone(), |name| format!("{slug} ({name})"))
+        if let Some(email) = requested_email(&subject.subject_id) {
+            if subject.subject_kind != ShareSubject::Person {
+                return Err(unavailable_audience());
+            }
+            emails.push(email.to_owned());
+        } else if Uuid::parse_str(&subject.subject_id).is_err() {
+            return Err(unavailable_audience());
+        } else if subject.subject_kind == ShareSubject::Person {
+            // Person UUIDs are an editing/removal capability for an audience
+            // the owner already has, never a directory lookup primitive.
+            if !existing_people.contains(subject.subject_id.as_str()) {
+                return Err(unavailable_audience());
+            }
+            person_ids.push(subject.subject_id.clone());
+        } else {
+            org_ids.push(subject.subject_id.clone());
         }
     }
+
+    let mut user_filter = Vec::new();
+    if !person_ids.is_empty() {
+        user_filter.push(doc! {"_id": {"$in": &person_ids}});
+    }
+    if !emails.is_empty() {
+        user_filter.push(doc! {"email": {"$in": &emails}});
+    }
+    let people: Vec<User> = if user_filter.is_empty() {
+        Vec::new()
+    } else {
+        let mut cursor = db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .find(doc! {"$or": user_filter, "is_active": true, "user_type": "person"})
+            .session(&mut *session)
+            .await?;
+        cursor.stream(&mut *session).try_collect().await?
+    };
+    let by_id: HashMap<_, _> = people.iter().map(|user| (user.id.as_str(), user)).collect();
+    let by_email: HashMap<_, _> = people
+        .iter()
+        .map(|user| (user.email.trim().to_lowercase(), user))
+        .collect();
+
+    let orgs: Vec<User> = if org_ids.is_empty() {
+        Vec::new()
+    } else {
+        let mut cursor = db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .find(doc! {
+                "_id": {"$in": &org_ids},
+                "is_active": true,
+                "user_type": "org",
+            })
+            .session(&mut *session)
+            .await?;
+        cursor.stream(&mut *session).try_collect().await?
+    };
+    let org_memberships: Vec<OrgMembership> = if org_ids.is_empty() {
+        Vec::new()
+    } else {
+        let mut cursor = db
+            .collection(crate::models::org_membership::COLLECTION_NAME)
+            .find(doc! {
+                "member_user_id": actor,
+                "org_user_id": {"$in": &org_ids},
+                "revoked_at": null,
+            })
+            .session(&mut *session)
+            .await?;
+        cursor.stream(&mut *session).try_collect().await?
+    };
+    let active_orgs: HashSet<&str> = org_memberships
+        .iter()
+        .map(|membership| membership.org_user_id.as_str())
+        .collect();
+    let org_by_id: HashMap<_, _> = orgs.iter().map(|org| (org.id.as_str(), org)).collect();
+
+    let mut resolved = Vec::with_capacity(input.len());
+    let mut seen = HashSet::new();
+    for subject in input {
+        let (subject_id, owner_email, owner_label) = if let Some(email) =
+            requested_email(&subject.subject_id)
+        {
+            let user = by_email.get(email).ok_or_else(unavailable_audience)?;
+            if user.id == actor {
+                return Err(unavailable_audience());
+            }
+            (user.id.clone(), Some(email.to_owned()), email.to_owned())
+        } else if subject.subject_kind == ShareSubject::Person {
+            let user = by_id
+                .get(subject.subject_id.as_str())
+                .ok_or_else(unavailable_audience)?;
+            let stored_email = previous_shares
+                .iter()
+                .find(|row| {
+                    row.subject_kind == ShareSubject::Person && row.subject_id == subject.subject_id
+                })
+                .and_then(|row| row.subject_email.clone())
+                .unwrap_or_else(|| user.email.trim().to_lowercase());
+            (
+                subject.subject_id.clone(),
+                Some(stored_email.clone()),
+                stored_email,
+            )
+        } else {
+            if !active_orgs.contains(subject.subject_id.as_str()) {
+                return Err(unavailable_audience());
+            }
+            let org = org_by_id
+                .get(subject.subject_id.as_str())
+                .ok_or_else(unavailable_audience)?;
+            let slug = org
+                .slug
+                .as_deref()
+                .filter(|slug| !slug.trim().is_empty())
+                .ok_or_else(unavailable_audience)?;
+            let name = org
+                .display_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map(str::trim)
+                .unwrap_or(slug);
+            (subject.subject_id.clone(), None, format!("{slug} ({name})"))
+        };
+        if !seen.insert((subject.subject_kind, subject_id.clone())) {
+            return Err(unavailable_audience());
+        }
+        resolved.push(ResolvedAudience {
+            audience: Audience {
+                subject_kind: subject.subject_kind,
+                subject_id,
+                role: subject.role,
+            },
+            owner_email,
+            owner_label,
+        });
+    }
+    Ok(resolved)
 }
 
 /// Read the current policy and audience for the owner-card preview. The
@@ -738,24 +930,31 @@ pub async fn preview_update(
             role: row.role,
         })
         .collect();
+    let resolved =
+        resolve_audience_in_session(db, actor, &input.audience, &rows, &mut session).await?;
+    let canonical_input = SharingUpdate {
+        expected_version: input.expected_version,
+        enabled: input.enabled,
+        audience: resolved.iter().map(|row| row.audience.clone()).collect(),
+        shared_access: input.shared_access.clone(),
+    };
     let widening = sharing_widens(
         current.enabled,
         &current_audience,
         &current.shared_access,
-        input,
+        &canonical_input,
     );
 
-    let subject_gains: Vec<(&Audience, &'static str)> = input
-        .audience
+    let subject_gains: Vec<(&ResolvedAudience, &'static str)> = resolved
         .iter()
         .filter_map(|wanted| {
             let existing = current_audience.iter().find(|existing| {
-                existing.subject_kind == wanted.subject_kind
-                    && existing.subject_id == wanted.subject_id
+                existing.subject_kind == wanted.audience.subject_kind
+                    && existing.subject_id == wanted.audience.subject_id
             });
             match existing {
                 None => Some((wanted, "new")),
-                Some(existing) if role_rank(wanted.role) > role_rank(existing.role) => {
+                Some(existing) if role_rank(wanted.audience.role) > role_rank(existing.role) => {
                     Some((wanted, "upgraded"))
                 }
                 Some(_) => None,
@@ -775,45 +974,29 @@ pub async fn preview_update(
             },
         )
         .collect();
-    let unchanged_subjects = input
-        .audience
+    let unchanged_subjects = resolved
         .iter()
         .filter(|wanted| {
             current_audience.iter().any(|existing| {
-                existing.subject_kind == wanted.subject_kind
-                    && existing.subject_id == wanted.subject_id
-                    && existing.role == wanted.role
+                existing.subject_kind == wanted.audience.subject_kind
+                    && existing.subject_id == wanted.audience.subject_id
+                    && existing.role == wanted.audience.role
             })
         })
         .count();
-    let unchanged_services = input
+    let unchanged_services = canonical_input
         .shared_access
         .iter()
         .filter(|(service, level)| current.shared_access.get(*service) == Some(*level))
         .count();
 
-    let subject_ids: Vec<_> = subject_gains
-        .iter()
-        .map(|(subject, _)| subject.subject_id.clone())
-        .collect();
-    let users: Vec<User> = if subject_ids.is_empty() {
-        Vec::new()
-    } else {
-        let mut cursor = db
-            .collection(crate::models::user::COLLECTION_NAME)
-            .find(doc! {"_id": {"$in": &subject_ids}})
-            .session(&mut session)
-            .limit(MAX_SHARES as i64)
-            .await?;
-        cursor.stream(&mut session).try_collect().await?
-    };
     let subjects = subject_gains
         .iter()
         .map(|(subject, change)| {
             format!(
                 "{} [{change}, role={}]",
-                summary_subject_label(subject, &users),
-                role_name(subject.role)
+                summary_label(&subject.owner_label),
+                role_name(subject.audience.role)
             )
         })
         .collect::<Vec<_>>();
@@ -866,8 +1049,12 @@ pub async fn preview_update(
             )
         })
         .collect::<Vec<_>>();
-    let agent_label = agent.display_name.as_deref().unwrap_or(&agent.name);
-    let agent_label = summary_label(agent_label);
+    let id_suffix: String = agent.id.chars().take(8).collect();
+    let agent_label = format!(
+        "{} [{}]",
+        summary_label(&agent.name),
+        summary_label(&id_suffix)
+    );
     let mut details = Vec::new();
     if !subjects.is_empty() {
         details.push(format!("people/orgs: {}", subjects.join(", ")));
@@ -964,35 +1151,6 @@ pub async fn update(
             "Invalid sharing version or audience size".into(),
         ));
     }
-    let mut unique = HashSet::new();
-    for subject in &input.audience {
-        if Uuid::parse_str(&subject.subject_id).is_err()
-            || subject.subject_id == actor
-            || !unique.insert(subject.subject_id.clone())
-            || (subject.subject_kind == ShareSubject::Org && subject.role != ShareRole::User)
-        {
-            return Err(AppError::ValidationError("Invalid sharing audience".into()));
-        }
-    }
-    let subjects: Vec<User> = db
-        .collection(crate::models::user::COLLECTION_NAME)
-        .find(doc! {"_id": {"$in": unique.into_iter().collect::<Vec<_>>()}, "is_active": true})
-        .await?
-        .try_collect()
-        .await?;
-    if input.audience.iter().any(|s| {
-        !subjects.iter().any(|u| {
-            u.id == s.subject_id
-                && match s.subject_kind {
-                    ShareSubject::Person => u.user_type.is_person(),
-                    ShareSubject::Org => u.user_type.is_org(),
-                }
-        })
-    }) {
-        return Err(AppError::ValidationError(
-            "Sharing audience is unavailable".into(),
-        ));
-    }
     let granted: HashSet<_> = agent
         .grants
         .service_ids
@@ -1023,6 +1181,15 @@ pub async fn update(
             "Sharing changed; reload before saving".into(),
         ));
     }
+    let resolved =
+        resolve_audience_in_session(db, actor, &input.audience, &previous_shares, &mut session)
+            .await?;
+    let input = SharingUpdate {
+        expected_version: input.expected_version,
+        enabled: input.enabled,
+        audience: resolved.iter().map(|row| row.audience.clone()).collect(),
+        shared_access: input.shared_access,
+    };
     let current_enabled = previous.as_ref().is_some_and(|p| p.enabled);
     let same_audience = previous_shares.len() == input.audience.len()
         && input.audience.iter().all(|wanted| {
@@ -1169,15 +1336,16 @@ pub async fn update(
         .delete_many(doc! {"agent_id": id})
         .session(&mut session)
         .await?;
-    for subject in input.audience {
+    for subject in &resolved {
         shares
             .insert_one(AgentShare {
                 id: Uuid::new_v4().to_string(),
                 agent_id: id.into(),
                 owner_id: actor.into(),
-                subject_kind: subject.subject_kind,
-                subject_id: subject.subject_id,
-                role: subject.role,
+                subject_kind: subject.audience.subject_kind,
+                subject_id: subject.audience.subject_id.clone(),
+                subject_email: subject.owner_email.clone(),
+                role: subject.audience.role,
                 created_at: Utc::now(),
             })
             .session(&mut session)
@@ -1564,6 +1732,7 @@ pub async fn remove_grants_in_session(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn audience(db: &Database, owner: &str, agent: &str) -> AppResult<Vec<Audience>> {
     personal_owner(db, owner, agent).await?;
     let rows: Vec<AgentShare> = db
@@ -1579,6 +1748,75 @@ pub async fn audience(db: &Database, owner: &str, agent: &str) -> AppResult<Vec<
             subject_kind: r.subject_kind,
             subject_id: r.subject_id,
             role: r.role,
+        })
+        .collect())
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AudienceDisplay {
+    pub subject_kind: ShareSubject,
+    pub subject_id: String,
+    pub role: ShareRole,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Owner-only audience labels. The query is bounded to the rows already in
+/// this agent's audience, so it cannot act as a UUID-to-email directory.
+pub async fn audience_for_owner(
+    db: &Database,
+    owner: &str,
+    agent: &str,
+) -> AppResult<Vec<AudienceDisplay>> {
+    personal_owner(db, owner, agent).await?;
+    let rows: Vec<AgentShare> = db
+        .collection(model::SHARES_COLLECTION_NAME)
+        .find(doc! {"agent_id": agent, "owner_id": owner})
+        .limit(MAX_SHARES as i64)
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<_> = rows.iter().map(|row| row.subject_id.clone()).collect();
+    let users: Vec<User> = if ids.is_empty() {
+        Vec::new()
+    } else {
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": &ids}, "is_active": true})
+            .await?
+            .try_collect()
+            .await?
+    };
+    let by_id: HashMap<_, _> = users.iter().map(|user| (user.id.as_str(), user)).collect();
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let user = by_id.get(row.subject_id.as_str());
+            let (email, slug, name) = match (row.subject_kind, user) {
+                (ShareSubject::Person, Some(user)) if user.user_type.is_person() => (
+                    Some(
+                        row.subject_email
+                            .unwrap_or_else(|| user.email.trim().to_lowercase()),
+                    ),
+                    None,
+                    None,
+                ),
+                (ShareSubject::Org, Some(user)) if user.user_type.is_org() => {
+                    (None, user.slug.clone(), user.display_name.clone())
+                }
+                _ => (None, None, None),
+            };
+            AudienceDisplay {
+                subject_kind: row.subject_kind,
+                subject_id: row.subject_id,
+                role: row.role,
+                email,
+                slug,
+                name,
+            }
         })
         .collect())
 }

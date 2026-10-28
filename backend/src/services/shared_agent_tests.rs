@@ -6,10 +6,12 @@ use crate::models::{
     assistant_agent::GuestAccess,
     assistant_sharing::{ShareRole, ShareSubject},
     usage_meter::CredentialClass,
+    user::UserType,
 };
 use mongodb::bson::{Document, doc};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::atomic::Ordering};
+use uuid::Uuid;
 
 async fn mcp(state: &crate::AppState, key: &str, method: &str, params: Value) -> Value {
     use super::billing::route_inventory::{BillingIngress, BillingRoutePolicy};
@@ -157,11 +159,7 @@ async fn shared_agent_preview_lists_only_sanitized_delta_and_rejects_stale_versi
                 subject_id: f.org.clone(),
                 role: ShareRole::User,
             },
-            sharing::Audience {
-                subject_kind: ShareSubject::Person,
-                subject_id: f.member.clone(),
-                role: ShareRole::Manager,
-            },
+            email_audience(&format!("{}@example.com", f.member), ShareRole::Manager),
         ],
         shared_access: BTreeMap::from([(service.clone(), GuestAccess::All)]),
     };
@@ -171,11 +169,8 @@ async fn shared_agent_preview_lists_only_sanitized_delta_and_rejects_stale_versi
     assert!(preview.widening);
     let member_email = format!("{}@example.com", f.member);
     assert!(preview.summary.contains(&member_email));
-    assert!(
-        preview
-            .summary
-            .contains("self-chosen name 'Mallory (manager)'")
-    );
+    assert!(!preview.summary.contains("Mallory"));
+    assert!(!preview.summary.contains("manager)"));
     assert!(!preview.summary.contains('\n'));
     assert!(!preview.summary.contains(&f.outsider));
     assert!(preview.summary.contains("2 existing recipients unchanged"));
@@ -192,6 +187,84 @@ async fn shared_agent_preview_lists_only_sanitized_delta_and_rejects_stale_versi
         sharing::preview_update(&f.state.db, &f.admin, &agent, &stale).await,
         Err(crate::errors::AppError::Conflict(_))
     ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_agent_preview_identity_is_owner_scoped() {
+    let f = Fixture::new("shared_agent_preview_identity_scope").await;
+    let agent = publish(&f, false).await;
+
+    let unknown = Uuid::new_v4().to_string();
+    let unknown_input = sharing::SharingUpdate {
+        expected_version: 1,
+        enabled: true,
+        audience: vec![sharing::Audience {
+            subject_kind: ShareSubject::Person,
+            subject_id: unknown.clone(),
+            role: ShareRole::User,
+        }],
+        shared_access: BTreeMap::new(),
+    };
+    let error = sharing::preview_update(&f.state.db, &f.admin, &agent, &unknown_input)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("@example.com"));
+    assert!(!error.contains("Test User"));
+    assert!(!error.contains(&unknown));
+
+    let existing_input = sharing::SharingUpdate {
+        expected_version: 1,
+        enabled: true,
+        audience: vec![
+            sharing::Audience {
+                subject_kind: ShareSubject::Person,
+                subject_id: f.outsider.clone(),
+                role: ShareRole::Manager,
+            },
+            sharing::Audience {
+                subject_kind: ShareSubject::Org,
+                subject_id: f.org.clone(),
+                role: ShareRole::User,
+            },
+        ],
+        shared_access: BTreeMap::new(),
+    };
+    let preview = sharing::preview_update(&f.state.db, &f.admin, &agent, &existing_input)
+        .await
+        .unwrap();
+    assert!(preview.widening);
+    assert!(
+        preview
+            .summary
+            .contains(&format!("{}@example.com", f.outsider))
+    );
+    assert!(!preview.summary.contains("Test User"));
+
+    let outside_org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(&outside_org, UserType::Org))
+        .await
+        .unwrap();
+    let org_input = sharing::SharingUpdate {
+        expected_version: 1,
+        enabled: true,
+        audience: vec![sharing::Audience {
+            subject_kind: ShareSubject::Org,
+            subject_id: outside_org,
+            role: ShareRole::User,
+        }],
+        shared_access: BTreeMap::new(),
+    };
+    let org_error = sharing::update(&f.state.db, &f.admin, &agent.id, org_input, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(org_error.contains("Sharing audience is unavailable"));
+    assert!(!org_error.contains("Test Org"));
     f.state.db.drop().await.unwrap();
 }
 
@@ -291,15 +364,14 @@ async fn publish(f: &Fixture, manager: bool) -> crate::models::assistant_agent::
             enabled: true,
             shared_access: BTreeMap::new(),
             audience: vec![
-                sharing::Audience {
-                    subject_kind: ShareSubject::Person,
-                    subject_id: f.outsider.clone(),
-                    role: if manager {
+                email_audience(
+                    &format!("{}@example.com", f.outsider),
+                    if manager {
                         ShareRole::Manager
                     } else {
                         ShareRole::User
                     },
-                },
+                ),
                 sharing::Audience {
                     subject_kind: ShareSubject::Org,
                     subject_id: f.org.clone(),
@@ -375,6 +447,15 @@ fn shared_test_skill() -> (
             preload_bytes: 0,
         },
     )
+}
+
+fn email_audience(email: &str, role: ShareRole) -> sharing::Audience {
+    serde_json::from_value(json!({
+        "subject_kind": "person",
+        "email": email,
+        "role": role,
+    }))
+    .unwrap()
 }
 
 async fn pin_shared_test_skill(
@@ -455,11 +536,10 @@ async fn shared_agent_add_only_save_preserves_existing_consent_and_turn() {
     let mut audience = sharing::audience(&f.state.db, &f.admin, &agent.id)
         .await
         .unwrap();
-    audience.push(sharing::Audience {
-        subject_kind: ShareSubject::Person,
-        subject_id: f.member.clone(),
-        role: ShareRole::User,
-    });
+    audience.push(email_audience(
+        &format!("{}@example.com", f.member),
+        ShareRole::User,
+    ));
     let saved = sharing::update(
         &f.state.db,
         &f.admin,
@@ -509,11 +589,10 @@ async fn shared_agent_add_only_save_rejects_stale_write_version() {
         .await
         .unwrap();
     let mut add_alice = base.clone();
-    add_alice.push(sharing::Audience {
-        subject_kind: ShareSubject::Person,
-        subject_id: f.member.clone(),
-        role: ShareRole::User,
-    });
+    add_alice.push(email_audience(
+        &format!("{}@example.com", f.member),
+        ShareRole::User,
+    ));
     let first = sharing::update(
         &f.state.db,
         &f.admin,
@@ -811,11 +890,10 @@ async fn shared_agent_snapshots_batch_queries_and_leave_owner_paths_unchanged() 
                 expected_version: 0,
                 enabled: true,
                 shared_access: BTreeMap::new(),
-                audience: vec![sharing::Audience {
-                    subject_kind: ShareSubject::Person,
-                    subject_id: f.outsider.clone(),
-                    role: ShareRole::User,
-                }],
+                audience: vec![email_audience(
+                    &format!("{}@example.com", f.outsider),
+                    ShareRole::User,
+                )],
             },
             true,
         )

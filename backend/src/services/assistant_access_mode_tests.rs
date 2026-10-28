@@ -62,6 +62,10 @@ async fn allow(f: &Fixture, refusal: &Value) -> String {
     id
 }
 
+fn email_audience(email: &str) -> Value {
+    json!({"subject_kind": "person", "email": email, "role": "user"})
+}
+
 async fn sharing_agent(f: &Fixture) -> (String, String, String) {
     flags::set_platform_override(
         &f.state.db,
@@ -260,7 +264,7 @@ async fn sharing_widening_cards_bind_policy_while_full_access_narrowing_stays_au
     };
     let alice_audience = json!([{
         "subject_kind": "person",
-        "subject_id": alice,
+        "email": format!("{}@example.com", alice),
         "role": "user"
     }]);
 
@@ -282,7 +286,13 @@ async fn sharing_widening_cards_bind_policy_while_full_access_narrowing_stays_au
     .await;
     assert!(is_error);
     assert_eq!(card["error"], "acknowledgement_required", "card={card}");
-    assert!(card["summary"].as_str().unwrap().contains("Alice Example"));
+    assert!(
+        card["summary"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("{}@example.com", alice))
+    );
+    assert!(!card["summary"].as_str().unwrap().contains("Alice Example"));
     assert!(
         card["summary"]
             .as_str()
@@ -333,7 +343,7 @@ async fn sharing_widening_cards_bind_policy_while_full_access_narrowing_stays_au
         2,
         json!([
             {"subject_kind":"person", "subject_id": alice, "role":"user"},
-            {"subject_kind":"person", "subject_id": bob, "role":"user"}
+            {"subject_kind":"person", "email": format!("{}@example.com", bob), "role":"user"}
         ]),
     );
     let (stale_card, stale_error) = crate::handlers::assistant_team::execute_tool(
@@ -358,11 +368,7 @@ async fn sharing_widening_cards_bind_policy_while_full_access_narrowing_stays_au
                     subject_id: alice.clone(),
                     role: ShareRole::User,
                 },
-                sharing::Audience {
-                    subject_kind: ShareSubject::Person,
-                    subject_id: bob.clone(),
-                    role: ShareRole::User,
-                },
+                serde_json::from_value(email_audience(&format!("{}@example.com", bob))).unwrap(),
             ],
             shared_access: [(service.clone(), GuestAccess::All)].into_iter().collect(),
         },

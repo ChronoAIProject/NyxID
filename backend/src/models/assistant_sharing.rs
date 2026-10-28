@@ -18,7 +18,7 @@ pub enum ShareRole {
     Manager,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShareSubject {
     Person,
@@ -33,6 +33,11 @@ pub struct AgentShare {
     pub owner_id: String,
     pub subject_kind: ShareSubject,
     pub subject_id: String,
+    /// The identity label shown to the owner when this share was created.
+    /// This is additive and absent on legacy rows; it is never exposed to a
+    /// recipient or used as an authorization key.
+    #[serde(default)]
+    pub subject_email: Option<String>,
     pub role: ShareRole,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,

@@ -1505,7 +1505,8 @@ async fn dispatch_specialists(
             } else {
                 let policy = crate::services::shared_agent_service::policy(db, &agent).await?;
                 let audience =
-                    crate::services::shared_agent_service::audience(db, owner, &agent.id).await?;
+                    crate::services::shared_agent_service::audience_for_owner(db, owner, &agent.id)
+                        .await?;
                 (
                     json!({"version": policy.version, "revision": policy.revision, "enabled": policy.enabled, "audience": audience, "shared_access": policy.shared_access}),
                     false,

@@ -78,9 +78,12 @@ invalidated by a changed behavior revision (profile, persona, skills or model
 default), so a manager cannot silently change the bot that received that consent.
 
 Direct person shares may grant `manager` or `user`; org audiences grant `user`
-only. An org audience means active members with `can_proxy()` of an active org,
-including its live membership lifecycle, not an expanded list copied at share
-time. Viewers are excluded. A direct share is an independent explicit grant;
+only. An org audience may name only an organization where the personal owner is
+an active member, so the owner can recognize its slug/name without turning a
+sharing preview into an organization directory. Its effective recipients remain
+active members with `can_proxy()` of that active org, including its live
+membership lifecycle, not an expanded list copied at share time. Viewers are
+excluded. A direct share is an independent explicit grant;
 removing an org audience does not revoke a surviving direct share. The owner UI
 shows all sources of effective access and supports removing all such sources.
 
@@ -105,7 +108,7 @@ remain Phase 2 proposals and are not present in 0.73.1.
 | Location | Proposed data and invariants |
 | --- | --- |
 | `assistant_agent_sharing` | Agent UUID `_id`, authoritative personal `owner_id`, defaulted `enabled: false`, write `version: 0`, authority `revision: 0`, `shared_access` map and explicitly published `memory`. `version` is the optimistic-concurrency token and increments on every non-no-op save; `revision` changes only when sharing is first enabled or an existing recipient's authority changes. A side collection prevents legacy agent replacement from erasing the policy. Empty/absent policy means withheld. Behavior is bound by a digest of persona, description, model, pinned skills and operation grants. Shared recipient projections retain those pinned skill references and metadata; skill package content is untrusted behavior, not owner-private memory. |
-| `assistant_agent_shares` | `agent_id`, authoritative `owner_id`, `subject_kind` (`person`/`org`), `subject_id`, `role` (`manager`/`user`), revision and creator/timestamps. Unique `(agent_id, subject_kind, subject_id)`; indexes for subject-to-agent discovery and agent cleanup. No stored `owner` role: it is derived from ownership. |
+| `assistant_agent_shares` | `agent_id`, authoritative `owner_id`, `subject_kind` (`person`/`org`), `subject_id`, owner-visible `subject_email` for person labels (defaulted for legacy rows), `role` (`manager`/`user`), revision and creator/timestamps. Unique `(agent_id, subject_kind, subject_id)`; indexes for subject-to-agent discovery and agent cleanup. No stored `owner` role: it is derived from ownership. |
 | `assistant_agent_consents` | Actor, agent, exact catalog and connection IDs, credential owner/epoch, execution-authority digest, behavior/share revisions, consent scope, decision and timestamps. Consents bind the actor's exact conversation and key as well as the connection/scope; actor and conversation indexes support listing/revocation. `always` remains valid until revoked or any binding changes. No raw credentials or tokens. |
 | `assistant_agent_private_notes` | Actor, agent, bounded notes, revision and timestamps; unique `(agent_id, actor_user_id)`. Reuse the existing 50-note/500-character bounds. Only the actor and that actor's private execution context can read them. |
 | Published team memory | Bounded notes in `assistant_agent_sharing.memory`, edited by owner/managers under the policy revision. No automatic transcript extraction. It is never read through the existing owner-memory store. |
@@ -515,7 +518,10 @@ and `useAppForm` keep current conventions; forms with non-text controls must
 become dirty and enable Save. The server returns caller capabilities so UI
 visibility never substitutes for enforcement.
 
-- **Share dialog:** owner sees named people and organizations, effective roles,
+- **Share dialog:** owner adds new people by normalized email; existing person
+  recipients are edited by their owner-visible UUID/email row. Organizations use
+  owner-visible IDs and labels, and only organizations the owner belongs to are
+  eligible. The owner sees effective roles,
   access sources, remove actions and an explicit enabled state. Manager and user
   descriptions say what they can edit. A “Services for shared users” section
   lists only the agent's grants, initially Withheld, with #1996's level and
@@ -555,7 +561,7 @@ ownership comparison. Phase 1 additions and Phase 2 proposed group surfaces:
 
 | Surface | Contract |
 | --- | --- |
-| `GET/PUT /agents/{id}/sharing` | Combined audience/role and per-service policy; responses include `version` and authority `revision`; owner writes send `expected_version`, projected caller reads; stale versions return 409 and the route never creates grants |
+| `GET/PUT /agents/{id}/sharing` | Combined audience/role and per-service policy; new people use `{subject_kind: "person", email}`, existing person rows use their owner-visible UUID, and org rows require an owner-active membership; responses include owner-visible labels plus `version` and authority `revision`; owner writes send `expected_version`, projected caller reads; stale versions return 409 and the route never creates grants |
 | `GET /agents` | Includes live authorized shared summaries and actor-only retained-history entries; existing owner/org entries remain |
 | `GET/PUT/DELETE /agents/{id}/private-notes` | Actor's own notes only |
 | `GET/PUT /agents/{id}/shared-memory` | Authorized read, owner/manager revision-fenced edit |
@@ -590,7 +596,12 @@ human confirmation classification. Any widening delegation (enabling sharing,
 adding or upgrading an audience subject, or adding/raising an owner service
 level) always requires a one-use owner action card, even in Full access, because
 it delegates account authority. Narrowing and no-op saves follow the normal
-access mode; Full access may auto-allow them with its receipt. In Full access,
+access mode; Full access may auto-allow them with its receipt. For a new person,
+the tool accepts `{subject_kind: "person", email}` and echoes that normalized
+email in the owner card. A UUID person selector is accepted only for an existing
+audience row; organization selectors require the owner to be an active member of
+that organization. Owner-only GET surfaces return only already-visible audience
+labels. In Full access,
 NyxBot may apply a widening only after the owner approves that card; this remains
 an owner-scoped policy mutation and does not grant new services. Extend group management
 tools with invite/quick-add/remove/leave and per-agent guest settings, calling

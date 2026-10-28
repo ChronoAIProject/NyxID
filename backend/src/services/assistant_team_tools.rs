@@ -366,9 +366,10 @@ pub fn schema(name: &str) -> Value {
         "set_agent_sharing" => (
             json!({"agent": subagent, "sharing": {"type":"object", "properties": {
             "expected_version": {"type":"integer", "minimum":0}, "enabled":{"type":"boolean"},
-            "audience":{"type":"array","maxItems":500,"items":{"type":"object","properties":{
-                "subject_kind":{"type":"string","enum":["person","org"]},"subject_id":string(64),"role":{"type":"string","enum":["user","manager"]}
-            },"required":["subject_kind","subject_id","role"],"additionalProperties":false}},
+            "audience":{"type":"array","maxItems":500,"items":{"oneOf":[
+                {"type":"object","properties":{"subject_kind":{"type":"string","enum":["person","org"]},"subject_id":string(64),"role":{"type":"string","enum":["user","manager"]}},"required":["subject_kind","subject_id","role"],"additionalProperties":false},
+                {"type":"object","properties":{"subject_kind":{"const":"person"},"email":{"type":"string","format":"email","maxLength":320},"role":{"type":"string","enum":["user","manager"]}},"required":["subject_kind","email","role"],"additionalProperties":false}
+            ]}},
             "shared_access":{"type":"object","additionalProperties":{"type":"string","enum":["read","use","all"]}}
         },"required":["expected_version","enabled","audience","shared_access"],"additionalProperties":false},
         "acknowledgement_id": string(64)}),
@@ -657,7 +658,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Read your personal specialist's sharing policy, write version and authority revision. No private recipient chats or notes are included."
         }
         "set_agent_sharing" => {
-            "Replace your personal specialist's sharing policy at the exact write version. Widening delegation (enabling sharing, adding or upgrading people/orgs, or adding/raising owner service levels) always requires the owner's one-use action card, even in Full access, because it delegates account authority. Narrowing and no-op saves follow the normal access mode; Full access may auto-allow those with a receipt. The write version changes on every non-no-op save; the authority revision changes only when existing authority changes or sharing is enabled. Managers edit profile/persona and published team memory only. Omit a service from shared_access to withhold your connection. This does not grant new services. Personal NyxBot and organization agents cannot be shared."
+            "Replace your personal specialist's sharing policy at the exact write version. Add a new person with {subject_kind: person, email: email}; use a subject_id only for a person already in this agent's audience, and use an organization subject_id only for an organization you belong to. Widening delegation (enabling sharing, adding or upgrading people/orgs, or adding/raising owner service levels) always requires the owner's one-use action card, even in Full access, because it delegates account authority. Narrowing and no-op saves follow the normal access mode; Full access may auto-allow those with a receipt. The write version changes on every non-no-op save; the authority revision changes only when existing authority changes or sharing is enabled. Managers edit profile/persona and published team memory only. Omit a service from shared_access to withhold your connection. This does not grant new services. Personal NyxBot and organization agents cannot be shared."
         }
         "list_subagents" => {
             "List your specialists with status, grants, what guests may do with each service \
@@ -948,6 +949,12 @@ pub(crate) fn delivery_schema() -> Value {
 }
 
 fn matches_spec(value: &Value, spec: &Value) -> bool {
+    if let Some(options) = spec["oneOf"].as_array() {
+        return options.iter().any(|option| matches_spec(value, option));
+    }
+    if let Some(expected) = spec.get("const") {
+        return value == expected;
+    }
     if let Some(types) = spec["type"].as_array() {
         return types
             .iter()
@@ -1054,6 +1061,13 @@ mod tests {
             }
         });
         assert!(validate("set_agent_sharing", &args).is_ok());
+        let mut email_args = args.clone();
+        email_args["sharing"]["audience"] = json!([{
+            "subject_kind": "person",
+            "email": "person@example.com",
+            "role": "user"
+        }]);
+        assert!(validate("set_agent_sharing", &email_args).is_ok());
     }
 
     #[test]

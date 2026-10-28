@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::{
     AppState,
     errors::AppResult,
-    models::assistant_sharing::{self as model, AgentShare, PrivateNotes},
+    models::assistant_sharing::{self as model, PrivateNotes},
     mw::auth::AuthUser,
     services::{
         assistant_nyxagent as engine, assistant_team_service as team,
@@ -39,14 +39,7 @@ pub async fn get(
     }
     sharing::personal_owner(&state.db, &actor, &id).await?;
     let policy = sharing::policy(&state.db, &agent).await?;
-    let audience: Vec<AgentShare> = state
-        .db
-        .collection(model::SHARES_COLLECTION_NAME)
-        .find(doc! {"agent_id": &id, "owner_id": &actor})
-        .limit(500)
-        .await?
-        .try_collect()
-        .await?;
+    let audience = sharing::audience_for_owner(&state.db, &actor, &id).await?;
     let services: Vec<crate::models::user_service::UserService> = state
         .db
         .collection(crate::models::user_service::COLLECTION_NAME)
@@ -79,12 +72,6 @@ pub async fn get(
         .collect();
     services.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     services.dedup_by(|a, b| a["id"] == b["id"]);
-    let audience: Vec<_> = audience
-        .into_iter()
-        .map(
-            |s| json!({"subject_kind": s.subject_kind, "subject_id": s.subject_id, "role": s.role}),
-        )
-        .collect();
     Ok(Json(
         json!({"enabled": policy.enabled, "role": "owner", "version": policy.version, "revision": policy.revision,
         "owner_id": actor, "audience": audience, "shared_access": policy.shared_access, "services": services}),
