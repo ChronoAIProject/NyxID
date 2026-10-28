@@ -695,14 +695,22 @@ async fn request(
                         .iter()
                         .any(|p| p == super::assistant_model_control_protocol::PROTOCOL)
                 });
-            let runtime =
-                assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG)
-                    .await?;
+            let runtime = if state.config.assistant_model_control_v1_enabled && negotiated_v1 {
+                Some(
+                    assistant_service::resolve_admin_service_by_slug(
+                        &state.db,
+                        engine::SERVICE_SLUG,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             super::assistant_model_control::issue(
                 state,
                 super::assistant_model_control::IssueRequest {
                     chat: &chat,
-                    runtime_catalog_id: &runtime.id,
+                    runtime_catalog_id: runtime.as_ref().map(|runtime| runtime.id.as_str()),
                     outer_body: body,
                     negotiated_v1,
                 },

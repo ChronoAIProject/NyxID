@@ -7,6 +7,368 @@ fn coverage(row: &crate::models::assistant_conversation::AssistantConversation) 
 }
 
 #[tokio::test]
+async fn real_owner_runtime_without_model_control_negotiation_needs_no_admin_catalog() {
+    use crate::services::{
+        assistant_nyxagent_runtime as runtime, platform_manager_contract as contract,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct ExactOnly(AtomicUsize);
+    #[async_trait::async_trait]
+    impl contract::NyxAgentEgress for ExactOnly {
+        async fn request(
+            &self,
+            _: &contract::NyxAgentExecutionContext,
+            _: &contract::RuntimeCredential,
+            request: contract::NyxAgentRequest,
+        ) -> AppResult<axum::response::Response> {
+            assert_eq!(request.method, reqwest::Method::POST);
+            assert_eq!(request.relative_path, "v1/responses");
+            assert!(request.model_control.is_none());
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let terminal = json!({"type":"response.completed","sequence_number":1,"response":{
+                "id":"resp_1234567890abcdef1234567890abcdef_1234567890abcdef1234567890abcdef",
+                "conversation":{"id":"conv_1234567890abcdef1234567890abcdef"},"status":"completed",
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Exact-only ordinary reply"}]}]}});
+            Ok(axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(format!("data: {terminal}\n\n")))
+                .unwrap())
+        }
+    }
+    for enabled in [false, true] {
+        let mut c = Controlled::configured("p2_runtime_no_admin_catalog", false).await;
+        c.f.state.config.assistant_model_control_v1_enabled = enabled;
+        assert!(
+            c.f.state
+                .db
+                .collection::<Document>("downstream_services")
+                .find_one(doc! {"slug":engine::SERVICE_SLUG})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &c.f.state.db,
+                &c.f.state.encryption_keys,
+                &c.f.owner,
+                &c.f.row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (sender, _) = tokio::sync::broadcast::channel(32);
+        let mut events = runtime::Events {
+            checkpoint: None,
+            sender,
+            cursor: 0,
+            reset_notified: false,
+        };
+        let egress = ExactOnly(AtomicUsize::new(0));
+        let result = Box::pin(runtime::execute_owner_turn(
+            &c.f.state,
+            &egress,
+            &runtime::owner_context(&c.f.row).unwrap(),
+            &c.f.row,
+            "Please manage my account",
+            &mut credential,
+            None,
+            &mut events,
+            "exact-only-reply",
+            &mut String::new(),
+            &mut None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(result.text, "Exact-only ordinary reply");
+        assert!(result.error.is_none());
+        assert_eq!(egress.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            c.f.state
+                .db
+                .collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.f.state
+                .db
+                .collection::<Document>("assistant_acknowledgements")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        c.f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn inactive_issuance_needs_no_catalog_but_cannot_downgrade_saved_active_lineage() {
+    for (enabled, negotiated) in [(false, true), (true, false)] {
+        let mut c = Controlled::configured("p2_inactive_without_catalog", false).await;
+        c.f.state.config.assistant_model_control_v1_enabled = enabled;
+        assert!(
+            issue(
+                &c.f.state,
+                IssueRequest {
+                    chat: &c.f.chat,
+                    runtime_catalog_id: None,
+                    outer_body: &json!({"input":"Please manage my account"}),
+                    negotiated_v1: negotiated,
+                }
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            c.f.state
+                .db
+                .collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        c.f.state.config.assistant_model_control_v1_enabled = true;
+        c.token = issue(
+            &c.f.state,
+            IssueRequest {
+                chat: &c.f.chat,
+                runtime_catalog_id: Some(&c.target.service.id),
+                outer_body: &json!({"input":"Please manage my account"}),
+                negotiated_v1: true,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+        let card = c.observe().await;
+        c.f.state.config.assistant_model_control_v1_enabled = enabled;
+        assert!(
+            issue(
+                &c.f.state,
+                IssueRequest {
+                    chat: &c.f.chat,
+                    runtime_catalog_id: None,
+                    outer_body: &json!({"input":"Please manage my account"}),
+                    negotiated_v1: negotiated,
+                }
+            )
+            .await
+            .is_err()
+        );
+        let roots = c.f.state.db.collection::<ModelControlRoot>(COLLECTION_NAME);
+        assert_eq!(roots.count_documents(doc! {}).await.unwrap(), 1);
+        let root = roots.find_one(doc! {}).await.unwrap().unwrap();
+        assert_eq!(root.phase, "awaiting_decision");
+        assert_eq!(root.acknowledgement_id.as_deref(), Some(card.as_str()));
+        c.f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unsupported_outer_body_is_exact_only_while_live_but_cannot_bypass_card_or_stop() {
+    for active in [false, true] {
+        let c = Controlled::new("p2_unsupported_outer_live_fence").await;
+        let body = json!({"input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.invalid/image"}]}]});
+        let request = || IssueRequest {
+            chat: &c.f.chat,
+            runtime_catalog_id: Some(&c.target.service.id),
+            outer_body: &body,
+            negotiated_v1: true,
+        };
+        assert!(issue(&c.f.state, request()).await.unwrap().is_none());
+        if active {
+            let card = c.observe().await;
+            assert!(issue(&c.f.state, request()).await.is_err());
+            let root =
+                c.f.state
+                    .db
+                    .collection::<ModelControlRoot>(COLLECTION_NAME)
+                    .find_one(doc! {"acknowledgement_id":&card})
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(root.phase, "awaiting_decision");
+        } else {
+            engine::request_stop(&c.f.state.db, &c.f.owner, &c.f.row.id)
+                .await
+                .unwrap();
+            assert!(issue(&c.f.state, request()).await.is_err());
+        }
+        assert_eq!(
+            c.f.state
+                .db
+                .collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        c.f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn live_non_user_input_stays_exact_only_but_stale_missing_input_fails_the_live_fence() {
+    let mut c = Controlled::configured("p2_live_event_without_user_input", false).await;
+    c.f.state.config.assistant_model_control_v1_enabled = true;
+    engine::finish_turn(
+        &c.f.state.db,
+        &c.f.row,
+        &c.f.row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "initial turn settled".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    engine::push_events(
+        &c.f.state.db,
+        &c.f.owner,
+        &c.f.row.id,
+        vec![crate::models::assistant_conversation::AgentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: "subagent_settled".into(),
+            text: "A server-authored work item settled".into(),
+            agent_id: None,
+            question_key: None,
+            reply_to: vec![],
+            source_event_ids: vec![],
+            bound: false,
+            report_to: None,
+            media_event_ids: vec![],
+            media_declared: None,
+            media_sent_at: None,
+            invocation_id: None,
+            created_at: Utc::now(),
+        }],
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut start: engine::TurnStart = (&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        agent_id: None,
+        conversation_id: Some(c.f.row.id.clone()),
+        text: String::new(),
+        model: None,
+        access_mode: None,
+    })
+        .into();
+    start.origin = crate::models::assistant_conversation::TurnOrigin::Event;
+    c.f.row = engine::begin_turn(&c.f.state.db, &c.f.owner, start, &c.f.state.encryption_keys)
+        .await
+        .unwrap();
+    c.f.chat = acks::for_key(
+        &c.f.state.db,
+        &c.f.owner,
+        Some(&c.f.row.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // The real event admission saves an event input, without inventing a user
+    // continuation or reusable control from its model-facing narration.
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>("assistant_messages")
+            .count_documents(
+                doc! {"conversation_id":&c.f.row.id,"turn_id":&c.f.chat.turn_id,"role":"event"},
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>("assistant_messages")
+            .count_documents(
+                doc! {"conversation_id":&c.f.row.id,"turn_id":&c.f.chat.turn_id,"role":"user"},
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        issue(
+            &c.f.state,
+            IssueRequest {
+                chat: &c.f.chat,
+                runtime_catalog_id: Some(&c.target.service.id),
+                outer_body: &json!({"input":"event narration"}),
+                negotiated_v1: true,
+            }
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>(COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    engine::request_stop(&c.f.state.db, &c.f.owner, &c.f.row.id)
+        .await
+        .unwrap();
+    assert!(
+        issue(
+            &c.f.state,
+            IssueRequest {
+                chat: &c.f.chat,
+                runtime_catalog_id: Some(&c.target.service.id),
+                outer_body: &json!({"input":"stale event narration"}),
+                negotiated_v1: true,
+            }
+        )
+        .await
+        .is_err()
+    );
+    c.f.state.config.assistant_model_control_v1_enabled = false;
+    assert!(
+        issue(
+            &c.f.state,
+            IssueRequest {
+                chat: &c.f.chat,
+                runtime_catalog_id: None,
+                outer_body: &json!({"input":"stale disabled narration"}),
+                negotiated_v1: false,
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>(COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    c.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn actual_new_turn_recorder_coverage_is_atomic_revision_bound_and_never_backfilled() {
     let c = Controlled::new("p2_recorder_admission").await;
     let markers =
@@ -66,7 +428,7 @@ async fn actual_new_turn_recorder_coverage_is_atomic_revision_bound_and_never_ba
         &c.f.state,
         IssueRequest {
             chat: &chat,
-            runtime_catalog_id: &c.target.service.id,
+            runtime_catalog_id: Some(&c.target.service.id),
             outer_body: &json!({"input":"ordinary admission with old recorder writer"}),
             negotiated_v1: true,
         },
@@ -124,7 +486,7 @@ async fn simultaneous_issue_reloads_under_fence_and_negative_marker_cannot_leave
                 &c.f.state,
                 IssueRequest {
                     chat: &c.f.chat,
-                    runtime_catalog_id: &c.target.service.id,
+                    runtime_catalog_id: Some(&c.target.service.id),
                     outer_body: &body,
                     negotiated_v1: true,
                 },
@@ -243,7 +605,7 @@ async fn negative_recorder_marker_has_no_ttl_and_real_conversation_erasure_remov
             &c.f.state,
             IssueRequest {
                 chat: &c.f.chat,
-                runtime_catalog_id: &c.target.service.id,
+                runtime_catalog_id: Some(&c.target.service.id),
                 outer_body: &json!({"input":"stale after erasure"}),
                 negotiated_v1: true
             }
@@ -443,7 +805,7 @@ async fn actual_owner_erasure_removes_non_ttl_recorder_markers_and_prevents_stal
             &c.f.state,
             IssueRequest {
                 chat: &c.f.chat,
-                runtime_catalog_id: &c.target.service.id,
+                runtime_catalog_id: Some(&c.target.service.id),
                 outer_body: &json!({"input":"stale"}),
                 negotiated_v1: true
             }

@@ -100,7 +100,7 @@ impl Controlled {
             &f.state,
             IssueRequest {
                 chat: &f.chat,
-                runtime_catalog_id: &catalog_id,
+                runtime_catalog_id: Some(&catalog_id),
                 outer_body: &json!({"input":"Please manage my account","store":true}),
                 negotiated_v1: true,
             },
@@ -233,7 +233,7 @@ impl Controlled {
             &self.f.state,
             IssueRequest {
                 chat: &self.f.chat,
-                runtime_catalog_id: &self.target.service.id,
+                runtime_catalog_id: Some(&self.target.service.id),
                 outer_body: &json!({"input":"Saved Allow narration","store":true}),
                 negotiated_v1: true,
             },
@@ -723,7 +723,7 @@ fn capture_derived_next_input_uses_complete_serialization_and_bound_host_result(
 
 #[tokio::test]
 async fn reusable_input_rejects_resource_and_unknown_nested_shapes_before_and_after_activation() {
-    let mut c = Controlled::new("p2_closed_input_schema").await;
+    let c = Controlled::new("p2_closed_input_schema").await;
     let unsupported = vec![
         json!({"role":"user","content":[{"type":"input_image","image_url":"https://example.invalid/image"}]}),
         json!({"role":"user","content":[{"type":"input_file","file_url":"https://example.invalid/file"}]}),
@@ -756,6 +756,14 @@ async fn reusable_input_rejects_resource_and_unknown_nested_shapes_before_and_af
             .unwrap(),
         0
     );
+    let (_, private, _) = persistence::authenticated(&c.f.state, &c.f.chat, &c.token, None)
+        .await
+        .unwrap();
+    assert!(private.preconsent.ineligible);
+    c.f.state.db.drop().await.unwrap();
+    // Unsupported actual callbacks permanently retire that preconsent lineage.
+    // Exercise the active-root negatives on a separately admitted clean turn.
+    let mut c = Controlled::new("p2_closed_input_schema_active").await;
     c.allow_resume().await;
     for item in unsupported {
         let candidate = request(vec![item.clone()]);
@@ -922,6 +930,11 @@ async fn private_status_uses_real_conversation_key_extractor_and_requires_separa
     let app = Router::new()
         .route(
             "/api/v1/assistant/model-control/v1/status",
+            post(crate::handlers::assistant_model_control::status)
+                .put(|_: crate::mw::auth::AuthUser| async { StatusCode::OK }),
+        )
+        .route(
+            "/assistant/model-control/v1/status",
             post(crate::handlers::assistant_model_control::status),
         )
         .route(
@@ -931,21 +944,35 @@ async fn private_status_uses_real_conversation_key_extractor_and_requires_separa
         .with_state(c.f.state.clone());
     for variant in [
         "valid",
+        "nested",
         "raw_key_only",
         "capability_only",
         "wrong_capability",
         "duplicate_control",
         "get",
         "management",
+        "put",
+        "permission_bound",
+        "scheduled_invocation",
+        "public_nyxbot",
+        "shared_entry_transport",
     ] {
+        c.f.state.db.collection::<Document>("api_keys").update_one(
+            doc! {"_id":&c.f.chat.api_key_id},
+            doc! {"$set":{"purpose": if matches!(variant,"permission_bound"|"scheduled_invocation"|"public_nyxbot"|"shared_entry_transport") {variant} else {"general"}}},
+        ).await.unwrap();
         let path = if variant == "management" {
             "/api/v1/assistant/settings"
+        } else if variant == "nested" {
+            "/assistant/model-control/v1/status"
         } else {
             "/api/v1/assistant/model-control/v1/status"
         };
         let mut request = Request::builder()
             .method(if matches!(variant, "get" | "management") {
                 "GET"
+            } else if variant == "put" {
+                "PUT"
             } else {
                 "POST"
             })
@@ -980,7 +1007,7 @@ async fn private_status_uses_real_conversation_key_extractor_and_requires_separa
             )
             .await
             .unwrap();
-        if variant == "valid" {
+        if matches!(variant, "valid" | "nested") {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["cache-control"], "no-store");
             let body: Value =
@@ -995,7 +1022,15 @@ async fn private_status_uses_real_conversation_key_extractor_and_requires_separa
             if variant == "get" {
                 assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
             }
-            if variant == "management" {
+            if matches!(
+                variant,
+                "management"
+                    | "put"
+                    | "permission_bound"
+                    | "scheduled_invocation"
+                    | "public_nyxbot"
+                    | "shared_entry_transport"
+            ) {
                 assert_eq!(response.status(), StatusCode::FORBIDDEN);
             }
         }
@@ -1021,7 +1056,7 @@ async fn retired_wire_root_cannot_migrate_allow_or_dispatch_but_saved_deny_retir
             &c.f.state,
             IssueRequest {
                 chat: &c.f.chat,
-                runtime_catalog_id: &c.target.service.id,
+                runtime_catalog_id: Some(&c.target.service.id),
                 outer_body: &json!({"input":"initial","store":true}),
                 negotiated_v1: false
             }
@@ -1060,7 +1095,7 @@ async fn retired_wire_root_cannot_migrate_allow_or_dispatch_but_saved_deny_retir
             &c.f.state,
             IssueRequest {
                 chat: &c.f.chat,
-                runtime_catalog_id: &c.target.service.id,
+                runtime_catalog_id: Some(&c.target.service.id),
                 outer_body: &json!({"input":"initial","store":true}),
                 negotiated_v1: true
             }

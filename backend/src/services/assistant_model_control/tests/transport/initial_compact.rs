@@ -377,11 +377,15 @@ async fn real_passive_final_claim_stop_revocation_and_credential_drift_send_noth
             c.f.state
                 .db
                 .collection::<UsageMeterRow>("usage_meter")
-                .find_one(doc! {"user_service_id":&c.connection,"status":"reserved"})
+                .find_one(doc! {"user_service_id":&c.connection,"status":"forwarded"})
                 .await
                 .unwrap()
                 .unwrap();
-        assert!(!held.released && !held.forwarded && held.reserved_credits > Credits::ZERO);
+        // Existing proxy accounting marks the hold forwarded before the final
+        // authority claim. No provider send has occurred at this barrier; a
+        // rejected claim must reset that bookkeeping and release the hold.
+        assert!(!held.released && held.forwarded && held.reserved_credits > Credits::ZERO);
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 0);
         match fence {
             "stop" => {
                 engine::request_stop(&c.f.state.db, &c.f.owner, &c.f.row.id)
@@ -646,7 +650,7 @@ async fn real_missing_control_before_or_after_issue_durably_excludes_truly_first
                 &c.f.state,
                 IssueRequest {
                     chat: &c.f.chat,
-                    runtime_catalog_id: &c.target.service.id,
+                    runtime_catalog_id: Some(&c.target.service.id),
                     outer_body: &json!({"input":"Please manage my account","store":true}),
                     negotiated_v1: true,
                 },
@@ -698,7 +702,19 @@ async fn real_missing_control_before_or_after_issue_durably_excludes_truly_first
 
 #[tokio::test]
 async fn real_node_routed_inference_read_is_card_free_billed_and_durably_ineligible() {
-    let (c, peer, server) = fixture("completed").await;
+    let (mut c, peer, server) = fixture("completed").await;
+    // This node owns its credential. The generic no-auth catalog fixture's
+    // false value would classify the installed bearer credential as a
+    // server-held master, which must never be sent through an owner node.
+    c.f.state
+        .db
+        .collection::<Document>("downstream_services")
+        .update_one(
+            doc! {"_id":&c.target.service.id},
+            doc! {"$set":{"requires_user_credential":true}},
+        )
+        .await
+        .unwrap();
     let node = crate::services::machine_integration_tests::ungranted_node_named(
         &c.f,
         &c.f.owner,
@@ -714,6 +730,25 @@ async fn real_node_routed_inference_read_is_card_free_billed_and_durably_ineligi
         )
         .await
         .unwrap();
+    c.target = crate::services::proxy_service::resolve_proxy_target_by_user_service_id(
+        &c.f.state.db,
+        &c.f.state.encryption_keys,
+        &c.f.owner,
+        &c.connection,
+        None,
+        None,
+        crate::services::proxy_service::ProxyExecutionContext::new(
+            None,
+            crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .target;
+    assert!(!crate::services::proxy_service::uses_server_held_master(
+        &c.target
+    ));
     let (sender, mut outbound) = tokio::sync::mpsc::channel(8);
     crate::test_utils::register_test_node_connection(&c.f.state, &node.id, sender).await;
     let count = Arc::new(AtomicUsize::new(0));

@@ -405,6 +405,7 @@ async fn model_deny_unproven_or_expired_captured_destination_never_uses_current_
 async fn platform_recorder_admission_abort_and_same_input_retry_commit_exact_new_turn_marker() {
     let j = Journey::new().await;
     j.link().await;
+    let sends_before_admission = j.sends().await.len();
     crate::services::security_readiness_service::ready_test_replica(&j.state.db).await;
     let update = j.update(1980, "Please manage my account", false);
     let verified =
@@ -489,6 +490,6 @@ async fn platform_recorder_admission_abort_and_same_input_retry_commit_exact_new
         }
     }
     assert_eq!(markers.count_documents(scope()).await.unwrap(), 1);
-    assert_eq!(j.sends().await.len(), 0);
+    assert_eq!(j.sends().await.len(), sends_before_admission);
     j.state.db.drop().await.unwrap();
 }
