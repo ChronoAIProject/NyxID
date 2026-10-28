@@ -715,6 +715,12 @@ fn unavailable_audience() -> AppError {
     AppError::ValidationError("Sharing audience is unavailable".into())
 }
 
+fn sharing_write_unavailable() -> AppError {
+    AppError::ValidationError(
+        "sharing could not be applied to one or more of the people listed".into(),
+    )
+}
+
 /// Resolve only identities the owner supplied directly or already has in the
 /// agent's audience. This is deliberately session-bound: preview and write
 /// use the same policy/share snapshot and never turn an arbitrary UUID into a
@@ -766,24 +772,41 @@ async fn resolve_audience_in_session(
     if !person_ids.is_empty() {
         user_filter.push(doc! {"_id": {"$in": &person_ids}});
     }
-    if !emails.is_empty() {
-        user_filter.push(doc! {"email": {"$in": &emails}});
+    for email in &emails {
+        // Email uniqueness is case-insensitive at the application boundary,
+        // but legacy rows may retain mixed-case values. Fetch exact,
+        // case-insensitive candidates and verify the normalized value below.
+        // The regex is escaped, so the user supplied address is never a
+        // pattern or a prefix match.
+        user_filter.push(doc! {
+            "email": {
+                "$regex": format!("^{}$", regex::escape(email)),
+                "$options": "i",
+            }
+        });
     }
     let people: Vec<User> = if user_filter.is_empty() {
         Vec::new()
     } else {
         let mut cursor = db
             .collection(crate::models::user::COLLECTION_NAME)
-            .find(doc! {"$or": user_filter, "is_active": true, "user_type": "person"})
+            .find(doc! {
+                "$or": user_filter,
+                "is_active": true,
+                "email_verified": true,
+                "user_type": "person",
+            })
             .session(&mut *session)
             .await?;
         cursor.stream(&mut *session).try_collect().await?
     };
     let by_id: HashMap<_, _> = people.iter().map(|user| (user.id.as_str(), user)).collect();
-    let by_email: HashMap<_, _> = people
-        .iter()
-        .map(|user| (user.email.trim().to_lowercase(), user))
-        .collect();
+    let mut by_email: HashMap<String, Vec<&User>> = HashMap::new();
+    for user in &people {
+        if let Some(email) = normalize_email(&user.email) {
+            by_email.entry(email).or_default().push(user);
+        }
+    }
 
     let orgs: Vec<User> = if org_ids.is_empty() {
         Vec::new()
@@ -825,7 +848,10 @@ async fn resolve_audience_in_session(
         let (subject_id, owner_email, owner_label) = if let Some(email) =
             requested_email(&subject.subject_id)
         {
-            let user = by_email.get(email).ok_or_else(unavailable_audience)?;
+            let matches = by_email.get(email).map(Vec::as_slice).unwrap_or_default();
+            let [user] = matches else {
+                return Err(unavailable_audience());
+            };
             if user.id == actor {
                 return Err(unavailable_audience());
             }
@@ -882,6 +908,98 @@ async fn resolve_audience_in_session(
     Ok(resolved)
 }
 
+/// Build the preview's policy subjects without resolving any new person
+/// email or consulting the user directory. New emails remain their supplied
+/// `email:` marker until the approved write resolves them transactionally.
+fn preview_audience_without_directory(
+    input: &[Audience],
+    previous_shares: &[AgentShare],
+) -> AppResult<Vec<ResolvedAudience>> {
+    if input.len() > MAX_SHARES {
+        return Err(unavailable_audience());
+    }
+    let existing_people: HashMap<&str, &AgentShare> = previous_shares
+        .iter()
+        .filter(|row| row.subject_kind == ShareSubject::Person)
+        .map(|row| (row.subject_id.as_str(), row))
+        .collect();
+    let existing_emails: HashMap<String, &AgentShare> = previous_shares
+        .iter()
+        .filter(|row| row.subject_kind == ShareSubject::Person)
+        .filter_map(|row| {
+            row.subject_email
+                .as_deref()
+                .and_then(normalize_email)
+                .map(|email| (email, row))
+        })
+        .collect();
+    let mut resolved = Vec::with_capacity(input.len());
+    let mut seen = HashSet::new();
+    for subject in input {
+        if subject.subject_kind == ShareSubject::Org && subject.role != ShareRole::User {
+            return Err(unavailable_audience());
+        }
+        let (subject_id, owner_email, owner_label) =
+            if let Some(email) = requested_email(&subject.subject_id) {
+                if let Some(existing) = existing_emails.get(email) {
+                    let label = existing
+                        .subject_email
+                        .clone()
+                        .unwrap_or_else(|| email.to_owned());
+                    (existing.subject_id.clone(), Some(label.clone()), label)
+                } else {
+                    (
+                        subject.subject_id.clone(),
+                        Some(email.to_owned()),
+                        email.to_owned(),
+                    )
+                }
+            } else if Uuid::parse_str(&subject.subject_id).is_err() {
+                return Err(unavailable_audience());
+            } else if subject.subject_kind == ShareSubject::Person {
+                let existing = existing_people
+                    .get(subject.subject_id.as_str())
+                    .ok_or_else(unavailable_audience)?;
+                let label = existing
+                    .subject_email
+                    .clone()
+                    .unwrap_or_else(|| subject.subject_id.clone());
+                (
+                    subject.subject_id.clone(),
+                    existing.subject_email.clone(),
+                    label,
+                )
+            } else {
+                // The write performs the live org membership and label check;
+                // a preview only echoes the owner-supplied UUID.
+                (subject.subject_id.clone(), None, subject.subject_id.clone())
+            };
+        if !seen.insert((subject.subject_kind, subject_id.clone())) {
+            return Err(unavailable_audience());
+        }
+        resolved.push(ResolvedAudience {
+            audience: Audience {
+                subject_kind: subject.subject_kind,
+                subject_id,
+                role: subject.role,
+            },
+            owner_email,
+            owner_label,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Preview authorization is already anchored to the loaded personal agent.
+/// Avoid a user-directory read here: a preview must never resolve a new email
+/// before the owner has approved the exact delegation card.
+fn preview_personal_owner(actor: &str, agent: &AssistantAgent) -> AppResult<()> {
+    if agent.user_id != actor || agent.is_nyxbot() || agent.destroyed_at.is_some() {
+        return Err(missing());
+    }
+    Ok(())
+}
+
 /// Read the current policy and audience for the owner-card preview. The
 /// proposed `SharingUpdate` is also the card's argument digest, so a later
 /// version change cannot be approved accidentally.
@@ -891,7 +1009,7 @@ pub async fn preview_update(
     agent: &AssistantAgent,
     input: &SharingUpdate,
 ) -> AppResult<SharingPreview> {
-    personal_owner(db, actor, &agent.id).await?;
+    preview_personal_owner(actor, agent)?;
     let mut session = db.client().start_session().await?;
     session.start_transaction().await?;
     let current = db
@@ -930,8 +1048,7 @@ pub async fn preview_update(
             role: row.role,
         })
         .collect();
-    let resolved =
-        resolve_audience_in_session(db, actor, &input.audience, &rows, &mut session).await?;
+    let resolved = preview_audience_without_directory(&input.audience, &rows)?;
     let canonical_input = SharingUpdate {
         expected_version: input.expected_version,
         enabled: input.enabled,
@@ -1181,9 +1298,29 @@ pub async fn update(
             "Sharing changed; reload before saving".into(),
         ));
     }
-    let resolved =
-        resolve_audience_in_session(db, actor, &input.audience, &previous_shares, &mut session)
-            .await?;
+    let has_email_subject = input
+        .audience
+        .iter()
+        .any(|subject| requested_email(&subject.subject_id).is_some());
+    let resolved = match resolve_audience_in_session(
+        db,
+        actor,
+        &input.audience,
+        &previous_shares,
+        &mut session,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            session.abort_transaction().await?;
+            return Err(if has_email_subject {
+                sharing_write_unavailable()
+            } else {
+                error
+            });
+        }
+    };
     let input = SharingUpdate {
         expected_version: input.expected_version,
         enabled: input.enabled,

@@ -269,6 +269,232 @@ async fn shared_agent_preview_identity_is_owner_scoped() {
 }
 
 #[tokio::test]
+async fn shared_agent_preview_email_is_directory_free_and_unknown_is_carded() {
+    let (f, _, reads) = Fixture::observed("shared_agent_preview_email_directory_free").await;
+    let agent = publish(&f, false).await;
+    reads.store(0, Ordering::SeqCst);
+    let unknown = email_audience("unknown@example.com", ShareRole::User);
+    let unknown_preview = sharing::preview_update(
+        &f.state.db,
+        &f.admin,
+        &agent,
+        &sharing::SharingUpdate {
+            expected_version: 1,
+            enabled: true,
+            audience: vec![unknown],
+            shared_access: BTreeMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(unknown_preview.widening);
+    assert!(unknown_preview.summary.contains("unknown@example.com"));
+    // The preview reads only the policy and existing share rows. In
+    // particular, it does not perform the owner-directory or email lookup.
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+
+    reads.store(0, Ordering::SeqCst);
+    let known_preview = sharing::preview_update(
+        &f.state.db,
+        &f.admin,
+        &agent,
+        &sharing::SharingUpdate {
+            expected_version: 1,
+            enabled: true,
+            audience: vec![email_audience(
+                &format!("{}@example.com", f.member),
+                ShareRole::User,
+            )],
+            shared_access: BTreeMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(known_preview.widening);
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert!(
+        known_preview
+            .summary
+            .contains(&format!("{}@example.com", f.member))
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_agent_email_write_requires_verified_unique_identity() {
+    let f = Fixture::new("shared_agent_email_identity_binding").await;
+    let agent = publish(&f, false).await;
+
+    f.state
+        .db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.member},
+            doc! {"$set": {"email": "MiXeD@Example.COM", "email_verified": true}},
+        )
+        .await
+        .unwrap();
+    let mut audience = sharing::audience(&f.state.db, &f.admin, &agent.id)
+        .await
+        .unwrap();
+    audience.push(email_audience("mixed@example.com", ShareRole::User));
+    sharing::update(
+        &f.state.db,
+        &f.admin,
+        &agent.id,
+        sharing::SharingUpdate {
+            expected_version: 1,
+            enabled: true,
+            audience,
+            shared_access: BTreeMap::new(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let mixed_row = f
+        .state
+        .db
+        .collection::<crate::models::assistant_sharing::AgentShare>(
+            crate::models::assistant_sharing::SHARES_COLLECTION_NAME,
+        )
+        .find_one(doc! {"agent_id": &agent.id, "subject_id": &f.member})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mixed_row.subject_email.as_deref(),
+        Some("mixed@example.com")
+    );
+
+    let unverified_agent = publish_named(&f, false, "unverified-target").await;
+    f.state
+        .db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.member},
+            doc! {"$set": {"email": "unverified@example.com", "email_verified": false}},
+        )
+        .await
+        .unwrap();
+    let mut unverified_audience = sharing::audience(&f.state.db, &f.admin, &unverified_agent.id)
+        .await
+        .unwrap();
+    unverified_audience.push(email_audience("unverified@example.com", ShareRole::User));
+    let unverified_error = sharing::update(
+        &f.state.db,
+        &f.admin,
+        &unverified_agent.id,
+        sharing::SharingUpdate {
+            expected_version: 1,
+            enabled: true,
+            audience: unverified_audience,
+            shared_access: BTreeMap::new(),
+        },
+        true,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(unverified_error.contains("sharing could not be applied"));
+    assert_eq!(
+        sharing::policy(&f.state.db, &unverified_agent)
+            .await
+            .unwrap()
+            .version,
+        1
+    );
+
+    let ambiguous_agent = publish_named(&f, false, "ambiguous-target").await;
+    f.state
+        .db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.member},
+            doc! {"$set": {"email": "ambiguous@example.com", "email_verified": true}},
+        )
+        .await
+        .unwrap();
+    let duplicate_id = Uuid::new_v4().to_string();
+    let mut duplicate = crate::test_utils::test_user(&duplicate_id, UserType::Person);
+    duplicate.email = "AMBIGUOUS@EXAMPLE.COM".into();
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(duplicate)
+        .await
+        .unwrap();
+    let mut ambiguous_audience = sharing::audience(&f.state.db, &f.admin, &ambiguous_agent.id)
+        .await
+        .unwrap();
+    ambiguous_audience.push(email_audience("ambiguous@example.com", ShareRole::User));
+    let ambiguous_error = sharing::update(
+        &f.state.db,
+        &f.admin,
+        &ambiguous_agent.id,
+        sharing::SharingUpdate {
+            expected_version: 1,
+            enabled: true,
+            audience: ambiguous_audience,
+            shared_access: BTreeMap::new(),
+        },
+        true,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(ambiguous_error.contains("sharing could not be applied"));
+    assert_eq!(
+        sharing::audience(&f.state.db, &f.admin, &ambiguous_agent.id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_agent_approved_unknown_email_writes_nothing() {
+    let f = Fixture::new("shared_agent_unknown_email_write").await;
+    let agent = publish(&f, false).await;
+    let mut audience = sharing::audience(&f.state.db, &f.admin, &agent.id)
+        .await
+        .unwrap();
+    audience.push(email_audience(
+        "does-not-exist@example.com",
+        ShareRole::User,
+    ));
+    let error = sharing::update(
+        &f.state.db,
+        &f.admin,
+        &agent.id,
+        sharing::SharingUpdate {
+            expected_version: 1,
+            enabled: true,
+            audience,
+            shared_access: BTreeMap::new(),
+        },
+        true,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("sharing could not be applied to one or more of the people listed"));
+    let current = sharing::policy(&f.state.db, &agent).await.unwrap();
+    assert_eq!(current.version, 1);
+    assert_eq!(current.revision, 1);
+    assert_eq!(
+        sharing::audience(&f.state.db, &f.admin, &agent.id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn shared_agent_write_rechecks_widening_and_requires_delegation_approval() {
     let f = Fixture::new("shared_agent_write_widening_fence").await;
     let agent = publish(&f, false).await;
@@ -336,6 +562,14 @@ async fn shared_agent_write_rechecks_widening_and_requires_delegation_approval()
 }
 
 async fn publish(f: &Fixture, manager: bool) -> crate::models::assistant_agent::AssistantAgent {
+    publish_named(f, manager, "shared-researcher").await
+}
+
+async fn publish_named(
+    f: &Fixture,
+    manager: bool,
+    name: &str,
+) -> crate::models::assistant_agent::AssistantAgent {
     sharing::ensure_indexes(&f.state.db).await.unwrap();
     flags::set_platform_override(
         &f.state.db,
@@ -350,7 +584,7 @@ async fn publish(f: &Fixture, manager: bool) -> crate::models::assistant_agent::
         &f.state.db,
         &f.state.encryption_keys,
         &f.admin,
-        f.request("shared-researcher"),
+        f.request(name),
     )
     .await
     .unwrap()
