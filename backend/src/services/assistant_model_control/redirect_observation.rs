@@ -55,6 +55,7 @@ impl HttpClient {
     }
 
     /// Raw clients retain ordinary behavior but cannot attest zero redirects.
+    #[cfg(test)]
     pub(crate) fn unobserved(client: reqwest::Client) -> Self {
         Self(Arc::new(ClientInner {
             client,

@@ -26,9 +26,6 @@ pub const MAX_ITEM_BYTES: usize = 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_STREAM_EVENTS: usize = 16384;
-/// Retain uncertain passive sends without eviction for the root's lifetime.
-/// At capacity a new passive send is refused before egress.
-pub const MAX_UNCERTAIN_READS: usize = 2048;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -371,54 +368,6 @@ pub struct VerifyReply {
 pub struct VerifyRequest {
     pub protocol: String,
     pub outer_request_binding: String,
-}
-
-/// Encrypted private object. No control material is added to Record.response.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BridgeJournal {
-    pub protocol: String,
-    pub root_id: String,
-    pub outer_request_binding: String,
-    pub phase: BridgePhase,
-    /// Exact control/request digests, independent of the current phase. A new
-    /// ordinary Read or process restart cannot erase an earlier uncertain send.
-    #[serde(default)]
-    pub uncertain_reads: Vec<String>,
-    #[serde(default)]
-    pub tool_results: Vec<ToolResultReceipt>,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BridgePhase {
-    Unactivated,
-    /// Passive Read has no recoverable provider-send token. Only actual server
-    /// observation can complete it; status uncertainty never authorizes replay.
-    ReadForwarding {
-        request_binding: String,
-    },
-    ReadCompleted {
-        receipt: CompletionReceipt,
-    },
-    ReadIneligible {
-        request_binding: Option<String>,
-    },
-    AwaitingDecision {
-        acknowledgement_id: String,
-    },
-    Prepared {
-        step: PreparedStep,
-    },
-    Forwarding {
-        step: PreparedStep,
-    },
-    Completed {
-        receipt: CompletionReceipt,
-    },
-    OutcomeUnknown {
-        step_id: String,
-    },
-    Denied,
 }
 
 #[cfg(test)]
