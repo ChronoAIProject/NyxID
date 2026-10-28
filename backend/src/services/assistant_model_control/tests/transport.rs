@@ -22,6 +22,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+mod compact;
+
 struct Provider {
     calls: AtomicUsize,
     headers: tokio::sync::Mutex<Vec<HeaderMap>>,
@@ -31,6 +33,7 @@ struct Provider {
     call_override: tokio::sync::Mutex<Option<Value>>,
     repeat_call: tokio::sync::Mutex<Option<Value>>,
     tool_calls: AtomicUsize,
+    bodies: tokio::sync::Mutex<Vec<(String, Value)>>,
 }
 fn completion(call: usize) -> Value {
     json!({"id":format!("resp-{call}"),"object":"response","status":"completed","error":null,"incomplete_details":null,
@@ -40,9 +43,11 @@ fn completion(call: usize) -> Value {
 async fn provider(
     State(peer): State<Arc<Provider>>,
     headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
 ) -> axum::response::Response {
     let call = peer.calls.fetch_add(1, Ordering::SeqCst);
     peer.headers.lock().await.push(headers);
+    peer.bodies.lock().await.push(("responses".into(), body));
     if peer.mode == "redirect" {
         return (
             StatusCode::TEMPORARY_REDIRECT,
@@ -95,10 +100,12 @@ async fn fixture(mode: &'static str) -> (Controlled, Arc<Provider>, tokio::task:
         call_override: tokio::sync::Mutex::new(None),
         repeat_call: tokio::sync::Mutex::new(None),
         tool_calls: AtomicUsize::new(0),
+        bodies: tokio::sync::Mutex::new(vec![]),
     });
     let second = peer.clone();
     let app = Router::new()
         .route("/responses", post(provider))
+        .route("/responses/compact", post(compact::provider))
         .route(
             "/tool-output",
             get(|State(peer): State<Arc<Provider>>| async move {
@@ -224,10 +231,30 @@ async fn callback_control(
     step: Option<&wire::PreparedStep>,
     include_control: bool,
 ) -> AppResult<axum::response::Response> {
-    let mut auth = c.f.auth.clone();
-    auth.assistant_chat = Some(Arc::new(c.f.chat.clone()));
+    callback_path(c, body, step, include_control, "responses").await
+}
+async fn callback_path(
+    c: &Controlled,
+    body: &Value,
+    step: Option<&wire::PreparedStep>,
+    include_control: bool,
+    path: &str,
+) -> AppResult<axum::response::Response> {
+    // Use production key authority construction, including its live turn
+    // fence. A synthetic chat alone skips ModelRequest capture and therefore
+    // cannot prove ordinary request-priced model usage at response EOF.
+    let key =
+        c.f.state
+            .db
+            .collection::<crate::models::api_key::ApiKey>("api_keys")
+            .find_one(doc! {"_id":&c.f.chat.api_key_id})
+            .await?
+            .unwrap();
+    let auth = crate::mw::auth::api_key_auth_user(&c.f.state.db, &key, None, None, None).await?;
+    assert!(auth.assistant_turn_fence.is_some());
+    assert!(auth.assistant_chat.is_some());
     let mut req = Request::builder().method("POST").uri(format!(
-        "/api/v1/proxy/s/p2-model/responses?_nyxid_via={}",
+        "/api/v1/proxy/s/p2-model/{path}?_nyxid_via={}",
         c.connection
     ));
     *req.headers_mut().unwrap() = c.headers();
@@ -246,7 +273,7 @@ async fn callback_control(
         State(c.f.state.clone()),
         auth,
         Default::default(),
-        Path(("p2-model".into(), "responses".into())),
+        Path(("p2-model".into(), path.into())),
         req,
     ))
     .await

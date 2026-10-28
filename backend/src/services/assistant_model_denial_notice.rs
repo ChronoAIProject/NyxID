@@ -49,8 +49,8 @@ async fn model_source_turn(
                     && args["root_id"] == root.id
                     // Deny retirement only: neither value grants dispatch compatibility.
                     && args["protocol"].as_str().is_some_and(|protocol|
-                        matches!(protocol, super::assistant_model_control_protocol::PROTOCOL
-                            | super::assistant_model_control_protocol::RETIRED_PROTOCOL))
+                        protocol == super::assistant_model_control_protocol::PROTOCOL
+                            || super::assistant_model_control_protocol::is_retired(protocol))
             })
         });
         return Ok(Some((

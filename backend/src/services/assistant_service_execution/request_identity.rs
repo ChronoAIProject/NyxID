@@ -145,6 +145,9 @@ impl InferenceFallbackReason {
             Self::MetadataObjectLimit => {
                 "Client metadata exceeds the 2048-byte automatic Read limit. Explicit approval fixes the complete bounded map and permits validated continuation text with the same exact connection, model and fixed Responses configuration."
             }
+            Self::CompactProtocolUnverified => {
+                "Automatic Read does not cover standalone compaction. Reusable approval requires the presealed generation and standalone-compact family, the same exact connection and model, and complete observed compact output as the next context without pruning."
+            }
             _ => {
                 "This shape is outside automatic Read. Reusable approval requires the closed Responses v1 contract; unsupported metadata, resources or compaction remain exact-only."
             }

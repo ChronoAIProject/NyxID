@@ -397,11 +397,13 @@ mod reuse_tests {
             input: vec![],
             capability_hash: "step".into(),
             capability_ciphertext: vec![],
+            operation: StepOperation::Generation,
             phase: StepPhase::Completed {
                 completion: ObservedCompletion {
                     response_id: "response".into(),
                     output: vec![],
                     calls: vec![],
+                    compaction: None,
                 },
                 receipt: wire::CompletionReceipt {
                     root_id: "root".into(),

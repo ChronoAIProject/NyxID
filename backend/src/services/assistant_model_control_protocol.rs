@@ -3,12 +3,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-// This exact revision is advertised/negotiated on both peers. The original
-// v1 runtime cannot prove projected/refusal results or bind a character limit.
-// Never advertise its protocol as compatible or migrate an active old root.
-pub const PROTOCOL: &str = "nyxid-owner-model-control-v1-tool-projection-1";
+// This exact revision is advertised/negotiated on both peers. Earlier peers
+// cannot prove the canonical compact family, projected/refusal results or the
+// required character limit. Never migrate active roots or imply compatibility.
+pub const PROTOCOL: &str = "nyxid-owner-model-control-v1-canonical-compact-1";
 /// Retirement only; this revision is never advertised or accepted for dispatch.
 pub const RETIRED_PROTOCOL: &str = "nyxid-owner-model-control-v1";
+pub const RETIRED_TOOL_PROTOCOL: &str = "nyxid-owner-model-control-v1-tool-projection-1";
+pub fn is_retired(protocol: &str) -> bool {
+    matches!(protocol, RETIRED_PROTOCOL | RETIRED_TOOL_PROTOCOL)
+}
 pub const CONTROL_HEADER: &str = "x-nyxid-runtime-model-control";
 pub const STEP_HEADER: &str = "x-nyxid-runtime-model-step";
 pub const TOOL_HEADER: &str = "x-nyxid-runtime-model-tool";

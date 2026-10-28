@@ -19,7 +19,8 @@ impl CompletionObserver {
             .get("content-type")
             .and_then(|h| h.to_str().ok())
             .is_some_and(crate::mw::security_headers::is_sse_media_type);
-        let success = response.status().is_success();
+        let success = response.status().is_success()
+            && !(self.claim.operation == StepOperation::Compact && sse);
         let mut builder = http::Response::builder()
             .status(response.status())
             .version(response.version())
@@ -52,7 +53,7 @@ impl CompletionObserver {
             }
             let completion = bounded.then(|| terminal_response(&bytes, sse)).transpose();
             match completion {
-                Ok(Some(value)) => { if self.complete(value).await.is_err() { let _=self.unknown().await; } },
+                Ok(Some(value)) => { if self.complete(value, hex::encode(Sha256::digest(bytes.as_slice()))).await.is_err() { let _=self.unknown().await; } },
                 _ => { let _=self.unknown().await; },
             }
         };
@@ -78,18 +79,31 @@ impl CompletionObserver {
         }).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
     }
 
-    async fn complete(&self, value: Value) -> AppResult<()> {
+    async fn complete(&self, value: Value, body_sha256: String) -> AppResult<()> {
         let mut session = self.state.db.client().start_session().await?;
         session.start_transaction().and_run2(async |session| {
             let result = async {
                 let (mut row, mut private) = persistence::load(&self.state, &self.claim.root_id, Some(&mut *session)).await?;
-                let fixed = &private.envelope.as_ref().ok_or_else(conflict)?.fixed;
-                let complete = envelope::verify_completion(&value, fixed)?;
                 let step = private.steps.iter_mut().find(|s| s.id == self.claim.step_id).ok_or_else(conflict)?;
                 if !matches!(&step.phase, StepPhase::Dispatched {dispatch_id} if dispatch_id == &self.claim.dispatch_id) { return Err(conflict()); }
+                let (complete, compaction) = match step.operation {
+                    StepOperation::Generation => {
+                        let fixed = &private.envelope.as_ref().ok_or_else(conflict)?.fixed;
+                        (envelope::verify_completion(&value, fixed)?, None)
+                    }
+                    StepOperation::Compact => {
+                        let complete = compact::verify(value.clone(), &step.input)?;
+                        (VerifiedProviderCompletion {response_id:complete.response_id,output:complete.output,calls:vec![]},
+                            Some(ObservedCompaction {response:complete.response,body_sha256:body_sha256.clone()}))
+                    }
+                };
+                let output_binding = match &compaction {
+                    Some(compaction) => digest(json!({"response":compaction.response,"body_sha256":compaction.body_sha256})),
+                    None => digest(json!(complete.output)),
+                };
                 let receipt = wire::CompletionReceipt {root_id:row.id.clone(),step_id:step.id.clone(),ordinal:step.ordinal,
-                    request_binding:step.request_binding.clone(),output_binding:digest(json!(complete.output)),receipt_bearer:persistence::new_token()?};
-                step.phase = StepPhase::Completed {completion:ObservedCompletion {response_id:complete.response_id,output:complete.output,calls:complete.calls},receipt};
+                    request_binding:step.request_binding.clone(),output_binding,receipt_bearer:persistence::new_token()?};
+                step.phase = StepPhase::Completed {completion:ObservedCompletion {response_id:complete.response_id,output:complete.output,calls:complete.calls,compaction},receipt};
                 persistence::save(&self.state,&mut row,&private,session).await
             }.await;
             super::super::api_key_mutation_service::transaction_result(result)

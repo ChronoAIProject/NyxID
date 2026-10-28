@@ -346,7 +346,7 @@ owner turns are eligible; guest/public and direct-provider profiles are not.
 The reusable subset is bounded standard `POST responses`, no query,
 `store=false`, no background/provider-hosted effects or resource URLs, closed
 text input/configuration and declared host function tools. Selected connection,
-catalog, owner/key/credential epochs, model, path, semantic headers, instructions,
+catalog, owner/key/credential epochs, model, approved endpoint family, semantic headers, instructions,
 tools and metadata remain fixed. Fully fixed bounded opaque string maps may
 contain unknown keys or strings over 1,024 bytes under explicit Write consent;
 this never widens automatic Read. Provider options are pinned opaque values,
@@ -357,7 +357,7 @@ remain outside the proven native reset contract. Later steps require exact serve
 and subsequent actual MCP tool results. A provider call declaration is not a
 tool-result receipt. Current native events bind the observed call ID to the
 current thread/turn; events without that ID require unique name/arguments.
-The exact `nyxid-owner-model-control-v1-tool-projection-1` revision requires a
+The exact `nyxid-owner-model-control-v1-canonical-compact-1` revision requires a
 1,024–65,536-character result limit fixed at first tool prepare. The full controlled MCP ingress is bounded at 2 MiB including JSON-RPC envelope
 overhead; supported parsed handler results use the existing deterministic Unicode
 truncation and refusal guidance. Receipts bind that exact model-facing text, success flag, originating
@@ -370,6 +370,22 @@ spend another budget slot. The bounded reply cache is scoped to the control and
 observed completion step, including locally blocked declarations. Missing activity,
 ambiguous identity, changed limits or unsupported projections cannot advance.
 
+New consent explicitly includes standalone `POST responses/compact` after an
+approved generation. Generation configuration, declared tools and opaque
+metadata are sealed before Allow. Compact has a separate closed schema: the
+same model and exact optional instructions, with no query, tools, metadata or
+generation-only store/stream options. Before compact, the complete observed
+generation output and every actual host-tool result must be accounted for.
+A successful `response.compaction` JSON body must reach real upstream EOF;
+an SSE `response.completed` frame cannot certify compact. The encrypted root
+retains the full response and raw-body digest. The whole returned output becomes
+the exact next generation input, without pruning, reordering, additions or
+native serialization projections. Returned privileged/tool history must match
+the actual sent history; retained calls declare no new executable tools and
+mint no tool receipts. Closed nonprivileged provider summaries and opaque
+compaction items are accepted as canonical output without inspecting ciphertext.
+This follows the [standalone compact contract](https://developers.openai.com/api/docs/guides/compaction).
+
 Prepare fixes the complete send digest. Duplicate decisions, continuation
 redelivery and Retry retain the logical root/step; they cannot rearm a claimed
 send. The final transactional claim follows billing admission; a losing callback
@@ -380,7 +396,8 @@ known-completed lost output is refused rather than resent. Consent expires no
 later than the saved Allow deadline. This is not an external exactly-once promise.
 
 Scalar/non-string or over-budget metadata maps, unproven native opaque
-correlation changes, reusable `responses/compact`, external image/file inputs and
+correlation changes, compact-first Allow without presealed generation authority,
+native compact filtering/reinjection, external image/file inputs and
 unsupported tool projections remain outside this contract. Compact is not classified as
 inherently stateful. Before activation, unsupported shapes/transports retain
 their legacy exact-only behavior; translated senders, node routes, pools,
@@ -388,7 +405,7 @@ overrides and catalog-only selections cannot activate reusable authority.
 After activation, missing controls, changed authority or unsupported transitions
 fail closed, even if a later body looks like strict Read.
 
-Model Deny uses a durable deterministic notice and exact saved destination for
+Model Deny, including a digest-bound compact-first legacy exact card, uses a durable deterministic notice and exact saved destination for
 app and supported modern captured-platform replies, with no model call or new
 card. Legacy one-shot Nyxbot additional-reply delivery remains unsupported;
 expired/unproven destinations or full saved-source snapshot drift are refusals,
@@ -398,8 +415,10 @@ their existing path.
 Deploy both sides and configure the matching existing NyxID model-source profile;
 verify `assistant:model-control-protocol-v1` against the full serving roster and
 drained old writers, then enable the paired flags. Issuance still requires actual
-exact revision negotiation. The original `nyxid-owner-model-control-v1` revision
-must drain under matching writers before replacement. New peers do not migrate
+exact revision negotiation. The original `nyxid-owner-model-control-v1` and
+`nyxid-owner-model-control-v1-tool-projection-1` revisions must drain under
+matching writers before replacement. Envelopes without the sealed compact family
+cannot gain it by continuation. New peers do not migrate
 old tokens, permit old-root Allow or dispatch, or claim mixed-revision tool
 compatibility. Digest-proven retired cards retain Deny and supported deterministic
 notice settlement. Disabling cannot reset active roots or restore legacy execution.

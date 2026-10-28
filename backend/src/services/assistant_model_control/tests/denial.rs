@@ -127,6 +127,60 @@ async fn deny_card(c: &Controlled, card: String) -> String {
     card
 }
 
+/// Shared assertion for actual callback fixtures: decision and exclusive
+/// deterministic runtime execution use the ordinary saved-reply settlement.
+pub(super) async fn assert_model_deny_settlement(c: &Controlled, card: String) {
+    let card = deny_card(c, card).await;
+    let row = begin_notice(c).await;
+    let active = row.active_turn.as_ref().unwrap();
+    assert_eq!(active.events.len(), 1);
+    assert_eq!(active.events[0].id, card);
+    assert!(notice::is_notice(&active.events[0]));
+    let egress = NoModel(AtomicUsize::new(0));
+    let result = execute(c, &row, &egress).await.unwrap();
+    assert!(result.error.is_none());
+    assert!(result.text.contains("You denied this model request"));
+    assert_eq!(egress.0.load(Ordering::SeqCst), 0);
+    let reply = uuid::Uuid::new_v4().to_string();
+    settle(c, &row, &result, &reply).await;
+    settle(c, &row, &result, &reply).await;
+    notice::recover(&c.f.state.db).await.unwrap();
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>("assistant_model_denial_notices")
+            .count_documents(doc! {"_id":&card,"state":"settled","reply_id":&reply})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>("assistant_model_denial_notices")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        engine::get(&c.f.state.db, &c.f.owner, &row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn unknown_and_oversized_fixed_metadata_deny_settles_without_model_or_second_card() {
     for metadata in [
@@ -644,9 +698,17 @@ async fn saved_ssh_effect_denials_keep_existing_explanation_only_for_known_bound
 #[tokio::test]
 async fn retired_saved_card_deny_has_one_deterministic_notice_but_unknown_malformed_digest_and_allow_refuse()
  {
-    for case in ["retired", "unknown", "malformed", "bad_digest"] {
+    for case in [
+        "retired",
+        "retired_tool",
+        "unknown",
+        "malformed",
+        "bad_digest",
+    ] {
         let protocol = if case == "unknown" {
             "unknown-future-model-control"
+        } else if case == "retired_tool" {
+            wire::RETIRED_TOOL_PROTOCOL
         } else {
             wire::RETIRED_PROTOCOL
         };
@@ -691,7 +753,7 @@ async fn retired_saved_card_deny_has_one_deterministic_notice_but_unknown_malfor
                 .await
                 .is_err()
         );
-        if case != "retired" {
+        if !matches!(case, "retired" | "retired_tool") {
             assert!(
                 acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &card, false)
                     .await

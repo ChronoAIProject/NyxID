@@ -16,6 +16,7 @@ use crate::{
 };
 
 mod callback;
+mod compact;
 mod envelope;
 mod issuance;
 mod tools;
@@ -68,7 +69,7 @@ fn conflict() -> AppError {
     )
 }
 fn unsupported() -> AppError {
-    AppError::Conflict("This model request has no validated reusable Responses v1 transition; exact-only metadata and compaction remain unsupported by this protocol".into())
+    AppError::Conflict("This model request has no validated transition in its approved Responses and standalone-compaction family".into())
 }
 fn invalid() -> AppError {
     AppError::Forbidden("Invalid or expired model control capability".into())
@@ -104,7 +105,16 @@ struct Step {
     capability_ciphertext: Vec<u8>,
     phase: StepPhase,
     #[serde(default)]
+    operation: StepOperation,
+    #[serde(default)]
     tools: Vec<HostTool>,
+}
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StepOperation {
+    #[default]
+    Generation,
+    Compact,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct HostTool {
@@ -158,6 +168,13 @@ struct ObservedCompletion {
     response_id: String,
     output: Vec<Value>,
     calls: Vec<ProviderToolCall>,
+    #[serde(default)]
+    compaction: Option<ObservedCompaction>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct ObservedCompaction {
+    response: Value,
+    body_sha256: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct ProviderToolCall {
@@ -192,6 +209,7 @@ pub(crate) struct PreparedDispatch {
     chat: acks::ChatAuthority,
     connection_id: String,
     connection_binding: String,
+    operation: StepOperation,
 }
 impl PreparedDispatch {
     pub(crate) async fn claim(&self) -> AppResult<CompletionObserver> {
@@ -203,6 +221,7 @@ pub(crate) struct ClaimedDispatch {
     root_id: String,
     step_id: String,
     dispatch_id: String,
+    operation: StepOperation,
 }
 
 pub(crate) async fn verify(
@@ -286,7 +305,17 @@ pub(crate) async fn prepare(
     {
         return Ok(wire::PrepareReply::AutomaticRead);
     }
-    let (envelope, input) = match envelope::envelope(&candidate) {
+    let parsed = match private
+        .envelope
+        .as_ref()
+        .filter(|_| row.phase != "unactivated")
+    {
+        Some(saved) => envelope::within_family(saved, &candidate)
+            .map(|(operation, input)| (saved.clone(), input, operation)),
+        None => envelope::envelope(&candidate)
+            .map(|(envelope, input)| (envelope, input, StepOperation::Generation)),
+    };
+    let (envelope, input, operation) = match parsed {
         Ok(candidate) => candidate,
         Err(_) if row.phase == "unactivated" => return Ok(wire::PrepareReply::ExactOnly {
             reason:"Reusable Responses v1 does not cover this metadata, compaction or executable shape. Existing exact approval applies.".into() }),
@@ -334,8 +363,17 @@ pub(crate) async fn prepare(
                 }) {
                     return Err(conflict());
                 }
-                let results = persistence::verify_tool_results(step, &candidate.tool_results)?;
-                envelope::next_input(&step.input, completion, &input, &results)?;
+                if completion.compaction.is_some() {
+                    // Canonical standalone output replaces the whole context.
+                    // No pruning, projections, additions or historical tool
+                    // receipts can turn this replacement into new authority.
+                    if input != completion.output || !candidate.tool_results.is_empty() {
+                        return Err(conflict());
+                    }
+                } else {
+                    let results = persistence::verify_tool_results(step, &candidate.tool_results)?;
+                    envelope::next_input(&step.input, completion, &input, &results)?;
+                }
             }
         }
     } else {
@@ -346,7 +384,8 @@ pub(crate) async fn prepare(
                     wire::ControlOrigin::AllowedContinuation {acknowledgement_id,..} if row.acknowledgement_id.as_ref() == Some(acknowledgement_id))),
             _ => false,
         };
-        if !saved_allow
+        if operation != StepOperation::Generation
+            || !saved_allow
             || candidate.preceding_receipt.is_some()
             || !candidate.tool_results.is_empty()
         {
@@ -371,6 +410,7 @@ pub(crate) async fn prepare(
         capability_hash: token_hash(token.expose()),
         capability_ciphertext: ciphertext,
         phase: StepPhase::Prepared,
+        operation,
         tools: vec![],
     };
     private.steps.push(step.clone());
@@ -447,6 +487,7 @@ pub(crate) async fn final_send_claim(
                         s.id == prepared.step_id
                             && s.request_binding == prepared.request_binding
                             && s.capability_hash == prepared.step_hash
+                            && s.operation == prepared.operation
                     })
                     .ok_or_else(conflict)?;
                 if !matches!(step.phase, StepPhase::Prepared) {
@@ -480,6 +521,7 @@ pub(crate) async fn final_send_claim(
         root_id: prepared.root_id.clone(),
         step_id: prepared.step_id.clone(),
         dispatch_id,
+        operation: prepared.operation,
     })
 }
 
