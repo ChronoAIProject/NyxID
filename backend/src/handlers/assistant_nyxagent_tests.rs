@@ -2259,6 +2259,65 @@ async fn retired_access_mode_route_answers_gone_and_every_chat_reports_full() {
 }
 
 #[tokio::test]
+async fn history_names_the_automation_behind_an_automation_turn() {
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("history_automation")
+        .await;
+    let messages = f
+        .state
+        .db
+        .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME);
+    let mut message = messages
+        .find_one(doc! {"conversation_id": &f.row.id, "role": "user"})
+        .await
+        .unwrap()
+        .unwrap();
+    message.id = uuid::Uuid::new_v4().to_string();
+    message.turn_id = "automation-turn".into();
+    message.role = "event".into();
+    message.seq = 50;
+    message.origin = Some(crate::models::assistant_conversation::TurnOrigin::Trigger);
+    messages.insert_one(&message).await.unwrap();
+    let docs = |name: &str| f.state.db.collection::<mongodb::bson::Document>(name);
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "run-1", "trigger_id": "trigger-1", "user_id": &f.owner, "turn_id": "automation-turn"})
+        .await
+        .unwrap();
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "trigger-1", "user_id": &f.owner, "label": "Keep the FAQ current"})
+        .await
+        .unwrap();
+    // Another owner's trigger with the same turn never names this message.
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "run-2", "trigger_id": "trigger-2", "user_id": "someone-else", "turn_id": "automation-turn"})
+        .await
+        .unwrap();
+    let Json(page) = history(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path(f.row.id.clone()),
+        Query(HistoryQuery::default()),
+    )
+    .await
+    .unwrap();
+    let dto = serde_json::to_value(page).unwrap();
+    let rows = dto["messages"].as_array().unwrap();
+    let automation = rows
+        .iter()
+        .find(|m| m["turn_id"] == "automation-turn")
+        .unwrap();
+    assert_eq!(automation["origin"], "trigger");
+    assert_eq!(
+        automation["automation"],
+        serde_json::json!({"trigger_id": "trigger-1", "run_id": "run-1", "label": "Keep the FAQ current"})
+    );
+    assert!(
+        rows.iter()
+            .filter(|m| m["turn_id"] != "automation-turn")
+            .all(|m| m["automation"].is_null())
+    );
+}
+
+#[tokio::test]
 async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
     use crate::models::assistant_acknowledgement::{
         AssistantAcknowledgement, COLLECTION_NAME as ACKS,
@@ -2526,6 +2585,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        activity_id: None,
         invocation_id: None,
         routing: None,
         link: None,

@@ -21,6 +21,10 @@ PUBLISH_WORKFLOWS = {".github/workflows/ci.yml", ".github/workflows/publish-imag
 
 def find_baseline(runs, base_sha, artifacts_for_run):
     """Search newest successful trusted runs, skipping absent/expired artifacts."""
+    # Artifacts uploaded by a reusable backend-tests call are attached to the
+    # parent workflow run. Keep selecting the exact artifact on the trusted
+    # Publish Images/CI run; nested job display-name prefixes are not stable
+    # when this gate is moved to a separate non-blocking job.
     for run in sorted(runs, key=lambda item: item["id"], reverse=True):
         if (run.get("head_sha") != base_sha or run.get("conclusion") != "success"
                 or run.get("event") not in {"push", "workflow_dispatch"}

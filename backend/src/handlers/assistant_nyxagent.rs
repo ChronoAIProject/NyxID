@@ -512,6 +512,18 @@ pub struct MessageResponse {
     /// A user message written in a chat app: its platform.
     via: Option<String>,
     activity_total: i64,
+    /// Who started the turn this message opens (`user`, `event`, `trigger`,
+    /// ...); absent on rows written before it was recorded.
+    origin: Option<crate::models::assistant_conversation::TurnOrigin>,
+    /// The automation an automation-started message came from, while its run
+    /// record is retained.
+    automation: Option<AutomationRunResponse>,
+}
+#[derive(Serialize)]
+pub struct AutomationRunResponse {
+    trigger_id: String,
+    run_id: String,
+    label: String,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
@@ -567,8 +579,89 @@ impl From<AssistantMessage> for MessageResponse {
                 .collect(),
             via: row.via,
             activity_total: row.activity_total,
+            origin: row.origin,
+            automation: None,
         }
     }
+}
+
+/// Names the automation behind each automation-started message on the page.
+/// Its run is found by turn ID (the instruction turn) or by run ID (a
+/// webhook's payload message); expired runs leave the message unnamed. Two
+/// bounded reads, only when the page holds such a message.
+async fn attach_automations(
+    db: &mongodb::Database,
+    user_id: &str,
+    messages: &mut [MessageResponse],
+) -> AppResult<()> {
+    use futures::TryStreamExt;
+    use mongodb::bson::Document;
+    let trigger_origin = Some(crate::models::assistant_conversation::TurnOrigin::Trigger);
+    let keys: Vec<String> = messages
+        .iter()
+        .filter(|m| m.origin == trigger_origin)
+        .map(|m| m.turn_id.clone())
+        .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    // (run id, trigger id, turn id)
+    let runs: Vec<(String, String, Option<String>)> = db
+        .collection::<Document>(crate::models::trigger_run::COLLECTION_NAME)
+        .find(doc! {"user_id": user_id, "$or": [
+            {"_id": {"$in": &keys}}, {"turn_id": {"$in": &keys}},
+        ]})
+        .projection(doc! {"_id": 1, "trigger_id": 1, "turn_id": 1})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter_map(|run| {
+            Some((
+                run.get_str("_id").ok()?.to_owned(),
+                run.get_str("trigger_id").ok()?.to_owned(),
+                run.get_str("turn_id").ok().map(str::to_owned),
+            ))
+        })
+        .collect();
+    if runs.is_empty() {
+        return Ok(());
+    }
+    let trigger_ids: Vec<&str> = runs
+        .iter()
+        .map(|(_, trigger, _)| trigger.as_str())
+        .collect();
+    let labels: HashMap<String, String> = db
+        .collection::<Document>(crate::models::trigger::COLLECTION_NAME)
+        .find(doc! {"_id": {"$in": trigger_ids}, "user_id": user_id})
+        .projection(doc! {"_id": 1, "label": 1})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter_map(|t| {
+            Some((
+                t.get_str("_id").ok()?.to_owned(),
+                t.get_str("label").ok()?.to_owned(),
+            ))
+        })
+        .collect();
+    for message in messages.iter_mut().filter(|m| m.origin == trigger_origin) {
+        let Some((run_id, trigger_id, _)) = runs.iter().find(|(run, _, turn)| {
+            *run == message.turn_id || turn.as_deref() == Some(message.turn_id.as_str())
+        }) else {
+            continue;
+        };
+        let Some(label) = labels.get(trigger_id) else {
+            continue;
+        };
+        message.automation = Some(AutomationRunResponse {
+            trigger_id: trigger_id.clone(),
+            run_id: run_id.clone(),
+            label: label.clone(),
+        });
+    }
+    Ok(())
 }
 #[derive(Serialize)]
 pub struct RecoveryResponse {
@@ -867,6 +960,7 @@ pub async fn history(
     for message in &mut messages {
         message.recovery = recovery.get(&message.id).cloned().map(Into::into);
     }
+    Box::pin(attach_automations(&state.db, &user_id, &mut messages)).await?;
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let feedback =
         crate::services::assistant_feedback_service::states_for_messages(&state.db, &user_id, &ids)
@@ -1063,6 +1157,8 @@ pub async fn attachment(
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
     creation_turn_id: Option<String>,
+    /// The tool call (turn activity ID) this card or receipt belongs to.
+    activity_id: Option<String>,
     authored_skill: Option<Value>,
     continuation_owner: Option<&'static str>,
     continuation_receipt_id: Option<String>,
@@ -1093,6 +1189,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
         Self {
             creation_turn_id: row.creation_turn_id,
+            activity_id: row.activity_id,
             continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
             authored_skill: row.authored_skill.map(|s| json!({"agent_id":s.agent_id,"proposal_id":s.proposal_id,"revision":s.revision,"skills_revision":s.skills_revision})),
             continuation_receipt_id: row.continuation_receipt_id,

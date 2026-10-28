@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useOrgs } from "@/hooks/use-orgs";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
@@ -130,6 +130,14 @@ export function ServiceGrantPicker({
   );
 }
 
+/** Organizations the person may create agents for. */
+function useWritableOrgs() {
+  const orgs = useOrgs();
+  return (orgs.data ?? []).filter((org) =>
+    ["admin", "member", "owner"].includes(org.your_role),
+  );
+}
+
 function AgentOwnerPicker({
   value,
   onChange,
@@ -137,10 +145,7 @@ function AgentOwnerPicker({
   readonly value?: string;
   readonly onChange: (id: string | undefined) => void;
 }) {
-  const orgs = useOrgs();
-  const writable = (orgs.data ?? []).filter((org) =>
-    ["admin", "member", "owner"].includes(org.your_role),
-  );
+  const writable = useWritableOrgs();
   return (
     <div className="space-y-2">
       <label className="text-12 font-medium" htmlFor="agent-owner">
@@ -174,9 +179,12 @@ function AgentOwnerPicker({
 
 /** Create a specialist: its name, role and starting grants. */
 export function NewAgentDialog({
+  owner = "personal",
   onClose,
   onCreated,
 }: {
+  /** "org" starts on the first organization the person can create agents for. */
+  readonly owner?: "personal" | "org";
   readonly onClose: () => void;
   readonly onCreated: (created: { id: string; home_conversation_id: string }) => void;
 }) {
@@ -197,6 +205,12 @@ export function NewAgentDialog({
   const name = form.watch("name");
   const description = form.watch("description");
   const org = form.watch("org");
+  const firstOrg = useWritableOrgs()[0]?.id;
+  // Organizations may still be loading when the dialog opens; preselect once known.
+  useEffect(() => {
+    if (owner !== "org" || !orgAgentsEnabled || !firstOrg || form.getValues("org")) return;
+    form.setValue("org", firstOrg, { shouldDirty: false, shouldTouch: false });
+  }, [firstOrg, form, orgAgentsEnabled, owner]);
 
   async function submit(values: AssistantAgentCreate) {
     setError(undefined);

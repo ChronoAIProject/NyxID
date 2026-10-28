@@ -59,7 +59,8 @@
   --color-card-foreground: #FAFAFA;
   --color-popover: #171717;
   --color-popover-foreground: #FAFAFA;
-  --color-sidebar: #0D0D0D;
+  --color-sidebar: #121212;
+  --color-sidebar-hover: #191919;
   --color-surface: #171717;
 
   /* ── Primary / Accent ── */
@@ -175,7 +176,8 @@ html.theme-light {
   --color-card-foreground: #18181B;
   --color-popover: #FFFFFF;
   --color-popover-foreground: #18181B;
-  --color-sidebar: #F4F4F5;
+  --color-sidebar: #FFFFFF;
+  --color-sidebar-hover: #F6F6F6;
   --color-surface: #FFFFFF;
 
   /* Secondary / accent — faint purple tints on light */
@@ -224,7 +226,8 @@ html.theme-dark {
   --color-card-foreground: #EFEFF1;
   --color-popover: #222225;
   --color-popover-foreground: #EFEFF1;
-  --color-sidebar: #141416;
+  --color-sidebar: #1C1C1F;
+  --color-sidebar-hover: #27272A;
   --color-surface: #222225;
 
   /* Text needs a lighter accent than solid button fills.
@@ -313,6 +316,53 @@ html.motion-reduce *::after {
   * {
     border-color: var(--color-border);
     -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Tailwind 4 leaves buttons on the default cursor; everything clickable
+     shows a pointer. Cursor utilities (resize, grab, not-allowed) still win. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([data-disabled]),
+  [role="menuitemcheckbox"]:not([data-disabled]),
+  [role="menuitemradio"]:not([data-disabled]),
+  [role="option"]:not([aria-disabled="true"]):not([data-disabled]),
+  [role="switch"]:not([aria-disabled="true"]),
+  [role="checkbox"]:not([aria-disabled="true"]),
+  [role="radio"]:not([aria-disabled="true"]),
+  summary,
+  select:not(:disabled),
+  input:is([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]):not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* Disclosures show the app's chevron instead of the browser triangle.
+     Summaries that draw their own icon opt out with `list-none`; the billing
+     page styles its own. */
+  summary:not(.list-none):not(.billing-page *) {
+    list-style: none;
+  }
+  summary:not(.list-none):not(.billing-page *)::-webkit-details-marker {
+    display: none;
+  }
+  summary:not(.list-none):not(.billing-page *)::before {
+    content: "";
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    margin-right: 0.25em;
+    vertical-align: -0.15em;
+    background-color: currentColor;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+    transition: transform 150ms ease-out;
+  }
+  details[open] > summary:not(.list-none):not(.billing-page *)::before {
+    transform: rotate(90deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    summary:not(.list-none):not(.billing-page *)::before {
+      transition: none;
+    }
   }
 }
 
@@ -881,6 +931,116 @@ html.theme-dark .assistant-halo--visible {
   }
 }
 
+/* ── Sidebar nav easter eggs (`sidebar-nav-glyphs.tsx`) ──
+   Played only while the glyph carries `data-playing`, which the component
+   sets on row hover (never under reduced motion) and clears at an iteration
+   boundary after two plays or once the pointer has left, so every loop
+   starts and ends on the lucide rest frame.
+   Transform origins are viewBox units. The plugin tile is drawn per frame
+   in the component instead. */
+
+/* The Home chimney follows hover exactly (`data-hovering`): it pops up
+   from below the roof line with an overshoot and sinks back on leave.
+   Transitions rather than keyframes, so a quick leave-and-return reverses
+   from wherever it is. The smoke runs while the component keeps the puffs
+   mounted; they wait for the chimney (delay set inline) and scale about
+   their own centre. */
+.nav-glyph-chimney {
+  transform: translateY(5px);
+  transition: transform 180ms ease-in;
+}
+
+[data-hovering] .nav-glyph-chimney {
+  transform: none;
+  transition: transform 520ms cubic-bezier(0.34, 1.8, 0.64, 1);
+}
+
+.nav-glyph-smoke {
+  opacity: 0;
+  transition: opacity 250ms ease-in;
+}
+
+[data-hovering] > .nav-glyph-smoke {
+  opacity: 1;
+  transition: none;
+}
+
+.nav-glyph-smoke-puff {
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0;
+  animation: nav-glyph-smoke 2.2s ease-out 2 backwards;
+}
+
+@keyframes nav-glyph-smoke {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.6);
+  }
+  15% {
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(0.6px, -3.5px) scale(1.1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(2.5px, -7px) scale(1.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-glyph-chimney,
+  [data-hovering] .nav-glyph-chimney {
+    transition: none;
+  }
+}
+
+/* A short bright segment of the trace runs left to right across the screen,
+   then the screen stays dark for a beat. `pathLength=100` on the path makes
+   the dash units percentages of the trace; with a 28-unit dash, offset 28
+   parks it wholly before the start and -100 wholly past the end. */
+.nav-glyph-heartbeat {
+  opacity: 0;
+  stroke-dasharray: 28 200;
+  stroke-dashoffset: 28;
+}
+
+[data-playing] > .nav-glyph-heartbeat {
+  opacity: 1;
+  animation: nav-glyph-heartbeat 2s linear infinite;
+}
+
+@keyframes nav-glyph-heartbeat {
+  0% {
+    stroke-dashoffset: 28;
+  }
+  70%,
+  100% {
+    stroke-dashoffset: -100;
+  }
+}
+
+[data-playing] > .nav-glyph-minute-hand,
+[data-playing] > .nav-glyph-hour-hand {
+  transform-origin: 16px 16.2px;
+  animation: nav-glyph-hand 2.2s ease-in-out infinite;
+}
+
+[data-playing] > .nav-glyph-minute-hand {
+  --nav-glyph-hand-turn: 720deg;
+}
+
+[data-playing] > .nav-glyph-hour-hand {
+  --nav-glyph-hand-turn: 360deg;
+}
+
+@keyframes nav-glyph-hand {
+  to {
+    transform: rotate(var(--nav-glyph-hand-turn));
+  }
+}
+
 /* ── Card hover glow ── */
 .hover-glow {
   transition:
@@ -1032,31 +1192,10 @@ html.theme-dark .assistant-halo--visible {
 .dictation-split-control:has([data-state="open"]) {
   background: var(--color-overlay);
 }
+/* The options arrow is always there: nothing slides out under a passing
+   pointer. */
 .dictation-split-control .dictation-chevron {
-  width: 0;
-  min-width: 0;
-  overflow: hidden;
-  padding: 0;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease;
-}
-.dictation-split-control:hover .dictation-chevron,
-.dictation-split-control:has(:focus-visible) .dictation-chevron,
-.dictation-split-control:has([data-state="open"]) .dictation-chevron {
   width: 1.25rem;
-  opacity: 1;
-  pointer-events: auto;
-}
-@media (hover: none) {
-  .dictation-split-control .dictation-chevron {
-    width: 1.25rem;
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .dictation-split-control .dictation-chevron { transition: none; }
 }
 @media (max-width: 540px) {
   [data-composer-editor].composer-compact {
@@ -1127,4 +1266,33 @@ html.theme-dark .assistant-halo--visible {
   [data-chat-content-layout]:has([data-chat-index-rail]) {
     --chat-index-width: calc(var(--spacing) * 7);
   }
+}
+
+/* A chat transcript fades only its text: the scrollbar strip on its right
+   (mid-slab beside the machine column) stays fully drawn. */
+[data-chat-transcript][data-scroll-fade] {
+  mask-image:
+    linear-gradient(to bottom,
+      transparent, rgb(0 0 0 / 65%) calc(var(--scroll-fade-top) * .4),
+      black var(--scroll-fade-top),
+      black calc(100% - var(--scroll-fade-bottom)), transparent),
+    linear-gradient(black, black);
+  mask-size: calc(100% - var(--assistant-scrollbar-width, 0px)) 100%, var(--assistant-scrollbar-width, 0px) 100%;
+  mask-position: left top, right top;
+  mask-repeat: no-repeat;
+  mask-composite: add;
+}
+
+/* While the open agent's row is pinned to the top of the list, rows slide
+   under it and a top fade would only dim it. Any other time the fade stays,
+   so rows never end in a hard cut. */
+[data-scroll-fade]:has([data-sticky-agent][data-stuck]) {
+  --scroll-fade-top: 0px;
+}
+
+/* On hover a muted icon takes its label's colour: when the text turns from
+   grey to white, so does the icon. Coloured icons (active, status) keep
+   theirs. Unlayered so it wins over the utility that greyed the icon. */
+:is(a, button, summary, [role="button"], [role="menuitem"], [role="option"], [role="tab"]):hover svg:is(.text-text-tertiary, .text-muted-foreground) {
+  color: inherit;
 }
