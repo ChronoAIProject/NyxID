@@ -57,99 +57,105 @@ pub(crate) async fn tool_prepare(
     let mut session = state.db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (live, _, _) = acks::fence(&state.db, chat, session).await?;
-                super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
-                let (mut row, mut private) =
-                    persistence::load(state, &root.id, Some(&mut *session)).await?;
-                persistence::require_row(&row, chat)?;
-                if !matches!(row.phase.as_str(), "allowed" | "unactivated") || (row.phase == "unactivated" && private.preconsent.ineligible) {
-                    return Err(conflict());
-                }
-                let control_hash = token_hash(token.expose());
-                let source = match request.refusal_source.as_ref() {
-                    Some(receipt) => Some(refusal_source(
-                        &private,
-                        receipt,
-                        &control_hash,
-                        request.result_char_limit,
-                    )?),
-                    None => None,
-                };
-                if let Some((_,evidence))=source.as_ref() {
-                    require_refusal_reuse(&private,evidence,&control_hash,request.result_char_limit,&request.name,&request.arguments)?;
-                }
-                let step = private.active_tool_step_mut(&row.phase, &token_hash(token.expose()))?;
-                let call = declaration(
-                    step,
-                    request.call_id.as_deref(),
-                    &request.name,
-                    &request.arguments,
-                )?
-                .clone();
-                let call_id = call.call_id.clone();
-                let source_hash = request
-                    .refusal_source
-                    .as_ref()
-                    .map(|r| token_hash(r.bearer.expose()));
-                let capability =
-                    if let Some(tool) = step.tools.iter().find(|t| t.call_id == call_id) {
-                        if tool.result_char_limit != request.result_char_limit
-                            || tool.control_hash.as_deref() != Some(control_hash.as_str())
-                            || (tool.refusal_source_hash != source_hash
-                                && !matches!((&tool.phase,source_hash.as_deref()),(HostToolPhase::Completed{receipt},Some(hash)) if token_hash(receipt.bearer.expose())==hash))
-                            || !(matches!(tool.phase, HostToolPhase::Prepared)
-                                || (source_hash.is_some()
-                                    && matches!(tool.phase, HostToolPhase::Completed { .. })))
-                        {
+        .and_run(
+            (state, chat, token, &request, &root),
+            |session, context| {
+                let (state, chat, token, request, root) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (live, _, _) = acks::fence(&state.db, chat, session).await?;
+                        super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
+                        let (mut row, mut private) =
+                            persistence::load(state, &root.id, Some(&mut *session)).await?;
+                        persistence::require_row(&row, chat)?;
+                        if !matches!(row.phase.as_str(), "allowed" | "unactivated") || (row.phase == "unactivated" && private.preconsent.ineligible) {
                             return Err(conflict());
                         }
-                        tool.capability.clone()
-                    } else {
-                        let capability = persistence::new_token()?;
-                        let (phase, evidence) = if let Some((original, evidence)) = source {
-                            let receipt = wire::ToolResultReceipt {
-                                step_id: step.id.clone(),
-                                call_id: call.call_id.clone(),
-                                tool_name: call.name.clone(),
-                                arguments_binding: digest(json!(call.arguments)),
-                                result_binding: original.result_binding,
-                                success:original.success,
-                                server_activity_id: original.server_activity_id,
-                                evidence: wire::ToolResultEvidence::ReusedRefusal {
-                                    origin_step_id: evidence.origin_step_id.clone(),
-                                    origin_call_id: evidence.origin_call_id.clone(),
-                                },
-                                bearer: persistence::new_token()?,
-                            };
-                            (HostToolPhase::Completed { receipt }, Some(evidence))
-                        } else {
-                            (HostToolPhase::Prepared, None)
+                        let control_hash = token_hash(token.expose());
+                        let source = match request.refusal_source.as_ref() {
+                            Some(receipt) => Some(refusal_source(
+                                &private,
+                                receipt,
+                                &control_hash,
+                                request.result_char_limit,
+                            )?),
+                            None => None,
                         };
-                        step.tools.push(HostTool {
-                            call_id: call_id.clone(),
-                            capability: capability.clone(),
-                            result_char_limit: request.result_char_limit,
-                            control_hash: Some(control_hash),
-                            refusal_evidence: evidence,
-                            refusal_source_hash: source_hash,
-                            phase,
-                        });
-                        capability
-                    };
-                let reply = wire::PreparedTool {
-                    root_id: row.id.clone(),
-                    step_id: step.id.clone(),
-                    call_id,
-                    tool_bearer: capability,
-                };
-                persistence::save(state, &mut row, &private, session).await?;
-                Ok(reply)
-            }
-            .await;
-            super::super::api_key_mutation_service::transaction_result(result)
-        })
+                        if let Some((_,evidence))=source.as_ref() {
+                            require_refusal_reuse(&private,evidence,&control_hash,request.result_char_limit,&request.name,&request.arguments)?;
+                        }
+                        let step = private.active_tool_step_mut(&row.phase, &token_hash(token.expose()))?;
+                        let call = declaration(
+                            step,
+                            request.call_id.as_deref(),
+                            &request.name,
+                            &request.arguments,
+                        )?
+                        .clone();
+                        let call_id = call.call_id.clone();
+                        let source_hash = request
+                            .refusal_source
+                            .as_ref()
+                            .map(|r| token_hash(r.bearer.expose()));
+                        let capability =
+                            if let Some(tool) = step.tools.iter().find(|t| t.call_id == call_id) {
+                                if tool.result_char_limit != request.result_char_limit
+                                    || tool.control_hash.as_deref() != Some(control_hash.as_str())
+                                    || (tool.refusal_source_hash != source_hash
+                                        && !matches!((&tool.phase,source_hash.as_deref()),(HostToolPhase::Completed{receipt},Some(hash)) if token_hash(receipt.bearer.expose())==hash))
+                                    || !(matches!(tool.phase, HostToolPhase::Prepared)
+                                        || (source_hash.is_some()
+                                            && matches!(tool.phase, HostToolPhase::Completed { .. })))
+                                {
+                                    return Err(conflict());
+                                }
+                                tool.capability.clone()
+                            } else {
+                                let capability = persistence::new_token()?;
+                                let (phase, evidence) = if let Some((original, evidence)) = source {
+                                    let receipt = wire::ToolResultReceipt {
+                                        step_id: step.id.clone(),
+                                        call_id: call.call_id.clone(),
+                                        tool_name: call.name.clone(),
+                                        arguments_binding: digest(json!(call.arguments)),
+                                        result_binding: original.result_binding,
+                                        success:original.success,
+                                        server_activity_id: original.server_activity_id,
+                                        evidence: wire::ToolResultEvidence::ReusedRefusal {
+                                            origin_step_id: evidence.origin_step_id.clone(),
+                                            origin_call_id: evidence.origin_call_id.clone(),
+                                        },
+                                        bearer: persistence::new_token()?,
+                                    };
+                                    (HostToolPhase::Completed { receipt }, Some(evidence))
+                                } else {
+                                    (HostToolPhase::Prepared, None)
+                                };
+                                step.tools.push(HostTool {
+                                    call_id: call_id.clone(),
+                                    capability: capability.clone(),
+                                    result_char_limit: request.result_char_limit,
+                                    control_hash: Some(control_hash),
+                                    refusal_evidence: evidence,
+                                    refusal_source_hash: source_hash,
+                                    phase,
+                                });
+                                capability
+                            };
+                        let reply = wire::PreparedTool {
+                            root_id: row.id.clone(),
+                            step_id: step.id.clone(),
+                            call_id,
+                            tool_bearer: capability,
+                        };
+                        persistence::save(state, &mut row, &private, session).await?;
+                        Ok(reply)
+                    }
+                    .await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(super::super::api_key_mutation_service::map_transaction_error)
 }
@@ -204,49 +210,68 @@ pub(crate) async fn tool_claim(
     let mut session = state.db.client().start_session().await?;
     let (step_id, call_id) = session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (live, _, _) = acks::fence(&state.db, chat, session).await?;
-                super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
-                let (mut row, mut private) =
-                    persistence::load(state, &root.id, Some(&mut *session)).await?;
-                persistence::require_row(&row, chat)?;
-                if !matches!(row.phase.as_str(), "allowed" | "unactivated")
-                    || (row.phase == "unactivated" && private.preconsent.ineligible)
-                {
-                    return Err(conflict());
-                }
-                let step = private.active_tool_step_mut(&row.phase, &token_hash(token.expose()))?;
-                let call_id = step
-                    .tools
-                    .iter()
-                    .find(|t| token_hash(t.capability.expose()) == token_hash(capability.expose()))
-                    .map(|t| t.call_id.clone())
-                    .ok_or_else(invalid)?;
-                declaration(step, Some(&call_id), name, arguments)?;
-                let tool = step
-                    .tools
-                    .iter_mut()
-                    .find(|t| {
-                        t.call_id == call_id
-                            && token_hash(t.capability.expose()) == token_hash(capability.expose())
-                    })
-                    .ok_or_else(invalid)?;
-                if tool.control_hash.as_deref() != Some(token_hash(token.expose()).as_str())
-                    || !matches!(tool.phase, HostToolPhase::Prepared)
-                {
-                    return Err(conflict());
-                }
-                tool.phase = HostToolPhase::Dispatched {
-                    dispatch_id: dispatch_id.clone(),
-                };
-                let ids = (step.id.clone(), call_id);
-                persistence::save(state, &mut row, &private, session).await?;
-                Ok(ids)
-            }
-            .await;
-            super::super::api_key_mutation_service::transaction_result(result)
-        })
+        .and_run(
+            (
+                state,
+                chat,
+                token,
+                capability,
+                name,
+                arguments,
+                &root,
+                &dispatch_id,
+            ),
+            |session, context| {
+                let (state, chat, token, capability, name, arguments, root, dispatch_id) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (live, _, _) = acks::fence(&state.db, chat, session).await?;
+                        super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
+                        let (mut row, mut private) =
+                            persistence::load(state, &root.id, Some(&mut *session)).await?;
+                        persistence::require_row(&row, chat)?;
+                        if !matches!(row.phase.as_str(), "allowed" | "unactivated")
+                            || (row.phase == "unactivated" && private.preconsent.ineligible)
+                        {
+                            return Err(conflict());
+                        }
+                        let step = private
+                            .active_tool_step_mut(&row.phase, &token_hash(token.expose()))?;
+                        let call_id = step
+                            .tools
+                            .iter()
+                            .find(|t| {
+                                token_hash(t.capability.expose()) == token_hash(capability.expose())
+                            })
+                            .map(|t| t.call_id.clone())
+                            .ok_or_else(invalid)?;
+                        declaration(step, Some(&call_id), name, arguments)?;
+                        let tool = step
+                            .tools
+                            .iter_mut()
+                            .find(|t| {
+                                t.call_id == call_id
+                                    && token_hash(t.capability.expose())
+                                        == token_hash(capability.expose())
+                            })
+                            .ok_or_else(invalid)?;
+                        if tool.control_hash.as_deref() != Some(token_hash(token.expose()).as_str())
+                            || !matches!(tool.phase, HostToolPhase::Prepared)
+                        {
+                            return Err(conflict());
+                        }
+                        tool.phase = HostToolPhase::Dispatched {
+                            dispatch_id: dispatch_id.clone(),
+                        };
+                        let ids = (step.id.clone(), call_id);
+                        persistence::save(state, &mut row, &private, session).await?;
+                        Ok(ids)
+                    }
+                    .await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(super::super::api_key_mutation_service::map_transaction_error)?;
     Ok(ToolDispatch {
@@ -268,37 +293,43 @@ pub(crate) async fn tool_complete(
     result: Option<&Value>,
 ) -> AppResult<()> {
     let mut session = state.db.client().start_session().await?;
-    session.start_transaction().and_run2(async |session| {
-        let result=async {
-            let (mut row,mut private)=persistence::load(state,&dispatch.root_id,Some(&mut *session)).await?;
-            let step=private.tool_step_mut(&dispatch.step_id)?;
-            let StepPhase::Completed {completion,..}=&step.phase else {return Err(conflict());};
-            let call=completion.calls.iter().find(|c| c.call_id==dispatch.call_id).ok_or_else(conflict)?;
-            let tool=step.tools.iter_mut().find(|t| t.call_id==dispatch.call_id).ok_or_else(conflict)?;
-            if !matches!(&tool.phase,HostToolPhase::Dispatched {dispatch_id} if dispatch_id==&dispatch.dispatch_id)
-            {return Err(conflict());}
-            tool.phase=match (activity_id,result) {
-                (Some(activity),Some(result)) if !activity.is_empty() && result.is_object()
-                    && result.to_string().len()<=wire::MAX_TOOL_RESULT_BYTES=>{
-                    let projection=wire::tool_result_projection(result,tool.result_char_limit);
-                    tool.refusal_evidence=projection.refusal.as_ref().and_then(|refusal| {
-                        let args=serde_json::from_str::<Value>(&call.arguments).ok()?;
-                        let (target_name,target_arguments_hash,attempt_hash,_)=refusal_attempt(&call.name,&args)?;
-                        Some(RefusalEvidence{kind:refusal.kind,target_name,target_arguments_hash,attempt_hash,
-                            origin_step_id:step.id.clone(),origin_call_id:call.call_id.clone()})
-                    });
-                    HostToolPhase::Completed {receipt:wire::ToolResultReceipt {
-                        step_id:step.id.clone(),
-                        call_id:call.call_id.clone(),tool_name:call.name.clone(),arguments_binding:digest(json!(call.arguments)),
-                        result_binding:digest(json!(projection.text)),success:projection.success,server_activity_id:activity.into(),evidence:wire::ToolResultEvidence::Executed,bearer:persistence::new_token()?,
-                    }}
-                }
-                _=>HostToolPhase::Unsupported,
-            };
-            persistence::save(state,&mut row,&private,session).await
-        }.await;
-        super::super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
+    session.start_transaction().and_run(
+            (state, &dispatch, activity_id, result),
+            |session, context| {
+                let (state, dispatch, activity_id, result) = *context;
+                Box::pin(async move {
+                    let result=async {
+                        let (mut row,mut private)=persistence::load(state,&dispatch.root_id,Some(&mut *session)).await?;
+                        let step=private.tool_step_mut(&dispatch.step_id)?;
+                        let StepPhase::Completed {completion,..}=&step.phase else {return Err(conflict());};
+                        let call=completion.calls.iter().find(|c| c.call_id==dispatch.call_id).ok_or_else(conflict)?;
+                        let tool=step.tools.iter_mut().find(|t| t.call_id==dispatch.call_id).ok_or_else(conflict)?;
+                        if !matches!(&tool.phase,HostToolPhase::Dispatched {dispatch_id} if dispatch_id==&dispatch.dispatch_id)
+                        {return Err(conflict());}
+                        tool.phase=match (activity_id,result) {
+                            (Some(activity),Some(result)) if !activity.is_empty() && result.is_object()
+                                && result.to_string().len()<=wire::MAX_TOOL_RESULT_BYTES=>{
+                                let projection=wire::tool_result_projection(result,tool.result_char_limit);
+                                tool.refusal_evidence=projection.refusal.as_ref().and_then(|refusal| {
+                                    let args=serde_json::from_str::<Value>(&call.arguments).ok()?;
+                                    let (target_name,target_arguments_hash,attempt_hash,_)=refusal_attempt(&call.name,&args)?;
+                                    Some(RefusalEvidence{kind:refusal.kind,target_name,target_arguments_hash,attempt_hash,
+                                        origin_step_id:step.id.clone(),origin_call_id:call.call_id.clone()})
+                                });
+                                HostToolPhase::Completed {receipt:wire::ToolResultReceipt {
+                                    step_id:step.id.clone(),
+                                    call_id:call.call_id.clone(),tool_name:call.name.clone(),arguments_binding:digest(json!(call.arguments)),
+                                    result_binding:digest(json!(projection.text)),success:projection.success,server_activity_id:activity.into(),evidence:wire::ToolResultEvidence::Executed,bearer:persistence::new_token()?,
+                                }}
+                            }
+                            _=>HostToolPhase::Unsupported,
+                        };
+                        persistence::save(state,&mut row,&private,session).await
+                    }.await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        ).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
 }
 
 /// Same canonical target/ack rules as TurnTools::Attempt. No raw result or

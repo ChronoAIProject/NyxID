@@ -82,10 +82,8 @@ pub(super) async fn load(
     id: &str,
     session: Option<&mut ClientSession>,
 ) -> AppResult<(ModelControlRoot, RootPrivate)> {
-    let find = state
-        .db
-        .collection::<ModelControlRoot>(COLLECTION_NAME)
-        .find_one(doc! {"_id":id});
+    let roots = state.db.collection::<ModelControlRoot>(COLLECTION_NAME);
+    let find = roots.find_one(doc! {"_id":id});
     let row = match session {
         Some(session) => find.session(session).await?,
         None => find.await?,
@@ -102,13 +100,11 @@ pub(super) async fn authenticated(
     session: Option<&mut ClientSession>,
 ) -> AppResult<(ModelControlRoot, RootPrivate, BoundControl)> {
     let hash = token_hash(token.expose());
-    let find = state
-        .db
-        .collection::<ModelControlRoot>(COLLECTION_NAME)
-        .find_one(doc! {
-            "user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
-            "api_key_id":&chat.api_key_id,"control_hashes":&hash,
-        });
+    let roots = state.db.collection::<ModelControlRoot>(COLLECTION_NAME);
+    let find = roots.find_one(doc! {
+        "user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+        "api_key_id":&chat.api_key_id,"control_hashes":&hash,
+    });
     let row = match session {
         Some(session) => find.session(session).await?,
         None => find.await?,
@@ -256,7 +252,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .options(
                     IndexOptions::builder()
                         .unique(true)
-                        .name("model_control_turn_lineage_v1".into())
+                        .name("model_control_turn_lineage_v1".to_owned())
                         .build(),
                 )
                 .build(),
@@ -266,7 +262,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                     IndexOptions::builder()
                         .unique(true)
                         .partial_filter_expression(doc! {"acknowledgement_id":{"$type":"string"}})
-                        .name("model_control_card_v1".into())
+                        .name("model_control_card_v1".to_owned())
                         .build(),
                 )
                 .build(),

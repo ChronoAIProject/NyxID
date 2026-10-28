@@ -391,56 +391,62 @@ pub(crate) async fn observe(
         return Ok(acks::refusal(&card));
     }
     let mut session = state.db.client().start_session().await?;
-    session.start_transaction().and_run2(async |session| {
-        let result = async {
-            let (mut row, mut private) = persistence::load(state, &callback.root.id, Some(&mut *session)).await?;
-            persistence::require_row(&row, chat)?;
-            if row.phase != "unactivated" || row.revision != callback.root.revision { return Err(conflict()); }
-            private.envelope = callback.private.envelope.clone();
-            private.initial_input = callback.private.initial_input.clone();
-            private.initial_operation = callback.private.initial_operation;
-            private.initial_request_binding = callback.private.initial_request_binding.clone();
-            private.connection_id = callback.private.connection_id.clone();
-            private.connection_binding = callback.private.connection_binding.clone();
-            private.owner_id = callback.private.owner_id.clone();
-            private.catalog_id = callback.private.catalog_id.clone();
-            private.effective_headers_binding = callback.private.effective_headers_binding.clone();
-            let args = json!({"protocol":wire::PROTOCOL,"root_id":row.id,
-                "connection_id":private.connection_id,"catalog_id":private.catalog_id,"binding":private.connection_binding,
-                "envelope":digest(serde_json::to_value(&private.envelope).map_err(|_| invalid())?),
-                "initial_operation":private.initial_operation,"initial_request":private.initial_request_binding});
-            let connection=state.db.collection::<crate::models::user_service::UserService>("user_services")
-                .find_one(doc!{"_id":&private.connection_id,"user_id":&private.owner_id})
-                .session(&mut *session).await?.ok_or_else(invalid)?;
-            let label=super::super::assistant_nyxagent::identifier(&connection.slug);
-            let model=super::super::assistant_nyxagent::identifier(callback.candidate.body["model"].as_str().ok_or_else(invalid)?);
-            let cause=super::super::assistant_service_execution::inference_fallback_reason(&callback.candidate.relative_path,&callback.candidate.body)
-                .ok_or_else(invalid)?;
-            let initial=if private.initial_operation==StepOperation::Compact {
-                "This initial consent binds the complete proposed generation configuration and this exact compact input before either authorized operation. Any known earlier Read output and host-tool results have been reconciled; caller-supplied initial history does not prove past tool execution."
-            } else {"The first authorized generation preserves all exact preceding input items and replaces only the final user item with saved Allow narration."};
-            let summary=format!("Connection {label} ({}), model {model}. {} Approval covers this Responses generation and standalone compact family: exact generation configuration and declared host tools stay fixed; compact sends the same model and exact instructions, with no generation-only options or tools. {initial} Approval includes the same exact opaque generation metadata options; they are not treated as automatic Read. Only server-observed output and genuine host-tool results may advance subsequent history. Complete observed compact output must replace the entire next input without pruning. Changed configuration, metadata or regenerated native context requires separate review.",connection.id,cause.reusable_message());
-            let mut card = acks::request_in_session(&state.db, chat, acks::Request {
-                kind:"action",service:Some((&connection.id,&label,&label)),tool:Some("nyxid.model_control_v1"),arguments:Some(&args),
-                summary:&summary,platform:false,
-            }, None, session).await?;
-            // This is always explicit owner Write, regardless of an automatic
-            // Read policy or legacy generic-approval exemption.
-            let confirmation = crate::models::assistant_acknowledgement::ActionConfirmation {
-                    risk:"change".into(), access_mode:Some(acks::effective_access_mode(&state.db, chat).await?), reason:"policy".into(),
-                };
-            state.db.collection::<Document>("assistant_acknowledgements").update_one(doc! {"_id":&card.id},
-                doc! {"$set":{"confirmation":bson::to_bson(&confirmation).map_err(|_| invalid())?}}).session(&mut *session).await?;
-            card.confirmation = Some(confirmation);
-            row.acknowledgement_id = Some(card.id.clone());
-            row.card_arguments = Some(args.clone());
-            row.phase = "awaiting_decision".into();
-            private.card_arguments = Some(args);
-            persistence::save(state, &mut row, &private, session).await?;
-            Ok(acks::refusal(&card))
-        }.await;
-        super::super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
+    session.start_transaction().and_run(
+            (state, chat, callback),
+            |session, context| {
+                let (state, chat, callback) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (mut row, mut private) = persistence::load(state, &callback.root.id, Some(&mut *session)).await?;
+                        persistence::require_row(&row, chat)?;
+                        if row.phase != "unactivated" || row.revision != callback.root.revision { return Err(conflict()); }
+                        private.envelope = callback.private.envelope.clone();
+                        private.initial_input = callback.private.initial_input.clone();
+                        private.initial_operation = callback.private.initial_operation;
+                        private.initial_request_binding = callback.private.initial_request_binding.clone();
+                        private.connection_id = callback.private.connection_id.clone();
+                        private.connection_binding = callback.private.connection_binding.clone();
+                        private.owner_id = callback.private.owner_id.clone();
+                        private.catalog_id = callback.private.catalog_id.clone();
+                        private.effective_headers_binding = callback.private.effective_headers_binding.clone();
+                        let args = json!({"protocol":wire::PROTOCOL,"root_id":row.id,
+                            "connection_id":private.connection_id,"catalog_id":private.catalog_id,"binding":private.connection_binding,
+                            "envelope":digest(serde_json::to_value(&private.envelope).map_err(|_| invalid())?),
+                            "initial_operation":private.initial_operation,"initial_request":private.initial_request_binding});
+                        let connection=state.db.collection::<crate::models::user_service::UserService>("user_services")
+                            .find_one(doc!{"_id":&private.connection_id,"user_id":&private.owner_id})
+                            .session(&mut *session).await?.ok_or_else(invalid)?;
+                        let label=super::super::assistant_nyxagent::identifier(&connection.slug);
+                        let model=super::super::assistant_nyxagent::identifier(callback.candidate.body["model"].as_str().ok_or_else(invalid)?);
+                        let cause=super::super::assistant_service_execution::inference_fallback_reason(&callback.candidate.relative_path,&callback.candidate.body)
+                            .ok_or_else(invalid)?;
+                        let initial=if private.initial_operation==StepOperation::Compact {
+                            "This initial consent binds the complete proposed generation configuration and this exact compact input before either authorized operation. Any known earlier Read output and host-tool results have been reconciled; caller-supplied initial history does not prove past tool execution."
+                        } else {"The first authorized generation preserves all exact preceding input items and replaces only the final user item with saved Allow narration."};
+                        let summary=format!("Connection {label} ({}), model {model}. {} Approval covers this Responses generation and standalone compact family: exact generation configuration and declared host tools stay fixed; compact sends the same model and exact instructions, with no generation-only options or tools. {initial} Approval includes the same exact opaque generation metadata options; they are not treated as automatic Read. Only server-observed output and genuine host-tool results may advance subsequent history. Complete observed compact output must replace the entire next input without pruning. Changed configuration, metadata or regenerated native context requires separate review.",connection.id,cause.reusable_message());
+                        let mut card = acks::request_in_session(&state.db, chat, acks::Request {
+                            kind:"action",service:Some((&connection.id,&label,&label)),tool:Some("nyxid.model_control_v1"),arguments:Some(&args),
+                            summary:&summary,platform:false,
+                        }, None, session).await?;
+                        // This is always explicit owner Write, regardless of an automatic
+                        // Read policy or legacy generic-approval exemption.
+                        let confirmation = crate::models::assistant_acknowledgement::ActionConfirmation {
+                                risk:"change".into(), access_mode:Some(acks::effective_access_mode(&state.db, chat).await?), reason:"policy".into(),
+                            };
+                        state.db.collection::<Document>("assistant_acknowledgements").update_one(doc! {"_id":&card.id},
+                            doc! {"$set":{"confirmation":bson::to_bson(&confirmation).map_err(|_| invalid())?}}).session(&mut *session).await?;
+                        card.confirmation = Some(confirmation);
+                        row.acknowledgement_id = Some(card.id.clone());
+                        row.card_arguments = Some(args.clone());
+                        row.phase = "awaiting_decision".into();
+                        private.card_arguments = Some(args);
+                        persistence::save(state, &mut row, &private, session).await?;
+                        Ok(acks::refusal(&card))
+                    }.await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        ).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
 }
 
 /// Joins the original decision transaction. Old exact-body cards are never

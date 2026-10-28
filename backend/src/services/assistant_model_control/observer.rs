@@ -106,62 +106,74 @@ impl CompletionObserver {
     async fn unknown(&self) -> AppResult<()> {
         require_observation_persistence(self.claim.read_observation)?;
         let mut session = self.state.db.client().start_session().await?;
-        session.start_transaction().and_run2(async |session| {
-            let result = async {
-                let (mut row, mut private) = persistence::load(&self.state, &self.claim.root_id, Some(&mut *session)).await?;
-                if self.claim.read_observation {
-                    if row.phase == "unactivated" && !private.preconsent.ineligible {
-                        private.preconsent.disable();
-                        persistence::save(&self.state, &mut row, &private, session).await?;
-                    }
-                    return Ok(());
-                }
-                let step = private.steps.iter_mut().find(|s| s.id == self.claim.step_id).ok_or_else(conflict)?;
-                if matches!(&step.phase, StepPhase::Dispatched {dispatch_id} if dispatch_id == &self.claim.dispatch_id) {
-                    step.phase = StepPhase::OutcomeUnknown { dispatch_id:self.claim.dispatch_id.clone() };
-                    persistence::save(&self.state, &mut row, &private, session).await?;
-                }
-                Ok(())
-            }.await;
-            super::super::api_key_mutation_service::transaction_result(result)
-        }).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
+        session.start_transaction().and_run(
+            (self,),
+            |session, context| {
+                let (observer,) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (mut row, mut private) = persistence::load(&observer.state, &observer.claim.root_id, Some(&mut *session)).await?;
+                        if observer.claim.read_observation {
+                            if row.phase == "unactivated" && !private.preconsent.ineligible {
+                                private.preconsent.disable();
+                                persistence::save(&observer.state, &mut row, &private, session).await?;
+                            }
+                            return Ok(());
+                        }
+                        let step = private.steps.iter_mut().find(|s| s.id == observer.claim.step_id).ok_or_else(conflict)?;
+                        if matches!(&step.phase, StepPhase::Dispatched {dispatch_id} if dispatch_id == &observer.claim.dispatch_id) {
+                            step.phase = StepPhase::OutcomeUnknown { dispatch_id:observer.claim.dispatch_id.clone() };
+                            persistence::save(&observer.state, &mut row, &private, session).await?;
+                        }
+                        Ok(())
+                    }.await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        ).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
     }
 
     async fn complete(&self, value: Value, body_sha256: String) -> AppResult<()> {
         require_observation_persistence(self.claim.read_observation)?;
         let mut session = self.state.db.client().start_session().await?;
-        session.start_transaction().and_run2(async |session| {
-            let result = async {
-                let (mut row, mut private) = persistence::load(&self.state, &self.claim.root_id, Some(&mut *session)).await?;
-                if self.claim.read_observation && private.preconsent.ineligible { return Ok(()); }
-                let fixed = if self.claim.read_observation {
-                    &private.preconsent.reads.iter().find(|r|r.record.id==self.claim.step_id).ok_or_else(conflict)?.envelope.fixed
-                } else { &private.envelope.as_ref().ok_or_else(conflict)?.fixed }.clone();
-                let step = if self.claim.read_observation {
-                    &mut private.preconsent.reads.iter_mut().find(|r|r.record.id==self.claim.step_id).ok_or_else(conflict)?.record
-                } else { private.steps.iter_mut().find(|s| s.id == self.claim.step_id).ok_or_else(conflict)? };
-                if !matches!(&step.phase, StepPhase::Dispatched {dispatch_id} if dispatch_id == &self.claim.dispatch_id) { return Err(conflict()); }
-                let (complete, compaction) = match step.operation {
-                    StepOperation::Generation => {
-                        (envelope::verify_completion(&value, &fixed)?, None)
-                    }
-                    StepOperation::Compact => {
-                        let complete = compact::verify(value.clone(), &step.input)?;
-                        (VerifiedProviderCompletion {response_id:complete.response_id,output:complete.output,calls:vec![]},
-                            Some(ObservedCompaction {response:complete.response,body_sha256:body_sha256.clone()}))
-                    }
-                };
-                let output_binding = match &compaction {
-                    Some(compaction) => digest(json!({"response":compaction.response,"body_sha256":compaction.body_sha256})),
-                    None => digest(json!(complete.output)),
-                };
-                let receipt = wire::CompletionReceipt {root_id:row.id.clone(),step_id:step.id.clone(),ordinal:step.ordinal,
-                    request_binding:step.request_binding.clone(),output_binding,receipt_bearer:persistence::new_token()?};
-                step.phase = StepPhase::Completed {completion:ObservedCompletion {response_id:complete.response_id,output:complete.output,calls:complete.calls,compaction},receipt};
-                persistence::save(&self.state,&mut row,&private,session).await
-            }.await;
-            super::super::api_key_mutation_service::transaction_result(result)
-        }).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
+        session.start_transaction().and_run(
+            (self, &value, &body_sha256),
+            |session, context| {
+                let (observer, value, body_sha256) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (mut row, mut private) = persistence::load(&observer.state, &observer.claim.root_id, Some(&mut *session)).await?;
+                        if observer.claim.read_observation && private.preconsent.ineligible { return Ok(()); }
+                        let fixed = if observer.claim.read_observation {
+                            &private.preconsent.reads.iter().find(|r|r.record.id==observer.claim.step_id).ok_or_else(conflict)?.envelope.fixed
+                        } else { &private.envelope.as_ref().ok_or_else(conflict)?.fixed }.clone();
+                        let step = if observer.claim.read_observation {
+                            &mut private.preconsent.reads.iter_mut().find(|r|r.record.id==observer.claim.step_id).ok_or_else(conflict)?.record
+                        } else { private.steps.iter_mut().find(|s| s.id == observer.claim.step_id).ok_or_else(conflict)? };
+                        if !matches!(&step.phase, StepPhase::Dispatched {dispatch_id} if dispatch_id == &observer.claim.dispatch_id) { return Err(conflict()); }
+                        let (complete, compaction) = match step.operation {
+                            StepOperation::Generation => {
+                                (envelope::verify_completion(value, &fixed)?, None)
+                            }
+                            StepOperation::Compact => {
+                                let complete = compact::verify(value.clone(), &step.input)?;
+                                (VerifiedProviderCompletion {response_id:complete.response_id,output:complete.output,calls:vec![]},
+                                    Some(ObservedCompaction {response:complete.response,body_sha256:body_sha256.clone()}))
+                            }
+                        };
+                        let output_binding = match &compaction {
+                            Some(compaction) => digest(json!({"response":compaction.response,"body_sha256":compaction.body_sha256})),
+                            None => digest(json!(complete.output)),
+                        };
+                        let receipt = wire::CompletionReceipt {root_id:row.id.clone(),step_id:step.id.clone(),ordinal:step.ordinal,
+                            request_binding:step.request_binding.clone(),output_binding,receipt_bearer:persistence::new_token()?};
+                        step.phase = StepPhase::Completed {completion:ObservedCompletion {response_id:complete.response_id,output:complete.output,calls:complete.calls,compaction},receipt};
+                        persistence::save(&observer.state,&mut row,&private,session).await
+                    }.await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        ).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
     }
 }
 

@@ -117,30 +117,33 @@ pub(super) async fn prepare(
     let mut session = state.db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (mut row, mut current) =
-                    persistence::load(state, &root.id, Some(&mut *session)).await?;
-                persistence::require_row(&row, chat)?;
-                if row.phase != "unactivated" || row.revision != root.revision {
-                    return Err(conflict());
-                }
-                if let Some(saved) = &current.preconsent.compact {
-                    if saved.control_hash != proposed.control_hash
-                        || saved.request_binding != proposed.request_binding
-                        || saved.envelope != proposed.envelope
-                        || saved.read_id != proposed.read_id
-                    {
+        .and_run((state, chat, root, &proposed), |session, context| {
+            let (state, chat, root, proposed) = *context;
+            Box::pin(async move {
+                let result = async {
+                    let (mut row, mut current) =
+                        persistence::load(state, &root.id, Some(&mut *session)).await?;
+                    persistence::require_row(&row, chat)?;
+                    if row.phase != "unactivated" || row.revision != root.revision {
                         return Err(conflict());
                     }
-                } else {
-                    current.preconsent.compact = Some(proposed.clone());
-                    persistence::save(state, &mut row, &current, session).await?;
+                    if let Some(saved) = &current.preconsent.compact {
+                        if saved.control_hash != proposed.control_hash
+                            || saved.request_binding != proposed.request_binding
+                            || saved.envelope != proposed.envelope
+                            || saved.read_id != proposed.read_id
+                        {
+                            return Err(conflict());
+                        }
+                    } else {
+                        current.preconsent.compact = Some(proposed.clone());
+                        persistence::save(state, &mut row, &current, session).await?;
+                    }
+                    Ok(wire::PrepareReply::Observe)
                 }
-                Ok(wire::PrepareReply::Observe)
-            }
-            .await;
-            super::super::api_key_mutation_service::transaction_result(result)
+                .await;
+                super::super::api_key_mutation_service::transaction_result(result)
+            })
         })
         .await
         .map_err(super::super::api_key_mutation_service::map_transaction_error)

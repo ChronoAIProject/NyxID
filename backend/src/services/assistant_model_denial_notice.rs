@@ -275,53 +275,59 @@ pub(crate) async fn recover(db: &Database) -> AppResult<()> {
         .await?;
     for expected in pending {
         let mut session = db.client().start_session().await?;
-        session.start_transaction().and_run2(async |session| {
-            let result=Box::pin(async {
-                let notices=db.collection::<ModelDenialNotice>(NOTICES);
-                let Some(mut notice)=notices.find_one(doc!{"_id":&expected.id,"state":{"$in":["pending","claimed"]}})
-                    .session(&mut *session).await? else {return Ok(());};
-                let conversation=db.collection::<AssistantConversation>("assistant_conversations").find_one(doc!{
-                    "_id":&notice.conversation_id,"user_id":&notice.user_id}).session(&mut *session).await?;
-                // Settlement (including the orphan sweep) owns an admitted
-                // turn until it clears active_turn. Never retire its notice
-                // underneath the shared reply transaction, even after expiry
-                // or revocation. execute still checks live authority.
-                if notice.state=="claimed" && conversation.as_ref().is_some_and(|row|
-                    row.active_turn.as_ref().is_some_and(|turn| Some(&turn.turn_id)==notice.claimed_turn_id.as_ref())) {
-                    return Ok(());
-                }
-                let key=db.collection::<Document>("api_keys").find_one(doc!{"_id":&notice.api_key_id,
-                    "user_id":&notice.user_id,"is_active":true}).session(&mut *session).await?;
-                if notice.expires_at<=Utc::now() || key.is_none() || conversation.as_ref().is_none_or(|row|
-                    row.credential_api_key_id!=notice.api_key_id) {
-                    notice.state="unsupported".into();notice.reason=Some("expired_or_revoked".into());
-                } else if notice.state=="claimed" {
-                    let saved=db.collection::<AssistantMessage>("assistant_messages").find_one(doc!{
-                        "user_id":&notice.user_id,"conversation_id":&notice.conversation_id,
-                        "turn_id":&notice.claimed_turn_id,"role":"assistant"}).session(&mut *session).await?;
-                    if let Some(saved)=saved {
-                        let completed=saved.status=="completed" && saved.text==TEXT;
-                        // Reclaim may have saved a failed no-reply turn before
-                        // this recovery pass. Stop/revocation/partial output
-                        // cannot resurrect successful notice work.
-                        if saved.status=="failed" && saved.error_code.as_deref()==Some("turn_lost")
-                            && saved.text.is_empty() && source_valid_in_session(db,&notice,session).await? {
-                            notice.state="pending".into();notice.claimed_turn_id=None;notice.reply_id=None;notice.reason=None;
-                        } else {
-                            notice.state=if completed {"settled"} else {"unsupported"}.into();
-                            notice.reply_id=Some(saved.id);notice.reason=(!completed).then(||"turn_did_not_complete".into());
+        session.start_transaction().and_run(
+            (db, &expected),
+            |session, context| {
+                let (db, expected) = *context;
+                Box::pin(async move {
+                    let result=Box::pin(async {
+                        let notices=db.collection::<ModelDenialNotice>(NOTICES);
+                        let Some(mut notice)=notices.find_one(doc!{"_id":&expected.id,"state":{"$in":["pending","claimed"]}})
+                            .session(&mut *session).await? else {return Ok(());};
+                        let conversation=db.collection::<AssistantConversation>("assistant_conversations").find_one(doc!{
+                            "_id":&notice.conversation_id,"user_id":&notice.user_id}).session(&mut *session).await?;
+                        // Settlement (including the orphan sweep) owns an admitted
+                        // turn until it clears active_turn. Never retire its notice
+                        // underneath the shared reply transaction, even after expiry
+                        // or revocation. execute still checks live authority.
+                        if notice.state=="claimed" && conversation.as_ref().is_some_and(|row|
+                            row.active_turn.as_ref().is_some_and(|turn| Some(&turn.turn_id)==notice.claimed_turn_id.as_ref())) {
+                            return Ok(());
                         }
-                    } else {notice.state="pending".into();notice.claimed_turn_id=None;}
-                }
-                notices.replace_one(doc!{"_id":&notice.id},&notice).session(&mut *session).await?;
-                if notice.state=="pending" {enqueue_in_session(db,&notice,session).await?;}
-                else {db.collection::<Document>("assistant_conversations").update_one(doc!{
-                    "_id":&notice.conversation_id,"user_id":&notice.user_id},doc!{"$pull":{"pending_events":{"id":&notice.id,"kind":EVENT_KIND}}})
-                    .session(&mut *session).await?;}
-                Ok(())
-            }).await;
-            super::api_key_mutation_service::transaction_result(result)
-        }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
+                        let key=db.collection::<Document>("api_keys").find_one(doc!{"_id":&notice.api_key_id,
+                            "user_id":&notice.user_id,"is_active":true}).session(&mut *session).await?;
+                        if notice.expires_at<=Utc::now() || key.is_none() || conversation.as_ref().is_none_or(|row|
+                            row.credential_api_key_id!=notice.api_key_id) {
+                            notice.state="unsupported".into();notice.reason=Some("expired_or_revoked".into());
+                        } else if notice.state=="claimed" {
+                            let saved=db.collection::<AssistantMessage>("assistant_messages").find_one(doc!{
+                                "user_id":&notice.user_id,"conversation_id":&notice.conversation_id,
+                                "turn_id":&notice.claimed_turn_id,"role":"assistant"}).session(&mut *session).await?;
+                            if let Some(saved)=saved {
+                                let completed=saved.status=="completed" && saved.text==TEXT;
+                                // Reclaim may have saved a failed no-reply turn before
+                                // this recovery pass. Stop/revocation/partial output
+                                // cannot resurrect successful notice work.
+                                if saved.status=="failed" && saved.error_code.as_deref()==Some("turn_lost")
+                                    && saved.text.is_empty() && source_valid_in_session(db,&notice,session).await? {
+                                    notice.state="pending".into();notice.claimed_turn_id=None;notice.reply_id=None;notice.reason=None;
+                                } else {
+                                    notice.state=if completed {"settled"} else {"unsupported"}.into();
+                                    notice.reply_id=Some(saved.id);notice.reason=(!completed).then(||"turn_did_not_complete".into());
+                                }
+                            } else {notice.state="pending".into();notice.claimed_turn_id=None;}
+                        }
+                        notices.replace_one(doc!{"_id":&notice.id},&notice).session(&mut *session).await?;
+                        if notice.state=="pending" {enqueue_in_session(db,&notice,session).await?;}
+                        else {db.collection::<Document>("assistant_conversations").update_one(doc!{
+                            "_id":&notice.conversation_id,"user_id":&notice.user_id},doc!{"$pull":{"pending_events":{"id":&notice.id,"kind":EVENT_KIND}}})
+                            .session(&mut *session).await?;}
+                        Ok(())
+                    }).await;
+                    super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        ).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
     }
     Ok(())
 }
@@ -462,21 +468,27 @@ pub(crate) async fn execute(
         .await?
         .ok_or_else(refused)?;
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async |session| {
-        let result=async {
-            let (live,_,_)=acks::fence(db,&chat,session).await?;
-            super::assistant_access_policy::require_same_live_turn(&chat,&live)?;
-            if chat.turn_id.as_deref()!=Some(turn.turn_id.as_str()) {return Err(refused());}
-            let notice=db.collection::<ModelDenialNotice>(NOTICES).find_one(doc!{"_id":&marker.id,"user_id":&row.user_id,
-                "conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,"state":"claimed",
-                "claimed_turn_id":&turn.turn_id,"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.ok_or_else(refused)?;
-            source_in_session(db,&notice,session).await?;
-            if live.active_turn.as_ref().is_none_or(|active|active.events.len()!=1
-                || active.events[0].id!=notice.id || active.events[0].kind!=EVENT_KIND || active.platform_reply!=notice.platform_reply)
-            {return Err(refused());}
-            Ok(())
-        }.await;super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
+    session.start_transaction().and_run(
+            (db, row, &chat, turn, marker),
+            |session, context| {
+                let (db, row, chat, turn, marker) = *context;
+                Box::pin(async move {
+                    let result=async {
+                        let (live,_,_)=acks::fence(db,chat,session).await?;
+                        super::assistant_access_policy::require_same_live_turn(chat,&live)?;
+                        if chat.turn_id.as_deref()!=Some(turn.turn_id.as_str()) {return Err(refused());}
+                        let notice=db.collection::<ModelDenialNotice>(NOTICES).find_one(doc!{"_id":&marker.id,"user_id":&row.user_id,
+                            "conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,"state":"claimed",
+                            "claimed_turn_id":&turn.turn_id,"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.ok_or_else(refused)?;
+                        source_in_session(db,&notice,session).await?;
+                        if live.active_turn.as_ref().is_none_or(|active|active.events.len()!=1
+                            || active.events[0].id!=notice.id || active.events[0].kind!=EVENT_KIND || active.platform_reply!=notice.platform_reply)
+                        {return Err(refused());}
+                        Ok(())
+                    }.await;super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        ).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
     Ok(Some(engine::TurnResult {
         text: TEXT.into(),
         session_id: None,

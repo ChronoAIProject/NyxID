@@ -508,22 +508,25 @@ pub(crate) async fn prepare(
     let mut session = state.db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (live, _, _) = acks::fence(&state.db, chat, session).await?;
-                super::assistant_access_policy::require_same_live_turn(chat, &live)?;
-                let (mut current, _) =
-                    persistence::load(state, &row.id, Some(&mut *session)).await?;
-                persistence::require_row(&current, chat)?;
-                if current.revision != row.revision || current.phase != "allowed" {
-                    return Err(conflict());
+        .and_run((state, chat, &row, &private), |session, context| {
+            let (state, chat, row, private) = *context;
+            Box::pin(async move {
+                let result = async {
+                    let (live, _, _) = acks::fence(&state.db, chat, session).await?;
+                    super::assistant_access_policy::require_same_live_turn(chat, &live)?;
+                    let (mut current, _) =
+                        persistence::load(state, &row.id, Some(&mut *session)).await?;
+                    persistence::require_row(&current, chat)?;
+                    if current.revision != row.revision || current.phase != "allowed" {
+                        return Err(conflict());
+                    }
+                    // Reconstruct each retry's mutable row from durable state. A
+                    // transaction abort must not reuse an incremented local revision.
+                    persistence::save(state, &mut current, private, session).await
                 }
-                // Reconstruct each retry's mutable row from durable state. A
-                // transaction abort must not reuse an incremented local revision.
-                persistence::save(state, &mut current, &private, session).await
-            }
-            .await;
-            super::api_key_mutation_service::transaction_result(result)
+                .await;
+                super::api_key_mutation_service::transaction_result(result)
+            })
         })
         .await
         .map_err(super::api_key_mutation_service::map_transaction_error)?;
@@ -557,55 +560,66 @@ pub(crate) async fn final_send_claim(
     let mut session = state.db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (live, _, _) = acks::fence(&state.db, &prepared.chat, session).await?;
-                super::assistant_access_policy::require_same_live_turn(&prepared.chat, &live)?;
-                let (mut row, mut private) =
-                    persistence::load(state, &prepared.root_id, Some(&mut *session)).await?;
-                persistence::require_row(&row, &prepared.chat)?;
-                if row.phase != "allowed"
-                    || !row.control_hashes.contains(&prepared.control_hash)
-                    || private.connection_binding.as_deref() != Some(current.as_str())
-                    || private.connection_id.as_deref() != Some(prepared.connection_id.as_str())
-                {
-                    return Err(conflict());
-                }
-                let step = private
-                    .steps
-                    .last_mut()
-                    .filter(|s| {
-                        s.id == prepared.step_id
-                            && s.request_binding == prepared.request_binding
-                            && s.capability_hash == prepared.step_hash
-                            && s.operation == prepared.operation
-                    })
-                    .ok_or_else(conflict)?;
-                if !matches!(step.phase, StepPhase::Prepared) {
-                    return Err(conflict());
-                }
-                let first = step.ordinal == 0;
-                step.phase = StepPhase::Dispatched {
-                    dispatch_id: dispatch_id.clone(),
-                };
-                if first
-                    && !acks::consume_action_in_session(
-                        &state.db,
-                        &prepared.chat,
-                        row.acknowledgement_id.as_deref().ok_or_else(conflict)?,
-                        "nyxid.model_control_v1",
-                        private.card_arguments.as_ref().ok_or_else(conflict)?,
-                        session,
-                    )
-                    .await?
-                {
-                    return Err(conflict());
-                }
-                persistence::save(state, &mut row, &private, session).await
-            }
-            .await;
-            super::api_key_mutation_service::transaction_result(result)
-        })
+        .and_run(
+            (state, prepared, &current, &dispatch_id),
+            |session, context| {
+                let (state, prepared, current, dispatch_id) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (live, _, _) = acks::fence(&state.db, &prepared.chat, session).await?;
+                        super::assistant_access_policy::require_same_live_turn(
+                            &prepared.chat,
+                            &live,
+                        )?;
+                        let (mut row, mut private) =
+                            persistence::load(state, &prepared.root_id, Some(&mut *session))
+                                .await?;
+                        persistence::require_row(&row, &prepared.chat)?;
+                        if row.phase != "allowed"
+                            || !row.control_hashes.contains(&prepared.control_hash)
+                            || private.connection_binding.as_deref() != Some(current.as_str())
+                            || private.connection_id.as_deref()
+                                != Some(prepared.connection_id.as_str())
+                        {
+                            return Err(conflict());
+                        }
+                        let step = private
+                            .steps
+                            .last_mut()
+                            .filter(|s| {
+                                s.id == prepared.step_id
+                                    && s.request_binding == prepared.request_binding
+                                    && s.capability_hash == prepared.step_hash
+                                    && s.operation == prepared.operation
+                            })
+                            .ok_or_else(conflict)?;
+                        if !matches!(step.phase, StepPhase::Prepared) {
+                            return Err(conflict());
+                        }
+                        let first = step.ordinal == 0;
+                        step.phase = StepPhase::Dispatched {
+                            dispatch_id: dispatch_id.clone(),
+                        };
+                        if first
+                            && !acks::consume_action_in_session(
+                                &state.db,
+                                &prepared.chat,
+                                row.acknowledgement_id.as_deref().ok_or_else(conflict)?,
+                                "nyxid.model_control_v1",
+                                private.card_arguments.as_ref().ok_or_else(conflict)?,
+                                session,
+                            )
+                            .await?
+                        {
+                            return Err(conflict());
+                        }
+                        persistence::save(state, &mut row, &private, session).await
+                    }
+                    .await;
+                    super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(super::api_key_mutation_service::map_transaction_error)?;
     Ok(ClaimedDispatch {
