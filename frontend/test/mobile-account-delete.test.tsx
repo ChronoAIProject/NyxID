@@ -27,6 +27,11 @@ function harness() {
   const box = ({ children }: NativeProps) => <div>{children}</div>;
   const native = {
     Alert: { alert: (title: string, message: string, buttons: NativeButton[]) => alerts.push({ title, message, buttons }) },
+    AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
+    AppState: { currentState: "active", addEventListener: () => ({ remove: () => undefined }) },
+    Keyboard: { addListener: () => ({ remove: () => undefined }), dismiss: () => undefined },
+    Share: { share: async () => ({}) },
+    useWindowDimensions: () => ({ width: 390, height: 844, scale: 3, fontScale: 1 }),
     Image: () => null,
     Linking: { openSettings: vi.fn() },
     Pressable: ({ children, disabled, onPress }: NativeProps) => <button disabled={disabled} onClick={onPress}>{children}</button>,
@@ -52,6 +57,8 @@ function harness() {
       fetch: transport,
       __DEV__: false,
       setTimeout, clearTimeout, URL,
+      requestAnimationFrame: (callback: (time: number) => void) => setTimeout(() => callback(Date.now()), 0),
+      cancelAnimationFrame: (handle: ReturnType<typeof setTimeout>) => clearTimeout(handle),
       require: (name: string): unknown => {
         if (name === "react") return React;
         if (name === "react/jsx-runtime") return jsxRuntime;
@@ -63,6 +70,9 @@ function harness() {
           removeItem: async (key: string) => { deviceStorage.delete(key); },
         } };
         if (name === "react-native-svg") return { __esModule: true, default: box, Circle: () => null, Path: () => null };
+        // Icon components are presentational; any named icon renders nothing.
+        if (name === "expo/fetch") return { fetch: transport };
+        if (name === "lucide-react-native") return new Proxy({ __esModule: true }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => null });
         if (name === "expo-linear-gradient") return { LinearGradient: box };
         if (name === "expo-constants") return { __esModule: true, default: { expoConfig: { version: "test" } } };
         if (name.endsWith("/ThemeContext")) return { useTheme: () => ({ colors: load(resolve(mobileRoot, "theme/mobileTheme.ts")).darkColors, mode: "dark", preference: "dark", setPreference: vi.fn() }) };
