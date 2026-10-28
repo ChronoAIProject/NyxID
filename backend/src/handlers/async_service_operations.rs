@@ -142,6 +142,7 @@ async fn call(
             if !crate::services::generated_artifacts::sandbox_contract(service, submit) {
                 return Err(denied());
             }
+            exec.strict_response_utf8 = true;
             crate::services::generated_artifacts::sandbox::RESPONSE_BYTES
         } else {
             watches::RESULT_BYTES
@@ -388,6 +389,14 @@ async fn artifact_result(
     let mut response = call(state, w, &w.contract.result_operation).await?;
     if response.status == 410 {
         return fail("result_expired").await;
+    }
+    // Explicit source expiry keeps its contract above. Otherwise known
+    // malformed/over-cap bytes are terminal even when the provider returned 5xx.
+    if response.is_body_too_large() {
+        return fail("artifact_too_large").await;
+    }
+    if response.is_malformed_utf8() {
+        return fail("artifact_invalid").await;
     }
     if response.status >= 500 {
         return watches::defer(&state.db, w).await;

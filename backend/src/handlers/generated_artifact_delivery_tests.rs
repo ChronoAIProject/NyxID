@@ -1633,6 +1633,207 @@ async fn generated_artifact_worker_reserves_shared_budget_before_result_body_and
 }
 
 #[tokio::test]
+async fn generated_artifact_strict_result_utf8_is_terminal_and_releases_capacity() {
+    check_artifact_strict_result(200, false, "artifact_invalid").await;
+    check_artifact_strict_result(503, false, "artifact_invalid").await;
+    check_artifact_strict_result(410, false, "result_expired").await;
+    check_artifact_strict_result(200, true, "artifact_too_large").await;
+    check_artifact_strict_result(503, true, "artifact_too_large").await;
+    check_artifact_valid_transient_result().await;
+    check_ordinary_async_lossy_result().await;
+}
+fn check_artifact_strict_result(
+    status: u16,
+    oversized: bool,
+    reason: &'static str,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        use crate::services::assistant_upload_service::byte_budget;
+        let a = boxed_generated().await;
+        let bytes = if oversized {
+            // Valid whole UTF-8, but cap+1 retains only the first byte of €.
+            let mut bytes = vec![b' '; artifacts::sandbox::RESPONSE_BYTES];
+            bytes.extend_from_slice("€".as_bytes());
+            bytes
+        } else {
+            vec![0xff, 0xfe]
+        };
+        *a.result_bytes.lock().unwrap() = Some(bytes);
+        a.result_status.store(status, Ordering::SeqCst);
+        a.submit().await;
+        a.due().await;
+        let baseline = byte_budget::available_for_tests();
+        let watch = a.watch().await;
+        let catalog = watch.artifact_catalog_service_id.as_deref().unwrap();
+        let held_result = a.result_gate.acquire().await.unwrap();
+        let mut sweep = Box::pin(async_operations::sweep(&a.f.state));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    result = &mut sweep => panic!("worker finished before result release: {result:?}"),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+                if a.calls.lock().unwrap().iter().any(|p| p.ends_with("/result")) { break; }
+            }
+        }).await.unwrap();
+        assert_eq!(
+            baseline - byte_budget::available_for_tests(),
+            2 * artifacts::sandbox::RESERVATION
+        );
+        let leases =
+            a.f.state
+                .db
+                .collection::<bson::Document>(crate::models::service_concurrency::COLLECTION_NAME);
+        let lease_scope =
+            doc! {"service_id":catalog,"person_id":&a.f.owner,"leases.0":{"$exists":true}};
+        assert_eq!(
+            leases.count_documents(lease_scope.clone()).await.unwrap(),
+            1
+        );
+        drop(held_result);
+        sweep.await.unwrap();
+        assert_eq!(byte_budget::available_for_tests(), baseline);
+        let watch = a.watch().await;
+        assert_eq!(watch.reason.as_deref(), Some(reason));
+        assert!(watch.result_encrypted.is_none());
+        assert!(watch.artifact_result.is_none());
+        assert_eq!(
+            a.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.ends_with("/result"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(ARTIFACTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(DELIVERIES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        // Lease release is asynchronous; wait only for this fixture's catalog.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let held = leases.count_documents(lease_scope.clone()).await.unwrap();
+                if held == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let calls = a.calls.lock().unwrap().clone();
+        Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+        assert_eq!(*a.calls.lock().unwrap(), calls);
+        finish(&a, &a.f.row, "submitted").await;
+        let event = admit_event(&a).await;
+        assert!(event.active_turn.as_ref().unwrap().attachments.is_empty());
+        finish(&a, &event, "The source could not be delivered.").await;
+        let axum::Json(history) = crate::handlers::assistant_nyxagent::history(
+            axum::extract::State(a.f.state.clone()),
+            crate::test_utils::test_auth_user(&a.f.owner),
+            axum::extract::Path(event.id.clone()),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        let history = serde_json::to_value(history).unwrap();
+        let message = history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| {
+                m["role"] == "assistant"
+                    && m["turn_id"] == event.active_turn.as_ref().unwrap().turn_id
+            })
+            .unwrap();
+        assert_eq!(
+            message["artifact_delivery"]["state"],
+            if reason == "artifact_invalid" {
+                "source_verification_failed"
+            } else {
+                reason
+            }
+        );
+        assert_eq!(message["artifact_delivery"]["recovery_available"], false);
+        assert!(message["attachments"].as_array().is_none_or(Vec::is_empty));
+        assert_eq!(*a.calls.lock().unwrap(), calls);
+    })
+}
+fn check_artifact_valid_transient_result() -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async {
+        let a = boxed_generated().await;
+        a.result_status.store(503, Ordering::SeqCst);
+        a.submit().await;
+        a.due().await;
+        Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+        let watch = a.watch().await;
+        assert_eq!(watch.state, "waiting");
+        assert!(watch.reason.is_none());
+        assert!(watch.result_encrypted.is_none());
+        assert_eq!(watch.attempts, 1);
+        assert_eq!(
+            a.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.ends_with("/result"))
+                .count(),
+            1
+        );
+    })
+}
+fn check_ordinary_async_lossy_result() -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async {
+        let a = AsyncFixture::new().await;
+        *a.result_bytes.lock().unwrap() = Some(vec![0xff, b'x']);
+        a.submit().await;
+        complete(&a).await;
+        let watch = a.watch().await;
+        assert!(watch.artifact_mode.is_none());
+        assert_eq!(watch.reason.as_deref(), Some("completed"));
+        let text = crate::services::record_field_service::decrypt(
+            &a.f.state.encryption_keys,
+            WATCHES,
+            &watch.id,
+            &watch.user_id,
+            "result_encrypted",
+            watch
+                .secret_context_versions
+                .get("result_encrypted")
+                .copied(),
+            watch.result_encrypted.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(text.as_slice(), "\u{fffd}x".as_bytes());
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(ARTIFACTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    })
+}
+
+#[tokio::test]
 async fn generated_artifact_worker_delivers_valid_peers_and_settles_envelope_refusals() {
     for case in [
         "mixed",

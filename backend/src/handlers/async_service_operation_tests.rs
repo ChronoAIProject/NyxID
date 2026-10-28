@@ -12,6 +12,7 @@ struct AsyncFixture {
     server: tokio::task::JoinHandle<()>,
     service: String,
     output: Arc<std::sync::Mutex<Value>>,
+    result_bytes: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     phase: Arc<std::sync::Mutex<String>>,
     status_gate: Arc<tokio::sync::Semaphore>,
     result_status: Arc<std::sync::atomic::AtomicU16>,
@@ -39,6 +40,8 @@ impl AsyncFixture {
         ));
         let phase = Arc::new(std::sync::Mutex::new("succeeded".to_owned()));
         let result_body = output.clone();
+        let result_bytes = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+        let raw_result = result_bytes.clone();
         let status_phase = phase.clone();
         let result_status = Arc::new(std::sync::atomic::AtomicU16::new(200));
         let response_status = result_status.clone();
@@ -54,6 +57,11 @@ impl AsyncFixture {
                 captured.lock().unwrap().push(uri.path().into());
                 let gate = gate.clone();
                 let result_body = result_body.lock().unwrap().clone();
+                let raw_result = if uri.path().ends_with("/result") {
+                    raw_result.lock().unwrap().clone()
+                } else {
+                    None
+                };
                 let status_phase = status_phase.lock().unwrap().clone();
                 let override_body = status_body.lock().unwrap().clone();
                 let result_code = response_status.load(Ordering::SeqCst);
@@ -83,6 +91,13 @@ impl AsyncFixture {
                             axum::body::Body::from("{"),
                         )
                             .into_response();
+                    }
+                    if let Some(bytes) = raw_result {
+                        return (
+                            axum::http::StatusCode::from_u16(result_code).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            bytes,
+                        ).into_response();
                     }
                     let body = Json(match uri.path() {
                         "/api/v1/agents" => json!({"id":"lifecycle-1","status":"queued"}),
@@ -157,6 +172,7 @@ impl AsyncFixture {
             server,
             service,
             output,
+            result_bytes,
             phase,
             status_gate,
             result_status,
