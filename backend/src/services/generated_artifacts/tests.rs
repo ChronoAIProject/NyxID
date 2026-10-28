@@ -413,6 +413,148 @@ async fn seeded_body(
     (w, row)
 }
 #[tokio::test]
+async fn generated_artifact_missing_saved_bytes_are_no_material_in_actual_registry() {
+    use super::super::encrypted_record_migration as migration;
+    let db = crate::test_utils::connect_transaction_test_database("artmissingregistry2037").await;
+    let keys = crate::test_utils::test_encryption_keys();
+    ensure_indexes(&db).await.unwrap();
+    let (w, mut row) = seeded(&db, &keys).await;
+    let pending = db
+        .collection::<PendingArtifact>(ARTIFACTS)
+        .find_one(doc! {"watch_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    bind_in_session(&db, &keys, &mut row, &w, &mut session)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+    let attachment = row.active_turn.as_ref().unwrap().attachments[0].id.clone();
+    assert_eq!(
+        db.collection::<Document>(ATTACHMENTS)
+            .delete_one(doc! {"_id":&attachment})
+            .await
+            .unwrap()
+            .deleted_count,
+        1
+    );
+    session.start_transaction().await.unwrap();
+    prepare_settlement_in_session(&db, &mut row, &mut session)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+    assert!(row.active_turn.as_ref().unwrap().attachments.is_empty());
+    let missing = db
+        .collection::<Document>(ARTIFACTS)
+        .find_one(doc! {"_id":&pending.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(missing.get_str("state").unwrap(), "missing");
+    assert_eq!(missing.get("data_encrypted"), Some(&bson::Bson::Null));
+    assert!(
+        missing
+            .get_document("secret_context_versions")
+            .unwrap()
+            .is_empty()
+    );
+    let saved = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.artifact_result.unwrap().rejected.iter().any(|r| {
+        r.index == pending.artifact_index
+            && matches!(
+                r.reason,
+                crate::models::generated_artifact::RejectionReason::Missing
+            )
+    }));
+
+    let mut invalid_rows = Vec::new();
+    for invalid in [false, true] {
+        if invalid {
+            for (state, ciphertext, versions) in [
+                ("pending", None, Default::default()),
+                ("unknown", None, Default::default()),
+                ("missing", None, pending.secret_context_versions.clone()),
+                ("missing", Some(Vec::new()), Default::default()),
+                ("missing", Some(vec![0; 32]), Default::default()),
+                (
+                    "missing",
+                    pending.data_encrypted.clone(),
+                    pending.secret_context_versions.clone(),
+                ),
+            ] {
+                let invalid = PendingArtifact {
+                    id: Uuid::new_v4().to_string(),
+                    watch_id: Uuid::new_v4().to_string(),
+                    state: state.into(),
+                    data_encrypted: ciphertext,
+                    secret_context_versions: versions,
+                    ..pending.clone()
+                };
+                let raw = bson::to_document(&invalid).unwrap();
+                db.collection::<Document>(ARTIFACTS)
+                    .insert_one(&raw)
+                    .await
+                    .unwrap();
+                invalid_rows.push(raw);
+            }
+        }
+        for mode in [migration::Mode::Verify, migration::Mode::Migrate] {
+            let generation = migration::start(&db, &keys, mode, None).await.unwrap();
+            let mut report = migration::status(&db, &keys).await.unwrap().unwrap();
+            for _ in 0..128 {
+                if report.phase == "observed" {
+                    break;
+                }
+                migration::advance(&db, &keys, &generation).await.unwrap();
+                report = migration::status(&db, &keys).await.unwrap().unwrap();
+            }
+            assert_eq!(
+                report.phase, "observed",
+                "bounded registry walk must finish"
+            );
+            assert_eq!(report.unresolved, invalid_rows.len() as i64);
+            assert_eq!(report.rewritten, 0);
+            let outcome = report
+                .field_outcomes
+                .iter()
+                .find(|outcome| {
+                    outcome.collection == ARTIFACTS && outcome.field == "data_encrypted"
+                })
+                .unwrap();
+            assert_eq!(outcome.no_material_observed, 1);
+            assert_eq!(outcome.authenticated_current, 0);
+            assert_eq!(outcome.verification_blocked, invalid_rows.len() as i64);
+            assert_eq!(
+                db.collection::<Document>(ARTIFACTS)
+                    .find_one(doc! {"_id":&pending.id})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                missing
+            );
+            for raw in &invalid_rows {
+                assert_eq!(
+                    db.collection::<Document>(ARTIFACTS)
+                        .find_one(doc! {"_id":raw.get_str("_id").unwrap()})
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    *raw
+                );
+            }
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn generated_artifacts_materialize_history_owner_http_ranges_recovery_and_retention() {
     let db = crate::test_utils::connect_transaction_test_database("art2037").await;
     let keys = crate::test_utils::test_encryption_keys();
