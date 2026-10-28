@@ -731,13 +731,13 @@ async fn materialize(
     if manifest.files.is_empty() && rows.len() != manifest.count {
         return Ok((Vec::new(), "delivery_failed"));
     }
-    let missing: Vec<_> = manifest
+    let missing_files: Vec<_> = manifest
         .files
         .iter()
         .filter(|f| !rows.iter().any(|r| r.id == f.pending_id))
         .cloned()
         .collect();
-    mark_missing_in_session(db, session, w, &missing).await?;
+    mark_missing_in_session(db, session, w, &missing_files).await?;
     let additional = rows
         .iter()
         .filter(|r| {
