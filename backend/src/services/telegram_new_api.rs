@@ -7,22 +7,39 @@ pub use crate::models::telegram_bot_request::{
     TelegramDiagnostic, TelegramFailure, TelegramReason,
 };
 
-/// Preserve ordinary reqwest redirect behavior, but never redirect an ORIGINAL
-/// Bot API request: /bot{nonempty credential}/{single nonempty method}. The
-/// original URL (previous[0]) determines the policy, including local API fixtures;
-/// an ordinary request redirected toward a Bot-shaped URL keeps ordinary policy.
+/// Preserve ordinary reqwest redirects, but never redirect an ORIGINAL request
+/// to the production Telegram API origin and /bot{credential}/{method} path.
+/// The original URL governs the policy, not a later redirect target.
 pub fn app_redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        let telegram = attempt.previous().first().is_some_and(|url| {
-            let mut segments = url.path().split('/');
-            segments.next() == Some("")
-                && segments
-                    .next()
-                    .is_some_and(|segment| segment.starts_with("bot") && segment.len() > 3)
-                && segments.next().is_some_and(|segment| !segment.is_empty())
-                && segments.next().is_none()
-        });
-        if telegram {
+    redirect_policy_for_origin(
+        url::Url::parse("https://api.telegram.org")
+            .expect("static Telegram API origin")
+            .origin(),
+    )
+}
+
+fn is_bot_api_request(url: &url::Url, origin: &url::Origin) -> bool {
+    if url.origin() != *origin {
+        return false;
+    }
+    let mut segments = url.path().split('/');
+    segments.next() == Some("")
+        && segments
+            .next()
+            .is_some_and(|segment| segment.starts_with("bot") && segment.len() > 3)
+        && segments.next().is_some_and(|segment| !segment.is_empty())
+        && segments.next().is_none()
+}
+
+// Private so local API fixtures can select their own exact origin without
+// exposing an application configuration or weakening the production boundary.
+fn redirect_policy_for_origin(origin: url::Origin) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt
+            .previous()
+            .first()
+            .is_some_and(|url| is_bot_api_request(url, &origin))
+        {
             attempt.stop()
         } else {
             reqwest::redirect::Policy::limited(10).redirect(attempt)
@@ -334,7 +351,9 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-telegram-fixture-client", "configured".parse().unwrap());
         let client = reqwest::Client::builder()
-            .redirect(app_redirect_policy())
+            .redirect(redirect_policy_for_origin(
+                url::Url::parse(&server.uri()).unwrap().origin(),
+            ))
             .default_headers(headers)
             .build()
             .unwrap();
@@ -391,6 +410,110 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "ordinary response");
         assert_eq!(target.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn telegram_new_production_redirect_match_requires_exact_origin_and_bot_path() {
+        let origin = url::Url::parse("https://api.telegram.org")
+            .unwrap()
+            .origin();
+        for (request, expected) in [
+            ("https://api.telegram.org/bot123:fixture/sendMessage", true),
+            (
+                "https://API.TELEGRAM.ORG:443/bot123:fixture/sendMessage",
+                true,
+            ),
+            ("http://api.telegram.org/bot123:fixture/sendMessage", false),
+            (
+                "https://api.telegram.org:444/bot123:fixture/sendMessage",
+                false,
+            ),
+            (
+                "https://api.telegram.org.example.test/bot123:fixture/sendMessage",
+                false,
+            ),
+            ("https://example.test/bottles/list", false),
+            ("https://example.test/botordinary/method", false),
+            ("http://127.0.0.1:49237/bot123:fixture/sendMessage", false),
+            ("https://api.telegram.org/bot/sendMessage", false),
+            ("https://api.telegram.org/bot123:fixture/", false),
+            (
+                "https://api.telegram.org/bot123:fixture/sendMessage/extra",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                is_bot_api_request(&url::Url::parse(request).unwrap(), &origin),
+                expected,
+                "origin/path case: {request}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_new_production_policy_preserves_ordinary_original_redirects_and_openapi() {
+        use wiremock::matchers::path;
+        let source = MockServer::start().await;
+        let target = MockServer::start().await;
+        let client = reqwest::Client::builder()
+            .redirect(app_redirect_policy())
+            .build()
+            .unwrap();
+        for (original, status) in [("/bottles/list", 307), ("/botordinary/method", 308)] {
+            source.reset().await;
+            target.reset().await;
+            Mock::given(method("GET"))
+                .and(path(original))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("Location", format!("{}/ordinary-final", target.uri())),
+                )
+                .expect(1)
+                .mount(&source)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/ordinary-final"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("ordinary response"))
+                .expect(1)
+                .mount(&target)
+                .await;
+            let response = client
+                .get(format!("{}{original}", source.uri()))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.unwrap(), "ordinary response");
+            assert_eq!(target.received_requests().await.unwrap().len(), 1);
+        }
+        source.reset().await;
+        target.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/botcatalog/openapi.json"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/spec.json", target.uri())),
+            )
+            .expect(1)
+            .mount(&source)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/spec.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "openapi":"3.0.0", "info":{"title":"Fixture", "version":"1"},
+                "paths":{"/status":{"get":{"operationId":"status", "responses":{"200":{"description":"ok"}}}}}
+            })))
+            .expect(1)
+            .mount(&target).await;
+        let endpoints = crate::services::openapi_parser::parse_openapi_spec(
+            &client,
+            &format!("{}/botcatalog/openapi.json", source.uri()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].path, "/status");
+        assert_eq!(target.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
