@@ -167,7 +167,7 @@ impl CompletionObserver {
                         };
                         let receipt = wire::CompletionReceipt {root_id:row.id.clone(),step_id:step.id.clone(),ordinal:step.ordinal,
                             request_binding:step.request_binding.clone(),output_binding,receipt_bearer:persistence::new_token()?};
-                        step.phase = StepPhase::Completed {completion:ObservedCompletion {response_id:complete.response_id,output:complete.output,calls:complete.calls,compaction},receipt};
+                        step.phase = StepPhase::Completed {completion:Box::new(ObservedCompletion {response_id:complete.response_id,output:complete.output,calls:complete.calls,compaction}),receipt};
                         persistence::save(&observer.state,&mut row,&private,session).await
                     }.await;
                     super::super::api_key_mutation_service::transaction_result(result)

@@ -437,12 +437,12 @@ mod reuse_tests {
             capability_ciphertext: vec![],
             operation: StepOperation::Generation,
             phase: StepPhase::Completed {
-                completion: ObservedCompletion {
+                completion: Box::new(ObservedCompletion {
                     response_id: "response".into(),
                     output: vec![],
                     calls: vec![],
                     compaction: None,
-                },
+                }),
                 receipt: wire::CompletionReceipt {
                     root_id: "root".into(),
                     step_id: format!("step-{call_id}"),

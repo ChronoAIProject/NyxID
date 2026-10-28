@@ -137,9 +137,8 @@ async fn compact_then_generation(
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|item| {
-            (item["type"] == "function_call").then(|| item["call_id"].as_str().unwrap())
-        })
+        .filter(|item| item["type"] == "function_call")
+        .map(|item| item["call_id"].as_str().unwrap())
     {
         assert!(
             tool_prepare(
