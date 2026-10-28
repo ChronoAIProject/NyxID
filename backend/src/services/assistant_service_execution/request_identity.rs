@@ -128,6 +128,16 @@ pub(crate) enum InferenceFallbackReason {
 }
 
 impl InferenceFallbackReason {
+    pub(crate) fn reusable_message(self) -> &'static str {
+        match self {
+            Self::MetadataShape => {
+                "Correlation metadata does not match the complete automatic Read contract. Explicit approval permits validated continuation text with the same exact connection, model and fixed Responses configuration."
+            }
+            _ => {
+                "This shape is outside automatic Read. Reusable approval requires the closed Responses v1 contract; unsupported metadata, resources or compaction remain exact-only."
+            }
+        }
+    }
     pub(crate) fn code(self) -> &'static str {
         match self {
             Self::MetadataShape => "metadata_shape",
@@ -175,6 +185,7 @@ pub(super) async fn record_fallback_reason(
     chat: &acks::ChatAuthority,
     operation: &Value,
     reason: InferenceFallbackReason,
+    reusable: bool,
 ) -> AppResult<()> {
     // Retain an actionable diagnosis even when an existing policy permits the
     // exact request without a card. Only the operation digest and static text
@@ -185,7 +196,8 @@ pub(super) async fn record_fallback_reason(
             "conversation_id":&chat.conversation_id, "api_key_id":&chat.api_key_id,
             "turn_id":&chat.turn_id, "operation":digest(operation.clone())},
             doc! {"$setOnInsert": {"_id":uuid::Uuid::new_v4().to_string(),
-            "reason":reason.code(), "explanation":reason.message(),
+            "reason":reason.code(), "explanation":if reusable {reason.reusable_message()} else {reason.message()},
+            "scope":if reusable {"validated_model_continuation_v1"}else {"exact_request"},
             "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35))}},
         )
         .upsert(true)

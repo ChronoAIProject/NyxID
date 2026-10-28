@@ -8,6 +8,8 @@ pub mod approval_grant;
 pub mod approval_request;
 pub mod assistant_action_receipt;
 pub mod assistant_direct_handoff;
+pub mod assistant_model_control;
+pub mod assistant_model_denial_notice;
 pub mod assistant_resource;
 pub mod assistant_wire_log;
 pub mod audit_log;

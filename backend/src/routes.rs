@@ -2486,6 +2486,29 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     ));
     let assistant_routes = Router::new()
         .route(
+            "/model-control/v1/tool-prepare",
+            post(handlers::assistant_model_control::tool_prepare)
+                .layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .route(
+            "/model-control/v1/tool-status",
+            post(handlers::assistant_model_control::tool_status)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/model-control/v1/verify",
+            post(handlers::assistant_model_control::verify).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/model-control/v1/prepare",
+            post(handlers::assistant_model_control::prepare)
+                .layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
+        .route(
+            "/model-control/v1/status",
+            post(handlers::assistant_model_control::status).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
             "/nyxagent/invocations/{key}",
             get(handlers::assistant_invocations::show),
         )

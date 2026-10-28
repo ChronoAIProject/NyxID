@@ -82,6 +82,18 @@ fn answer_routing_parts(
     reply_channel: Option<&ChannelOrigin>,
     turn: &ActiveTurn,
 ) -> AnswerRouting {
+    if turn
+        .events
+        .iter()
+        .any(super::assistant_model_denial_notice::is_notice)
+    {
+        // App replies stay in the app. Captured platform notices use the
+        // separate saved-personal-reply path, never today's legacy home/chat.
+        return AnswerRouting {
+            primary: PrimaryDestination::App,
+            also: Vec::new(),
+        };
+    }
     let primary = if let Some(group_id) = group_id {
         PrimaryDestination::Group {
             group_id: group_id.to_owned(),
@@ -2303,7 +2315,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             row.pending_events = rest;
             selected
         } else {
-            super::async_service_operation::select_events(&mut row, start.origin)
+            super::assistant_model_denial_notice::select_events(&mut row, start.origin)
         };
         Box::pin(super::channel_thread_follow_service::filter_events(
             db, user_id, &id, selected, session,
@@ -2533,7 +2545,23 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
         .await?;
     }
-    if let Some(lost) = row.active_turn.take() {
+    if let Some(lost) = row.active_turn.as_ref() {
+        let lost_reply_id = Uuid::new_v4().to_string();
+        let lost_error = if lost.stop_requested {
+            TurnError::internal("cancelled", "stop")
+        } else {
+            TurnError::internal("turn_lost", "lease_expiry")
+        };
+        Box::pin(super::assistant_model_denial_notice::settled_in_session(
+            db,
+            &row,
+            &lost_reply_id,
+            lost.reply.as_ref().map_or("", |reply| reply.text.as_str()),
+            Some(&lost_error),
+            session,
+        ))
+        .await?;
+        let lost = row.active_turn.take().expect("retained reclaimed turn");
         let lost_turn = lost.clone();
         let lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
         Box::pin(super::assistant_turn_observability::failed_in_session(
@@ -2573,7 +2601,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             author: None,
             voice: None,
             execution_pending: false,
-            id: Uuid::new_v4().to_string(),
+            id: lost_reply_id,
             conversation_id: id.clone(),
             user_id: user_id.into(),
             seq: row.message_count,
@@ -2901,6 +2929,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         ))
         .await?;
     }
+    Box::pin(super::assistant_model_denial_notice::claim_in_session(
+        db, &mut row, session,
+    ))
+    .await?;
     Box::pin(super::assistant_service_execution::bind_owner_selection(
         db, session, &row, start, &text,
     ))
@@ -3323,7 +3355,11 @@ pub async fn append_events_in_session(
             let index = row
                 .pending_events
                 .iter()
-                .position(|e| e.source_event_ids.is_empty() && e.trigger_run_id.is_none())
+                .position(|e| {
+                    e.source_event_ids.is_empty()
+                        && e.trigger_run_id.is_none()
+                        && !super::assistant_model_denial_notice::is_notice(e)
+                })
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);
         }
@@ -3781,6 +3817,9 @@ async fn finish_turn_inner(
                     == 1;
                 current.message_count += 1;
                 current.updated_at = now;
+                Box::pin(super::assistant_model_denial_notice::settled_in_session(
+                    &db, &current, &message_id, &result.text, error.as_ref(), session,
+                )).await?;
                 current.deliver_also = current
                     .active_turn
                     .as_ref()
@@ -5406,6 +5445,8 @@ pub async fn delete(
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         super::assistant_service_execution::COLLECTION,
+                        crate::models::assistant_model_control::COLLECTION_NAME,
+                        "assistant_model_denial_notices",
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::assistant_resource::COLLECTION_NAME,
                         crate::models::nyxbot_image_delivery::COLLECTION_NAME,

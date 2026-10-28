@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::crypto::jwt;
+use crate::errors::AppError;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
@@ -97,6 +98,9 @@ fn tool_succeeded(response: &Response) -> bool {
 
 #[derive(Clone)]
 struct ToolResultDigest(String);
+
+#[derive(Clone)]
+struct ModelControlActivity(String);
 
 #[derive(Clone, Copy)]
 struct RpcFailureCode(i32);
@@ -1683,14 +1687,15 @@ pub async fn mcp_post(
                 Err(r) => return r,
             };
             let sse_capable = accepts_sse(&headers);
-            handle_tools_call(
-                &state,
-                &auth,
-                sid.as_deref(),
-                &request,
-                sse_capable,
+            controlled_tools_call(ControlledToolsCall {
+                state: &state,
+                auth: &auth,
+                session_id: sid.as_deref(),
+                request: &request,
+                client_accepts_sse: sse_capable,
+                headers: &headers,
                 billing_egress_permit,
-            )
+            })
             .await
         }
 
@@ -2421,6 +2426,130 @@ async fn refuse_retry_duplicate(
 
 /// Chat-key tool calls are recorded on the live turn as metadata-only activity
 /// so the browser can show what the assistant is doing before its reply streams.
+struct ControlledToolsCall<'a> {
+    state: &'a AppState,
+    auth: &'a McpAuthContext,
+    session_id: Option<&'a str>,
+    request: &'a JsonRpcRequest,
+    client_accepts_sse: bool,
+    headers: &'a HeaderMap,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+}
+
+async fn controlled_tools_call(input: ControlledToolsCall<'_>) -> Response {
+    use crate::services::{
+        assistant_model_control as control, assistant_model_control_protocol as wire,
+    };
+    let ControlledToolsCall {
+        state,
+        auth,
+        session_id,
+        request,
+        client_accepts_sse,
+        headers,
+        billing_egress_permit,
+    } = input;
+    let single = |name: &str| -> crate::errors::AppResult<Option<&str>> {
+        let mut values = headers.get_all(name).iter();
+        let value = values
+            .next()
+            .map(|h| {
+                h.to_str()
+                    .map_err(|_| AppError::Forbidden("Invalid private model control".into()))
+            })
+            .transpose()?;
+        if values.next().is_some() {
+            return Err(AppError::Forbidden(
+                "Duplicate private model control".into(),
+            ));
+        }
+        Ok(value)
+    };
+    let claim = async {
+        let token = single(wire::CONTROL_HEADER)?;
+        let capability = single(wire::TOOL_HEADER)?;
+        if token.is_none() && capability.is_none() {
+            if let Some(chat) = &auth.chat
+                && control::require_control_lineage(state, chat).await?
+            {
+                return Err(AppError::Forbidden(
+                    "Active model control cannot be omitted".into(),
+                ));
+            }
+            return Ok(None);
+        }
+        let chat = auth
+            .chat
+            .as_ref()
+            .filter(|c| auth.is_api_key && !c.guest)
+            .ok_or_else(|| {
+                AppError::Forbidden("An owner conversation credential is required".into())
+            })?;
+        let token = wire::SecretToken::parse(
+            token
+                .ok_or_else(|| AppError::Forbidden("Missing model control".into()))?
+                .into(),
+        )
+        .map_err(|_| AppError::Forbidden("Invalid model control".into()))?;
+        let capability = wire::SecretToken::parse(
+            capability
+                .ok_or_else(|| AppError::Forbidden("Missing tool control".into()))?
+                .into(),
+        )
+        .map_err(|_| AppError::Forbidden("Invalid tool control".into()))?;
+        let params = request
+            .params
+            .as_ref()
+            .ok_or_else(|| AppError::BadRequest("Missing tool params".into()))?;
+        let name = params["name"]
+            .as_str()
+            .ok_or_else(|| AppError::BadRequest("Missing tool name".into()))?;
+        control::tool_claim(state, chat, &token, &capability, name, &params["arguments"])
+            .await
+            .map(Some)
+    }
+    .await;
+    let claim = match claim {
+        Ok(claim) => claim,
+        Err(error) => return app_error_to_rpc(request.id.clone(), &error),
+    };
+    let response = Box::pin(handle_tools_call(
+        state,
+        auth,
+        session_id,
+        request,
+        client_accepts_sse && claim.is_none(),
+        billing_egress_permit,
+    ))
+    .await;
+    let Some(claim) = claim else {
+        return response;
+    };
+    let (parts, body) = response.into_parts();
+    let activity = parts
+        .extensions
+        .get::<ModelControlActivity>()
+        .map(|a| a.0.clone());
+    let bytes = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let _ = control::tool_complete(state, claim, activity.as_deref(), None).await;
+            return rpc_error(
+                request.id.clone(),
+                -32603,
+                "Controlled tool result exceeded its supported projection",
+            );
+        }
+    };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+    let result = parsed
+        .as_ref()
+        .filter(|p| p["error"].is_null())
+        .and_then(|p| p.get("result"));
+    let _ = control::tool_complete(state, claim, activity.as_deref(), result).await;
+    Response::from_parts(parts, Body::from(bytes))
+}
+
 async fn handle_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2530,7 +2659,7 @@ async fn handle_tools_call(
     };
     // Keep native dispatch out of the progress-tracking wrapper's frame.
     // Universal calls add another dispatch layer before transactional cards.
-    let response = crate::services::machine_activity_service::ACTIVITY_ID
+    let mut response = crate::services::machine_activity_service::ACTIVITY_ID
         .scope(
             activity.as_ref().map(|(_, id)| id.clone()),
             Box::pin(dispatch_tools_call(
@@ -2571,6 +2700,9 @@ async fn handle_tools_call(
         }
     }
     if let Some((chat, id)) = activity {
+        response
+            .extensions_mut()
+            .insert(ModelControlActivity(id.clone()));
         let failure = tool_failure(&response);
         let _ = crate::services::assistant_nyxagent::activity_finished_for_turn(
             &state.db,

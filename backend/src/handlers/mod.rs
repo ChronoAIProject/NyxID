@@ -31,6 +31,7 @@ pub mod assistant_action_effects_services;
 pub mod assistant_actions;
 pub mod assistant_agent_learning;
 pub mod assistant_direct;
+pub(crate) mod assistant_model_control;
 pub mod assistant_readiness;
 pub mod auth;
 pub mod auth_agent_key;

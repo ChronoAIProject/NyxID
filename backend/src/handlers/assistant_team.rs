@@ -416,6 +416,17 @@ pub(crate) async fn owner_denial_decided(
     {
         return;
     }
+    match crate::services::assistant_model_denial_notice::exists(&state.db, &row.id).await {
+        Ok(true) => {
+            // The decision transaction already saved independent no-model work.
+            // Unsupported destinations remain open; never ask a denied model
+            // to explain itself or invent a legacy inbound delivery identity.
+            Box::pin(wake(state, owner, &row.conversation_id)).await;
+            return;
+        }
+        Err(_) => return,
+        Ok(false) => {}
+    }
     let event = crate::models::assistant_acknowledgement::bind_continuation(
         row.routing.as_ref(),
         team::event(
@@ -3642,6 +3653,12 @@ pub fn spawn_sweeps(state: AppState) {
             }
             if deliver_pending_skill_notifications(&state).await.is_err() {
                 tracing::debug!("Skill attachment outbox sweep deferred");
+            }
+            if crate::services::assistant_model_denial_notice::recover(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Saved model-Deny notice recovery deferred");
             }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {

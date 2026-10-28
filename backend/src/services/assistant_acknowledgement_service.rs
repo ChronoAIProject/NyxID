@@ -3024,6 +3024,9 @@ pub(crate) async fn decide_in_session(
     if allow && row.kind == "action" {
         row.expires_at = now + Duration::seconds(ACTION_SECONDS);
     }
+    // Reusable model authority inherits the actual saved Allow deadline.
+    super::assistant_model_control::decision_in_session(db, &row, session).await?;
+    super::assistant_model_denial_notice::decision_in_session(db, &row, session).await?;
     row.continuation_receipt_id = if row.invocation_id.is_some() {
         Box::pin(super::assistant_invocation_service::decision_in_session(
             db, session, &row,
