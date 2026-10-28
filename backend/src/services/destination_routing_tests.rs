@@ -529,6 +529,7 @@ pub(crate) async fn mcp_call(
         &mcp_service::McpExecContext {
             assistant_chat: None,
             response_body_limit: None,
+            strict_response_utf8: false,
             actor_user_id: None,
             caller_token: None,
             delegation_restrictions: Default::default(),

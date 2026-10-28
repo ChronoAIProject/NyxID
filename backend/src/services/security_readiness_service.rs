@@ -37,6 +37,7 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    "assistant:generated-artifacts",
     "assistant:org-agents",
     "assistant:operation-scopes",
     "assistant:guest-operation-scopes",

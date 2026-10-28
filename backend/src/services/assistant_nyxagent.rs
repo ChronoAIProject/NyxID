@@ -1116,6 +1116,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::channel_media_events::ensure_indexes(db).await?;
     super::assistant_channel_media::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
+    super::generated_artifacts::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
@@ -2851,7 +2852,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     Box::pin(super::async_service_operation::bind_in_session(
-        db, &mut row, session,
+        db, keys, &mut row, session,
     ))
     .await?;
     Box::pin(super::assistant_invocation_service::bind_in_session(
@@ -3659,6 +3660,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                artifact_delivery: None,
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
@@ -3746,6 +3748,7 @@ async fn finish_turn_inner(
                         activity
                     })
                     .collect();
+                super::generated_artifacts::prepare_settlement_in_session(&db, &mut current, session).await?;
                 let attachments = current
                     .active_turn
                     .as_ref()
@@ -3783,6 +3786,8 @@ async fn finish_turn_inner(
                     .as_ref()
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
+                super::generated_artifacts::associate_in_session(&db, &current, &message_id, session).await?;
+                turn_metadata.artifact_delivery = super::generated_artifacts::settled_outcome_in_session(&db, &current, session).await?;
                 super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
                     let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;
@@ -4206,6 +4211,7 @@ pub async fn attach_routed_image(
         assistant_conversation::TurnAttachment,
     };
     let meta = TurnAttachment {
+        artifact: Default::default(),
         chat_delivery: Some(chat_delivery),
         image_input: None,
         image_inspection: None,
@@ -4249,6 +4255,7 @@ pub async fn attach_routed_image(
     );
     let stored = async {
         let mut attachment = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             origin: "tool".into(),
             id: meta.id.clone(),
@@ -4307,6 +4314,7 @@ pub(crate) async fn attach_resource_image(
         assistant_resource::{AssistantResource, COLLECTION_NAME as RESOURCES},
     };
     let meta = media.map(|media| TurnAttachment {
+        artifact: Default::default(),
         id: resource.attachment_id.clone(),
         label: resource
             .source
@@ -4328,6 +4336,7 @@ pub(crate) async fn attach_resource_image(
     let attachment = if let Some(media) = media {
         let meta = meta.as_ref().ok_or_else(resources::missing)?;
         let mut row = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: meta.id.clone(),
             origin: "tool".into(),
@@ -5390,6 +5399,9 @@ pub async fn delete(
                     }
                     for collection in [
                         crate::models::async_service_operation::COLLECTION_NAME,
+                        crate::models::generated_artifact::COLLECTION_NAME,
+                        crate::models::generated_artifact::DELIVERIES,
+                        crate::models::generated_artifact::SERIES,
                         crate::models::assistant_voice::REQUESTS,
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,

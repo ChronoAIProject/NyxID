@@ -57,6 +57,67 @@ pub async fn load(db: &Database) -> AppResult<Settings> {
         .await?
         .unwrap_or_default())
 }
+/// Materialization serializes with policy replacement, including the initial
+/// default singleton. The transaction's computed expiry and policy agree.
+pub(crate) async fn artifact_policy_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+) -> AppResult<Policy> {
+    let defaults = bson::to_document(&Settings::default())
+        .map_err(|_| AppError::Internal("Attachment retention metadata".into()))?;
+    Ok(db
+        .collection::<Settings>(SETTINGS)
+        .find_one_and_update(
+            doc! {"_id":SETTINGS_ID},
+            doc! {"$inc":{"artifact_materialization_generation":1_i64},"$setOnInsert":defaults},
+        )
+        .upsert(true)
+        .return_document(mongodb::options::ReturnDocument::After)
+        .session(session)
+        .await?
+        .unwrap_or_default()
+        .policy
+        .unwrap_or_default())
+}
+
+/// Generated attachments have no user-upload settlement rule. Fence their
+/// metadata against concurrent retention deletion in the recovery transaction.
+pub(crate) async fn generated_available_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    filter: Document,
+    policy: Policy,
+) -> AppResult<()> {
+    let row = db
+        .collection::<Document>(ATTACHMENTS)
+        .find_one_and_update(
+            filter.clone(),
+            doc! {"$inc":{"artifact_delivery_generation":1_i64}},
+        )
+        .projection(projection())
+        .session(&mut *session)
+        .await?;
+    if let Some(row) = row {
+        if row.get_str("origin").ok() != Some("generated_artifact") {
+            return Err(AppError::NotFound("Attachment not found".into()));
+        }
+        return if age_expired(&row, policy, Utc::now()) {
+            Err(AppError::AssistantAttachmentExpired)
+        } else {
+            Ok(())
+        };
+    }
+    if db
+        .collection::<Document>(TOMBSTONES)
+        .find_one(filter)
+        .session(session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::AssistantAttachmentExpired);
+    }
+    Err(AppError::NotFound("Attachment not found".into()))
+}
 pub async fn refresh(db: &Database, cache: &Cache) -> AppResult<()> {
     let settings = load(db).await?;
     let mut snapshot = cache.write().unwrap_or_else(|e| e.into_inner());
@@ -146,6 +207,24 @@ fn bound_at(row: &Document) -> Option<DateTime<Utc>> {
 }
 
 fn age_expired(row: &Document, policy: Policy, now: DateTime<Utc>) -> bool {
+    if row.get_str("origin").ok() == Some("generated_artifact") {
+        if date(row, "expires_at").is_none_or(|expiry| expiry <= now) {
+            return true;
+        }
+        let days = policy.tool_image_days.unwrap_or(
+            if row
+                .get_str("content_type")
+                .unwrap_or_default()
+                .starts_with("image/")
+            {
+                policy.image_days
+            } else {
+                policy.document_days
+            },
+        );
+        return date(row, "created_at")
+            .is_none_or(|created| created + Duration::days(i64::from(days)) <= now);
+    }
     let (start, duration) = if row.get_str("origin").ok() == Some("machine_preview") {
         (
             date(row, "created_at"),

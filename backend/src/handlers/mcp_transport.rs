@@ -2262,7 +2262,11 @@ async fn handle_tools_list(
 fn audit_chat_tool(name: &str) -> bool {
     matches!(
         name,
-        "nyx__call_tool" | "nyx__connect_service" | "nyx__wait_for_connection" | "nyx__ssh_exec"
+        "nyx__call_tool"
+            | "nyx__connect_service"
+            | "nyx__wait_for_connection"
+            | "nyx__ssh_exec"
+            | "nyx__artifact_delivery"
     ) || name.starts_with("nyx__oracle_")
         || name.starts_with("nyxid__")
 }
@@ -2275,6 +2279,7 @@ fn native_activity_names() -> &'static std::collections::HashSet<String> {
             definitions.push(crate::services::assistant_resource_service::definition());
             definitions.push(crate::services::assistant_upload_service::definition());
             definitions.push(crate::services::assistant_upload_service::list_definition());
+            definitions.push(crate::services::generated_artifacts::recovery_definition());
             definitions
                 .push(crate::services::assistant_nyxagent::conversation_history_definition());
             let mut names: std::collections::HashSet<String> =
@@ -2618,6 +2623,7 @@ async fn dispatch_tools_call(
                 | "nyx__ssh_exec"
                 | "nyx__ssh_list_services"
                 | "nyx__resource_get"
+                | "nyx__artifact_delivery"
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
@@ -2634,17 +2640,21 @@ async fn dispatch_tools_call(
                 api_key_name: auth.api_key_name.clone(),
             },
             "assistant_mcp_tool_call",
-            Some(serde_json::json!({
-                "conversation_id": chat.conversation_id,
-                "agent_role": chat.role,
-                "guest": chat.guest,
-                "tool_name": if known_meta_tool || known_account_tool {
-                    tool_name
-                } else {
-                    "service_tool"
-                },
-                "outcome": "requested",
-            })),
+            Some(if tool_name == "nyx__artifact_delivery" {
+                crate::services::generated_artifacts::recovery_audit_data(false)
+            } else {
+                serde_json::json!({
+                    "conversation_id": chat.conversation_id,
+                    "agent_role": chat.role,
+                    "guest": chat.guest,
+                    "tool_name": if known_meta_tool || known_account_tool {
+                        tool_name
+                    } else {
+                        "service_tool"
+                    },
+                    "outcome": "requested",
+                })
+            }),
         )
         .await;
     }
@@ -2676,6 +2686,7 @@ async fn dispatch_tools_call(
                 | "nyx__ssh_exec"
                 | "nyx__resource_get"
                 | "nyx__attachment_read" | "nyx__attachment_list" | "nyx__conversation_history"
+                | "nyx__artifact_delivery"
                 | "nyx__machine_list"
                 | "nyx__saved_logins"
                 | "nyx__machine_list_files"
@@ -2743,6 +2754,15 @@ async fn dispatch_tools_call(
             &arguments,
             request.id.clone(),
             billing_egress_permit,
+        ))
+        .await;
+    }
+    if tool_name == "nyx__artifact_delivery" {
+        return Box::pin(handle_artifact_delivery(
+            state,
+            auth,
+            &arguments,
+            request.id.clone(),
         ))
         .await;
     }
@@ -3456,6 +3476,7 @@ fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext
     mcp_service::McpExecContext {
         assistant_chat: auth.chat.as_ref(),
         response_body_limit: None,
+        strict_response_utf8: false,
         actor_user_id: Some(&auth.user_id),
         caller_token: auth.caller_token.as_deref(),
         delegation_restrictions: Box::new(restrictions),
@@ -3908,6 +3929,9 @@ fn webhook_execution_arguments(
 
 fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> serde_json::Value {
     let mut schema = schema.clone();
+    if schema["maxProperties"] == 0 {
+        return schema;
+    }
     // Any owner chat may be asked for an action card (access mode or webhook
     // policy); guests never confirm cards.
     if auth.chat.as_ref().is_some_and(|chat| !chat.guest)
@@ -4120,6 +4144,100 @@ async fn handle_account_tool(
     tool_result(request_id, &result.value.to_string(), result.is_error)
 }
 
+async fn handle_artifact_delivery(
+    state: &AppState,
+    auth: &McpAuthContext,
+    args: &serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> Response {
+    use crate::services::assistant_acknowledgement_service as acks;
+    let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
+        return tool_result(
+            id,
+            "Artifact recovery requires an owner Web chat turn",
+            true,
+        );
+    };
+    if !args.as_object().is_some_and(|args| args.is_empty()) {
+        return tool_result(id, "Artifact recovery accepts no arguments", true);
+    }
+    // Both direct and wrapped calls use the same owner acknowledgement gate.
+    let facts = acks::ActionFacts {
+        class: acks::OwnerActionClass::Change,
+        read_only: false,
+        destructive: false,
+    };
+    let summary = "Recover the saved cloud attachments on the preceding reply";
+    let confirmation_args =
+        match crate::services::generated_artifacts::recovery_confirmation_arguments(&state.db, chat)
+            .await
+        {
+            Ok(args) => args,
+            Err(_) => {
+                return tool_result(
+                    id,
+                    "Artifact recovery requires an owner Web user turn",
+                    true,
+                );
+            }
+        };
+    let auto = match acks::confirmation_needed(&state.db, chat, facts, false).await {
+        Ok(acks::Gate::Ask(need)) => {
+            match acks::confirm_action(
+                &state.db,
+                chat,
+                "nyx__artifact_delivery",
+                &confirmation_args,
+                &need,
+                summary,
+            )
+            .await
+            {
+                Ok(Some(refusal)) => return tool_result(id, &refusal.to_string(), true),
+                Ok(None) => None,
+                Err(_) => return tool_result(id, "Confirmation could not be checked", true),
+            }
+        }
+        Ok(acks::Gate::AutoAllowed(auto)) => Some(auto),
+        Ok(acks::Gate::Proceed) => None,
+        Err(_) => return tool_result(id, "Confirmation could not be checked", true),
+    };
+    match crate::services::generated_artifacts::recover_for_chat(
+        &state.db,
+        &state.encryption_keys,
+        chat,
+        args,
+    )
+    .await
+    {
+        Ok(()) => {
+            if let Some(auto) = auto {
+                acks::record_auto_allowed(
+                    &state.db,
+                    chat,
+                    "nyx__artifact_delivery",
+                    args,
+                    &auto,
+                    summary,
+                )
+                .await;
+            }
+            tool_result(
+                id,
+                "The saved cloud result is materialized on the preceding reply. Use its private attachment card; no new execution was submitted.",
+                false,
+            )
+        }
+        Err(error) => tool_result(
+            id,
+            &crate::services::assistant_account_tools::error_result(error)
+                .value
+                .to_string(),
+            true,
+        ),
+    }
+}
+
 async fn handle_attachment_list(
     state: &AppState,
     auth: &McpAuthContext,
@@ -4322,6 +4440,21 @@ async fn handle_meta_call_tool(
         return tool_result(request_id, "tool_name too long (max 200 chars)", true);
     }
 
+    if tool_name == "nyx__artifact_delivery" {
+        crate::services::generated_artifacts::audit_recovery_request(
+            &state.db,
+            &audit_service::AuditActor {
+                user_id: auth.user_id.clone(),
+                ip_address: auth.ip_address.clone(),
+                user_agent: auth.user_agent.clone(),
+                api_key_id: auth.api_key_id.clone(),
+                api_key_name: auth.api_key_name.clone(),
+            },
+            false,
+        )
+        .await;
+    }
+
     let result_query =
         match crate::services::notion_evidence::validate_query(arguments.get("result_query")) {
             Ok(query) => query,
@@ -4389,6 +4522,15 @@ async fn handle_meta_call_tool(
             &inner_args,
             request_id,
             billing_egress_permit,
+        ))
+        .await;
+    }
+    if tool_name == "nyx__artifact_delivery" {
+        return Box::pin(handle_artifact_delivery(
+            state,
+            auth,
+            &inner_args,
+            request_id,
         ))
         .await;
     }
@@ -4772,6 +4914,19 @@ async fn chat_native_definitions(
     tools.push(crate::services::assistant_upload_service::definition());
     tools.push(crate::services::assistant_upload_service::list_definition());
     tools.push(crate::services::assistant_nyxagent::conversation_history_definition());
+    if !chat.guest
+        && !chat.platform_thread
+        && !chat.invocation_controlled
+        && chat.turn_live
+        && !chat.turn_stopped
+        && chat.channel_adapter_origin.is_none()
+        && chat.org_agent_access.is_none()
+        && crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        tools.push(crate::services::generated_artifacts::recovery_definition());
+    }
     tools
 }
 

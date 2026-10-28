@@ -140,6 +140,12 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::generated_artifact::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (m::generated_artifact::DELIVERIES, doc! {"user_id":owner}),
+        (m::generated_artifact::SERIES, doc! {"user_id":owner}),
+        (
             m::async_service_operation::QUOTAS_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
@@ -767,4 +773,57 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
         Ok(db.collection::<Document>(USERS).find_one(doc! {"_id":&job.user_id}).session(&mut tx).await?.is_none())
     }.await;
     super::super::org_membership_authority::finish(tx, result).await
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn owner_erasure_inventory_purges_pending_artifacts_and_delivery_associations_only_for_owner()
+     {
+        let db = crate::test_utils::connect_transaction_test_database("arterase2037").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let foreign = uuid::Uuid::new_v4().to_string();
+        db.collection::<Document>(super::super::super::erasure_admission::COLLECTION)
+            .insert_one(doc! {"_id":&owner,"erasure_accepted":true})
+            .await
+            .unwrap();
+        let collections = [
+            crate::models::generated_artifact::COLLECTION_NAME,
+            crate::models::generated_artifact::DELIVERIES,
+            crate::models::generated_artifact::SERIES,
+        ];
+        for collection in collections {
+            for user in [&owner, &foreign] {
+                db.collection::<Document>(collection).insert_one(doc! {
+                    "_id":uuid::Uuid::new_v4().to_string(),"user_id":user,
+                    "data_encrypted":bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:vec![1,2,3] },
+                }).await.unwrap();
+            }
+        }
+        let targets: Vec<_> = inventory(&owner)
+            .into_iter()
+            .filter(|(name, _)| collections.contains(name))
+            .collect();
+        assert_eq!(targets.len(), 3);
+        for (collection, filter) in targets {
+            assert!(erase_page(&db, &owner, collection, filter).await.unwrap());
+            assert_eq!(
+                db.collection::<Document>(collection)
+                    .count_documents(doc! {"user_id":&owner})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<Document>(collection)
+                    .count_documents(doc! {"user_id":&foreign})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        db.drop().await.unwrap();
+    }
 }

@@ -1290,6 +1290,53 @@ describe("NyxBot agents", () => {
   });
 });
 
+it("loads history with a future attachment origin and type through the same private endpoint", async () => {
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({ ...page, messages: page.messages.map((message, index) => index === 1
+      ? { ...message, attachments: [{ id: "future-file", content_type: "application/x-future-format", origin: "future_generator", size: 12, label: "future-file" }] }
+      : message) });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages[1]?.images).toEqual([{
+    id: "future-file",
+    endpoint: `/assistant/nyxagent/conversations/${id}/attachments/future-file`,
+    contentType: "application/x-future-format",
+    label: "future-file",
+  }]);
+});
+
+it.each([false, true])("loads a generated MP4 wire payload when active=%s", async (active) => {
+  const attachment = {
+    id: "generated-file", content_type: "video/mp4", origin: "generated_artifact", size: 1024,
+    label: "Sandbox result", filename: "movie.mp4", source: "sandbox", result_version: "2",
+    preview_kind: "video", expires_at: "2030-01-01T00:00:00Z",
+  };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({
+      ...page,
+      conversation: { ...page.conversation, active_turn: active
+        ? { turn_id: "turn", started_at: start, activities: [], attachments: [attachment] }
+        : null },
+      messages: active ? page.messages.slice(0, 1)
+        : page.messages.map((message, index) => index === 1 ? { ...message, attachments: [attachment] } : message),
+    });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const image = transport.session(id).messages.at(-1)?.images?.[0];
+  expect(image).toMatchObject({
+    id: "generated-file", contentType: "video/mp4", label: "Sandbox result",
+    endpoint: `/assistant/nyxagent/conversations/${id}/attachments/generated-file`,
+  });
+  expect(image?.origin).toBe("generated_artifact");
+  expect(image?.filename).toBe("movie.mp4");
+  expect(image?.resultVersion).toBe("2");
+  expect(image?.previewKind).toBe("video");
+});
+
 it("retains a settled reply's tool activity as done tool calls", async () => {
   globalThis.__nyxidAssistantHttpMock = () => {
     const page = history();

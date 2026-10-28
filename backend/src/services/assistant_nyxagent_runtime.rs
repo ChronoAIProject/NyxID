@@ -1495,6 +1495,13 @@ async fn execute_turn_inner(
         ""
     };
     let mut guidance = guidance.to_owned();
+    if !row.guest_turn
+        && crate::services::generated_artifacts::enabled(&state.db, &row.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        guidance.push_str(crate::services::generated_artifacts::GUIDANCE);
+    }
     if let Some(agent) = agent.as_ref()
         && crate::services::agent_skill_preload::enabled(agent, row.guest_turn)
     {

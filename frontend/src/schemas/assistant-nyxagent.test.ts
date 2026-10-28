@@ -8,6 +8,7 @@ import {
   assistantGroupMessagesSchema,
   assistantGroupPostedSchema,
   nyxAgentAcknowledgementSchema,
+  nyxAgentAttachmentSchema,
   nyxAgentChannelAgentSchema,
   nyxAgentChannelConnectSchema,
   nyxAgentChannelListSchema,
@@ -35,6 +36,13 @@ const legacyConversation = {
   active_turn: null,
   context_reset_at: null,
 };
+
+it("reads future attachment MIME and origin strings without discarding their owner capability", () => {
+  const attachment = { id: "future-file", content_type: "application/x-future-format", origin: "future_generator", size: 12, label: "future-file" };
+  expect(nyxAgentAttachmentSchema.parse(attachment)).toEqual(attachment);
+  expect(() => nyxAgentAttachmentSchema.parse({ ...attachment, size: -1 })).toThrow();
+  expect(() => nyxAgentAttachmentSchema.parse({ ...attachment, content_type: 7 })).toThrow();
+});
 
 describe("NyxBot conversation schema", () => {
   it("reads rows from servers before agents existed as unattributed NyxBot threads", () => {

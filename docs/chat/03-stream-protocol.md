@@ -149,3 +149,19 @@ snapshots, raw workflow observations, workflow waiting signals, or a Workflow
 create-recovery response. It does not allocate `workflow-pending-*`, alias a
 workflow identity, or replay workflow wire captures. Legacy `chatc-*` history
 may be displayed or deleted, but it never becomes a stream or control target.
+
+## Durable generated-result metadata
+
+NyxAgent history/active-turn attachment DTOs add optional `filename`, `source`,
+`result_version` (local revision), `preview_kind` (`image`, `video`, `download`)
+and RFC3339 `expires_at`. Generated rows carry `origin: generated_artifact`;
+legacy fields and authenticated attachment IDs/endpoints retain their meaning.
+An assistant history message can add `artifact_delivery` with stable state,
+attachment count and a recovery-available boolean. It contains no source URL,
+operation ID or raw digest. The client constructs the exact owner/message
+empty-body recovery endpoint from its existing conversation/message identities.
+
+Async completion may precede file materialization, so a completion event alone
+is never a file-delivered claim. Durable Sandbox files use the ordinary private
+attachment/history path. Live `MEDIA_CONTENT` and `ArtifactBlock` events do not
+change and do not establish this durable recovery authority.

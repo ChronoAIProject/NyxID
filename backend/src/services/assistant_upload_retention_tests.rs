@@ -874,6 +874,7 @@ async fn machine_preview_retention_shortens_immediately_and_sweep_is_fenced() {
     let (state, owner, thread) = fixture().await;
     let id = Uuid::new_v4().to_string();
     let row = crate::models::assistant_attachment::AssistantAttachment {
+        artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: id.clone(),
         origin: "machine_preview".into(),

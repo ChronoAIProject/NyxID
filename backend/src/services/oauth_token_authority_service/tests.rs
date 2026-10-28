@@ -147,7 +147,10 @@ impl Fixture {
 
     async fn mcp_initialize(&self, token: &str) -> StatusCode {
         use crate::services::billing::{BillingIngress, route_inventory::BillingRoutePolicy};
-        let response = Router::new().route("/mcp", post(crate::handlers::mcp_transport::mcp_post))
+        // Keep the handler future's Send boundary concrete in this fixture.
+        let response = Router::new().route("/mcp", post(|state, policy, request| -> futures::future::BoxFuture<'static, axum::response::Response> {
+            Box::pin(crate::handlers::mcp_transport::mcp_post(state, policy, request))
+        }))
             .layer(axum::Extension(BillingRoutePolicy::Metered(BillingIngress::Mcp)))
             .with_state(self.state.clone())
             .oneshot(Request::builder().method("POST").uri("/mcp")

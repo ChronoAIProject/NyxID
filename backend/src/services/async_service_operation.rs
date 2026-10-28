@@ -171,6 +171,14 @@ pub async fn reserve_with_arguments(
     let contract = endpoint.async_operation.clone().ok_or_else(invalid)?;
     validate_endpoints(&contract, service, endpoint)?;
     let cma = super::cma_operation::metadata(&contract, args);
+    let artifact_catalog_service_id =
+        if super::generated_artifacts::sandbox_contract(service, endpoint)
+            && super::generated_artifacts::enabled(db, &chat.user_id).await?
+        {
+            super::generated_artifacts::trusted_sandbox_catalog(db, service, endpoint).await?
+        } else {
+            None
+        };
     let db_ref_for_audit = db;
     let db = db.clone();
     let chat = chat.clone();
@@ -215,7 +223,9 @@ pub async fn reserve_with_arguments(
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
             }
             let now=Utc::now();
-            let watch=AsyncServiceOperation{cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
+            let artifact_mode = (artifact_catalog_service_id.is_some() && turn.origin == TurnOrigin::User && super::generated_artifacts::web_delivery(&delivery)).then(|| super::generated_artifacts::sandbox::MODE.to_owned());
+            let admitted_catalog = artifact_mode.as_ref().and(artifact_catalog_service_id.clone());
+            let watch=AsyncServiceOperation{artifact_catalog_service_id:admitted_catalog,artifact_event_turn_id:None,artifact_mode,artifact_result:None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
                 operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+if cma.is_some(){Duration::days(30)}else{Duration::hours(4)},result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;
@@ -508,6 +518,7 @@ pub async fn cancel(db: &Database, user: &str, id: &str) -> AppResult<()> {
         // scheduler -> assistant tool -> Stop path.
         let result:AppResult<()>=Box::pin(async {
             db.collection::<bson::Document>(WATCHES).update_many(doc!{"user_id":&user,"conversation_id":&id,"state":{"$in":["submitting","waiting","ready","queued"]}},doc!{"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"state":"cancelling","result_encrypted":null,"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}}).session(&mut *session).await?;
+            super::generated_artifacts::discard_in_session(&db,doc!{"user_id":&user,"conversation_id":&id,"state":{"$in":["pending","materializing"]}},session).await?;
             db.collection::<bson::Document>(CONVERSATIONS).update_one(doc!{"_id":&id,"user_id":&user},doc!{"$pull":{"pending_events":{"kind":EVENT_KIND}}}).session(&mut *session).await?;
             Ok(())
         }).await;transactions::transaction_result(result)
@@ -763,9 +774,18 @@ pub async fn input_context(
     let Some(w) = bound(db, row).await? else {
         return Ok(zeroize::Zeroizing::new(String::new()));
     };
-    let expired = Utc::now() >= w.expires_at.min(w.created_at + Duration::hours(4));
-    let data = if expired {
+    let source_expired = Utc::now() >= w.expires_at.min(w.created_at + Duration::hours(4));
+    let durable_expiry = w
+        .artifact_result
+        .as_ref()
+        .and_then(|m| m.materialized_expires_at);
+    let expired = durable_expiry.map_or(source_expired, |expiry| expiry <= Utc::now());
+    let data = if source_expired {
         zeroize::Zeroizing::new(String::new())
+    } else if w.artifact_mode.is_some() {
+        // Do not forward arbitrary saved process output from an older generated
+        // summary. Only the typed metadata schema may enter model context.
+        super::generated_artifacts::sandbox::context_summary(&result_text(keys, &w).await?)
     } else {
         result_text(keys, &w).await?
     };
@@ -776,6 +796,8 @@ pub async fn input_context(
         operation_id: Option<&'a str>,
         originating_turn_id: &'a str,
         reason: Option<&'a str>,
+        artifact_delivery: Option<&'a str>,
+        verified_file_count: Option<usize>,
         data: &'a str,
     }
     let quoted = crate::crypto::secret_json::to_secret_string(&QuotedResult {
@@ -789,6 +811,18 @@ pub async fn input_context(
             w.reason.as_deref()
         },
         data: &data,
+        artifact_delivery: w.artifact_result.as_ref().map(|m| {
+            if m.materialized_expires_at.unwrap_or(m.expires_at) <= Utc::now() {
+                if m.materialized_expires_at.is_some() {
+                    "retention_expired"
+                } else {
+                    "result_expired"
+                }
+            } else {
+                m.delivery_reason.as_str()
+            }
+        }),
+        verified_file_count: w.artifact_result.as_ref().map(|m| m.count),
     })
     .map_err(|_| invalid())?;
     Ok(zeroize::Zeroizing::new(format!(
@@ -833,6 +867,7 @@ pub async fn claim_cancel(
 /// Attach the saved task identity to its event turn inside admission's transaction.
 pub async fn bind_in_session(
     db: &Database,
+    keys: &EncryptionKeys,
     row: &mut AssistantConversation,
     session: &mut ClientSession,
 ) -> AppResult<()> {
@@ -900,6 +935,7 @@ pub async fn bind_in_session(
             .session(&mut *session)
             .await?;
     }
+    super::generated_artifacts::bind_in_session(db, keys, row, &w, session).await?;
     Ok(())
 }
 
@@ -919,9 +955,18 @@ pub async fn pending_voice_in_session(
 /// TTL only removes terminal metadata. Pending events retain their identity even
 /// after the encrypted payload expires, so admission can deliver a stable reason.
 pub async fn expire_results(db: &Database) -> AppResult<()> {
-    db.collection::<bson::Document>(WATCHES).update_many(
-        doc!{"state":{"$in":["ready","queued"]},"$or":[{"expires_at":{"$lte":bson::DateTime::now()}},{"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::hours(4))}}],"result_encrypted":{"$ne":null}},
-        doc!{"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"result_encrypted":null,"reason":"result_expired"}}).await?;
+    let expired = doc! {"state":{"$in":["ready","queued"]},"$or":[{"expires_at":{"$lte":bson::DateTime::now()}},{"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::hours(4))}}],"result_encrypted":{"$ne":null}};
+    let mut durable = expired.clone();
+    durable.insert("artifact_result.materialized_expires_at", doc! {"$ne":null});
+    // Source summaries expire at four hours even when saved bytes remain. Do
+    // not relabel already-materialized delivery or shorten its recovery TTL.
+    db.collection::<bson::Document>(WATCHES).update_many(durable,
+        doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"result_encrypted":null}}).await?;
+    let mut pending = expired;
+    pending.insert("artifact_result.materialized_expires_at", bson::Bson::Null);
+    db.collection::<bson::Document>(WATCHES).update_many(pending,
+        doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"result_encrypted":null,"reason":"result_expired"}}).await?;
+    super::generated_artifacts::sweep(db).await?;
     Ok(())
 }
 

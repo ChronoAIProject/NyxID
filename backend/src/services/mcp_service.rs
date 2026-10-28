@@ -172,6 +172,8 @@ pub struct McpExecContext<'a> {
     pub assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
     /// Background result readers may stop buffering after this many bytes.
     pub response_body_limit: Option<usize>,
+    /// Strict, allocation-bounded UTF-8 for an admitted artifact result only.
+    pub strict_response_utf8: bool,
     /// Acting person/SA when credential resolution runs as another owner.
     pub actor_user_id: Option<&'a str>,
     /// Supplied caller bearer; absent for API-key-only or session-fallback calls.
@@ -2810,6 +2812,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
         | "nyx__oracle_attach"
         | "nyx__oracle_extract" => (false, false, true),
         "nyx__resource_get" => (false, false, true),
+        "nyx__artifact_delivery" => (false, false, false),
         "nyx__call_tool" | "nyx__ssh_exec" => (false, true, true),
         _ => {
             let (service, endpoint) = resolve_tool_call(name, services)?;
@@ -2843,6 +2846,7 @@ pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
         "nyxid__task_status" => "Read task execution status",
         "nyx__resource_get" => "Retrieve a source image",
+        "nyx__artifact_delivery" => "Recover the saved cloud result",
         "nyx__search_tools" => "Search service tools",
         "nyx__call_tool" => "Call a service tool",
         "nyx__connect_service" => "Connect a service",
@@ -5075,9 +5079,9 @@ impl std::fmt::Debug for ToolMedia {
     }
 }
 
-/// A downstream tool response. `text` is exactly what callers received before
-/// media support (lossy UTF-8 of the body), so digests and existing consumers
-/// are unchanged; `media` is set only for verified images.
+/// Ordinary responses retain their existing text/media decoding. Admitted
+/// artifact results carry a private failure when bounded strict decoding fails;
+/// status and downstream provenance remain independent of body validity.
 #[derive(Debug)]
 pub struct ToolResponse {
     pub resources: Option<Box<super::resource_adapter::ResourceRead>>,
@@ -5086,6 +5090,13 @@ pub struct ToolResponse {
     pub text: String,
     pub media: Option<ToolMedia>,
     origin: ToolResponseOrigin,
+    body_error: Option<ToolResponseBodyError>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ToolResponseBodyError {
+    TooLarge,
+    MalformedUtf8,
 }
 
 #[derive(Debug)]
@@ -5105,7 +5116,16 @@ impl ToolResponse {
             text: refusal.to_string(),
             media: None,
             origin: ToolResponseOrigin::AssistantPolicy,
+            body_error: None,
         }
+    }
+
+    pub(crate) fn is_body_too_large(&self) -> bool {
+        self.body_error == Some(ToolResponseBodyError::TooLarge)
+    }
+
+    pub(crate) fn is_malformed_utf8(&self) -> bool {
+        self.body_error == Some(ToolResponseBodyError::MalformedUtf8)
     }
 
     pub(crate) fn is_policy_refusal(&self) -> bool {
@@ -5162,6 +5182,46 @@ pub(crate) fn tool_response(status: u16, content_type: Option<&str>, body: &[u8]
         text: String::from_utf8_lossy(body).to_string(),
         media: tool_media(status, content_type, body),
         origin: ToolResponseOrigin::Downstream,
+        body_error: None,
+    }
+}
+
+// Node bodies and bounded direct bodies are already owned. Strict decoding
+// consumes that allocation and never makes an image or replacement-text copy.
+fn owned_tool_response(
+    status: u16,
+    content_type: Option<&str>,
+    mut body: Vec<u8>,
+    limit: Option<usize>,
+    strict_utf8: bool,
+) -> ToolResponse {
+    if let Some(limit) = limit {
+        body.truncate(limit.saturating_add(1));
+    }
+    if !strict_utf8 {
+        return tool_response(status, content_type, &body);
+    }
+    let (text, body_error) = if limit.is_some_and(|n| body.len() > n) {
+        // A cap+1 prefix may split a valid UTF-8 character. Size wins.
+        drop(body);
+        (String::new(), Some(ToolResponseBodyError::TooLarge))
+    } else {
+        match String::from_utf8(body) {
+            Ok(text) => (text, None),
+            Err(error) => {
+                drop(error); // Drop malformed raw bytes before returning the marker.
+                (String::new(), Some(ToolResponseBodyError::MalformedUtf8))
+            }
+        }
+    };
+    ToolResponse {
+        resources: None,
+        concurrency: None,
+        status,
+        text,
+        media: None,
+        origin: ToolResponseOrigin::Downstream,
+        body_error,
     }
 }
 
@@ -5185,16 +5245,37 @@ fn node_dispatch_failure_disposition(dispatched: bool) -> NodeDispatchFailureDis
     }
 }
 
+// Stop at cap+1 before any decoding, including a split multibyte prefix.
+async fn read_bounded_tool_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<(Vec<u8>, usize), reqwest::Error> {
+    let mut bytes = Vec::new();
+    let mut received = 0usize;
+    while let Some(chunk) = response.chunk().await? {
+        received = received.saturating_add(chunk.len());
+        let take = chunk
+            .len()
+            .min(limit.saturating_add(1).saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&chunk[..take]);
+        if bytes.len() > limit {
+            break;
+        }
+    }
+    Ok((bytes, received))
+}
+
 async fn collect_node_stream_response(
     stream: impl Into<crate::services::node_ws_manager::NodeProxyStream>,
     limit: Option<usize>,
-) -> AppResult<(u16, Vec<(String, String)>, Vec<u8>)> {
+) -> AppResult<(u16, Vec<(String, String)>, Vec<u8>, usize)> {
     let mut stream = stream.into();
     use crate::services::node_ws_manager::StreamChunk;
 
     let mut status = 200u16;
     let mut headers = Vec::new();
     let mut body = Vec::new();
+    let mut received = 0usize;
     while let Some(chunk) = stream.recv().await {
         match chunk {
             StreamChunk::Start {
@@ -5205,15 +5286,17 @@ async fn collect_node_stream_response(
                 headers = stream_headers;
             }
             StreamChunk::Data(data) => {
+                received = received.saturating_add(data.len());
                 let take = limit.map_or(data.len(), |n| {
-                    data.len().min((n + 1).saturating_sub(body.len()))
+                    data.len()
+                        .min(n.saturating_add(1).saturating_sub(body.len()))
                 });
                 body.extend_from_slice(&data[..take]);
                 if limit.is_some_and(|n| body.len() > n) {
-                    return Ok((status, headers, body));
+                    return Ok((status, headers, body, received));
                 }
             }
-            StreamChunk::End => return Ok((status, headers, body)),
+            StreamChunk::End => return Ok((status, headers, body, received)),
             StreamChunk::Error(error) => {
                 tracing::error!(%error, "Node stream failed after provider dispatch");
                 return Err(AppError::Internal(
@@ -5988,6 +6071,7 @@ async fn execute_tool_resolved_inner(
                     .map_err(|_| AppError::Internal("Invalid managed response encoding".into()))?,
                 media: None,
                 origin: ToolResponseOrigin::Downstream,
+                body_error: None,
             }));
         }
         let metered = box_mcp_forwarding(|| billing.open(&billing_ctx))
@@ -6147,13 +6231,14 @@ async fn execute_tool_resolved_inner(
                     Ok(ProxyResponseType::Complete(resp)) => {
                         box_mcp_forwarding(|| billing.settle(
                                 &metered,
-                                mcp_platform_usage_for_path(
-                                    &resp.body,
-                                    request_len,
-                                    &target.service,
-                                    &path,
-                                    resp.status,
-                                ),
+                                if exec_ctx.strict_response_utf8 {
+                                    mcp_artifact_usage(
+                                        &resp.body[..exec_ctx.response_body_limit.map_or(resp.body.len(), |n| resp.body.len().min(n.saturating_add(1)))],
+                                        resp.body.len(), request_len, &target.service, &path, resp.status,
+                                    )
+                                } else {
+                                    mcp_platform_usage_for_path(&resp.body, request_len, &target.service, &path, resp.status)
+                                },
                                 None,
                                 None,
                             ))
@@ -6170,16 +6255,16 @@ async fn execute_tool_resolved_inner(
                                 admission.receipt(db, chat, assistant_auto).await;
                             }
                         }
-                        return Ok(McpToolExecutionOutcome::Response(tool_response(
+                        return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
                             resp.status,
                             header_value(&resp.headers, "content-type"),
-                            &resp.body[..exec_ctx
-                                .response_body_limit
-                                .map_or(resp.body.len(), |n| resp.body.len().min(n + 1))],
+                            resp.body,
+                            exec_ctx.response_body_limit,
+                            exec_ctx.strict_response_utf8,
                         )));
                     }
                     Ok(ProxyResponseType::Streaming(rx)) => {
-                        let (status, headers, body_buf) = match collect_node_stream_response(
+                        let (status, headers, body_buf, received) = match collect_node_stream_response(
                             rx,
                             exec_ctx.response_body_limit,
                         )
@@ -6192,13 +6277,11 @@ async fn execute_tool_resolved_inner(
                         };
                         box_mcp_forwarding(|| billing.settle(
                                 &metered,
-                                mcp_platform_usage_for_path(
-                                    &body_buf,
-                                    request_len,
-                                    &target.service,
-                                    &path,
-                                    status,
-                                ),
+                                if exec_ctx.strict_response_utf8 {
+                                    mcp_artifact_usage(&body_buf, received, request_len, &target.service, &path, status)
+                                } else {
+                                    mcp_platform_usage_for_path(&body_buf, request_len, &target.service, &path, status)
+                                },
                                 None,
                                 None,
                             ))
@@ -6215,10 +6298,12 @@ async fn execute_tool_resolved_inner(
                                 admission.receipt(db, chat, assistant_auto).await;
                             }
                         }
-                        return Ok(McpToolExecutionOutcome::Response(tool_response(
+                        return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
                             status,
                             header_value(&headers, "content-type"),
-                            &body_buf,
+                            body_buf,
+                            exec_ctx.response_body_limit,
+                            exec_ctx.strict_response_utf8,
                         )));
                     }
                     Err(failure) => match node_dispatch_failure_disposition(failure.dispatched) {
@@ -6382,17 +6467,17 @@ async fn execute_tool_resolved_inner(
                 .and_then(|value| value.to_str().ok()),
         );
         let read = if let Some(limit) = exec_ctx.response_body_limit {
-            let mut response = response;
-            let mut bytes = Vec::new();
             let result: Result<_, reqwest::Error> = async {
-                while let Some(chunk) = response.chunk().await? {
-                    let take = chunk.len().min((limit + 1).saturating_sub(bytes.len()));
-                    bytes.extend_from_slice(&chunk[..take]);
-                    if bytes.len() > limit {
-                        break;
-                    }
-                }
-                Ok((String::from_utf8_lossy(&bytes).into_owned(), None))
+                let (bytes, received) = read_bounded_tool_body(response, limit).await?;
+                // Preserve received-byte accounting before strict decoding consumes
+                // the buffer. Ordinary callers retain their historical text meter.
+                let raw_usage = exec_ctx.strict_response_utf8.then(|| {
+                    mcp_artifact_usage(&bytes, received, request_len, &target.service, &path, status)
+                });
+                let response = owned_tool_response(
+                    status, None, bytes, Some(limit), exec_ctx.strict_response_utf8,
+                );
+                Ok((response, raw_usage))
             }
             .await;
             result
@@ -6403,9 +6488,15 @@ async fn execute_tool_resolved_inner(
                     (String::from_utf8_lossy(&bytes).to_string(), media)
                 }),
                 None => response.text().await.map(|text| (text, None)),
-            }
+            }.map(|(text, media)| (ToolResponse {
+                resources: None,
+                concurrency: None,
+                status, text, media,
+                origin: ToolResponseOrigin::Downstream,
+                body_error: None,
+            }, None))
         };
-        let (body_text, media) = match read {
+        let (response, raw_usage) = match read {
             Ok(read) => read,
             Err(error) => {
                 tracing::error!(
@@ -6421,13 +6512,13 @@ async fn execute_tool_resolved_inner(
         };
         box_mcp_forwarding(|| billing.settle(
                 &metered,
-                mcp_platform_usage_for_path(
-                    body_text.as_bytes(),
+                raw_usage.unwrap_or_else(|| mcp_platform_usage_for_path(
+                    response.text.as_bytes(),
                     request_len,
                     &target.service,
                     &path,
                     status,
-                ),
+                )),
                 None,
                 None,
             ))
@@ -6445,14 +6536,7 @@ async fn execute_tool_resolved_inner(
                 admission.receipt(db, chat, assistant_auto).await;
             }
         }
-        Ok(McpToolExecutionOutcome::Response(ToolResponse {
-            resources: None,
-            concurrency: None,
-            status,
-            text: body_text,
-            media,
-            origin: ToolResponseOrigin::Downstream,
-        }))
+        Ok(McpToolExecutionOutcome::Response(response))
     })
     .await
 }
@@ -6476,6 +6560,27 @@ fn mcp_platform_usage_for_path(
     llm_usage_service::platform_usage(
         usage.as_ref(),
         request_len.saturating_add(body.len() as i64),
+        crate::services::billing::metric_resolution::captures_tokens(service),
+    )
+}
+
+fn mcp_artifact_usage(
+    body: &[u8],
+    received: usize,
+    request_len: i64,
+    service: &DownstreamService,
+    path: &str,
+    status: u16,
+) -> PlatformUsage {
+    use crate::services::llm_usage_service;
+    // The ordinary usage extractor has a lossy SSE fallback. Never send
+    // malformed artifact bytes there: validation borrows the bounded prefix.
+    let usage = std::str::from_utf8(body)
+        .ok()
+        .and_then(|_| llm_usage_service::usage_from_body(body, path, (200..300).contains(&status)));
+    llm_usage_service::platform_usage(
+        usage.as_ref(),
+        request_len.saturating_add(i64::try_from(received).unwrap_or(i64::MAX)),
         crate::services::billing::metric_resolution::captures_tokens(service),
     )
 }
@@ -7361,6 +7466,188 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn admitted_artifact_direct_reader_keeps_raw_usage_and_strict_body_failures() {
+        use axum::{Router, routing::get};
+        let router = Router::new()
+            .route("/valid", get(|| async { br#"{"success":true}"#.to_vec() }))
+            .route(
+                "/malformed",
+                get(|| async { (axum::http::StatusCode::BAD_GATEWAY, vec![0xff_u8, 0xfe]) }),
+            )
+            .route(
+                "/overlimit",
+                get(|| async {
+                    // A valid multibyte character split by the retained cap+1 prefix.
+                    let mut bytes = vec![b' '; 4];
+                    bytes.extend_from_slice("€".as_bytes());
+                    bytes.extend_from_slice(&[b' '; 57]);
+                    bytes
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+        let service = crate::models::downstream_service::test_helpers::dummy_service();
+        for (path, limit, status, malformed, overlimit) in [
+            ("valid", 100, 200, false, false),
+            ("malformed", 100, 502, true, false),
+            ("overlimit", 4, 200, false, true),
+        ] {
+            let downstream = client.get(format!("{base}/{path}")).send().await.unwrap();
+            assert_eq!(downstream.status().as_u16(), status);
+            let (body, received) = read_bounded_tool_body(downstream, limit).await.unwrap();
+            let usage = mcp_artifact_usage(&body, received, 7, &service, path, status);
+            assert_eq!(usage.bytes, 7 + received as i64);
+            assert_eq!(usage.requests, 1);
+            assert_eq!(usage.tokens, 0);
+            let allocation = body.as_ptr();
+            if overlimit {
+                assert_eq!(body.len(), limit + 1);
+                assert!(received >= body.len() && received <= 64);
+                assert!(std::str::from_utf8(&body).is_err());
+            } else {
+                assert_eq!(received, body.len());
+            }
+            let response = owned_tool_response(status, None, body, Some(limit), true);
+            assert_eq!(response.status, status);
+            assert!(matches!(response.origin, ToolResponseOrigin::Downstream));
+            assert!(!response.is_policy_refusal());
+            assert_eq!(response.is_malformed_utf8(), malformed);
+            assert_eq!(response.is_body_too_large(), overlimit);
+            assert!(response.media.is_none());
+            if malformed || overlimit {
+                assert!(response.text.is_empty());
+                assert_eq!(response.text.capacity(), 0);
+            } else {
+                assert_eq!(response.text, r#"{"success":true}"#);
+                assert_eq!(response.text.as_ptr(), allocation);
+            }
+        }
+        server.abort();
+
+        // The explicit opt-in leaves ordinary bounded text replacement intact.
+        let ordinary = owned_tool_response(200, None, vec![0xff, b'x'], Some(100), false);
+        assert_eq!(ordinary.text, "\u{fffd}x");
+        assert!(!ordinary.is_malformed_utf8());
+        assert!(!ordinary.is_body_too_large());
+        // Strict artifact reads never duplicate even an image-shaped body.
+        let image = owned_tool_response(
+            200,
+            Some("image/png"),
+            b"\x89PNG\r\n\x1a\n".to_vec(),
+            Some(100),
+            true,
+        );
+        assert!(image.is_malformed_utf8());
+        assert!(image.media.is_none());
+        let mut token_service = service;
+        token_service.billing = Some(crate::models::service_billing::ServiceBilling {
+            platform_key_pricing: Some(
+                serde_json::from_value(serde_json::json!({
+                    "metric":"tokens", "credits_per_unit":"1"
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let malformed_usage = mcp_artifact_usage(&[0xff], 4096, 7, &token_service, "", 200);
+        assert_eq!(malformed_usage.bytes, 4103);
+        assert!(malformed_usage.tokens > 0);
+        let reported = br#"{"usage":{"total_tokens":57,"prompt_tokens":50,"completion_tokens":7}}"#;
+        let valid_usage = mcp_artifact_usage(reported, reported.len(), 7, &token_service, "", 200);
+        assert_eq!(valid_usage.bytes, 7 + reported.len() as i64);
+        assert_eq!(valid_usage.tokens, 57);
+    }
+
+    #[tokio::test]
+    async fn admitted_artifact_node_complete_and_stream_keep_status_usage_and_cap_precedence() {
+        use crate::services::node_ws_manager::{NodeProxyResponse, StreamChunk};
+        let service = crate::models::downstream_service::test_helpers::dummy_service();
+        for (body, limit, malformed, overlimit) in [
+            (br#"{"success":true}"#.to_vec(), 100, false, false),
+            (vec![0xff, 0xfe], 100, true, false),
+            (
+                [b"    ".as_slice(), "€".as_bytes(), &[b'x'; 57]].concat(),
+                4,
+                false,
+                true,
+            ),
+        ] {
+            let complete = NodeProxyResponse {
+                request_id: "node-result".into(),
+                status: 503,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: body.clone(),
+            };
+            // Node completion settles the whole received body before conversion.
+            let usage = mcp_artifact_usage(
+                &complete.body[..complete.body.len().min(limit + 1)],
+                complete.body.len(),
+                7,
+                &service,
+                "executions/op/result",
+                complete.status,
+            );
+            assert_eq!(usage.bytes, 7 + body.len() as i64);
+            assert_eq!(usage.requests, 1);
+            let response = owned_tool_response(
+                complete.status,
+                header_value(&complete.headers, "content-type"),
+                complete.body,
+                Some(limit),
+                true,
+            );
+            assert_eq!(response.status, 503);
+            assert!(matches!(response.origin, ToolResponseOrigin::Downstream));
+            assert_eq!(response.is_malformed_utf8(), malformed);
+            assert_eq!(response.is_body_too_large(), overlimit);
+            assert!(response.media.is_none());
+
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tx.send(StreamChunk::Start {
+                status: 503,
+                headers: vec![],
+            })
+            .await
+            .unwrap();
+            tx.send(StreamChunk::Data(body.clone())).await.unwrap();
+            if overlimit {
+                // This queued chunk is never consumed or billed after the cap.
+                tx.send(StreamChunk::Data(vec![b'z'; 17])).await.unwrap();
+            }
+            tx.send(StreamChunk::End).await.unwrap();
+            drop(tx);
+            let (status, _, retained, received) =
+                collect_node_stream_response(rx, Some(limit)).await.unwrap();
+            assert_eq!(received, body.len());
+            assert_eq!(retained.len(), body.len().min(limit + 1));
+            if overlimit {
+                assert!(received > retained.len());
+            }
+            let usage = mcp_artifact_usage(
+                &retained,
+                received,
+                7,
+                &service,
+                "executions/op/result",
+                status,
+            );
+            assert_eq!(usage.bytes, 7 + body.len() as i64);
+            assert_eq!(usage.requests, 1);
+            let response = owned_tool_response(status, None, retained, Some(limit), true);
+            assert_eq!(response.status, 503);
+            assert!(matches!(response.origin, ToolResponseOrigin::Downstream));
+            assert_eq!(response.is_malformed_utf8(), malformed);
+            assert_eq!(response.is_body_too_large(), overlimit);
+            assert!(response.media.is_none());
+            if malformed || overlimit {
+                assert_eq!(response.text.capacity(), 0);
+            }
+        }
+    }
+
     #[test]
     fn mcp_usage_estimates_only_token_services_and_preserves_reported_usage() {
         use crate::models::downstream_service::test_helpers::dummy_service;
@@ -7587,6 +7874,7 @@ mod tests {
                     &McpExecContext {
                         assistant_chat: None,
                         response_body_limit: None,
+                        strict_response_utf8: false,
                         actor_user_id: None,
                         caller_token: None,
                         delegation_restrictions: Default::default(),

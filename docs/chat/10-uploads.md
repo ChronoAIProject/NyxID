@@ -425,3 +425,122 @@ variables. Retention is the runtime admin policy above:
 An ingress-generated HTTP 413 below these limits indicates that a proxy's body
 limit needs updating. Invalid/encrypted documents and extraction deadlines return
 HTTP 400 with a fixed actionable message. No filenames or content are logged.
+
+## Generated result storage and owner delivery
+
+Generated files use `origin: generated_artifact` and the same private attachment
+route and retention/tombstone sweep as ordinary assistant attachments. They are
+separate from user-upload admission and tool-image extraction. The Sandbox
+`ExecuteResponse.output.files` entries contain untrusted path, base64 content,
+optional error and optional diagnostic size; no MIME is supplied. Decoded size
+is authoritative. Basenames are sanitized to 160 UTF-8 bytes. The adapter never
+fetches a URL supplied by output, and names/paths/base64 do not enter logs or
+model context. The generated-result encrypted summary contains only selected
+metadata: success, exit code (when present), and verified file count. Stdout and
+stderr are arbitrary content and are discarded. Model context reconstructs only
+that typed metadata and the server-owned delivery state; older free-form
+generated summaries are withheld. Unmarked legacy watches retain the existing
+bounded text-result path.
+
+| Bound | Generated-result contract |
+| --- | --- |
+| Status / legacy text | 16 KiB |
+| Exact Sandbox result JSON | 13 MiB |
+| Files per result | 8, bounded during deserialization |
+| Decoded total | 9 MiB |
+| One raster image | 5 MiB, existing signature validation |
+| One video or download-only file | 8 MiB |
+| Result worker | One per process |
+| Result memory reservation | 22 MiB payload, weighted twice by the shared 192 MiB budget |
+
+The single result reservation begins before HTTP body reading and spans JSON,
+base64 decode, validation, hashing, encryption and pending persistence. Cancellation
+releases it. Materialization also reserves through pending ciphertext loading,
+decryption and attachment encryption. Authenticated egress reserves the exact
+stored size; its permit follows the actual byte buffer, including HTTP-buffered
+clones and range slices, until released.
+
+The status snapshots before and after result retrieval must name the exact
+operation and have equal lifecycle version tokens, including equal token
+presence. A changed, added or removed token rejects the result with
+`artifact_source_changed` before pending rows are persisted. Version is a
+lifecycle consistency fence and diagnostic metadata; `source_result_identity`
+continues to derive from the exact operation and canonical verified file bytes
+and metadata. Valid expiry is checked on both snapshots and the earlier expiry
+is retained.
+
+`async_service_operation_artifacts` stores one encrypted row per file, with a
+unique `(watch_id, source_result_identity, artifact_index)` index. Every row is
+serialized and checked below MongoDB's 16 MiB document bound. An encrypted 8 MiB
+fixture proves the allowed maximum fits. Contextual envelope encryption binds
+owner, conversation, original turn, watch, operation and source identity; durable
+attachment context additionally binds the completion turn. The bounded operator
+verification/rewrap registry includes this collection. Pending rows expire at
+`min(source expiry when supplied, watch expiry)`. Materialized attachments store
+`min(source expiry, watch expiry, normal retention deadline at materialization)`.
+Current retention can shorten availability and never extends the stored limit.
+Cancellation and expiry clear pending ciphertext; conversation deletion and owner
+purge remove both pending rows and recovery associations. Materialized files use
+the existing retention sweep.
+
+The owner route remains
+`GET /api/v1/assistant/nyxagent/conversations/{id}/attachments/{attachment_id}`.
+Every read checks feature, owner, conversation and retention before decryption,
+including Range requests. Responses are private/no-store, nosniff and sandboxed,
+with safe UTF-8 Content-Disposition for `origin: generated_artifact`. Verified
+generated rasters and supported MP4 are inline; other generated formats are
+octet-stream downloads. Legacy tool/user-upload files retain their stored MIME
+and exact `inline` disposition, including existing DocumentAttachment consumers.
+One satisfiable byte range
+returns 206 and Content-Range; one syntactically valid unsatisfiable range returns
+416 and `bytes */size`. Unsupported multi-ranges, multiple Range fields, unknown
+units and malformed syntax are ignored with the complete 200 response. If-Range
+without a matching validator also receives the complete response.
+
+MP4 validation walks bounded ISO-BMFF boxes and checks a real visual track,
+dimensions, visual sample entries/configuration, sample counts/chunk mappings,
+complete media extents and self-contained references. Preview is currently
+allowlisted for the tested AVC Baseline/four-byte-NAL configuration. Other
+accepted visual codecs remain download-only. Browser decode failure removes
+playback and preserves download. MP4 markers without that structure are rejected.
+
+`POST /api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery`
+requires an **empty body**, a first-party human owner and an idle conversation.
+It loads the server-written `assistant_artifact_deliveries` association, checks
+exact event/watch/operation/source/attachment lineage, and retries only saved
+materialization. Unique message and watch/event identities plus conflict-safe
+readback make duplicate settlement/recovery idempotent. A live owner Web turn
+may invoke the no-argument internal action described in [09](09-nyxbot-orchestrator.md#verified-sandbox-files-and-recovery).
+Once file IDs exist, the saved delivery association expires at the minimum
+persisted attachment deadline. Recovery rechecks the current retention policy
+and attachment/tombstone state in its transaction; history applies live retention
+as well, so policy shortening cannot leave an expired file advertised as recoverable.
+Capacity exhaustion retains pending bytes until source/watch expiry; unavailable
+slots never trigger regeneration. Expired, cancelled, missing, unauthorized and
+failed-delivery states have separate UI copy.
+
+Direct and wrapped MCP recovery and the HTTP recovery route append the existing
+`assistant_mcp_tool_call` audit event with fixed `tool_name: nyx__artifact_delivery`,
+`outcome: requested` and `transport: mcp|http`. Event data contains no arguments,
+conversation/message/watch/operation/file IDs, names, paths or bytes. Standard
+actor attribution and audit-chain handling remain in the audit service.
+
+### Generated-artifact rollout and rollback
+
+1. Keep `assistant:generated-artifacts` disabled (its registered default).
+2. Deploy parser, optional metadata, recovery handlers and collection/index
+   creation to **every API and async worker**.
+3. Drain/remove old workers and writers; verify no old binary can claim watches.
+4. Verify the new artifact-capable build on every relevant replica and the unique
+   pending/delivery indexes. Existing security readiness requires the instance
+   roster and drained acknowledgement before enabling this flag.
+5. Enable only the intended Web audience, inspect bounded pending/materialized/
+   terminal counts and cleanup, then broaden deliberately.
+
+Rollback disables new admission first. Keep upgraded workers and cleanup running
+until artifact-enabled watches are terminal/materialized or source-expired and
+pending ciphertext is cleared. Do not restart an old binary while such watches
+remain pending, delete collections, or rewrite existing attachment bytes. Flag-off
+legacy watches remain readable; admitted artifact watches drain while disabled.
+Live source-to-originating-Web acceptance remains a release gate separate from
+fixture/browser tests.

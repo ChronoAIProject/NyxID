@@ -1359,6 +1359,7 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
         axum::extract::State(f.state.clone()),
         crate::test_utils::test_auth_user(&f.owner),
         axum::extract::Path((f.row.id.clone(), attachments[0].id.clone())),
+        axum::http::HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -1374,6 +1375,7 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
             axum::extract::State(f.state.clone()),
             crate::test_utils::test_auth_user(&stranger),
             axum::extract::Path((f.row.id.clone(), attachments[0].id.clone())),
+            axum::http::HeaderMap::new(),
         )
         .await,
         Err(crate::errors::AppError::NotFound(_))

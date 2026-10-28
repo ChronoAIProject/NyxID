@@ -252,6 +252,9 @@ pub struct ToolFailure {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default, flatten)]
+    pub artifact: super::generated_artifact::Metadata,
+
     /// Whether this tool image may accompany a reply sent to a channel chat.
     #[serde(default)]
     pub chat_delivery: Option<bool>,

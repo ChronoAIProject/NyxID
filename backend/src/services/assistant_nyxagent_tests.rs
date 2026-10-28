@@ -766,6 +766,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
             ended_at: None,
         }],
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            artifact: Default::default(),
             chat_delivery: None,
             image_input: None,
             image_inspection: None,
@@ -831,6 +832,7 @@ fn guest_recap_omits_owner_tool_metadata() {
             ended_at: None,
         }],
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            artifact: Default::default(),
             chat_delivery: None,
             image_input: None,
             image_inspection: None,
@@ -4093,6 +4095,42 @@ async fn voice_queue_bounds_concurrent_admission_and_never_replays_lost_claims()
 }
 
 #[test]
+fn generated_artifact_guidance_is_opt_in_and_resets_stable_binding() {
+    use crate::services::assistant_instruction_context::Prepared;
+    let mut row = stale_test_row(Utc::now());
+    row.nyxagent_session_id = None;
+    let off = Prepared::with_guidance(&[2; 32], &row, None, &[], "").unwrap();
+    assert!(!off.instructions().contains("nyx__artifact_delivery"));
+    let mut binding = off.binding.clone();
+    binding.session_id = "session".into();
+    row.nyxagent_session_id = Some(binding.session_id.clone());
+    row.nyxagent_instruction_binding = Some(binding);
+    assert!(
+        !Prepared::with_guidance(&[2; 32], &row, None, &[], "")
+            .unwrap()
+            .reset
+    );
+    let on = Prepared::with_guidance(
+        &[2; 32],
+        &row,
+        None,
+        &[],
+        crate::services::generated_artifacts::GUIDANCE,
+    )
+    .unwrap();
+    assert!(on.reset);
+    assert!(on.instructions().contains("nyx__artifact_delivery"));
+    let mut binding = on.binding;
+    binding.session_id = "new-session".into();
+    row.nyxagent_session_id = Some(binding.session_id.clone());
+    row.nyxagent_instruction_binding = Some(binding);
+    let disabled = Prepared::with_guidance(&[2; 32], &row, None, &[], "").unwrap();
+    assert!(disabled.reset);
+    assert_eq!(disabled.binding.fingerprint, off.binding.fingerprint);
+    assert!(!disabled.instructions().contains("nyx__artifact_delivery"));
+}
+
+#[test]
 fn instruction_fingerprint_covers_configuration_and_audience_without_database_access() {
     use crate::models::{
         assistant_agent::{AssistantAgent, MemoryNote},
@@ -4611,6 +4649,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
             message
                 .attachments
                 .push(crate::models::assistant_conversation::TurnAttachment {
+                    artifact: Default::default(),
                     chat_delivery: None,
                     id: upload_id.clone(),
                     label: "Old source.txt".into(),
@@ -5593,6 +5632,10 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        artifact_catalog_service_id: None,
+        artifact_mode: None,
+        artifact_result: None,
+        artifact_event_turn_id: None,
         secret_context_versions: Default::default(),
         cma: None,
         id: "watch".into(),
