@@ -2139,6 +2139,31 @@ fn settle_retention_result<'a>(
 ) -> futures::future::BoxFuture<'a, RetainedArtifactResult> {
     Box::pin(async move {
         finish(a, event, "Saved generated files.").await;
+        let delivered =
+            a.f.state
+                .db
+                .collection::<AsyncServiceOperation>(WATCHES)
+                .find_one(doc! {"_id":&watch.id})
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(delivered.state, "delivered");
+        assert_eq!(delivered.reason.as_deref(), Some("completed"));
+        assert!(delivered.result_encrypted.is_none());
+        assert!(
+            !delivered
+                .secret_context_versions
+                .contains_key("result_encrypted")
+        );
+        assert!(
+            delivered.expires_at
+                >= delivered
+                    .artifact_result
+                    .as_ref()
+                    .unwrap()
+                    .materialized_expires_at
+                    .unwrap()
+        );
         let message =
             a.f.state
                 .db
