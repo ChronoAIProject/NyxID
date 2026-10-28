@@ -65,3 +65,22 @@ it("shows what the thread is waiting for and that the agent continues by itself"
   expect(note).toHaveTextContent("NyxID has not received any message from this bot yet.");
   expect(note).toHaveTextContent("NyxBot continues here by itself when this happens");
 });
+
+it("shows the thread title beside the agent and renames it in place", async () => {
+  const user = userEvent.setup();
+  const rename = vi.fn().mockResolvedValue(undefined);
+  render(
+    <ThreadHeader name="NyxBot" kind="nyxbot" destroyed={false} title="Morning briefing" onRenameTitle={rename} />,
+  );
+  await user.click(screen.getByRole("button", { name: "Rename chat" }));
+  const field = screen.getByRole("textbox", { name: "Chat title" });
+  await user.clear(field);
+  await user.type(field, "Daily plan{Enter}");
+  expect(rename).toHaveBeenCalledWith("Daily plan");
+});
+
+it("shows a read-only title when the thread cannot be renamed", () => {
+  render(<ThreadHeader name="researcher" kind="specialist" destroyed title="Old notes" />);
+  expect(screen.getByText("Old notes")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Rename chat" })).not.toBeInTheDocument();
+});

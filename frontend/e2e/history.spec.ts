@@ -24,9 +24,7 @@ test("opening the assistant lists history but leaves a bare route on New chat", 
   }
 
   expect(new URL(page.url()).searchParams.has("c")).toBe(false);
-  await expect(
-    page.locator("header").getByText("New chat", { exact: true }),
-  ).toBeVisible();
+  await expect(page).toHaveTitle("nyxid - New chat");
   await expect(
     page.getByText(
       "Ask NyxID to help with services, access, and account operations.",

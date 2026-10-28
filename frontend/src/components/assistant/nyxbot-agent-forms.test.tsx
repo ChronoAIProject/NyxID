@@ -224,6 +224,25 @@ it("gates org creation and offers Member organizations with org-only resource co
   });
 });
 
+it("starts on the first writable organization when opened for an organization agent", async () => {
+  orgEnabled = true;
+  const onCreated = vi.fn();
+  render(
+    <QueryClientProvider client={client}>
+      <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}>
+        <NewAgentDialog owner="org" onClose={vi.fn()} onCreated={onCreated} />
+      </OverlayLayer>
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  expect(screen.getByRole("combobox", { name: "Ownership" })).toHaveTextContent("Team");
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "researcher");
+  await user.type(screen.getByRole("textbox", { name: "Role" }), "Research public topics");
+  await user.click(screen.getByRole("button", { name: "Create agent" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(posts[0]).toMatchObject({ org: "org-team" });
+});
+
 it("hides organization selection while rollout is disabled", () => {
   renderDialog();
   expect(

@@ -9,7 +9,7 @@ for (const width of [1280, 390, 320]) {
     await openAssistant(page, {
       faults: { nyxagentEnabled: true, modelControlsEnabled: true },
     });
-    await page.getByRole("button", { name: "Switch to dark mode" }).click();
+    await page.emulateMedia({ colorScheme: "dark" });
     const input = composerInput(page);
     const trigger = page.getByRole("button", {
       name: "Model and permissions: Claude Sonnet 4.5, Auto",
@@ -210,7 +210,7 @@ for (const width of [1280, 320]) {
         voiceEnabled: true,
       },
     });
-    await page.getByRole("button", { name: "Switch to dark mode" }).click();
+    await page.emulateMedia({ colorScheme: "dark" });
     await expect(voice).toBeVisible();
     const trigger = page.getByRole("button", {
       name: /Model and permissions:/,
@@ -289,7 +289,7 @@ for (const width of [1280, 320]) {
     await openAssistant(page, {
       faults: { nyxagentEnabled: true, voiceEnabled: true },
     });
-    await page.getByRole("button", { name: "Switch to dark mode" }).click();
+    await page.emulateMedia({ colorScheme: "dark" });
     const trigger = page.getByRole("button", {
       name: /Thinking and permissions:/,
     });
@@ -494,7 +494,8 @@ for (const width of [390, 1280]) {
       window.visualViewport!.dispatchEvent(new Event("resize"));
     });
     await expect.poll(async () => (await surface.boundingBox())!.height).toBeLessThanOrEqual(360);
-    await expect.poll(async () => (await surface.boundingBox())!.y).toBeGreaterThanOrEqual(112);
+    // Below the 60px keyboard offset, plus the 52px top bar that only narrow viewports have.
+    await expect.poll(async () => (await surface.boundingBox())!.y).toBeGreaterThanOrEqual(width < 768 ? 112 : 60);
     await expect.poll(async () => {
       const bounds = (await surface.boundingBox())!;
       return bounds.y + bounds.height;
@@ -511,7 +512,8 @@ for (const width of [390, 1280]) {
     await expect.poll(async () => (await surface.boundingBox())!.height).toBeLessThanOrEqual(360);
     await expect(handle).toBeInViewport();
     await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeInViewport();
-    expect((await handle.boundingBox())!.y).toBeGreaterThanOrEqual(52);
+    // Clear of the 52px top bar, which only narrow viewports have.
+    expect((await handle.boundingBox())!.y).toBeGreaterThanOrEqual(width < 768 ? 52 : 0);
     expect(await input.innerText()).toBe(originalText);
     await input.fill("A long draft remains scrollable.\n".repeat(100));
     await expect(input).toHaveCSS("overflow-y", "scroll");

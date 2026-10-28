@@ -1,7 +1,12 @@
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { AssistantAccountMenu } from "@/components/assistant/assistant-account-menu";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
-import { useState, type ReactNode } from "react";
+import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
+import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import { SidebarRailContext } from "./sidebar-rail-context";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
@@ -21,22 +26,28 @@ import { ChatKindIcon } from "@/components/assistant/nyxbot-channel-chats";
 import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
 import {
   Activity,
+  Building2,
   ChevronRight,
   ChevronsUpDown,
   FileText,
-  House,
-  LayoutGrid,
   MoreHorizontal,
   PencilLine,
   Plus,
-  Monitor,
-  CalendarClock,
-  ShieldCheck,
+  Settings2,
+  SlidersHorizontal,
   Trash2,
   User,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
+import {
+  ApprovalsGlyph,
+  AutomationsGlyph,
+  HomeGlyph,
+  MachinesGlyph,
+  PluginsGlyph,
+} from "@/components/assistant/sidebar-nav-glyphs";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -55,6 +66,7 @@ import {
 import {
   Tooltip,
   TooltipContent,
+  TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAssistantWorkspaceCounts } from "@/hooks/use-assistant-workspace";
@@ -83,6 +95,15 @@ function GroupLabel({ children }: { readonly children: string }) {
   );
 }
 
+/** An owner's agents or crews: a top-level section label, flush with WORKSPACE. */
+function OwnerLabel({ children }: { readonly children: ReactNode }) {
+  return (
+    <p className="-ml-2 px-3 py-2 text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+      {children}
+    </p>
+  );
+}
+
 /** Workspace destination that is visible per the mockup but not yet built. */
 function ComingSoonItem({
   icon: Icon,
@@ -98,7 +119,7 @@ function ComingSoonItem({
       <TooltipTrigger asChild>
         <div
           aria-disabled="true"
-          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground opacity-50"
+          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-1.5 text-13 text-muted-foreground opacity-50"
         >
           <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
           <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -165,7 +186,7 @@ function ConversationRow({
         aria-label={shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
-          "w-full overflow-hidden px-3 py-2 text-left text-13 transition-colors",
+          "w-full overflow-hidden px-2 py-1 text-left text-13 transition-colors",
           active
             ? "font-medium text-foreground"
             : "text-muted-foreground group-hover:text-foreground",
@@ -200,7 +221,7 @@ function ConversationRow({
             aria-label={`Options for ${shownTitle}`}
             data-keep-drawer-open=""
             className={cn(
-              "absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-md bg-card text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
+              "absolute right-1 top-1 flex size-[1.5em] items-center justify-center rounded-md bg-card text-13 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
               "pointer-events-none opacity-0",
               "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
               "group-hover:pointer-events-auto group-hover:opacity-100",
@@ -208,7 +229,7 @@ function ConversationRow({
               "data-[state=open]:pointer-events-auto data-[state=open]:opacity-100",
             )}
           >
-            <MoreHorizontal className="h-3.5 w-3.5" />
+            <MoreHorizontal className="size-[1.1em]" />
           </button>
         </DropdownMenuTrigger>
         {/* Above the z-[80] mobile sidebar drawer this can be opened from. */}
@@ -248,7 +269,12 @@ export interface SidebarAgents {
   readonly threadsLoading?: boolean;
   readonly onSelectAgent: (agentId: string) => void;
   readonly onNewThread: (agentId: string) => void;
-  readonly onNewAgent: () => void;
+  /** Open an agent's details sheet; the row's hover menu offers it. */
+  readonly onAgentDetails?: (agentId: string) => void;
+  /** Create an agent: personal, or owned by an organization. */
+  readonly onNewAgent: (owner: "personal" | "org") => void;
+  /** Offer organization ownership in "Create agent". */
+  readonly canCreateOrgAgent?: boolean;
   /** The NyxBot home is open. */
   readonly homeActive?: boolean;
   readonly onHome?: () => void;
@@ -316,14 +342,14 @@ function ChannelThreadsGroup({
         aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
-        className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+        className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
       >
         <ChevronRight
           aria-hidden="true"
           className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
         />
         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-        <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary">
+        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary @min-[15rem]:inline">
           {platform}
         </span>
         {running ? (
@@ -332,7 +358,8 @@ function ChannelThreadsGroup({
         <span className="shrink-0 tabular-nums text-11">{count}</span>
       </button>
       {open ? (
-        <div className="ml-3 space-y-0.5 border-l border-border/60 pl-1.5">
+        // The guide line runs down from the chevron's centre.
+        <div className="ml-3.5 space-y-px border-l border-border/60 pl-1">
           {Array.from(new Set(visible.map((thread) => thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id))).map((chatId) => {
             const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
             const followed = children.some((thread) => thread.channel?.thread_id);
@@ -357,6 +384,19 @@ function ChannelThreadsGroup({
   );
 }
 
+/** The @handle a display name hides, a hover away (agents keep one line). */
+function HandleTooltip({ handle, children }: { readonly handle?: string; readonly children: ReactNode }) {
+  if (!handle) return children;
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent side="bottom" align="start" className="text-11">{handle}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 function AgentRow({
   agent,
   selected,
@@ -371,69 +411,176 @@ function AgentRow({
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
   const nyxbot = agent.kind === "nyxbot";
+  // Clicking the selected agent folds its threads away for the thread open at
+  // that moment; opening another of its threads unfolds them again.
+  const [folded, setFolded] = useState<{ active: string | undefined }>();
+  const expanded = selected && !(folded && folded.active === activeThreadId);
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
-  const threads = selected ? splitChannelThreads(model.threads) : { own: [], bots: [] };
+  const threads = expanded ? splitChannelThreads(model.threads) : { own: [], bots: [] };
   const pending = agent.pending_acknowledgements;
   const name = agentTitle(agent);
   const handle = agentHandle(agent);
-  // Under the name: NyxBot's role, and the @handle when a display name hides it.
-  const subtitle = nyxbot
-    ? handle
-      ? `${handle} · personal agent`
-      : "Your personal agent"
-    : handle;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
+  const sticky = useRef<HTMLDivElement>(null);
+  // `data-stuck` marks the row while it is pinned (its threads scroll beneath
+  // it). Only then does the list drop its top fade (app.css); otherwise rows
+  // would end in a hard cut.
+  useLayoutEffect(() => {
+    const element = sticky.current;
+    const scroller = element?.closest<HTMLElement>("[data-scroll-fade]");
+    const block = element?.parentElement;
+    if (!expanded || !element || !scroller || !block) return;
+    const update = () => {
+      const top = scroller.getBoundingClientRect().top;
+      const box = block.getBoundingClientRect();
+      element.toggleAttribute("data-stuck", box.top < top - 0.5 && box.bottom > top + element.offsetHeight);
+    };
+    update();
+    scroller.addEventListener("scroll", update, { passive: true });
+    return () => {
+      scroller.removeEventListener("scroll", update);
+      element.removeAttribute("data-stuck");
+    };
+  }, [expanded]);
+  const { open: openPanel } = useAccountPanel();
+  const canChat = agent.status !== "destroyed" && agent.can_use !== false;
+  const hasMenu = canChat || nyxbot || Boolean(model.onAgentDetails);
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => model.onSelectAgent(agent.id)}
-        aria-label={agentAccessibleName(agent)}
-        aria-expanded={selected}
+      {/* The open agent stays pinned to the top of the list while its threads
+          scroll beneath it (app.css drops the list's top fade meanwhile). */}
+      <div
+        ref={sticky}
+        data-sticky-agent={expanded ? "" : undefined}
         className={cn(
-          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-13 transition-colors",
-          selected
-            ? "font-medium text-foreground"
-            : "text-muted-foreground hover:bg-overlay hover:text-foreground",
-          agent.status === "destroyed" && "opacity-50",
+          "group relative",
+          // Pinned, it fades the rows sliding under it instead of slicing them.
+          expanded && "sticky top-0 z-10 bg-sidebar after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:hidden after:h-4 after:bg-gradient-to-b after:from-sidebar after:to-transparent data-[stuck]:after:block",
         )}
       >
-        <span className="relative flex shrink-0">
-          <AgentAvatar agent={agent} size="sm" />
-          {nyxbot ? null : (
-            <AgentStatusDot
-              status={agent.status}
-              className="absolute -bottom-0.5 -right-0.5 ring-2 ring-background"
-            />
-          )}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate">{name}</span>
-          {subtitle ? (
-            <span className="block truncate text-10 font-normal text-text-tertiary">
-              {subtitle}
-            </span>
-          ) : null}
-        </span>
-        {platforms.slice(0, 1).map((platform) => (
-          <span
-            key={platform}
-            className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary"
+        <HandleTooltip handle={handle}>
+          <button
+            type="button"
+            onClick={() => {
+              if (selected) {
+                setFolded(expanded ? { active: activeThreadId } : undefined);
+              } else {
+                setFolded(undefined);
+                model.onSelectAgent(agent.id);
+              }
+            }}
+            aria-label={agentAccessibleName(agent)}
+            aria-expanded={expanded}
+            // Folding is in place; keep the mobile drawer open for it.
+            data-keep-drawer-open={selected ? "" : undefined}
+            className={cn(
+              // The whole row highlights (also while its options button is
+              // hovered); only its content fades under that button.
+              "flex w-full items-center rounded-lg py-1 pl-3 pr-2 text-left text-13 transition-colors group-hover:bg-sidebar-hover",
+              selected
+                ? "font-medium text-foreground"
+                : "text-muted-foreground group-hover:text-foreground",
+              agent.status === "destroyed" && "opacity-50",
+            )}
           >
-            {channelPlatformName(platform)}
-            {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
-          </span>
-        ))}
-        {pending > 0 ? (
-          <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
-            {pending}
-          </span>
+            <span
+              className={cn(
+                // -my-1/py-1 grow the masked box past the avatar, so the fade
+                // never clips the status dot that overhangs it.
+                "-my-1 flex min-w-0 flex-1 items-center gap-2 py-1",
+                hasMenu && "[@media(hover:none)]:[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))] group-hover:[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]",
+                menuOpen && TITLE_FADE,
+              )}
+            >
+              <span className="relative flex shrink-0">
+                <AgentAvatar agent={agent} size="sm" />
+                {nyxbot ? null : (
+                  <AgentStatusDot
+                    status={agent.status}
+                    className="absolute -bottom-0.5 -right-0.5 ring-2 ring-sidebar transition-colors group-hover:ring-sidebar-hover"
+                  />
+                )}
+              </span>
+              <span className="flex min-w-0 flex-1 items-center gap-1">
+                <span className="min-w-0 truncate">{name}</span>
+                <ChevronRight
+                  aria-hidden="true"
+                  className={cn(
+                    "h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform",
+                    expanded && "rotate-90",
+                  )}
+                />
+              </span>
+              {/* Only once the sidebar is wide enough; the bot's chats name it anyway. */}
+              {platforms.slice(0, 1).map((platform) => (
+                <span
+                  key={platform}
+                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary @min-[15rem]:inline"
+                >
+                  {channelPlatformName(platform)}
+                  {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
+                </span>
+              ))}
+              {pending > 0 ? (
+                <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
+                  {pending}
+                </span>
+              ) : null}
+            </span>
+          </button>
+        </HandleTooltip>
+        {hasMenu ? (
+          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <button
+                ref={menuTrigger}
+                type="button"
+                aria-label={`Options for ${name}`}
+                data-keep-drawer-open=""
+                className={cn(
+                  "absolute right-1 top-1/2 flex size-[1.5em] -translate-y-1/2 items-center justify-center rounded-md bg-card text-13 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
+                  "pointer-events-none opacity-0",
+                  "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
+                  "group-hover:pointer-events-auto group-hover:opacity-100",
+                  "focus-visible:pointer-events-auto focus-visible:opacity-100",
+                  "data-[state=open]:pointer-events-auto data-[state=open]:opacity-100",
+                )}
+              >
+                <MoreHorizontal className="size-[1.1em]" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-[160px]">
+              {canChat ? (
+                <DropdownMenuItem onSelect={() => model.onNewThread(agent.id)}>
+                  <Plus aria-hidden="true" />
+                  New chat
+                </DropdownMenuItem>
+              ) : null}
+              {model.onAgentDetails ? (
+                <DropdownMenuItem onSelect={() => model.onAgentDetails?.(agent.id)}>
+                  <Settings2 aria-hidden="true" />
+                  Agent details
+                </DropdownMenuItem>
+              ) : null}
+              {nyxbot ? (
+                <DropdownMenuItem
+                  onSelect={() => void openPanel("nyxbot", {}, menuTrigger.current ?? undefined)}
+                >
+                  <SlidersHorizontal aria-hidden="true" />
+                  NyxBot settings
+                </DropdownMenuItem>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
         ) : null}
-      </button>
-      {selected ? (
+      </div>
+      {expanded ? (
+        // The guide line runs down from the avatar's centre.
         <div
           role="group"
           aria-label={`Threads with ${name}`}
-          className="mb-1 ml-3 mt-0.5 space-y-0.5 border-l border-border/60 pl-1.5"
+          className="mb-1 ml-[22px] mt-0.5 space-y-px border-l border-border/60 pl-1"
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
@@ -449,17 +596,17 @@ function AgentRow({
               renderThread={renderThread}
             />
           ))}
-          {agent.status === "destroyed" || agent.can_use === false ? null : (
+          {canChat ? (
             <button
               type="button"
               onClick={() => model.onNewThread(agent.id)}
               aria-label={`New chat with ${name}`}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
             >
               <Plus aria-hidden="true" className="h-3 w-3" />
               New chat
             </button>
-          )}
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -484,10 +631,8 @@ function AgentsSection({
   return (
     <div className="space-y-0.5">
       {agentOwnerSections(visible).map((section) => (
-        <section key={section.id} aria-label={section.label}>
-          <p className="px-3 pb-1 pt-3 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-            {section.label}
-          </p>
+        <section key={section.id} aria-label={`${section.label} agents`}>
+          <OwnerLabel>{section.label} agents</OwnerLabel>
           {section.agents.map((agent) => (
         <AgentRow
           key={agent.id}
@@ -514,59 +659,131 @@ function AgentsSection({
   );
 }
 
+/**
+ * The one place to create: a personal agent, an organization's agent, or a
+ * crew (a group chat with several agents).
+ */
+function CreateAgentMenu({
+  agents,
+  onNewCrew,
+  compact = false,
+}: {
+  readonly agents: SidebarAgents;
+  readonly onNewCrew?: () => void;
+  /** An icon button for the sidebar rail. */
+  readonly compact?: boolean;
+}) {
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          {compact ? (
+            <button
+              type="button"
+              aria-label="Create new agent"
+              title="Create new agent"
+              className={RAIL_BUTTON}
+            >
+              <Plus aria-hidden="true" className="h-4 w-4" />
+            </button>
+          ) : (
+            /* Styled like a Workspace destination. */
+            <button
+              type="button"
+              // The dialogs are rendered by this sidebar; closing the mobile
+              // drawer would unmount them.
+              data-keep-drawer-open=""
+              className="mb-0.5 flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground data-[state=open]:bg-overlay data-[state=open]:text-foreground"
+            >
+              <Plus aria-hidden="true" className="h-4 w-4 shrink-0 text-text-tertiary" />
+              <span className="truncate">Create new agent</span>
+            </button>
+          )}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" side={compact ? "right" : undefined} className="min-w-[200px]">
+          <DropdownMenuItem onSelect={() => agents.onNewAgent("personal")}>
+            <User aria-hidden="true" />
+            Personal agent
+          </DropdownMenuItem>
+          {agents.canCreateOrgAgent ? (
+            <DropdownMenuItem onSelect={() => agents.onNewAgent("org")}>
+              <Building2 aria-hidden="true" />
+              Organization agent
+            </DropdownMenuItem>
+          ) : null}
+          {onNewCrew ? (
+            <DropdownMenuItem onSelect={onNewCrew}>
+              <Users aria-hidden="true" />
+              Crew
+            </DropdownMenuItem>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
+  );
+}
+
 function GroupsSection({ model }: { readonly model: SidebarGroups }) {
   const sections = new Map<string, typeof model.groups>();
   for (const group of model.groups) {
     const key = group.owner?.type === "org" ? group.owner.id : "personal";
     sections.set(key, [...(sections.get(key) ?? []), group]);
   }
+  // With no crews yet, the personal section still offers the first one.
+  if (!sections.size) sections.set("personal", []);
   return (
     <div className="space-y-0.5">
-      {[...sections.entries()].map(([owner, groups]) => <div key={owner}>
-        <p className="px-3 pt-2 pb-1 text-10 font-medium text-text-tertiary">{owner === "personal" ? "Personal" : groups[0]?.owner?.name}</p>
-        {groups.map((group) => {
-        const working = group.working_agent_ids.length;
-        const selected = group.id === model.selectedGroupId;
+      {[...sections.entries()].map(([owner, groups]) => {
+        const label = `${owner === "personal" ? "Personal" : (groups[0]?.owner?.name ?? "Organization")} crews`;
         return (
-          <button
-            key={group.id}
-            type="button"
-            onClick={() => model.onSelectGroup(group.id)}
-            aria-current={selected ? "page" : undefined}
-            aria-label={`${group.name}, group with ${group.members
-              .map((member) => agentTitle(member))
-              .join(", ")}${working ? `, ${String(working)} working` : ""}`}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-13 transition-colors",
-              selected
-                ? "bg-overlay-strong font-medium text-foreground"
-                : "text-muted-foreground hover:bg-overlay hover:text-foreground",
-            )}
-          >
-            <AgentAvatarStack agents={group.members} size="xs" max={3} />
-            <span className="min-w-0 flex-1 truncate">{group.name}</span>
-            {working ? (
-              <span
-                aria-hidden="true"
-                className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
-              />
+          <section key={owner} aria-label={label}>
+            <OwnerLabel>{label}</OwnerLabel>
+            {groups.map((group) => {
+              const working = group.working_agent_ids.length;
+              const selected = group.id === model.selectedGroupId;
+              return (
+                <button
+                  key={group.id}
+                  type="button"
+                  onClick={() => model.onSelectGroup(group.id)}
+                  aria-current={selected ? "page" : undefined}
+                  aria-label={`${group.name}, group with ${group.members
+                    .map((member) => agentTitle(member))
+                    .join(", ")}${working ? `, ${String(working)} working` : ""}`}
+                  className={cn(
+                    "group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-13 transition-colors",
+                    selected
+                      ? "bg-overlay-strong font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-sidebar-hover hover:text-foreground",
+                  )}
+                >
+                  <AgentAvatarStack agents={group.members} size="xs" max={3} ring="ring-sidebar group-hover:ring-sidebar-hover" />
+                  <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                  {working ? (
+                    <span
+                      aria-hidden="true"
+                      className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
+                    />
+                  ) : null}
+                </button>
+              );
+            })}
+            {owner === "personal" && model.loading && !model.groups.length ? (
+              <p className="px-3 py-1.5 text-11 text-text-tertiary">Loading crews...</p>
             ) : null}
-          </button>
+            {owner === "personal" && !model.loading && !model.groups.length ? (
+              <button
+                type="button"
+                onClick={model.onNewGroup}
+                data-keep-drawer-open=""
+                className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+              >
+                Chat with several agents at once
+              </button>
+            ) : null}
+          </section>
         );
-      })}</div>)}
-      {model.loading && !model.groups.length ? (
-        <p className="px-3 py-1.5 text-11 text-text-tertiary">Loading groups...</p>
-      ) : null}
-      {!model.loading && !model.groups.length ? (
-        <button
-          type="button"
-          onClick={model.onNewGroup}
-          data-keep-drawer-open=""
-          className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
-        >
-          Chat with several agents at once
-        </button>
-      ) : null}
+      })}
     </div>
   );
 }
@@ -604,6 +821,7 @@ export function AssistantSidebar({
   readonly groups?: SidebarGroups;
 }) {
   const { current: accountPanel } = useAccountPanel();
+  const rail = useContext(SidebarRailContext);
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
   const workspacePreview = useFeature(FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW);
@@ -667,8 +885,25 @@ export function AssistantSidebar({
     );
   }
 
+  if (rail) {
+    return (
+      <SidebarRail
+        agents={agents}
+        groups={groups}
+        activeView={activeView}
+        activeConversationId={activeConversationId}
+        pendingApprovals={counts.data?.pendingApprovals ?? 0}
+        accountOpen={Boolean(accountPanel.panel)}
+        onSelect={onSelect}
+      />
+    );
+  }
+
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    <div className="flex h-full min-h-0 flex-col bg-sidebar">
+      {/* One scroll area for the whole column; the account button stays put. */}
+      {/* Always a visible scrollbar, so the column reads as scrollable. */}
+      <div data-scroll-fade="" className="min-h-0 flex-1 overflow-y-scroll overscroll-contain">
       {/* NyxAgent mode starts chats from the NyxBot home and each agent's
           own "New chat"; the generic button belongs to the earlier engines. */}
       {agents ? (
@@ -696,13 +931,13 @@ export function AssistantSidebar({
             type="button"
             onClick={agents.onHome}
             aria-current={agents.homeActive ? "page" : undefined}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-13 transition-colors ${
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left text-13 transition-colors ${
               agents.homeActive
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground"
             }`}
           >
-            <House
+            <HomeGlyph
               className={`h-4 w-4 shrink-0 ${agents.homeActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
             />
             <span className="truncate">Home</span>
@@ -710,9 +945,9 @@ export function AssistantSidebar({
         ) : (
           <Link
             to="/assistant"
-            className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground hover:bg-overlay hover:text-foreground"
+            className="flex items-center gap-3 rounded-lg px-3 py-1.5 text-13 text-muted-foreground hover:bg-overlay hover:text-foreground"
           >
-            <House className="h-4 w-4" />
+            <HomeGlyph className="h-4 w-4" />
             Home
           </Link>
         )}
@@ -722,13 +957,13 @@ export function AssistantSidebar({
               view: "automations",
               to: "/assistant/automations",
               label: "Automations",
-              icon: CalendarClock,
+              icon: AutomationsGlyph,
             },
             {
               view: "machines",
               to: "/assistant/machines",
               label: "Machines",
-              icon: Monitor,
+              icon: MachinesGlyph,
             },
           ] as const
         ).map((item) => (
@@ -737,7 +972,7 @@ export function AssistantSidebar({
             to={item.to}
             aria-current={activeView === item.view ? "page" : undefined}
             className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors",
+              "flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors",
               activeView === item.view
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -757,13 +992,13 @@ export function AssistantSidebar({
         <Link
           to="/assistant/plugins"
           aria-current={pluginsActive ? "page" : undefined}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors ${
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors ${
             pluginsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
           }`}
         >
-          <LayoutGrid
+          <PluginsGlyph
             className={`h-4 w-4 shrink-0 ${pluginsActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
           />
           <span className="truncate">Plugins</span>
@@ -782,13 +1017,13 @@ export function AssistantSidebar({
         <Link
           to="/assistant/approvals"
           aria-current={approvalsActive ? "page" : undefined}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors ${
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors ${
             approvalsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
           }`}
         >
-          <ShieldCheck
+          <ApprovalsGlyph
             className={`h-4 w-4 shrink-0 ${approvalsActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
           />
           <span className="min-w-0 flex-1 truncate">Approvals</span>
@@ -811,23 +1046,10 @@ export function AssistantSidebar({
           {notice}
         </p>
       ) : null}
-      <nav aria-label="Agents and conversations" data-scroll-fade="" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-3">
+      <nav aria-label="Agents and conversations" className="@container px-2 pb-3">
         {agents ? (
           <>
-            <div className="-ml-2 flex items-center justify-between">
-              <GroupLabel>Agents</GroupLabel>
-              <button
-                type="button"
-                aria-label="New agent"
-                // The dialog is rendered by this sidebar; closing the mobile
-                // drawer would unmount it.
-                data-keep-drawer-open=""
-                onClick={agents.onNewAgent}
-                className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            </div>
+            <CreateAgentMenu agents={agents} onNewCrew={groups?.onNewGroup} />
             <AgentsSection
               model={agents}
               activeThreadId={activeConversationId}
@@ -835,23 +1057,7 @@ export function AssistantSidebar({
             />
           </>
         ) : null}
-        {groups ? (
-          <>
-            <div className="-ml-2 mt-2 flex items-center justify-between">
-              <GroupLabel>Groups</GroupLabel>
-              <button
-                type="button"
-                aria-label="New group"
-                data-keep-drawer-open=""
-                onClick={groups.onNewGroup}
-                className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            </div>
-            <GroupsSection model={groups} />
-          </>
-        ) : null}
+        {groups ? <GroupsSection model={groups} /> : null}
         {/* The earlier engines' chats; NyxAgent mode lists threads under agents. */}
         {!agents ? (
           <>
@@ -862,6 +1068,7 @@ export function AssistantSidebar({
           </>
         ) : null}
       </nav>
+      </div>
 
       <div className="shrink-0 border-t border-border/60 p-2">
         <AssistantAccountMenu align="start" side="top">
@@ -869,6 +1076,7 @@ export function AssistantSidebar({
             type="button"
             aria-label="Account menu"
             data-keep-drawer-open=""
+            data-assistant-account-fallback="menu"
             className={cn(
               "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-overlay",
               Boolean(accountPanel.panel) && "bg-overlay-strong font-medium text-foreground",
@@ -978,5 +1186,283 @@ function RenameChatInline({
             </Button>
           </div>
         </form>
+  );
+}
+
+const RAIL_BUTTON =
+  "relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-overlay data-[state=open]:text-foreground";
+
+/** One rail icon with its name in a tooltip. */
+function RailItem({ label, children }: { readonly label: string; readonly children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * The hidden sidebar: Workspace destinations as icons, then every agent as
+ * an avatar (hover lists its chats) and every crew, with the account last.
+ */
+function SidebarRail({
+  agents,
+  groups,
+  activeView,
+  activeConversationId,
+  pendingApprovals,
+  accountOpen,
+  onSelect,
+}: {
+  readonly agents?: SidebarAgents;
+  readonly groups?: SidebarGroups;
+  readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines";
+  readonly activeConversationId: string | undefined;
+  readonly pendingApprovals: number;
+  readonly accountOpen: boolean;
+  readonly onSelect: (conversationId: string) => void;
+}) {
+  const homeActive = agents ? Boolean(agents.homeActive) : false;
+  const iconClass = (active: boolean) => cn("h-4 w-4", active && "text-nyx-secondary-400");
+  const linkClass = (active: boolean) => cn(RAIL_BUTTON, active && "bg-overlay-strong text-foreground");
+  const destinations = [
+    { view: "automations", to: "/assistant/automations", label: "Automations", icon: AutomationsGlyph },
+    { view: "machines", to: "/assistant/machines", label: "Machines", icon: MachinesGlyph },
+    { view: "plugins", to: "/assistant/plugins", label: "Plugins", icon: PluginsGlyph },
+  ] as const;
+  const liveAgents = (agents?.agents ?? []).filter((agent) => agent.status !== "destroyed");
+  return (
+    <TooltipProvider delayDuration={200}>
+      <div className="flex h-full min-h-0 flex-col items-center bg-sidebar">
+        <nav
+          aria-label="Workspace and agents"
+          className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto overscroll-contain py-1 [scrollbar-width:none]"
+        >
+          <RailItem label="Home">
+            {agents?.onHome ? (
+              <button type="button" aria-label="Home" aria-current={homeActive ? "page" : undefined} onClick={agents.onHome} className={linkClass(homeActive)}>
+                <HomeGlyph className={iconClass(homeActive)} />
+              </button>
+            ) : (
+              <Link to="/assistant" aria-label="Home" className={linkClass(false)}>
+                <HomeGlyph className="h-4 w-4" />
+              </Link>
+            )}
+          </RailItem>
+          {destinations.map((item) => (
+            <RailItem key={item.view} label={item.label}>
+              <Link
+                to={item.to}
+                aria-label={item.label}
+                aria-current={activeView === item.view ? "page" : undefined}
+                className={linkClass(activeView === item.view)}
+              >
+                <item.icon className={iconClass(activeView === item.view)} />
+              </Link>
+            </RailItem>
+          ))}
+          <RailItem label={pendingApprovals ? `Approvals (${String(pendingApprovals)} waiting)` : "Approvals"}>
+            <Link
+              to="/assistant/approvals"
+              aria-label={pendingApprovals ? `Approvals, ${String(pendingApprovals)} waiting` : "Approvals"}
+              aria-current={activeView === "approvals" ? "page" : undefined}
+              className={linkClass(activeView === "approvals")}
+            >
+              <ApprovalsGlyph className={iconClass(activeView === "approvals")} />
+              {pendingApprovals ? (
+                <span aria-hidden="true" className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-warning" />
+              ) : null}
+            </Link>
+          </RailItem>
+          {agents ? <CreateAgentMenu agents={agents} onNewCrew={groups?.onNewGroup} compact /> : null}
+          {liveAgents.length ? <div className="h-2 shrink-0" aria-hidden="true" /> : null}
+          {agents
+            ? liveAgents.map((agent) => (
+                <RailAgent
+                  key={agent.id}
+                  agent={agent}
+                  model={agents}
+                  activeConversationId={activeConversationId}
+                  onSelect={onSelect}
+                />
+              ))
+            : null}
+          {groups?.groups.length ? <div className="h-2 shrink-0" aria-hidden="true" /> : null}
+          {groups?.groups.map((group) => {
+            const selected = group.id === groups.selectedGroupId;
+            return (
+              <RailItem key={group.id} label={group.name}>
+                <button
+                  type="button"
+                  aria-label={`${group.name}, group`}
+                  aria-current={selected ? "page" : undefined}
+                  onClick={() => groups.onSelectGroup(group.id)}
+                  className={linkClass(selected)}
+                >
+                  <AgentAvatarStack agents={group.members} size="xs" max={2} ring="ring-sidebar" />
+                </button>
+              </RailItem>
+            );
+          })}
+        </nav>
+        <div className="shrink-0 py-2">
+          <AssistantAccountMenu align="start" side="top">
+            <button
+              type="button"
+              aria-label="Account menu"
+              data-assistant-account-fallback="menu"
+              className={cn(
+                "flex h-8 w-8 items-center justify-center rounded-lg border border-hairline bg-overlay-strong text-text-tertiary transition-colors hover:text-foreground",
+                accountOpen && "text-foreground",
+              )}
+            >
+              <User aria-hidden="true" className="h-3.5 w-3.5" />
+            </button>
+          </AssistantAccountMenu>
+        </div>
+      </div>
+    </TooltipProvider>
+  );
+}
+
+/** Threads shown in an agent's hover card before "All chats". */
+const RAIL_THREADS = 8;
+
+/** An agent on the rail: a click lists its chats, with "All chats" to open the agent. */
+function RailAgent({
+  agent,
+  model,
+  activeConversationId,
+  onSelect,
+}: {
+  readonly agent: AssistantAgent;
+  readonly model: SidebarAgents;
+  readonly activeConversationId: string | undefined;
+  readonly onSelect: (conversationId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = agent.id === model.selectedAgentId;
+  return (
+    // Its chats open on click, never on a passing pointer; "All chats"
+    // inside opens the agent itself.
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={agentAccessibleName(agent)}
+          aria-current={selected ? "true" : undefined}
+          className={cn(RAIL_BUTTON, selected && "bg-overlay-strong")}
+        >
+          <AgentAvatar agent={agent} size="md" />
+          {agent.status === "running" ? (
+            <span aria-hidden="true" className="absolute right-1 bottom-1 h-1.5 w-1.5 rounded-full bg-success motion-safe:animate-pulse" />
+          ) : null}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="right"
+        align="start"
+        sideOffset={8}
+        className="w-64 p-2"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => event.preventDefault()}
+      >
+        {open ? (
+          <RailAgentChats
+            agent={agent}
+            model={model}
+            activeConversationId={activeConversationId}
+            onPick={(conversationId) => {
+              setOpen(false);
+              onSelect(conversationId);
+            }}
+            onNewChat={() => {
+              setOpen(false);
+              model.onNewThread(agent.id);
+            }}
+            onAll={() => {
+              setOpen(false);
+              model.onSelectAgent(agent.id);
+            }}
+          />
+        ) : null}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function RailAgentChats({
+  agent,
+  model,
+  activeConversationId,
+  onPick,
+  onNewChat,
+  onAll,
+}: {
+  readonly agent: AssistantAgent;
+  readonly model: SidebarAgents;
+  readonly activeConversationId: string | undefined;
+  readonly onPick: (conversationId: string) => void;
+  readonly onNewChat: () => void;
+  readonly onAll: () => void;
+}) {
+  const userId = useAuthStore((state) => state.user?.id);
+  const selected = agent.id === model.selectedAgentId;
+  // The open agent's threads are already loaded; others load (and cache) on hover.
+  const threads = useQuery({
+    queryKey: nyxBotQueryKeys.threads(userId, agent.id),
+    queryFn: () => nyxAgentTransport.list(agent.id),
+    enabled: !selected && Boolean(userId),
+  });
+  const chats = selected ? model.threads : (threads.data ?? []);
+  const loading = selected ? Boolean(model.threadsLoading) : threads.isPending;
+  return (
+    <div className="space-y-1 text-12">
+      <div className="flex items-center gap-2 px-1 pb-1">
+        <AgentAvatar agent={agent} size="sm" />
+        <span className="min-w-0 flex-1 truncate font-medium text-foreground">{agentTitle(agent)}</span>
+        <button
+          type="button"
+          onClick={onNewChat}
+          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+        >
+          <Plus aria-hidden="true" className="h-3 w-3" />
+          New chat
+        </button>
+      </div>
+      {loading && !chats.length ? (
+        <p className="px-2 py-1.5 text-11 text-text-tertiary">Loading chats...</p>
+      ) : !chats.length ? (
+        <p className="px-2 py-1.5 text-11 text-text-tertiary">No chats yet.</p>
+      ) : (
+        <ul aria-label={`${agentTitle(agent)} chats`} className="space-y-0.5">
+          {chats.slice(0, RAIL_THREADS).map((chat) => (
+            <li key={chat.id}>
+              <button
+                type="button"
+                onClick={() => onPick(chat.id)}
+                aria-current={chat.id === activeConversationId ? "page" : undefined}
+                className={cn(
+                  "w-full truncate rounded-md px-2 py-1.5 text-left transition-colors hover:bg-overlay hover:text-foreground",
+                  chat.id === activeConversationId ? "bg-overlay-strong text-foreground" : "text-muted-foreground",
+                )}
+              >
+                {chat.title || "New conversation"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {chats.length > RAIL_THREADS ? (
+        <button
+          type="button"
+          onClick={onAll}
+          className="w-full rounded-md px-2 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+        >
+          All chats ({chats.length})
+        </button>
+      ) : null}
+    </div>
   );
 }
