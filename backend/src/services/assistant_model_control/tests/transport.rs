@@ -1,5 +1,9 @@
 //! Real local proxy/provider/MCP paths. Authored source; runtime validation pending.
 use super::*;
+use crate::services::billing::lago_client::{
+    Entitlement, LagoAck, LagoApi, LagoError, LagoEvent, LagoTaxConfig, LagoUsage,
+    OwnerProvisionInput,
+};
 use crate::{
     models::{
         billing_wallet::BillingWallet,
@@ -17,6 +21,7 @@ use axum::{
     routing::{get, post},
 };
 use futures::TryStreamExt;
+use std::collections::BTreeSet;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -82,7 +87,7 @@ async fn provider(
         if peer.mode=="truncated" {return;}
         yield Ok(Bytes::copy_from_slice(&frame.as_bytes()[middle..]));
         peer.terminal.notify_one();
-        if call==0 {peer.eof.acquire().await.unwrap().forget();}
+        if call==0 || peer.mode=="passive_pending" {peer.eof.acquire().await.unwrap().forget();}
     };
     (
         [("content-type", "text/event-stream")],
@@ -236,6 +241,186 @@ async fn fixture_with_issuance(
     .target;
     (c, peer, server)
 }
+
+/// Acknowledges only the actual one-credit winning transactions. Its accrued
+/// usage grows from those ACKs, so the real reconciler refreshes the same wallet
+/// from settled provider balance minus precisely the emitted usage.
+struct CountedLago {
+    customer: String,
+    subscription: String,
+    expected: BTreeSet<String>,
+    acknowledged: tokio::sync::Mutex<BTreeSet<String>>,
+}
+
+#[async_trait::async_trait]
+impl LagoApi for CountedLago {
+    async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
+        assert_eq!(owner.external_customer_id, self.customer);
+        Ok(self.customer.clone())
+    }
+    async fn ensure_subscription(&self, customer: &str, _: &str) -> AppResult<String> {
+        assert_eq!(customer, self.customer);
+        Ok(self.subscription.clone())
+    }
+    async fn tax_config(&self, customer: &str, subscription: &str) -> AppResult<LagoTaxConfig> {
+        assert_eq!(customer, self.customer);
+        assert_eq!(subscription, self.subscription);
+        Ok(crate::services::billing::taxes::zero_config())
+    }
+    async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+        assert!(self.expected.contains(&event.transaction_id));
+        assert_eq!(
+            event.external_subscription_id.as_deref(),
+            Some(self.subscription.as_str())
+        );
+        assert!(event.external_customer_id.is_none());
+        assert_eq!(event.code, "platform_requests");
+        assert_eq!(event.properties.quantity, json!(1));
+        assert_eq!(event.properties.service_code.as_deref(), Some("p2-model"));
+        assert_eq!(event.properties.layer.as_deref(), Some("platform"));
+        assert!(
+            self.acknowledged
+                .lock()
+                .await
+                .insert(event.transaction_id.clone())
+        );
+        Ok(LagoAck {
+            transaction_id: event.transaction_id.clone(),
+        })
+    }
+    async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError> {
+        let mut replies = Vec::new();
+        for event in events {
+            replies.push(self.record_event(event).await?);
+        }
+        Ok(replies)
+    }
+    async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
+        assert_eq!(customer, self.customer);
+        assert!(subscription.is_empty() || subscription == self.subscription);
+        let count = self.acknowledged.lock().await.len();
+        Ok(LagoUsage {
+            customer_id: customer.into(),
+            subscription_id: subscription.into(),
+            raw: json!({"customer_usage":{"total_amount_cents":(count * 100).to_string(),
+                "charges_usage":[{"billable_metric_code":"platform_requests","units":count.to_string()}]}}),
+        })
+    }
+    async fn wallet_balance(&self, customer: &str) -> AppResult<i64> {
+        assert_eq!(customer, self.customer);
+        Ok(10_000)
+    }
+    async fn entitlements(&self, subscription: &str) -> AppResult<Vec<Entitlement>> {
+        assert_eq!(subscription, self.subscription);
+        Ok(Vec::new())
+    }
+}
+
+async fn reconcile_charged_wallet(
+    c: &Controlled,
+    charged: &[UsageMeterRow],
+    wallet: BillingWallet,
+) -> BillingWallet {
+    assert!(!charged.is_empty());
+    let charge = Credits::from_whole(i64::try_from(charged.len()).unwrap());
+    // Released+ledgered rows precede the final settlement-lock cleanup. Wait
+    // for that real writer, then inspect a fresh snapshot of this same wallet.
+    let wallet = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if let Some(ready) =
+                c.f.state
+                    .db
+                    .collection::<BillingWallet>("billing_wallet")
+                    .find_one(doc! {"_id":&wallet.id,"active_settlement":bson::Bson::Null})
+                    .await
+                    .unwrap()
+            {
+                break ready;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(wallet.owner_id, c.f.owner);
+    assert_eq!(wallet.balance_credits, Credits::from_whole(10_000));
+    assert_eq!(wallet.reserved_credits, Credits::ZERO);
+    assert_eq!(
+        wallet.pending_lago_debits, charge,
+        "only completed sends accrue debits"
+    );
+    let mut ids = Vec::new();
+    let mut transactions = BTreeSet::new();
+    for row in charged {
+        assert_eq!(row.wallet_id.as_deref(), Some(wallet.id.as_str()));
+        assert_eq!(row.billing_owner_id, wallet.owner_id);
+        assert_eq!(row.status, UsageStatus::Finalized);
+        assert!(row.forwarded && row.released && !row.lago_acked);
+        assert_eq!(row.quantity, Some(1));
+        assert_eq!(
+            row.funding.as_ref().unwrap().wallet_charge_credits,
+            Some(Credits::from_whole(1))
+        );
+        ids.push(row.id.clone());
+        assert!(transactions.insert(row.transaction_id.clone()));
+    }
+    // Advance only these already-settled rows past the reconciler's 30-second
+    // push grace. ACK/funding/financial fields are written by production paths.
+    let due = c.f.state.db.collection::<UsageMeterRow>("usage_meter").update_many(
+        doc! {"_id":{"$in":&ids},"wallet_id":&wallet.id,"status":"finalized","released":true,"funding.settled":true,"lago_acked":false},
+        doc! {"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(31))}},
+    ).await.unwrap();
+    assert_eq!(due.matched_count, u64::try_from(charged.len()).unwrap());
+    let lago = Arc::new(CountedLago {
+        customer: wallet.lago_customer_id.clone(),
+        subscription: wallet.lago_subscription_id.clone().unwrap(),
+        expected: transactions.clone(),
+        acknowledged: tokio::sync::Mutex::new(BTreeSet::new()),
+    });
+    let mut config = crate::test_utils::test_app_config();
+    config.billing_enabled = true;
+    let stats = crate::services::billing::reconcile::BillingReconciler::new(
+        c.f.state.db.clone(),
+        Some(lago.clone()),
+        Arc::new(config),
+    )
+    .run_once()
+    .await
+    .unwrap();
+    assert_eq!(stats.pushed, u64::try_from(charged.len()).unwrap());
+    assert_eq!(stats.retried, 0);
+    assert_eq!(stats.dead_lettered, 0);
+    assert_eq!(stats.wallet_balance_refreshes, 1);
+    assert_eq!(*lago.acknowledged.lock().await, transactions);
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<UsageMeterRow>("usage_meter")
+            .count_documents(
+                doc! {"_id":{"$in":ids},"lago_acked":true,"status":"finalized","released":true},
+            )
+            .await
+            .unwrap(),
+        u64::try_from(charged.len()).unwrap()
+    );
+    let refreshed =
+        c.f.state
+            .db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {"_id":&wallet.id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(refreshed.id, wallet.id);
+    assert_eq!(
+        refreshed.balance_credits,
+        wallet.balance_credits.checked_sub(charge).unwrap()
+    );
+    assert_eq!(refreshed.reserved_credits, Credits::ZERO);
+    assert_eq!(refreshed.pending_lago_debits, Credits::ZERO);
+    refreshed
+}
+
 async fn callback(
     c: &Controlled,
     body: &Value,
@@ -677,10 +862,11 @@ async fn counted_followup(metadata: Option<Value>) {
             .await
             .unwrap();
     assert_eq!(held.len(), 2);
-    assert!(
-        held.iter()
-            .all(|r| r.reserved_credits > Credits::ZERO && !r.released)
-    );
+    assert!(held.iter().all(|r| r.reserved_credits > Credits::ZERO
+        && !r.released
+        && r.forwarded
+        && r.status == UsageStatus::Forwarded));
+    assert_eq!(peer.calls.load(Ordering::SeqCst), 0);
     release.add_permits(2);
     let (a, b) = both.await;
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
@@ -858,6 +1044,7 @@ async fn counted_followup(metadata: Option<Value>) {
             .unwrap()
             .unwrap();
     assert_eq!(wallet.reserved_credits, Credits::ZERO);
+    let wallet = reconcile_charged_wallet(&c, &charged, wallet).await;
     assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
     assert_eq!(
         c.f.state
@@ -1298,7 +1485,11 @@ async fn real_final_claim_stop_key_revocation_or_catalog_drift_releases_billing_
                 .await
                 .unwrap()
                 .unwrap();
-        assert!(held.reserved_credits > Credits::ZERO && !held.released && !held.forwarded);
+        // Forwarded is existing pre-send bookkeeping; the actual provider has
+        // not been called at this final-authority barrier.
+        assert!(held.reserved_credits > Credits::ZERO && !held.released && held.forwarded);
+        assert_eq!(held.status, UsageStatus::Forwarded);
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 0);
         if fence == "stop" {
             engine::request_stop(&c.f.state.db, &c.f.owner, &c.f.row.id)
                 .await

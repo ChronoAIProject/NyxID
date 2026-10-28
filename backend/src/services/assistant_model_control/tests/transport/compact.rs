@@ -115,6 +115,14 @@ async fn completed_generation(
     compact.body = json!({"model":"model-v1","input":input});
     compact.preceding_receipt = Some(receipt.receipt_bearer);
     compact.tool_results = vec![proof];
+    // The next callback's Forwarded holds must exclude this prior generation,
+    // whose billing settlement runs independently from its completion receipt.
+    crate::billing_integration_tests::wait_for_charged_usage(
+        &c.f.state.db,
+        doc! {"user_service_id":&c.connection,"status":"finalized"},
+        1,
+    )
+    .await;
     (card, step, compact)
 }
 
@@ -239,7 +247,7 @@ async fn real_one_allow_generation_tool_compact_json_eof_and_full_replacement_ke
         c.f.state
             .db
             .collection("usage_meter")
-            .find(doc! {"user_service_id":&c.connection,"status":"reserved"})
+            .find(doc! {"user_service_id":&c.connection,"status":"forwarded"})
             .await
             .unwrap()
             .try_collect()
@@ -249,8 +257,9 @@ async fn real_one_allow_generation_tool_compact_json_eof_and_full_replacement_ke
     assert!(
         holds
             .iter()
-            .all(|row| row.reserved_credits > Credits::ZERO && !row.released && !row.forwarded)
+            .all(|row| row.reserved_credits > Credits::ZERO && !row.released && row.forwarded)
     );
+    assert_eq!(peer.calls.load(Ordering::SeqCst), 1);
     release.add_permits(2);
     let (a, b) = both.await;
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
@@ -449,6 +458,7 @@ async fn real_one_allow_generation_tool_compact_json_eof_and_full_replacement_ke
             .unwrap()
             .unwrap();
     assert_eq!(wallet.reserved_credits, Credits::ZERO);
+    let wallet = reconcile_charged_wallet(&c, &charged, wallet).await;
     assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
     assert_eq!(
         c.f.state
@@ -586,11 +596,12 @@ async fn real_compact_final_claim_stop_revoke_expiry_or_connection_drift_release
             c.f.state
                 .db
                 .collection::<UsageMeterRow>("usage_meter")
-                .find_one(doc! {"user_service_id":&c.connection,"status":"reserved"})
+                .find_one(doc! {"user_service_id":&c.connection,"status":"forwarded"})
                 .await
                 .unwrap()
                 .unwrap();
-        assert!(held.reserved_credits > Credits::ZERO && !held.released && !held.forwarded);
+        assert!(held.reserved_credits > Credits::ZERO && !held.released && held.forwarded);
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 1);
         match fence {
             "stop" => {
                 engine::request_stop(&c.f.state.db, &c.f.owner, &c.f.row.id)
@@ -654,7 +665,6 @@ async fn real_compact_final_claim_stop_revoke_expiry_or_connection_drift_release
                 .unwrap()
                 .unwrap();
         assert_eq!(wallet.reserved_credits, Credits::ZERO);
-        assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
         let charged = crate::billing_integration_tests::wait_for_charged_usage(
             &c.f.state.db,
             doc! {"user_service_id":&c.connection,"status":"finalized"},
@@ -662,6 +672,8 @@ async fn real_compact_final_claim_stop_revoke_expiry_or_connection_drift_release
         )
         .await;
         assert_eq!(charged.len(), 1);
+        let wallet = reconcile_charged_wallet(&c, &charged, wallet).await;
+        assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
         assert_eq!(charged[0].billing_owner_id, c.f.owner);
         assert_eq!(
             charged[0].api_key_id.as_deref(),

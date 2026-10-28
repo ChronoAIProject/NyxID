@@ -411,7 +411,54 @@ async fn real_passive_final_claim_stop_revocation_and_credential_drift_send_noth
                 .await
                 .unwrap()
                 .unwrap();
-                c.f.state.db.collection::<Document>("user_api_keys").update_one(doc! {"_id":service.api_key_id.unwrap()},vec![doc! {"$set":{"credential_epoch":{"$add":[{"$ifNull":["$credential_epoch",0]},1]}}}]).await.unwrap();
+                let key_id = service.api_key_id.unwrap();
+                let credentials =
+                    c.f.state
+                        .db
+                        .collection::<crate::models::user_api_key::UserApiKey>("user_api_keys");
+                let before = credentials
+                    .find_one(doc! {"_id":&key_id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(before.id, key_id);
+                assert_eq!(before.user_id, c.f.owner);
+                assert_eq!(before.credential_epoch, 1);
+                let binding = crate::services::assistant_service_execution::connection_binding(
+                    &c.f.state.db,
+                    &c.connection,
+                    &c.f.chat.api_key_id,
+                )
+                .await
+                .unwrap();
+                crate::services::user_api_key_service::update_api_key(
+                    &c.f.state.db,
+                    &c.f.state.encryption_keys,
+                    &c.f.owner,
+                    &key_id,
+                    None,
+                    Some("replacement-provider-fixture-key"),
+                )
+                .await
+                .unwrap();
+                let after = credentials
+                    .find_one(doc! {"_id":&key_id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(after.id, before.id);
+                assert_eq!(after.user_id, before.user_id);
+                assert_eq!(after.credential_epoch, 2);
+                assert_ne!(
+                    crate::services::assistant_service_execution::connection_binding(
+                        &c.f.state.db,
+                        &c.connection,
+                        &c.f.chat.api_key_id,
+                    )
+                    .await
+                    .unwrap(),
+                    binding
+                );
             }
         }
         release.add_permits(1);
@@ -532,7 +579,7 @@ async fn real_unobserved_or_same_final_url_redirect_read_keeps_response_but_neve
 #[tokio::test]
 async fn real_failed_or_dropped_new_read_observation_cannot_revive_older_completed_history() {
     for failure in ["drop", "completion_persistence"] {
-        let (mut c, peer, server) = fixture("completed").await;
+        let (mut c, peer, server) = fixture("passive_pending").await;
         c.f.state.http_client = HttpClient::observed(
             reqwest::Client::builder(),
             reqwest::redirect::Policy::default(),
@@ -559,14 +606,25 @@ async fn real_failed_or_dropped_new_read_observation_cannot_revive_older_complet
             .as_array_mut()
             .unwrap()
             .extend(output.as_array().unwrap().iter().cloned());
-        let response = callback(&c, &second.body, None).await.unwrap();
+        // Arm the actual observer before the shared relay moves its upstream
+        // stream to a spawned task. Consumer task-locals do not follow it.
+        let response = crate::services::assistant_model_control::observer::FAIL_PASSIVE_PERSISTENCE
+            .scope(
+                failure == "completion_persistence",
+                callback(&c, &second.body, None),
+            )
+            .await
+            .unwrap();
         if failure == "drop" {
+            // Even a background drain cannot observe EOF before this drop.
+            assert_eq!(peer.eof.available_permits(), 0);
             drop(response);
         } else {
-            crate::services::assistant_model_control::observer::FAIL_PASSIVE_PERSISTENCE
-                .scope(true, to_bytes(response.into_body(), wire::MAX_STREAM_BYTES))
+            peer.eof.add_permits(1);
+            let delivered = to_bytes(response.into_body(), wire::MAX_STREAM_BYTES)
                 .await
                 .unwrap();
+            assert!(String::from_utf8_lossy(&delivered).contains("response.completed"));
         }
         assert_eq!(peer.calls.load(Ordering::SeqCst), 2);
         let (_, private, _) = persistence::authenticated(&c.f.state, &c.f.chat, &c.token, None)
