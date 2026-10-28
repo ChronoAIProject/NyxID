@@ -2098,14 +2098,23 @@ fn check_revision_replay_failure_and_concurrency<'a>(
             .unwrap();
         // Restore a live lease to exercise a real persist retry with an existing
         // immutable result, rather than merely calling the same parser twice.
+        let lease_until = bson::DateTime::from_chrono(unchanged.lease_until.unwrap());
         db.collection::<Document>(WATCHES)
             .update_one(
                 doc! {"_id":&unchanged.id},
                 doc! {"$set":{"state":&unchanged.state,"lease_id":&unchanged.lease_id,
-                "lease_until":bson::to_bson(&unchanged.lease_until).unwrap()}},
+                "lease_until":lease_until}},
             )
             .await
             .unwrap();
+        let restored = db
+            .collection::<Document>(WATCHES)
+            .find_one(doc! {"_id":&unchanged.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.get_datetime("lease_until").unwrap(), &lease_until);
+        assert!(lease_until > bson::DateTime::now());
         persist_revision(db, keys, &unchanged, &result)
             .await
             .unwrap();
@@ -2131,10 +2140,18 @@ fn check_revision_replay_failure_and_concurrency<'a>(
             .update_one(
                 doc! {"_id":&unchanged.id},
                 doc! {"$set":{"state":&unchanged.state,"lease_id":&unchanged.lease_id,
-                "lease_until":bson::to_bson(&unchanged.lease_until).unwrap()}},
+                "lease_until":lease_until}},
             )
             .await
             .unwrap();
+        let restored = db
+            .collection::<Document>(WATCHES)
+            .find_one(doc! {"_id":&unchanged.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.get_datetime("lease_until").unwrap(), &lease_until);
+        assert!(lease_until > bson::DateTime::now());
         let moved = sandbox::parse(
             &body("/different/movie.mp4", high),
             unchanged.operation_id.as_deref().unwrap(),
