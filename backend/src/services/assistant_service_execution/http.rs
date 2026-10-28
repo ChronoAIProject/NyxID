@@ -7,6 +7,8 @@ pub struct HttpProjection {
     pub replace_headers: bool,
     /// Server-resolved node/other sender has no model-control final claim.
     pub(crate) model_control_ineligible: bool,
+    /// Exact value generated at server ingress, never supplied as wire proof.
+    pub(crate) model_control_generated_request_id: Option<String>,
     pub base_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
     pub(crate) machine_git: Option<crate::models::downstream_service::GitHttp>,
@@ -17,6 +19,7 @@ impl Default for HttpProjection {
             apply_agent_override: true,
             replace_headers: false,
             model_control_ineligible: false,
+            model_control_generated_request_id: None,
             base_url: None,
             extra_headers: Vec::new(),
             machine_git: None,
@@ -347,6 +350,21 @@ async fn check_http_projected_inner(
             automatic: None,
         });
     };
+    let mut control_headers = headers.clone();
+    if projection
+        .model_control_generated_request_id
+        .as_deref()
+        .is_some_and(|generated| {
+            let mut values = control_headers.get_all("x-request-id").iter();
+            values.next().and_then(|value| value.to_str().ok()) == Some(generated)
+                && values.next().is_none()
+        })
+    {
+        // Keep ordinary approval/forwarding identity unchanged. Only private
+        // model-control identity excludes this request's server correlation.
+        // Resolve effective overrides AFTER removal, so their values stay bound.
+        control_headers.remove("x-request-id");
+    }
     let mut control = if control_transport_eligible {
         crate::services::assistant_model_control::callback(
             state,
@@ -359,8 +377,8 @@ async fn check_http_projected_inner(
                 path,
                 query,
                 body,
-                headers,
-                semantic_headers: projection.headers(target, headers),
+                headers: &control_headers,
+                semantic_headers: projection.headers(target, &control_headers),
                 instrumented_transport: !projection.replace_headers
                     && !projection.model_control_ineligible,
             },

@@ -15,7 +15,7 @@ tokio::task_local! {
 /// can choose a root, continuation, input snapshot or next logical step.
 pub(crate) struct IssueRequest<'a> {
     pub chat: &'a acks::ChatAuthority,
-    pub runtime_catalog_id: &'a str,
+    pub runtime_catalog_id: Option<&'a str>,
     pub outer_body: &'a Value,
     pub negotiated_v1: bool,
 }
@@ -80,24 +80,21 @@ pub(crate) async fn issue(
         return Err(invalid());
     }
     if !state.config.assistant_model_control_v1_enabled || !negotiated_v1 {
-        if existing.as_ref().is_some_and(|r| r.phase != "unactivated") {
-            return Err(invalid());
-        }
-        return Ok(None);
+        return exact_only(state, chat, &filter).await;
     }
     let Some(input) = input else {
         // Event/trigger owner turns without a saved user-input continuation
         // keep their exact-only contract. No synthetic user input is minted.
-        if existing.as_ref().is_some_and(|r| r.phase != "unactivated") {
-            return Err(invalid());
-        }
-        return Ok(None);
+        return exact_only(state, chat, &filter).await;
     };
+    let runtime_catalog_id = runtime_catalog_id.ok_or_else(invalid)?;
     super::super::security_readiness_service::require(&state.db, READINESS_CAPABILITY).await?;
     let binding = digest(outer_body.clone());
     let resumed_input = match outer_text(outer_body) {
         Ok(text) => text,
-        Err(_) if existing.as_ref().is_none_or(|r| r.phase == "unactivated") => return Ok(None),
+        Err(_) if existing.as_ref().is_none_or(|r| r.phase == "unactivated") => {
+            return exact_only(state, chat, &filter).await;
+        }
         Err(error) => return Err(error),
     };
     let now = Utc::now();
@@ -206,6 +203,49 @@ pub(crate) async fn issue(
         token,
         runtime_catalog_id: runtime_catalog_id.into(),
     }))
+}
+
+/// Inactive negotiation and live event turns need no runtime catalog. Exact-only
+/// fallbacks for unsupported outer bodies use the same fence. They
+/// still serialize with decisions, Stop, revocation and erasure, and cannot
+/// downgrade a saved active lineage based on a stale preflight read.
+async fn exact_only(
+    state: &AppState,
+    chat: &acks::ChatAuthority,
+    filter: &Document,
+) -> AppResult<Option<TargetedControl>> {
+    let mut session = state.db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run((state, chat, filter), |session, context| {
+            let (state, chat, filter) = *context;
+            Box::pin(async move {
+                let result = async {
+                    let (live, _, _) = acks::fence(&state.db, chat, session).await?;
+                    super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
+                    let roots = state.db.collection::<ModelControlRoot>(COLLECTION_NAME);
+                    let mut cursor = roots
+                        .find(filter.clone())
+                        .limit(2)
+                        .session(&mut *session)
+                        .await?;
+                    let rows: Vec<ModelControlRoot> =
+                        cursor.stream(&mut *session).try_collect().await?;
+                    if rows.len() > 1
+                        || rows.iter().any(|row| {
+                            row.api_key_id != chat.api_key_id || row.phase != "unactivated"
+                        })
+                    {
+                        return Err(invalid());
+                    }
+                    Ok(None)
+                }
+                .await;
+                super::super::api_key_mutation_service::transaction_result(result)
+            })
+        })
+        .await
+        .map_err(super::super::api_key_mutation_service::map_transaction_error)
 }
 
 fn outer_text(body: &Value) -> AppResult<String> {

@@ -258,6 +258,17 @@ async fn callback_path(
     include_control: bool,
     path: &str,
 ) -> AppResult<axum::response::Response> {
+    callback_with_headers(c, body, step, include_control, path, c.headers()).await
+}
+
+async fn callback_with_headers(
+    c: &Controlled,
+    body: &Value,
+    step: Option<&wire::PreparedStep>,
+    include_control: bool,
+    path: &str,
+    headers: HeaderMap,
+) -> AppResult<axum::response::Response> {
     // Use production key authority construction, including its live turn
     // fence. A synthetic chat alone skips ModelRequest capture and therefore
     // cannot prove ordinary request-priced model usage at response EOF.
@@ -275,7 +286,7 @@ async fn callback_path(
         "/api/v1/proxy/s/p2-model/{path}?_nyxid_via={}",
         c.connection
     ));
-    *req.headers_mut().unwrap() = c.headers();
+    *req.headers_mut().unwrap() = headers;
     if !include_control {
         req.headers_mut().unwrap().remove(wire::CONTROL_HEADER);
     }
@@ -296,6 +307,89 @@ async fn callback_path(
     ))
     .await
 }
+#[tokio::test]
+async fn real_generated_correlation_is_forwarded_without_rebinding_but_caller_id_stays_exact() {
+    for caller_supplied in [false, true] {
+        let (mut c, peer, server) = fixture("completed").await;
+        let mut headers = c.headers();
+        if caller_supplied {
+            headers.insert("x-request-id", "caller-fixed".parse().unwrap());
+        }
+        let initial = request(vec![user("initial")]);
+        let first =
+            callback_with_headers(&c, &initial.body, None, true, "responses", headers.clone())
+                .await
+                .unwrap();
+        assert_eq!(first.status(), StatusCode::CONFLICT);
+        let first_id = first.headers()["x-request-id"].clone();
+        let refusal: Value =
+            serde_json::from_slice(&to_bytes(first.into_body(), 16384).await.unwrap()).unwrap();
+        let repeated =
+            callback_with_headers(&c, &initial.body, None, true, "responses", headers.clone())
+                .await
+                .unwrap();
+        if caller_supplied {
+            assert_eq!(first_id, "caller-fixed");
+            assert_eq!(repeated.headers()["x-request-id"], first_id);
+        } else {
+            assert_ne!(repeated.headers()["x-request-id"], first_id);
+        }
+        let same: Value =
+            serde_json::from_slice(&to_bytes(repeated.into_body(), 16384).await.unwrap()).unwrap();
+        assert_eq!(same, refusal);
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 0);
+        c.resume_card(refusal["acknowledgement_id"].as_str().unwrap().into())
+            .await;
+        // Refresh the control on this genuine Allow continuation, preserving
+        // the exact original caller header when one was actually supplied.
+        headers.insert(wire::CONTROL_HEADER, c.token.expose().parse().unwrap());
+        let mut candidate = request(vec![user("Saved Allow narration")]);
+        if caller_supplied {
+            candidate
+                .semantic_headers
+                .push(("x-request-id".into(), "caller-fixed".into()));
+        }
+        let body = candidate.body.clone();
+        let wire::PrepareReply::Prepared { step } =
+            prepare(&c.f.state, &c.f.chat, &c.token, candidate)
+                .await
+                .unwrap()
+        else {
+            panic!("exact caller headers must prepare");
+        };
+        let mut changed = headers.clone();
+        changed.insert("x-request-id", "different-caller-id".parse().unwrap());
+        assert!(
+            callback_with_headers(&c, &body, Some(&step), true, "responses", changed)
+                .await
+                .is_err()
+        );
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 0);
+        peer.eof.add_permits(1);
+        let response = callback_with_headers(&c, &body, Some(&step), true, "responses", headers)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent_id = response.headers()["x-request-id"].clone();
+        to_bytes(response.into_body(), wire::MAX_STREAM_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(peer.headers.lock().await[0]["x-request-id"], sent_id);
+        if caller_supplied {
+            assert_eq!(sent_id, "caller-fixed");
+        } else {
+            assert_ne!(sent_id, first_id);
+        }
+        assert!(matches!(
+            current(&c, &step).await,
+            wire::PrepareReply::Completed { .. }
+        ));
+        server.abort();
+        c.f.state.db.drop().await.unwrap();
+    }
+}
+
 async fn admitted(c: &mut Controlled, peer: &Provider) -> (String, wire::PreparedStep) {
     admitted_request(
         c,
@@ -313,6 +407,7 @@ async fn admitted_request(
 ) -> (String, wire::PreparedStep) {
     let response = callback(c, &initial.body, None).await.unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
+    let first_correlation = response.headers()["x-request-id"].clone();
     let refusal: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap()).unwrap();
     let card = refusal["acknowledgement_id"].as_str().unwrap().to_owned();
@@ -348,6 +443,7 @@ async fn admitted_request(
     );
     assert!(!saved.summary.contains("thread_id"));
     let repeated = callback(c, &initial.body, None).await.unwrap();
+    assert_ne!(repeated.headers()["x-request-id"], first_correlation);
     let repeated: Value =
         serde_json::from_slice(&to_bytes(repeated.into_body(), 16384).await.unwrap()).unwrap();
     assert_eq!(
@@ -881,7 +977,7 @@ async fn refresh_control(c: &mut Controlled) {
         &c.f.state,
         IssueRequest {
             chat: &c.f.chat,
-            runtime_catalog_id: &c.target.service.id,
+            runtime_catalog_id: Some(&c.target.service.id),
             outer_body: &json!({"input":"Saved Allow narration","store":true}),
             negotiated_v1: true,
         },
@@ -2080,7 +2176,7 @@ async fn real_tool_prepared_control_drift_and_stale_turn_refuse_claim_and_status
         );
     }
     let original = c.token.clone();
-    let different=issue(&c.f.state,IssueRequest{chat:&c.f.chat,runtime_catalog_id:&c.target.service.id,outer_body:&json!({"input":"Saved Allow narration","store":true,"instructions":"different outer snapshot"}),negotiated_v1:true}).await.unwrap().unwrap().token;
+    let different=issue(&c.f.state,IssueRequest{chat:&c.f.chat,runtime_catalog_id:Some(&c.target.service.id),outer_body:&json!({"input":"Saved Allow narration","store":true,"instructions":"different outer snapshot"}),negotiated_v1:true}).await.unwrap().unwrap().token;
     assert_ne!(different.expose(), original.expose());
     let before = engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
         .await
