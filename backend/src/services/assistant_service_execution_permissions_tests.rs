@@ -568,6 +568,26 @@ async fn fallback_diagnostic_write_failure_preserves_legacy_execution_denial_and
     let sent = provider.received_requests().await.unwrap();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].body, bytes);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        0,
+        "this personal Autopilot action needs neither an owner card nor an approval-bypass receipt"
+    );
+    let unobserved = f
+        .state
+        .db
+        .collection::<Document>(COLLECTION)
+        .find_one(doc! {"kind":"model_control_unobserved","user_id":&f.owner,
+        "conversation_id":&f.row.id,"api_key_id":&f.chat.api_key_id,
+        "turn_id":f.chat.turn_id.as_deref().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
 
     let mut auth = f.auth.clone();
     auth.assistant_chat = Some(std::sync::Arc::new(f.chat.clone()));
@@ -609,11 +629,43 @@ async fn fallback_diagnostic_write_failure_preserves_legacy_execution_denial_and
     assert!(summary.contains(Reason::MetadataUnknownField.message()));
     assert!(!summary.contains("private diagnostic input"));
     let ack = refusal["acknowledgement_id"].as_str().unwrap();
+    let binding = f
+        .state
+        .db
+        .collection::<Document>(COLLECTION)
+        .find_one(doc! {"_id":ack,"kind":"card_binding"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.get_str("connection_id"), Ok(id.as_str()));
+    assert_eq!(binding.get_str("owner_id"), Ok(f.owner.as_str()));
+    let operation: Value = bson::from_bson(binding.get("operation").unwrap().clone()).unwrap();
+    let exact_digest = acks::arguments_digest(&json!({
+        "connection_id": &id,
+        "effective_owner_id": &f.owner,
+        "execution_binding": binding.get_str("binding").unwrap(),
+        "operation": operation,
+    }));
     let denied = acks::decide(&f.state.db, &f.owner, &f.row.id, ack, false)
         .await
         .unwrap();
+    assert_eq!(denied.id, ack);
     assert_eq!(denied.status, "denied");
-    let response = send(Some(ack)).await.unwrap();
+    assert_eq!(
+        denied.arguments_digest.as_deref(),
+        Some(exact_digest.as_str())
+    );
+    let saved_denied = f
+        .state
+        .db
+        .collection::<Document>("assistant_acknowledgements")
+        .find_one(doc! {"_id":ack})
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Without a redemption id, the exact digest reuses the saved Deny card.
+    let response = send(None).await.unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
     let response = axum::body::to_bytes(response.into_body(), 8192)
         .await
@@ -622,6 +674,26 @@ async fn fallback_diagnostic_write_failure_preserves_legacy_execution_denial_and
     assert_eq!(refusal["error"], "acknowledgement_denied");
     assert_eq!(refusal["acknowledgement_id"], ack);
     assert_eq!(provider.received_requests().await.unwrap().len(), 1);
+
+    // An explicit id attempts redemption; a denied card is never consumable.
+    let response = send(Some(ack)).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let response = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let refusal: Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(refusal["error"], "acknowledgement_invalid");
+    assert_eq!(provider.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .find_one(doc! {"_id":ack})
+            .await
+            .unwrap()
+            .unwrap(),
+        saved_denied
+    );
     assert_eq!(
         f.state
             .db
@@ -640,6 +712,16 @@ async fn fallback_diagnostic_write_failure_preserves_legacy_execution_denial_and
             .unwrap(),
         1,
         "mandatory lineage recording still succeeds"
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(COLLECTION)
+            .find_one(doc! {"_id":unobserved.get_str("_id").unwrap()})
+            .await
+            .unwrap()
+            .unwrap(),
+        unobserved
     );
     assert_eq!(
         f.state
