@@ -17,6 +17,31 @@ describe("useAssistantFeedback", () => {
     </QueryClientProvider>
   );
 
+  it("changes a vote with a vote-only PUT and retains the saved comment for editing", async () => {
+    vi.mocked(api.put).mockResolvedValue({ vote: "down" });
+    const { result } = renderHook(() => useReplyFeedback({ scope: "conversation", parentId: "c", messageId: "m", initialVote: "up", initialComment: "Useful — explanation" }), { wrapper });
+    await act(async () => { await result.current.toggle("down"); });
+    expect(api.put).toHaveBeenLastCalledWith("/assistant/nyxagent/conversations/c/messages/m/feedback", { vote: "down" });
+    expect(Object.keys(vi.mocked(api.put).mock.lastCall![1] as object)).toEqual(["vote"]);
+    expect(result.current.comment).toBe("Useful — explanation");
+  });
+
+  it("clears a withdrawn comment before DELETE resolves and does not restore it over a re-vote", async () => {
+    let finishDelete!: () => void;
+    vi.mocked(api.delete).mockReturnValue(new Promise<void>((resolve) => { finishDelete = resolve; }));
+    vi.mocked(api.put).mockResolvedValue({ vote: "down" });
+    const { result } = renderHook(() => useReplyFeedback({ scope: "conversation", parentId: "c", messageId: "m", initialVote: "up", initialComment: "Useful — withdrawn" }), { wrapper });
+    let withdrawal!: Promise<void>;
+    act(() => { withdrawal = result.current.toggle("up"); });
+    expect(result.current.comment).toBe("");
+    await act(async () => { await result.current.toggle("down"); });
+    expect(api.put).toHaveBeenLastCalledWith("/assistant/nyxagent/conversations/c/messages/m/feedback", { vote: "down" });
+    await act(async () => { await result.current.send("New details"); });
+    await act(async () => { finishDelete(); await withdrawal; });
+    expect(result.current.comment).toBe("New details");
+    expect(result.current.vote).toBe("down");
+  });
+
   it("edits a group reply's saved comment through PUT without withdrawing", async () => {
     vi.mocked(api.put).mockResolvedValue({ vote: "down", comment: "Updated group comment" });
     const { result } = renderHook(() => useReplyFeedback({ scope: "group", parentId: "g", messageId: "m", initialVote: "down", initialComment: "Saved group comment" }), { wrapper });

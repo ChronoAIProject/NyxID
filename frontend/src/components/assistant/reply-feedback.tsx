@@ -26,6 +26,23 @@ const FEEDBACK_REASONS: Readonly<Record<AssistantFeedbackVote, readonly string[]
   down: ["Not useful", "Not accurate", "Bad response", "Hard to understand"],
 };
 
+function feedbackDetails(comment: string, vote: AssistantFeedbackVote) {
+  const separator = comment.indexOf(" — ");
+  const prefix = separator < 0 ? comment : comment.slice(0, separator);
+  const reasons = prefix.split(", ");
+  const known = Object.values(FEEDBACK_REASONS).flat();
+  if (!reasons.every((reason) => known.includes(reason))) {
+    return { chosen: [], note: comment, comment };
+  }
+  const chosen = reasons.filter((reason) => FEEDBACK_REASONS[vote].includes(reason));
+  const note = separator < 0 ? "" : comment.slice(separator + 3);
+  return {
+    chosen,
+    note,
+    comment: chosen.length === reasons.length ? comment : feedbackComment(chosen, note),
+  };
+}
+
 /**
  * The stored comment: the chosen reasons, then the reader's own words
  * (`Not accurate, Bad response — wrong date`).
@@ -116,12 +133,14 @@ function FeedbackDetails({
   readonly onClose: () => void;
 }) {
   const fieldId = useId();
-  const [chosen, setChosen] = useState<readonly string[]>([]);
-  const [note, setNote] = useState(initialComment);
+  const [initial] = useState(() => feedbackDetails(initialComment, vote));
+  const [chosen, setChosen] = useState<readonly string[]>(initial.chosen);
+  const [note, setNote] = useState(initial.note);
   const [submitting, setSubmitting] = useState(false);
   const [failed, setFailed] = useState(false);
   const options = FEEDBACK_REASONS[vote];
-  const comment = feedbackComment(options.filter((reason) => chosen.includes(reason)), note);
+  const unchanged = note === initial.note && chosen.length === initial.chosen.length && chosen.every((reason) => initial.chosen.includes(reason));
+  const comment = unchanged ? initial.comment : feedbackComment(options.filter((reason) => chosen.includes(reason)), note);
   const submit = async () => {
     if (pending || submitting || comment.length > COMMENT_LIMIT) return;
     setSubmitting(true);

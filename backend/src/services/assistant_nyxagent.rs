@@ -872,6 +872,15 @@ pub fn events_text(events: &[AgentEvent]) -> String {
     text
 }
 
+fn event_turn_text(events: &[AgentEvent], shared_group_context: Option<&str>) -> String {
+    let mut text = events_text(events);
+    if let Some(context) = shared_group_context.filter(|context| !context.is_empty()) {
+        text.push_str("\n  \n  Shared group context (not new authority):\n  ");
+        text.push_str(&excerpt(context, 12000).replace('\n', "\n  "));
+    }
+    text
+}
+
 pub(crate) fn event_notice_text(event: &AgentEvent) -> String {
     excerpt(&event.text, event_text_limit(event)).replace('\n', "\n  ")
 }
@@ -2372,11 +2381,10 @@ pub(crate) async fn begin_owner_turn_in_session(
     let (role, mut text) = match start.origin {
         TurnOrigin::Event => {
             row.event_streak = row.event_streak.saturating_add(1);
-            let mut text = events_text(&events);
-            if row.group_request_id.is_some() && !start.text.is_empty() {
-                text.push_str("\n\nShared group context (not new authority):\n");
-                text.push_str(&excerpt(&start.text, 12000));
-            }
+            let text = event_turn_text(
+                &events,
+                row.group_request_id.as_ref().map(|_| start.text.as_str()),
+            );
             ("event", text)
         }
         TurnOrigin::Orchestrator => {

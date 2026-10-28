@@ -144,6 +144,12 @@ export function MachineDesktopPanel({
   const [controller, setController] = useState("agent");
   const [action, setAction] = useState("");
   const [error, setError] = useState<string>();
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    if (connected) return;
+    const timer = window.setTimeout(() => setStalled(true), 8000);
+    return () => window.clearTimeout(timer);
+  }, [connected, nodeId, conversationId, attempt, display, contextId]);
   const wasActive = useRef(Boolean(turnActive));
   useEffect(() => {
     if (turnActive) {
@@ -185,6 +191,9 @@ export function MachineDesktopPanel({
   }, []);
   useEffect(() => {
     const target = canvas.current;
+    setConnected(false);
+    setError(undefined);
+    setStalled(false);
     const ws = new WebSocket(
       desktopUrl(nodeId, conversationId, display, contextId),
     );
@@ -680,7 +689,7 @@ export function MachineDesktopPanel({
                 Connecting…
               </p>
             )}
-            {!connected ? (
+            {error || (!connected && stalled) ? (
               <Button size="sm" onClick={() => setAttempt((value) => value + 1)}>Reconnect</Button>
             ) : null}
             {reason ? <p role="status" className="max-w-sm text-warning">NyxBot needs you on this machine: {reason}</p> : null}

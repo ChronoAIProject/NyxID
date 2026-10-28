@@ -592,10 +592,14 @@ impl From<AssistantMessage> for MessageResponse {
 async fn attach_automations(
     db: &mongodb::Database,
     user_id: &str,
+    conversation_id: &str,
     messages: &mut [MessageResponse],
 ) {
-    if try_attach_automations(db, user_id, messages).await.is_err() {
+    if let Err(error) = try_attach_automations(db, user_id, messages).await {
         tracing::warn!(
+            %error,
+            user_id,
+            conversation_id,
             message_count = messages.len(),
             "Could not attach automation names to history"
         );
@@ -646,7 +650,6 @@ async fn try_attach_automations(
     }
     let trigger_ids: Vec<&str> = runs
         .iter()
-        .filter(|(_, _, _, label)| label.is_none())
         .map(|(_, trigger, _, _)| trigger.as_str())
         .collect();
     let labels: HashMap<String, String> = if trigger_ids.is_empty() {
@@ -673,7 +676,7 @@ async fn try_attach_automations(
         }) else {
             continue;
         };
-        let Some(label) = snapshot.as_ref().or_else(|| labels.get(trigger_id)) else {
+        let Some(label) = labels.get(trigger_id).or(snapshot.as_ref()) else {
             continue;
         };
         message.automation = Some(AutomationRunResponse {
@@ -981,7 +984,7 @@ pub async fn history(
     for message in &mut messages {
         message.recovery = recovery.get(&message.id).cloned().map(Into::into);
     }
-    Box::pin(attach_automations(&state.db, &user_id, &mut messages)).await;
+    Box::pin(attach_automations(&state.db, &user_id, &id, &mut messages)).await;
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let feedback =
         crate::services::assistant_feedback_service::states_for_messages(&state.db, &user_id, &ids)

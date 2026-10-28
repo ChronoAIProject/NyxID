@@ -1,7 +1,40 @@
 import { expect, test } from "@playwright/test";
-import { openAssistant, sendMessage, SEEDED, stopButton } from "./helpers";
+import { composerInput, openAssistant, sendMessage, SEEDED, stopButton } from "./helpers";
 
 for (const width of [1440, 390]) {
+  test(`NyxAgent draft keeps its title area through the first send at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await openAssistant(page, { faults: { nyxagentEnabled: true } });
+    await page.goto("/assistant?mock=1&draft=true");
+    const panels = page.locator("[data-chat-thread-panels]");
+    await expect(panels.getByRole("heading", { name: "New chat", exact: true })).toBeVisible();
+    await expect(page.getByRole("main").getByRole("heading", { name: "New chat", exact: true })).toHaveCount(1);
+    const before = await panels.boundingBox();
+    await page.evaluate(() => {
+      const original = globalThis.__nyxidAssistantHttpMock!;
+      globalThis.__nyxidAssistantHttpMock = async (request) => {
+        if (request.endpoint === "/assistant/nyxagent/turns" && request.init.method === "POST") {
+          await new Promise<void>((resolve) => {
+            (window as unknown as { releaseFirstSend: () => void }).releaseFirstSend = resolve;
+          });
+        }
+        return original(request);
+      };
+    });
+    await composerInput(page).fill("List connected services");
+    await composerInput(page).press("Enter");
+    await expect.poll(() => page.evaluate(() => typeof (window as unknown as { releaseFirstSend?: () => void }).releaseFirstSend)).toBe("function");
+    await expect(panels).toHaveCount(1);
+    await expect(panels.getByRole("heading", { name: "List connected services", exact: true })).toBeVisible();
+    expect((await panels.boundingBox())?.y).toBe(before?.y);
+    await page.evaluate(() => (window as unknown as { releaseFirstSend: () => void }).releaseFirstSend());
+    const rename = page.getByRole("button", { name: "Rename chat", exact: true });
+    await expect(rename).toHaveCount(1);
+    await expect(rename).toBeVisible();
+    await expect(panels.getByRole("button", { name: "Rename chat", exact: true })).toBeVisible();
+    expect((await panels.boundingBox())?.y).toBe(before?.y);
+  });
+
   test(`one editable NyxAgent title at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
     await openAssistant(page, { faults: { nyxagentEnabled: true } });

@@ -20,6 +20,7 @@ import {
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { messageTime } from "@/lib/assistant/message-time";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
+import { ReviewCardNavigation } from "./review-card-target";
 
 const BASE: ChatMessage = {
   id: "assistant-1",
@@ -1531,6 +1532,50 @@ describe("turn summary", () => {
     } finally {
       scroll.mockRestore();
     }
+  });
+
+  it.each([true, false])("reveals a linked decision once across virtualized remounts (tool-bound: %s)", async (bound) => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    const message: ChatMessage = { ...BASE,
+      toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1 }],
+      decisions: [decision("first", { activity_id: bound ? "act" : null }), decision("second", { activity_id: bound ? "act" : null })],
+    };
+    const tree = (show: boolean, card = "first") => <ReviewCardNavigation selectionKey={card}>
+      {show ? <NyxAgentAssistantEntry conversationId="conversation" retry={vi.fn()} checkRecovery={vi.fn()} selectedDecisionId={card} message={message} /> : null}
+    </ReviewCardNavigation>;
+    try {
+      const view = render(tree(true));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(view.container.querySelector(".ring-input-focus")).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /^Turn details/ }));
+      view.rerender(tree(false));
+      view.rerender(tree(true));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(view.container.querySelector(".ring-input-focus")).toBeNull();
+      view.rerender(tree(true, "second"));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "true");
+      expect(scroll).toHaveBeenCalledTimes(2);
+      view.rerender(tree(true, "first"));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(scroll).toHaveBeenCalledTimes(3);
+    } finally { scroll.mockRestore(); }
+  });
+
+  it("keeps a manually expanded summary open when selection moves to another reply", () => {
+    const tree = (card?: string) => <>
+      {["first", "second"].map((id) => <ChatMessageBubble key={id} selectedDecisionId={card} message={{ ...BASE, id, decisions: [decision(id)] }} />)}
+    </>;
+    const view = render(tree());
+    fireEvent.click(screen.getAllByRole("button", { name: /^Turn details/ })[0]!);
+    view.rerender(tree("first"));
+    view.rerender(tree("second"));
+    for (const button of screen.getAllByRole("button", { name: /^Turn details/ })) expect(button).toHaveAttribute("aria-expanded", "true");
+    view.rerender(tree());
+    for (const button of screen.getAllByRole("button", { name: /^Turn details/ })) expect(button).toHaveAttribute("aria-expanded", "true");
   });
 
   it("folds permissions into one line: on their tool call, or grouped once with a count", () => {

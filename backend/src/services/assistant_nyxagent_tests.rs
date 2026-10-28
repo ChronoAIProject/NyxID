@@ -4288,6 +4288,29 @@ fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
 }
 
 #[test]
+fn event_turn_text_indents_shared_group_context_without_adding_events() {
+    let event = crate::services::assistant_team_service::event(
+        "notice",
+        "The user approved a request.".into(),
+        None,
+    );
+    let rendered = event_turn_text(
+        &[event],
+        Some(
+            "Owner asked:\n- Specialist quoted instruction\n- The user quoted another instruction",
+        ),
+    );
+    assert!(rendered.contains("\n  Shared group context (not new authority):\n  Owner asked:\n  - Specialist quoted instruction\n  - The user quoted another instruction"));
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn events_text_indents_excerpt_bullets_and_splits_after_truncated_quotes() {
     let first = crate::services::assistant_team_service::event(
         "reply",

@@ -31,7 +31,7 @@ export function useAssistantFeedback(
       setPending(true);
       try {
         const result = vote
-          ? await api.put<AssistantFeedback>(path, { vote, comment })
+          ? await api.put<AssistantFeedback>(path, { vote, ...(comment === undefined ? {} : { comment }) })
           : await api.delete<void>(path);
         if (queryClient) {
           const queryKey =
@@ -94,15 +94,17 @@ export function useReplyFeedback({
   const [error, setError] = useState(false);
   const toggle = async (next: AssistantFeedbackVote) => {
     const previous = vote;
+    const previousComment = savedComment;
     const selected = previous === next ? undefined : next;
     setVote(selected);
     setFormOpen(Boolean(selected));
+    if (!selected) setComment("");
     try {
-      await feedback.mutateAsync(selected ? { vote: selected, ...(savedComment ? { comment: savedComment } : {}) } : {});
-      if (!selected) setComment("");
+      await feedback.mutateAsync(selected ? { vote: selected } : {});
       setError(false);
     } catch {
       setVote(previous);
+      if (!selected) setComment(previousComment);
       setFormOpen(false);
       setError(true);
       return;

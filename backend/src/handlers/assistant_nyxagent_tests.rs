@@ -2322,18 +2322,25 @@ async fn history_names_the_automation_behind_an_automation_turn() {
         )
         .await
         .unwrap();
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "trigger-1"},
+            doc! {"$set": {"label": "Renamed automation"}},
+        )
+        .await
+        .unwrap();
     let mut named = vec![MessageResponse::from(message.clone())];
-    attach_automations(&f.state.db, &f.owner, &mut named).await;
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
     assert_eq!(
         named[0].automation.as_ref().unwrap().label,
-        "Original run label"
+        "Renamed automation"
     );
     docs(crate::models::trigger::COLLECTION_NAME)
         .delete_one(doc! {"_id": "trigger-1"})
         .await
         .unwrap();
     named[0].automation = None;
-    attach_automations(&f.state.db, &f.owner, &mut named).await;
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
     assert_eq!(
         named[0].automation.as_ref().unwrap().label,
         "Original run label"
@@ -2343,16 +2350,66 @@ async fn history_names_the_automation_behind_an_automation_turn() {
         .await
         .unwrap();
     named[0].automation = None;
-    attach_automations(&f.state.db, &f.owner, &mut named).await;
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
     assert!(named[0].automation.is_none());
 
     let client =
         mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=50")
             .await
             .unwrap();
-    attach_automations(&client.database("unavailable"), &f.owner, &mut named).await;
+    attach_automations(
+        &client.database("unavailable"),
+        &f.owner,
+        &f.row.id,
+        &mut named,
+    )
+    .await;
     assert!(named[0].automation.is_none());
     assert_eq!(named[0].text, message.text);
+}
+
+#[tokio::test]
+async fn automation_enrichment_warning_keeps_diagnostics_and_omits_message_text() {
+    use tracing::instrument::WithSubscriber;
+
+    let client =
+        mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=50")
+            .await
+            .unwrap();
+    let message = bson::from_document::<AssistantMessage>(doc! {
+        "_id": "automation-message", "conversation_id": "automation-conversation", "user_id": OWNER,
+        "seq": 1_i64, "turn_id": "automation-turn", "role": "event",
+        "text": "PRIVATE automation input", "status": "completed", "origin": "trigger",
+        "created_at": bson::DateTime::now(), "activities": [], "attachments": [],
+    })
+    .unwrap();
+    let mut messages = vec![MessageResponse::from(message)];
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let writer = capture.reopen().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.try_clone().unwrap())
+        .finish();
+    Box::pin(attach_automations(
+        &client.database("unavailable"),
+        OWNER,
+        "automation-conversation",
+        &mut messages,
+    ))
+    .with_subscriber(subscriber)
+    .await;
+    let logs = std::fs::read_to_string(capture.path()).unwrap();
+    assert!(logs.contains("WARN"));
+    assert!(logs.contains("Could not attach automation names to history"));
+    assert!(logs.contains("error=Database error"));
+    assert!(logs.contains(OWNER));
+    assert!(logs.contains("conversation_id=\"automation-conversation\""));
+    assert!(logs.contains("message_count=1"));
+    assert!(!logs.contains("PRIVATE automation input"));
+    assert_eq!(messages[0].text, "PRIVATE automation input");
+    assert!(messages[0].automation.is_none());
 }
 
 #[tokio::test]

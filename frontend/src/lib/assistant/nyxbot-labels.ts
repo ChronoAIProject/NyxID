@@ -98,13 +98,16 @@ export function eventNotices(text: string): string[] {
   if (!EVENT_HEADER.test(text)) return [text.trim()];
   const indented = text.match(EVENT_HEADER)?.[0].includes("continuation lines are indented");
   const notices: string[] = [];
-  for (const line of text.replace(EVENT_HEADER, "").split("\n")) {
+  const lines = text.replace(EVENT_HEADER, "").split("\n");
+  let remainingQuotes = (lines.join("\n").match(/"/g) ?? []).length;
+  for (const line of lines) {
     const current = notices.at(-1);
     const insideQuote = current !== undefined && (current.match(/"/g)?.length ?? 0) % 2 === 1;
     const knownEvent = /^- (?:Specialist |The user |NyxBot |Asynchronous service operation|Skill |The owner |The \S+ channel bot )/.test(line);
-    if (/^- /.test(line) && (indented || !insideQuote || knownEvent)) notices.push(line.slice(2).trim());
+    if (/^- /.test(line) && (indented || !insideQuote || (knownEvent && remainingQuotes === 0))) notices.push(line.slice(2).trim());
     else if (current === undefined) notices.push(line.replace(/^\s*-\s+/, "").trim());
     else notices[notices.length - 1] = `${current}\n${indented ? line.replace(/^ {2}/, "") : line}`;
+    remainingQuotes -= (line.match(/"/g) ?? []).length;
   }
   const kept = notices.map((notice) => notice.trim()).filter(Boolean);
   return kept.length ? kept : [text.trim()];

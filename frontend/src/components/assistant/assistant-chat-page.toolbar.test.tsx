@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
   mode: "nyxmode" as NyxAgentAccessMode,
   override: null as NyxAgentAccessMode | null,
   staleCard: false,
+  agentLoaded: true,
   voice: false,
   savedVoice: true,
   voiceMounts: 0,
@@ -54,9 +55,9 @@ vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: (name: string) => name === "assistant:voice" && state.voice,
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
-  useNyxBotAgents: () => ({ data: { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } }),
-  selectedAgentOf: (rows: unknown[]) => rows[0],
-  nyxBotOf: (rows: unknown[]) => rows[0],
+  useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } : undefined }),
+  selectedAgentOf: (rows?: unknown[]) => rows?.[0],
+  nyxBotOf: (rows?: unknown[]) => rows?.[0],
   useNyxBotSettings: () => ({ data: { access_mode: state.mode, voice: state.savedVoice ? voicePreferences : null } }),
   useUpdateNyxBotSettings: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useNyxAgentModels: () => ({ data: [{ id: "nyxagent/chat", label: "chat", available: true }], isPending: false }),
@@ -71,10 +72,10 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
   send: vi.fn(), stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
-  getConversation: (id?: string) => id ? conversation : undefined,
+  getConversation: (id?: string) => id && state.agentLoaded ? conversation : undefined,
   capabilities: () => Promise.resolve({ steer: null }),
 } }));
-vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
+vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children, contentTitle }: { children: ReactNode; contentTitle?: boolean }) => <main data-content-title={Boolean(contentTitle)}>{children}</main> }));
 vi.mock("./assistant-engine-sidebar", () => ({ AssistantEngineSidebar: () => null }));
 vi.mock("./nyxbot-agent-panels", () => ({
   ThreadPanels: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -114,11 +115,27 @@ beforeEach(() => {
   state.mode = "nyxmode";
   state.override = null;
   state.staleCard = false;
+  state.agentLoaded = true;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
 function mount() {
   return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
+it.each([{ draft: true }, { c: conversation.id }])("owns the title before and after thread identity resolves: %j", (search) => {
+  state.search = search;
+  state.agentLoaded = false;
+  const view = mount();
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
+  expect(screen.getByTestId("thread-header")).toBeInTheDocument();
+  state.streaming = true;
+  view.rerender(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
+  expect(screen.getByTestId("thread-header")).toBeInTheDocument();
+  state.agentLoaded = true;
+  view.rerender(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
+  expect(screen.getAllByTestId("thread-header")).toHaveLength(1);
+});
 it.each([{}, { draft: true }, { draft: true, agent: agent.id }])("puts combined settings in the home/draft composer %j", (search) => {
   state.search = search; const view = mount();
   const controls = view.container.querySelector("[data-composer-footer]") as HTMLElement;

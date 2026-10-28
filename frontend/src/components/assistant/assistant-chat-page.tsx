@@ -10,7 +10,7 @@ import { ConversationMachineDesktops, MachinePane, MachinePaneToggle } from "./m
 import { useConversationDesktops } from "@/hooks/use-machines";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useMachinePaneStore } from "@/stores/machine-pane-store";
-import { ReviewCardTarget } from "./review-card-target";
+import { ReviewCardNavigation, ReviewCardTarget } from "./review-card-target";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
 import {
@@ -913,17 +913,17 @@ function NyxAgentThreadPage() {
     chat.error ??
     (requestError?.scope === errorScope ? requestError.message : undefined) ??
     turnError;
-  const threadPanels = headerAgent && !showHome ? (
+  const threadPanels = !showHome ? (
     <ThreadPanels>
       <ThreadHeader
-        name={agentName}
+        name={headerAgent ? agentName : "Loading agent…"}
         handle={headerNamed ? agentHandle(headerNamed) : undefined}
-        kind={headerAgent.kind}
-        agentId={headerAgent.id}
+        kind={headerAgent?.kind ?? "nyxbot"}
+        agentId={headerAgent?.id}
         destroyed={destroyed}
         channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
-        onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
-        title={selectedId ? chat.session.title : undefined}
+        onOpenDetails={headerAgent ? () => setDetailsAgentId(headerAgent.id) : undefined}
+        title={chat.session.title}
         titleKey={selectedId}
         onRenameTitle={
           selectedId && !destroyed
@@ -961,7 +961,7 @@ function NyxAgentThreadPage() {
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
       title={showHome ? "Home" : chat.session.title}
-      contentTitle={showHome || Boolean(headerAgent && selectedId)}
+      contentTitle
       titleKey={selectedId}
       onRenameTitle={
         selectedId && !destroyed
@@ -979,6 +979,7 @@ function NyxAgentThreadPage() {
         />
       }
     >
+      <ReviewCardNavigation selectionKey={`${user?.id}:${selectedId ?? "draft"}:${search.card ?? ""}`}>
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {threadPanels}
         <AgentDetailsSheet
@@ -1332,6 +1333,7 @@ function NyxAgentThreadPage() {
           />
         </div>
       </div>
+      </ReviewCardNavigation>
     </AssistantShell>
   );
 }

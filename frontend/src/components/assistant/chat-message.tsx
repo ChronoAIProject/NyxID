@@ -1,5 +1,5 @@
 import { useRouter, useRouterState } from "@tanstack/react-router";
-import { ReviewCardTarget } from "./review-card-target";
+import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
 import { CAPACITY_ACKNOWLEDGEMENT, formatCapacityWait } from "@/lib/assistant/capacity-wait";
@@ -270,11 +270,13 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
   const total = Math.max(count, message.activityTotal ?? 0);
   const selected = decisions.some((row) => row.id === selectedDecisionId);
   const target = selected ? selectedDecisionId : undefined;
-  const [expansion, setExpansion] = useState({ target, open: selected });
-  if (expansion.target !== target) {
-    setExpansion({ target, open: selected });
+  const navigation = useReviewCardNavigation();
+  const reveal = selected && !navigation?.handled;
+  const [expansion, setExpansion] = useState({ target, navigation, open: reveal });
+  if (expansion.target !== target || expansion.navigation !== navigation) {
+    setExpansion({ target, navigation, open: expansion.open || reveal });
   }
-  const open = expansion.target === target ? expansion.open : selected;
+  const open = expansion.open || ((expansion.target !== target || expansion.navigation !== navigation) && reveal);
   const capacityWaitMs = message.turnMetadata?.capacityWaitMs ?? 0;
   const attempts = message.turnMetadata?.attempts ?? 0;
   const waited = message.status === "complete" && (capacityWaitMs > 0 || attempts > 1);
@@ -301,7 +303,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
     <div className={cn("mb-2", ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL)}>
       <button
         type="button"
-        onClick={() => setExpansion({ target, open: !open })}
+        onClick={() => setExpansion({ target, navigation, open: !open })}
         aria-expanded={open}
         aria-label={`Turn details: ${[...parts, failed ? `${String(failed)} failed` : "", deliveryFailed ? "delivery failed" : ""].filter(Boolean).join(", ")}`}
         className={cn(BANNER_ROW, "text-muted-foreground transition-colors hover:bg-overlay")}
