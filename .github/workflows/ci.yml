@@ -288,6 +288,8 @@ jobs:
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'permissions-test')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.permissions == 'true')
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -296,9 +298,28 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         with:
           shared-key: permissions-test
+          incremental: 'true'
       - run: cargo fmt -p nyxid-permissions --check
-      - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
-      - run: cargo test -p nyxid-permissions --locked
+      - name: Compile permissions with incremental retry
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/permissions-clippy.log" --
+          cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
+      - name: Build permissions tests with incremental retry
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/permissions-test-build.log" --
+          cargo test -p nyxid-permissions --locked --no-run
+      - name: Run permissions tests
+        run: cargo test -p nyxid-permissions --locked
+      - name: Save incremental build cache
+        if: github.ref == 'refs/heads/main' && success()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/debug/incremental
+          key: v0-rust-incremental-permissions-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
       - run: python3 scripts/test-drive-permissions-poc.py
 
   # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
@@ -426,6 +447,7 @@ jobs:
     # Retain every target while bounding simultaneous compiler memory use.
     env:
       CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
       - name: Prepare backend memory reserve
@@ -439,8 +461,20 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         with:
           shared-key: rust-clippy
+          incremental: 'true'
       - name: Check Clippy with resource samples
-        run: python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/clippy.log" --
+          python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
+      - name: Save incremental build cache
+        if: github.ref == 'refs/heads/main' && success()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/debug/incremental
+          key: v0-rust-incremental-rust-clippy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
 
   # ---------------------------------------------------------------------------
   # Rust: backend tests
@@ -455,50 +489,6 @@ jobs:
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'backend-test')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     uses: ./.github/workflows/backend-tests.yml
-
-  # Keep the standalone test-profile build and smoke assertion. It exercises
-  # a different Cargo feature-unification path from the combined nextest run.
-  backend-billing-smoke:
-    name: Backend Billing Smoke
-    needs: changes
-    if: >-
-      !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'backend-billing-smoke')) &&
-      (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    # Same test-binary compile as backend-test; see the note there.
-    env:
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-    steps:
-      - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
-      - name: Start transaction-capable MongoDB
-        run: bash .github/scripts/start-test-mongodb.sh
-      - name: Install system dependencies
-        timeout-minutes: 5
-        run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: ./.github/actions/ci-rust-cache
-        with:
-          shared-key: backend-build
-          save-if: 'false'
-      - name: Billing route coverage smoke
-        run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
-      - name: Test MongoDB diagnostics
-        if: failure() || cancelled()
-        continue-on-error: true
-        run: bash .github/scripts/dump-test-mongodb.sh
-
-      - name: Upload resource samples
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: resources-backend-billing-smoke
-          path: ${{ runner.temp }}/nyxid-ci-resources
-          if-no-files-found: ignore
-          retention-days: 14
 
   # Keep the production feature/profile and dep-info guard together while
   # letting the full backend tests run on their own runner.
@@ -547,23 +537,19 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           echo "ref=ghcr.io/${owner}/nyxid/backend:buildcache-linux-amd64" >> "$GITHUB_OUTPUT"
       - name: Build backend release image without publishing
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: backend/Dockerfile
-          platforms: linux/amd64
-          build-args: |
-            NYXID_GIT_HASH=${{ github.sha }}
-            CARGO_BUILD_JOBS=2
-          outputs: type=cacheonly
-          push: false
-          cache-from: |
-            type=registry,ref=${{ steps.backend-cache.outputs.ref }}
-          # Import only from the registry: even mode=min GHA export stalled for
-          # ~40 minutes after compilation in #2052. Trusted publishing retains
-          # compiler layers in the registry; PRs neither overwrite it nor use
-          # Actions cache storage.
-          provenance: false
+        run: >-
+          python3 .github/scripts/ci_resources.py backend-image-smoke
+          docker buildx build --progress=plain --platform linux/amd64
+          --file backend/Dockerfile
+          --build-arg NYXID_GIT_HASH=${{ github.sha }}
+          --build-arg CARGO_BUILD_JOBS=4
+          --output type=cacheonly --cache-from type=registry,ref=${{ steps.backend-cache.outputs.ref }}
+          --provenance=false .
+        # Import only from the registry: even mode=min GHA export stalled for
+        # ~40 minutes after compilation in #2052. Trusted publishing retains
+        # compiler layers in the registry; PRs neither overwrite it nor use
+        # Actions cache storage. ci_resources.py records BuildKit duration and
+        # host/cgroup memory samples for the release-image review.
 
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
@@ -632,6 +618,8 @@ jobs:
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'cli-test')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
@@ -641,12 +629,16 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         with:
           shared-key: cli-cli-test
+          incremental: 'true'
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
 
-      - name: Build CLI
-        run: cargo build -p nyxid-cli
+      - name: Build CLI with incremental retry
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/cli-build.log" --
+          cargo build -p nyxid-cli
 
       - uses: actions/setup-node@v6
         with:
@@ -654,8 +646,21 @@ jobs:
       - name: Test saved-login extension and signed package freshness
         run: node --test cli/tests/machine_filler.test.mjs
 
+      - name: Build CLI tests with incremental retry
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/cli-test-build.log" --
+          cargo nextest run --no-run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
       - name: Run CLI tests
         run: cargo nextest run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
+      - name: Save incremental build cache
+        if: github.ref == 'refs/heads/main' && success()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/debug/incremental
+          key: v0-rust-incremental-cli-cli-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
 
       - name: Publish test summary
         if: always()
@@ -685,7 +690,7 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: 2
-      CARGO_INCREMENTAL: 0
+      CARGO_INCREMENTAL: 1
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     strategy:
       fail-fast: false
@@ -708,8 +713,21 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         with:
           shared-key: features-${{ matrix.cache-suffix }}-rust-features
+          incremental: 'true'
       - name: Build with --features ${{ matrix.features }}
-        run: python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }} cargo build -p nyxid --features ${{ matrix.features }}
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/features-${{ matrix.cache-suffix }}.log" --
+          python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }}
+          cargo build -p nyxid --features ${{ matrix.features }}
+      - name: Save incremental build cache
+        if: github.ref == 'refs/heads/main' && success()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/debug/incremental
+          key: v0-rust-incremental-features-${{ matrix.cache-suffix }}-rust-features-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
       - name: Upload resource samples
         if: always()
         continue-on-error: true
@@ -800,6 +818,8 @@ jobs:
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'wizard-bundle-freshness')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.wizard == 'true')
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
@@ -810,6 +830,12 @@ jobs:
         with:
           shared-key: cli-cli-test
           save-if: 'false'
+          incremental: 'true'
+      - name: Build wizard freshness test with incremental retry
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/wizard-freshness-build.log" --
+          cargo test -p nyxid-cli --test wizard_bundle_freshness --no-run
       - name: Verify wizard bundle freshness
         run: cargo test -p nyxid-cli --test wizard_bundle_freshness
 
@@ -997,6 +1023,8 @@ jobs:
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'coverage-cli')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1010,15 +1038,20 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         with:
           shared-key: coverage-cli-coverage-cli
+          incremental: 'true'
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.9.1
 
       # Measure WITHOUT the gate (enforced as the final step below). `report` is
       # package-scoped so the % isn't diluted by the rest of the workspace.
+      - name: Build head coverage with incremental retry
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/coverage-cli-build.log" --
+          cargo llvm-cov --package nyxid-cli --no-report
       - name: Measure (head)
         run: |
-          cargo llvm-cov --package nyxid-cli --no-report
           cargo llvm-cov report --package nyxid-cli --lcov --output-path coverage-cli.lcov
           cargo llvm-cov report --package nyxid-cli --json --summary-only --output-path coverage-cli.raw.json
 
@@ -1048,6 +1081,16 @@ jobs:
       # Enforce the threshold LAST (see backend job for rationale).
       - name: Enforce coverage gate (head)
         run: cargo llvm-cov report --package nyxid-cli --fail-under-lines 64
+
+      - name: Save incremental build cache
+        if: github.ref == 'refs/heads/main' && success()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/debug/incremental
+            target/llvm-cov-target/debug/incremental
+          key: v0-rust-incremental-coverage-cli-coverage-cli-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
 
       - name: Upload coverage artifact
         if: always()
@@ -1233,7 +1276,6 @@ jobs:
       - rust-clippy
       - backend-test
       - permissions-test
-      - backend-billing-smoke
       - backend-image-inputs
       - backend-image-smoke
       - cli-test
@@ -1288,7 +1330,6 @@ jobs:
             rust-clippy=${{ needs.rust-clippy.result }}
             backend-test=${{ needs.backend-test.result }}
             permissions-test=${{ needs.permissions-test.result }}
-            backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
             backend-image-smoke=${{ needs.backend-image-smoke.result }}
             cli-test=${{ needs.cli-test.result }}

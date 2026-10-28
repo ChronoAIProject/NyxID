@@ -14,6 +14,18 @@ def cache(id, lane, ref='refs/heads/main', date='2026-10-27T00:00:00Z', size=100
                 date=date, createdAt=date, lastAccessedAt=date, sizeInBytes=size)
 
 
+def incremental(id, lane, ref='refs/heads/main', date='2026-10-27T00:00:00Z',
+                os='Linux', arch='x64', generation='a' * 64, sha='b' * 40):
+    return dict(
+        id=id,
+        key=f'v0-rust-incremental-{lane}-{os}-{arch}-{generation}-{sha}',
+        ref=ref,
+        createdAt=date,
+        lastAccessedAt=date,
+        sizeInBytes=100,
+    )
+
+
 def dist(id, target, ref='refs/heads/main', date='2026-10-27T00:00:00Z'):
     return dict(id=id, key=f'v0-rust-dist-{target}-Linux-x64-11111111-22222222', ref=ref,
                 createdAt=date, lastAccessedAt=date, sizeInBytes=100)
@@ -73,6 +85,20 @@ class CacheBudgetTests(unittest.TestCase):
         old = cache(1, 'cli-cli-test')
         new = cache(2, 'cli-cli-test', date='2026-10-28T00:00:00Z')
         self.assertEqual([row['id'] for row in plan([old, new], NOW)], [1])
+
+    def test_incremental_keeps_newest_per_lane_and_os_arch(self):
+        rows = [
+            incremental(1, 'backend-build'),
+            incremental(2, 'backend-build', date='2026-10-28T00:00:00Z'),
+            incremental(3, 'coverage-backend-build'),
+            incremental(4, 'backend-build', os='Darwin', arch='arm64'),
+            incremental(5, 'backend-build', ref='refs/pull/1/merge'),
+        ]
+        self.assertEqual([row['id'] for row in plan(rows, NOW)], [1, 5])
+
+    def test_incremental_keeps_only_main_entry_when_no_replacement_exists(self):
+        rows = [incremental(1, 'backend-build', ref='refs/pull/1/merge')]
+        self.assertEqual(plan(rows, NOW), [])
 
     def test_rust_lane_keeps_os_arch_families_independently(self):
         rows = [

@@ -148,8 +148,9 @@ jobs:
           - component: backend
             context: .
             file: backend/Dockerfile
-            # Same bounded concurrency as the PR smoke build, on both arches.
-            cargo_build_args: CARGO_BUILD_JOBS=2
+            # The dependency layer defaults to two jobs; the final server
+            # compile uses four native vCPUs on both release runners.
+            cargo_build_args: CARGO_BUILD_JOBS=4
           - component: frontend
             # Repo-root context (not frontend/): the frontend image needs the
             # docs source at docs/site, read by the vite docs-sync publish-gate

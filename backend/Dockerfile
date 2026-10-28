@@ -25,11 +25,11 @@ RUN python /recipe.py /input /recipe
 FROM rust:1.93-bookworm AS dependencies
 WORKDIR /build
 
-# Keep native amd64/arm64 builds bounded while allowing two compiler jobs.
-# CI prepares 24 GiB total swap for the large server crate. Small builders can
-# override this to 1; Cargo's default would otherwise use every available CPU.
-ARG CARGO_BUILD_JOBS=2
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+# Keep the dependency compile bounded while allowing two compiler jobs.
+# CI prepares 24 GiB total swap for the large server crate. The final server
+# compile has its own CARGO_BUILD_JOBS setting below.
+ARG CARGO_DEP_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_DEP_BUILD_JOBS}
 ENV CARGO_INCREMENTAL=0
 COPY --from=dependency-recipe /recipe/ ./
 
@@ -53,6 +53,10 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
 RUN cargo build --locked --release --manifest-path backend/Cargo.toml --bin nyxid-server --features gcp-kms
 
 FROM dependencies AS builder
+# The final server compile can use all four hosted vCPUs. Callers can lower
+# this without changing the dependency-layer default above.
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 # Restore every original manifest and the exact lock before compiling real code.
 # CARGO_PKG_VERSION and workspace path dependency identities must be real here.
 COPY --from=dependency-recipe /input/ ./

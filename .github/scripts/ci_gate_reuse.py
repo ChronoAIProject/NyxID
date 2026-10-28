@@ -336,6 +336,56 @@ def _resolve_local_workflow(
     return child_path, workflows[child_path]
 
 
+def _workflow_call_inputs(
+    workflow: Mapping[str, Any], provided: Any
+) -> Mapping[str, Any] | None:
+    """Resolve static workflow_call inputs for nested job conditions.
+
+    Reusable workflows may contain jobs such as the ordinary-only billing
+    smoke. Keep those leaves in the ordinary parent identity while excluding
+    them from a coverage parent whose ``with.coverage`` is true. Unknown or
+    expression-valued inputs remain unresolved and are handled conservatively.
+    """
+
+    trigger = workflow.get("on")
+    call = trigger.get("workflow_call") if isinstance(trigger, Mapping) else None
+    definitions = call.get("inputs") if isinstance(call, Mapping) else None
+    values: dict[str, Any] = {}
+    if isinstance(definitions, Mapping):
+        for name, definition in definitions.items():
+            if not isinstance(name, str) or not isinstance(definition, Mapping):
+                return None
+            default = definition.get("default")
+            if default is None and definition.get("type") == "boolean":
+                default = False
+            values[name] = default
+    if provided is None:
+        return values
+    if not isinstance(provided, Mapping):
+        return None
+    for name, value in provided.items():
+        if not isinstance(name, str) or not isinstance(value, (bool, int, float, str)):
+            return None
+        values[name] = value
+    return values
+
+
+def _nested_job_enabled(job: Mapping[str, Any], inputs: Mapping[str, Any] | None) -> bool:
+    """Evaluate the small input-only condition subset used by nested jobs."""
+
+    condition = job.get("if")
+    if not isinstance(condition, str) or inputs is None:
+        return True
+    condition = condition.strip()
+    match = re.fullmatch(r"(!\s*)?inputs\.([A-Za-z_][A-Za-z0-9_-]*)", condition)
+    if not match:
+        return True
+    value = inputs.get(match.group(2))
+    if not isinstance(value, bool):
+        return True
+    return not value if match.group(1) else value
+
+
 def _validate_identity_patterns(specs: Iterable[JobIdentity]) -> None:
     specs = tuple(specs)
     exact_owner: dict[str, str] = {}
@@ -376,6 +426,7 @@ def analyze_workflow(
     *,
     current_path: str = WORKFLOW_PATH,
     nested: bool = False,
+    input_values: Mapping[str, Any] | None = None,
     _stack: tuple[str, ...] = (),
 ) -> WorkflowIdentity:
     if current_path in _stack:
@@ -398,6 +449,8 @@ def analyze_workflow(
     for job_id, raw_job in jobs.items():
         if not isinstance(raw_job, Mapping):
             raise WorkflowIdentityError("workflow_identity_job_mapping")
+        if nested and not _nested_job_enabled(raw_job, input_values):
+            continue
         if "if" in raw_job and not isinstance(raw_job.get("if"), str):
             raise WorkflowIdentityError("workflow_identity_if_expression")
         # A job in ci-pass.needs is eligible only when force-all would execute
@@ -422,7 +475,9 @@ def analyze_workflow(
                 )
                 child = analyze_workflow(
                     child_workflow, reusable_workflows, current_path=child_path,
-                    nested=True, _stack=stack
+                    nested=True,
+                    input_values=_workflow_call_inputs(child_workflow, raw_job.get("with")),
+                    _stack=stack
                 )
                 prefix = f"{parent_name} / "
                 names = tuple(f"{prefix}{name}" for name in child.leaf_names)

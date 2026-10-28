@@ -17,6 +17,10 @@ MAIN = "refs/heads/main"
 RUST = re.compile(
     r"^v0-rust-(?P<lane>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-[0-9a-f]{8}-[0-9a-f]{8}$"
 )
+INCREMENTAL = re.compile(
+    r"^v0-rust-incremental-(?P<lane>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-"
+    r"[0-9a-f]+-[0-9a-f]+$"
+)
 DIST = re.compile(
     r"^v0-rust-dist-(?P<target>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-[0-9a-f]{8}-[0-9a-f]{8}$"
 )
@@ -64,6 +68,8 @@ def family(key):
         return "node"
     if COVERAGE_BASE.fullmatch(key):
         return "coverage-backend-base"
+    if INCREMENTAL.fullmatch(key):
+        return "rust-incremental"
     match = RUST.fullmatch(key)
     if match and (match["lane"] in LANES or match["lane"] in RETIRED):
         return "rust-lane"
@@ -122,6 +128,17 @@ def plan(rows, now=None):
         if family_key not in rust_newest or rank(row) > rank(rust_newest[family_key]):
             rust_newest[family_key] = row
 
+    incremental_newest = {}
+    for row in rows:
+        if row["ref"] != MAIN:
+            continue
+        match = INCREMENTAL.fullmatch(row["key"])
+        if not match:
+            continue
+        family_key = (match["lane"], match["os"], match["arch"])
+        if family_key not in incremental_newest or rank(row) > rank(incremental_newest[family_key]):
+            incremental_newest[family_key] = row
+
     for row in rows:
         key = row["key"]
         match = DIST.fullmatch(key)
@@ -153,6 +170,13 @@ def plan(rows, now=None):
                         reason = f"superseded by main cache {replacement['id']}"
                 elif key.startswith(DOCKER):
                     reason = "Docker consumers now import registry caches; GHA export retired"
+                else:
+                    incremental = INCREMENTAL.fullmatch(key)
+                    if incremental:
+                        family_key = (incremental["lane"], incremental["os"], incremental["arch"])
+                        replacement = incremental_newest.get(family_key)
+                        if replacement and row["id"] != replacement["id"]:
+                            reason = f"superseded incremental cache by main cache {replacement['id']}"
         if reason:
             removals.append({**row, "reason": reason})
     return removals

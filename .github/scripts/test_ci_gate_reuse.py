@@ -5,6 +5,7 @@ from ci_gate_reuse import (
     CI_GATE_PREFIX,
     WorkflowIdentityError,
     WorkflowSchemaError,
+    analyze_workflow,
     assess_tree_and_jobs,
     decide_from_api,
     newest_completed_successful_run,
@@ -13,8 +14,13 @@ from ci_gate_reuse import (
 
 
 NESTED = {
+    "on": {"workflow_call": {"inputs": {
+        "coverage": {"type": "boolean", "default": False},
+    }}},
     "jobs": {
         "build": {"name": "Build test archive"},
+        "billing-smoke": {"name": "Billing route coverage smoke",
+                          "if": "!inputs.coverage"},
         "run": {
             "name": "Test shard ${{ matrix.shard }}",
             "strategy": {"matrix": {"shard": [1, 2]}},
@@ -51,6 +57,7 @@ def decision_jobs():
         job("Detect Changes"),
         job("Frontend"),
         job("Backend Test / Build test archive"),
+        job("Backend Test / Billing route coverage smoke"),
         job("Backend Test / Test shard 1"),
         job("Backend Test / Test shard 2"),
         job("Backend Test / Verify complete suite"),
@@ -62,6 +69,13 @@ def decision_jobs():
 
 
 class GateReuseTests(unittest.TestCase):
+    def test_nested_input_condition_excludes_ordinary_only_coverage_leaf(self):
+        analysis = analyze_workflow(WORKFLOW, WORKFLOWS)
+        backend = analysis.reusable["backend-test"].exact_names
+        coverage = analysis.reusable["coverage-backend"].exact_names
+        self.assertIn("Backend Test / Billing route coverage smoke", backend)
+        self.assertNotIn("Coverage (Backend) / Billing route coverage smoke", coverage)
+
     def test_tree_match_reuses_complete_direct_and_nested_jobs(self):
         decision = assess_tree_and_jobs(
             workflow=WORKFLOW, reusable_workflows=WORKFLOWS,

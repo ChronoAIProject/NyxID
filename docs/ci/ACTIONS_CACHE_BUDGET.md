@@ -39,6 +39,9 @@ environment value for local reports.
 - **Known Rust lanes** keep the newest main generation and remove older or
   non-main copies only after that main replacement exists. Billing and wizard
   lanes share their current backend/CLI replacements as configured in the script.
+- **Incremental Rust caches** (`v0-rust-incremental-<lane>-<os>-<arch>-...`)
+  use the same newest-main rule, grouped by lane and runner OS/architecture.
+  A lane with no main replacement is preserved.
 - **Retired Docker BuildKit blobs/indexes** are removable because Docker jobs now
   import and export the per-platform registry cache. No workflow restores these
   GitHub Actions cache records.
@@ -79,7 +82,12 @@ group prevents overlapping delete passes. A pass is intentionally non-atomic:
 all Docker GHA readers were removed before this cleanup was introduced, so an
 index cannot be restored while its blobs are being retired.
 
+`ci-cache-warm.yml` separately refreshes the main Rust dependency and
+incremental generations when Publish Images reuses an already-successful gate.
+It is non-blocking and cancels older warm runs so only the newest main tree
+publishes cache generations.
+
 The tests cover newest-per-target dist retention, non-main dist cleanup, node
 family retention, coverage newest-30 plus 14-day retention, known Rust lanes,
-Docker retirement, unknown-family protection, malformed-date conservatism and
-soft-cap warning behavior.
+incremental-lane retention, Docker retirement, unknown-family protection,
+malformed-date conservatism and soft-cap warning behavior.
