@@ -237,6 +237,8 @@ async fn live_non_user_input_stays_exact_only_but_stale_missing_input_fails_the_
         &c.f.owner,
         &c.f.row.id,
         vec![crate::models::assistant_conversation::AgentEvent {
+            trigger_run_id: None,
+            continuation_protocol_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             kind: "subagent_settled".into(),
             text: "A server-authored work item settled".into(),
