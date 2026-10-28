@@ -20,7 +20,6 @@ import {
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
-import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import { useAssistantChat } from "@/hooks/use-assistant-chat";
 import { useDirectAssistantChat } from "@/hooks/use-assistant-direct";
@@ -262,7 +261,6 @@ function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
   return (
     <AssistantShell
       title={workspaceTitles[view]}
-      headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"

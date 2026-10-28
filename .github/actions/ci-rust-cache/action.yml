@@ -1,0 +1,67 @@
+name: Ordinary CI Rust cache
+description: Keep dependency caches reusable without consuming the release cache budget.
+inputs:
+  shared-key:
+    description: Compatible build mode; feature/profile variants keep separate keys.
+    required: true
+  incremental:
+    description: Keep workspace crates and a lane-scoped incremental target cache.
+    default: 'false'
+  save-if:
+    description: Only a designated main-branch writer saves each compatible cache.
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    # rust-cache hashes *every* installed compiler. Unused runner stable updates
+    # (1.99.0 vs 1.99.1) duplicated caches even though CI builds with 1.98.1.
+    - name: Keep only the active pinned toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        active="$(rustup show active-toolchain | cut -d ' ' -f 1)"
+        while read -r installed _; do
+          if [[ -n "$installed" && "$installed" != "$active" ]]; then
+            rustup toolchain uninstall "$installed"
+          fi
+        done < <(rustup toolchain list --quiet)
+    - uses: Swatinem/rust-cache@v2
+      # These affect metadata scheduling/runtime stacks, not compiled artifacts.
+      # Pin them for the cache step so equivalent test jobs have identical keys.
+      env:
+        CARGO_BUILD_JOBS: '2'
+        CARGO_INCREMENTAL: '0'
+        RUST_MIN_STACK: '8388608'
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        # A new prefix is required because enabling workspace-crate retention
+        # changes the cache contents without changing rust-cache's environment
+        # hash. Keep the legacy key for non-incremental lanes.
+        prefix-key: ${{ inputs.incremental == 'true' && 'v1-rust-incremental' || 'v0-rust' }}
+        save-if: ${{ github.ref == 'refs/heads/main' && inputs.save-if == 'true' }}
+        # taiki-e installs these tools by pinned version already. Keep compiled
+        # dependencies, not another copy of each nextest/llvm-cov executable.
+        cache-bin: false
+        cache-targets: true
+        cache-all-crates: false
+        cache-workspace-crates: ${{ inputs.incremental == 'true' && 'true' || 'false' }}
+    - name: Enable incremental compilation
+      if: inputs.incremental == 'true'
+      shell: bash
+      run: echo 'CARGO_INCREMENTAL=1' >> "$GITHUB_ENV"
+    # rust-cache intentionally removes incremental directories before saving.
+    # Restore them separately; each caller saves this path after its build so
+    # only the trusted main branch creates a new generation.
+    - name: Restore incremental build cache
+      if: inputs.incremental == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          target/debug/incremental
+          target/llvm-cov-target/debug/incremental
+        # Actions caches are immutable; include the commit so main can publish
+        # a fresh incremental generation while PRs restore the newest prefix.
+        key: v0-rust-incremental-${{ inputs.shared-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+        restore-keys: |
+          v0-rust-incremental-${{ inputs.shared-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-
+          v0-rust-incremental-${{ inputs.shared-key }}-${{ runner.os }}-${{ runner.arch }}-

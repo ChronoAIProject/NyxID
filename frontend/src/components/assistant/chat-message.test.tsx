@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as telemetry from "@/lib/telemetry";
 import { api } from "@/lib/api-client";
+import { toast } from "sonner";
 import {
   ChatMessageBubble,
   ChatMessageEntry,
@@ -175,28 +176,39 @@ describe("canonical chat presentation", () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it("opens the optional feedback comment popover without submitting", () => {
+  it("offers no comment until the reader votes", () => {
     render(
       <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Add feedback comment" }),
-    );
+    expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /comment/i })).not.toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "Optional feedback comment" }),
-    ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Send" })).toBeVisible();
-  });
-  it("keeps comment submission optional", () => {
-    render(
-      <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
-    );
-    expect(
-      screen.getByRole("button", { name: "Add feedback comment" }),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("textbox", { name: "Optional feedback comment" }),
+      screen.queryByRole("dialog"),
     ).not.toBeInTheDocument();
+  });
+  it.each([
+    ["Helpful", "Give positive feedback", ["Useful", "Accurate", "Easy to understand"]],
+    ["Not helpful", "Give negative feedback", ["Not useful", "Not accurate", "Bad response", "Hard to understand"]],
+  ])("a %s vote saves at once and opens a details dialog", async (button, title, reasons) => {
+    const put = vi.spyOn(api, "put").mockResolvedValue({});
+    try {
+      render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: button }));
+      });
+      expect(put).toHaveBeenCalledTimes(1);
+      const dialog = screen.getByRole("dialog", { name: title });
+      expect(
+        within(within(dialog).getByRole("group", { name: "Reasons" }))
+          .getAllByRole("button", { pressed: false })
+          .map((pill) => pill.textContent),
+      ).toEqual(reasons);
+      expect(within(dialog).getByRole("textbox", { name: "Details (optional)" })).toBeVisible();
+      expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+      expect(within(dialog).getByRole("button", { name: "Submit" })).toBeEnabled();
+    } finally {
+      put.mockRestore();
+    }
   });
 
   it("renders an inline context reset as a system note without assistant controls", () => {
@@ -270,9 +282,7 @@ describe("canonical chat presentation", () => {
       />,
     );
     expect(screen.getByText("NyxBot")).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "Add feedback comment" }),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
     unmount();
     render(
       <ChatMessageEntry
@@ -971,20 +981,148 @@ it.each(["", "Partial reply"])("shows a persistent stopped label without activit
   expect(container.querySelector("[data-empty-turn-error]")).toBeNull();
 });
 
-it("focuses the comment field and closes it with Escape, showing save failures", async () => {
-  render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
-  fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
-  const textarea = screen.getByRole("textbox", {
-    name: "Optional feedback comment",
-  });
-  expect(textarea).toHaveFocus();
-  fireEvent.keyDown(textarea, { key: "Escape" });
-  expect(
-    screen.queryByRole("textbox", { name: "Optional feedback comment" }),
-  ).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
-  fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
-  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+it("submits the chosen reasons ahead of the details, then thanks the reader", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  const thanks = vi.spyOn(toast, "success");
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+    });
+    expect(put).toHaveBeenLastCalledWith(
+      "/assistant/nyxagent/conversations/conversation-1/messages/assistant-1/feedback",
+      { vote: "down", comment: undefined },
+    );
+    // Reasons keep their offered order, whatever order they were chosen in.
+    fireEvent.click(screen.getByRole("button", { name: "Bad response" }));
+    fireEvent.click(screen.getByRole("button", { name: "Not accurate" }));
+    expect(screen.getByRole("button", { name: "Not accurate" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.change(screen.getByRole("textbox", { name: "Details (optional)" }), {
+      target: { value: "  wrong date  " },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    });
+    expect(put).toHaveBeenLastCalledWith(
+      "/assistant/nyxagent/conversations/conversation-1/messages/assistant-1/feedback",
+      { vote: "down", comment: "Not accurate, Bad response — wrong date" },
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(thanks).toHaveBeenCalledWith("Thanks for the feedback.");
+  } finally {
+    put.mockRestore();
+    thanks.mockRestore();
+  }
+});
+
+it("submits details with Cmd/Ctrl+Enter and keeps plain Enter for new lines", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    const field = screen.getByRole("textbox", { name: "Details (optional)" });
+    fireEvent.change(field, { target: { value: "clear steps" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(put).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      fireEvent.keyDown(field, { key: "Enter", ctrlKey: true });
+    });
+    expect(put).toHaveBeenLastCalledWith(
+      "/assistant/nyxagent/conversations/conversation-1/messages/assistant-1/feedback",
+      { vote: "up", comment: "clear steps" },
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  } finally {
+    put.mockRestore();
+  }
+});
+
+it("an empty Submit keeps the saved vote without another write", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    });
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "true");
+  } finally {
+    put.mockRestore();
+  }
+});
+
+it("keeps the dialog open with its text when the details fail to save", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("offline"));
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Details (optional)" }), {
+      target: { value: "missed the point" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    });
+    const dialog = screen.getByRole("dialog", { name: "Give negative feedback" });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Unable to save feedback");
+    expect(within(dialog).getByRole("textbox", { name: "Details (optional)" })).toHaveValue("missed the point");
+  } finally {
+    put.mockRestore();
+  }
+});
+
+it("Cancel and Escape close the dialog and keep the vote; clicking the vote again withdraws it", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  const remove = vi.spyOn(api, "delete").mockResolvedValue(undefined);
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Details (optional)" }), {
+      key: "Escape",
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "true");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Not helpful" })).toHaveAttribute("aria-pressed", "true");
+    expect(remove).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+    });
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Not helpful" })).toHaveAttribute("aria-pressed", "false");
+  } finally {
+    put.mockRestore();
+    remove.mockRestore();
+  }
+});
+
+it("opens no dialog when the vote fails to save", async () => {
+  const put = vi.spyOn(api, "put").mockRejectedValue(new Error("offline"));
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Unable to save feedback");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "false");
+  } finally {
+    put.mockRestore();
+  }
 });
 
 it("separates the described tool label from elapsed time without duplicate Thinking", () => {
@@ -1065,8 +1203,8 @@ describe("message timestamps", () => {
         <ChatMessageEntry message={message} conversationId="conversation-1" />,
       );
       const time = sentTime(container);
-      expect(time).toHaveTextContent(expected.label);
-      expect(time).not.toHaveAttribute("title");
+      expect(time).toHaveTextContent(expected.short);
+      expect(time).toHaveAttribute("title", expected.label);
       unmount();
     }
   });
@@ -1079,7 +1217,7 @@ describe("message timestamps", () => {
       />,
     );
     expect(screen.getByText("From Telegram")).toBeInTheDocument();
-    expect(sentTime(container)).toHaveTextContent(messageTime(at)!.label);
+    expect(sentTime(container)).toHaveTextContent(messageTime(at)!.short);
   });
 
   it("puts a reply's time on its feedback line, and keeps it without feedback", () => {
@@ -1189,7 +1327,10 @@ it("shows attempt and capacity wait details for failed and successful replies", 
     errorDetail: { stage: "stream", turnId: "turn", continuations: 0, attempts: 7, capacityWaitMs: 80_000 } }} />);
   expect(screen.getByText("attempts").nextElementSibling).toHaveTextContent("7");
   expect(screen.getByText("waited 1 minute 20 seconds for capacity")).toBeInTheDocument();
+  // A settled reply keeps them inside its turn summary.
   rerender(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 3, capacityWaitMs: 33_000 } }} />);
+  const summary = screen.getByRole("button", { name: /^Turn details: Completed, waited 33 seconds/ });
+  fireEvent.click(summary);
   expect(screen.getByText("attempts").nextElementSibling).toHaveTextContent("3");
   expect(screen.getByText("waited 33 seconds for capacity")).toBeInTheDocument();
 });
@@ -1213,11 +1354,12 @@ it("renders the system acknowledgement in the pending agent bubble and replaces 
   expect(container.querySelector('[data-system-note]')).not.toBeInTheDocument();
 });
 
-it("hides ordinary successful Details and shows retries without a wait", () => {
+it("hides ordinary successful turn details and shows retries without a wait", () => {
   const { rerender } = render(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 1, capacityWaitMs: 0 } }} />);
-  expect(screen.queryByText("Details")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^Turn details/ })).not.toBeInTheDocument();
   rerender(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 2, capacityWaitMs: 0 } }} />);
-  expect(screen.getByText("Details")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Turn details: Completed" }));
+  expect(screen.getByText("attempts").nextElementSibling).toHaveTextContent("2");
   expect(screen.queryByText(/waited/)).not.toBeInTheDocument();
   rerender(<ChatMessageBubble message={{ ...BASE, status: "error", errorDetail: {
     stage: "stream", turnId: "turn", continuations: 0, attempts: 1, capacityWaitMs: 0,
@@ -1277,5 +1419,81 @@ describe("message body copy integration", () => {
   ])("has no body copy control for $status / $content", (message) => {
     render(<ChatMessageBubble message={{ ...BASE, ...message }} />);
     expect(screen.queryByRole("button", { name: "Copy message" })).not.toBeInTheDocument();
+  });
+});
+
+describe("turn summary", () => {
+  const decision = (
+    id: string,
+    fields: Partial<import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement> = {},
+  ): import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement => ({
+    id,
+    kind: "action",
+    status: "allowed",
+    summary:
+      "Organization connection api-firecrawl (33dc1c9b-e1f3-4be8-a35e-fef09b999021) in ChronoAI: POST scrape on api-firecrawl",
+    decider: "user",
+    decided_by: "access_mode",
+    reason: null,
+    confirmation: { risk: "change", access_mode: "autopilot", reason: "policy" },
+    service_slug: null,
+    service_name: null,
+    tool_name: "nyxid.service_execution",
+    created_at: "2026-10-27T00:00:00Z",
+    decided_at: "2026-10-27T00:00:00Z",
+    expires_at: "2026-10-27T00:00:00Z",
+    ...fields,
+  });
+
+  it("folds permissions into one line: on their tool call, or grouped once with a count", () => {
+    const tool = (id: string) => ({ id, name: "api-firecrawl__scrape", status: "done" as const, startedAt: 1, finishedAt: 2 });
+    render(
+      <ChatMessageBubble
+        message={{
+          ...BASE,
+          toolCalls: [tool("act-1"), tool("act-2")],
+          decisions: [
+            decision("11111111-1111-4111-8111-111111111111", { activity_id: "act-1" }),
+            decision("22222222-2222-4222-8222-222222222222"),
+            decision("33333333-3333-4333-8333-333333333333"),
+            decision("44444444-4444-4444-8444-444444444444", {
+              decided_by: "user",
+              status: "denied",
+              summary: "Delete the page",
+              confirmation: null,
+            }),
+          ],
+        }}
+      />,
+    );
+    // Nothing is listed until asked for; the line carries the counts.
+    expect(screen.queryByText(/bypassed policy confirmation/)).not.toBeInTheDocument();
+    const summary = screen.getByRole("button", {
+      name: "Turn details: Completed, 2 actions, 1 denied, 3 allowed by Full access",
+    });
+    expect(within(summary).getByText("1 denied")).toHaveClass("text-warning");
+    fireEvent.click(summary);
+    // The receipt that knows its tool call sits on it, the full text on hover.
+    const pill = screen.getAllByText("Full access")[0]!;
+    expect(pill.closest("summary")).toHaveTextContent("api-firecrawl__scrape");
+    expect(pill).toHaveAttribute("title", expect.stringContaining("bypassed policy confirmation"));
+    // The rest collapse to one line each, without record IDs.
+    const list = screen.getByRole("list", { name: "Permissions used" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("Full access · Organization connection api-firecrawl in ChronoAI: POST scrape on api-firecrawl×2");
+    expect(rows[0]).not.toHaveTextContent("33dc1c9b");
+    expect(rows[1]).toHaveTextContent("You denied · Delete the page");
+  });
+
+  it("keeps channel delivery inside the summary, flagging a failure on the line", () => {
+    const { rerender } = render(
+      <ChatMessageBubble message={{ ...BASE, channelDelivery: { status: "delivered", heard_prefix_matches_sent: false } }} />,
+    );
+    expect(screen.queryByText("Provider confirmed message delivery.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Turn details: Completed" }));
+    expect(screen.getByText("Provider confirmed message delivery.")).toBeInTheDocument();
+    rerender(<ChatMessageBubble message={{ ...BASE, id: "assistant-2", channelDelivery: { status: "failed", heard_prefix_matches_sent: false } }} />);
+    expect(screen.getByRole("button", { name: "Turn details: Completed, delivery failed" })).toHaveTextContent("delivery failed");
   });
 });

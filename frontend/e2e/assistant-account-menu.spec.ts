@@ -1,6 +1,6 @@
 import { billingWallet, billingUsage, billingGrant, billingAllowance, billingCatalog, billingRow } from "../src/test/billing-fixture";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { openAssistant, sendMessage, stopButton } from "./helpers";
+import { openAccountMenu, openAssistant, sendMessage, stopButton } from "./helpers";
 
 async function setTextScale(scope: Page | Locator, scale: number) {
   const slider = scope.getByRole("slider", { name: "Text size", exact: true });
@@ -173,9 +173,8 @@ test("account menus navigate to NyxBot settings and dismiss same-URL keyboard na
     0,
   );
 
-  const headerTrigger = page.getByRole("button", { name: "User menu" });
   await page.keyboard.press("Escape");
-  await headerTrigger.click();
+  await openAccountMenu(page);
   await expect(
     page.getByRole("menuitem", {
       name: "Notification settings (opens in Studio)",
@@ -200,7 +199,7 @@ test("account menus navigate to NyxBot settings and dismiss same-URL keyboard na
   );
 
   await page.keyboard.press("Escape");
-  await headerTrigger.click();
+  await openAccountMenu(page);
   await page
     .getByRole("menuitem", { name: "NyxBot settings", exact: true })
     .click();
@@ -208,7 +207,7 @@ test("account menus navigate to NyxBot settings and dismiss same-URL keyboard na
     page.getByRole("heading", { name: "NyxBot settings" }),
   ).toBeVisible();
   await page.keyboard.press("Escape");
-  await headerTrigger.click();
+  await openAccountMenu(page);
   await expect(page.getByRole("menu")).toBeVisible();
 });
 
@@ -225,12 +224,11 @@ test("keeps the shell visible while account content loads", async ({
   });
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
       await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
-  await page.getByRole("button", { name: "User menu" }).click();
+  await openAccountMenu(page);
   await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
   await expect(
     page.getByRole("status").filter({ hasText: "Loading Account Settings..." }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "User menu", includeHidden: true })).toBeAttached();
   await expect(
     page.getByRole("button", { name: "Account menu", includeHidden: true }),
   ).toBeAttached();
@@ -285,23 +283,21 @@ for (const width of [320, 390, 768, 1024, 1280]) {
       await page.setViewportSize({ width, height: 900 });
       await openAssistant(page, { faults: { nyxagentEnabled: true } });
       await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
-      await page.getByRole("button", { name: "User menu" }).click();
+      await openAccountMenu(page);
       await page
         .getByRole("menuitem", { name: "Settings", exact: true })
         .click();
       await page.getByRole("tab", { name: "Display", exact: true }).click();
       await setTextScale(page, textScale);
       await page.keyboard.press("Escape");
+      await openAccountMenu(page);
       await page
-        .getByRole("button", { name: "NyxBot settings", exact: true })
+        .getByRole("menuitem", { name: "NyxBot settings", exact: true })
         .click();
       await expect(
         page.getByRole("heading", { name: "NyxBot settings" }),
       ).toBeVisible();
       await expect(page).toHaveTitle("nyxid - Home");
-      await expect(
-        page.getByRole("button", { name: "NyxBot settings", exact: true, includeHidden: true }),
-      ).toHaveAttribute("aria-expanded", "true");
       await expect(page.getByRole("dialog", { name: "NyxBot settings" })).toBeVisible();
 
       await expectUsable(
@@ -497,46 +493,30 @@ for (const width of [320, 390, 768, 1024, 1280]) {
 }
 
 for (const width of [390, 1280]) {
-  test(`both account menus and the chat gear reach the page at ${width}px`, async ({
+  test(`the account menu reaches Settings and NyxBot settings at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
     await openAssistant(page, { faults: { nyxagentEnabled: true } });
-      await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
-    const gear = page.getByRole("button", {
-      name: "NyxBot settings",
-      exact: true,
-    });
-    await expect(gear).toHaveAttribute("aria-expanded", "false");
-    await gear.click();
+    await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
+    await openAccountMenu(page);
+    await page
+      .getByRole("menuitem", { name: "Settings", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "Account Settings" }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await openAccountMenu(page);
+    await page
+      .getByRole("menuitem", { name: "NyxBot settings", exact: true })
+      .click();
     await expect(
       page.getByRole("heading", { name: "NyxBot settings" }),
     ).toBeVisible();
-    for (const label of ["Account menu", "User menu"]) {
-      await page.keyboard.press("Escape");
-      if (label === "Account menu" && width < 768)
-        await page.getByRole("button", { name: "Open chats" }).click();
-      await page.getByRole("button", { name: label, exact: true }).click();
-      await page
-        .getByRole("menuitem", { name: "Settings", exact: true })
-        .click();
-      await expect(
-        page.getByRole("heading", { name: "Account Settings" }),
-      ).toBeVisible();
-      await page.keyboard.press("Escape");
-      if (label === "Account menu" && width < 768)
-        await page.getByRole("button", { name: "Open chats" }).click();
-      await page.getByRole("button", { name: label, exact: true }).click();
-      await page
-        .getByRole("menuitem", { name: "NyxBot settings", exact: true })
-        .click();
-      await expect(
-        page.getByRole("heading", { name: "NyxBot settings" }),
-      ).toBeVisible();
-      await expect(
-        page.getByRole("button", { name: "Close chats" }),
-      ).toHaveCount(0);
-    }
+    await expect(
+      page.getByRole("button", { name: "Close chats" }),
+    ).toHaveCount(0);
   });
 }
 
@@ -585,14 +565,13 @@ test("keeps the shell visible while lazy NyxBot page content loads", async ({
   );
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
       await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
-  await page.getByRole("button", { name: "User menu" }).click();
+  await openAccountMenu(page);
   await page
     .getByRole("menuitem", { name: "NyxBot settings", exact: true })
     .click();
   await expect(
     page.getByRole("status").filter({ hasText: "Loading NyxBot settings..." }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "User menu", includeHidden: true })).toBeAttached();
   await expect(
     page.getByRole("button", { name: "Account menu", includeHidden: true }),
   ).toBeAttached();
@@ -602,47 +581,22 @@ test("keeps the shell visible while lazy NyxBot page content loads", async ({
   ).toBeVisible();
 });
 
-test("the group chat header gear opens NyxBot settings", async ({ page }) => {
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
-      await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
-  await page
-    .getByRole("navigation", { name: "Agents and conversations" })
-    .getByRole("button", { name: "New group", exact: true })
-    .click();
-  const dialog = page.getByRole("dialog", { name: "New group", exact: true });
-  await dialog
-    .getByRole("textbox", { name: "Name", exact: true })
-    .fill("Settings review");
-  await dialog
-    .getByRole("button", { name: "Create group", exact: true })
-    .click();
-  await expect(
-    page.getByRole("heading", { name: "Settings review", exact: true }),
-  ).toBeVisible();
-  const gear = page.getByRole("button", { name: "NyxBot settings", exact: true });
-  await expect(gear).toHaveAttribute("aria-expanded", "false");
-  await gear.click();
-  await expect(
-    page.getByRole("heading", { name: "NyxBot settings", exact: true }),
-  ).toBeVisible();
-  expect(new URL(page.url()).pathname).toBe("/assistant");
-  expect(new URL(page.url()).searchParams.get("panel")).toBe("nyxbot");
-});
-
 for (const width of [320, 390, 768, 1024, 1280]) {
   for (const textScale of [1, 1.25]) {
     test(`populated Billing and Usage stay usable at ${width}px with ${textScale * 100}% text`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await openAssistant(page, { faults: { nyxagentEnabled: true } });
       await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
-      await page.getByRole("button", { name: "User menu" }).click();
+      await openAccountMenu(page);
       await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
       const settings = page.getByRole("dialog", { name: "Account Settings" });
       await settings.getByRole("tab", { name: "Display" }).click();
       await setTextScale(settings, textScale);
       await page.keyboard.press("Escape");
-      const trigger = width < 768 ? "User menu" : "Account menu";
-      await page.getByRole("button", { name: trigger }).click();
+      // On narrow viewports the account button sits in the closed drawer, so
+      // focus returns to the drawer opener.
+      const trigger = width < 768 ? "Open chats" : "Account menu";
+      await openAccountMenu(page);
       await page.getByRole("menuitem", { name: "Billing", exact: true }).click();
       const billing = page.getByRole("dialog", { name: "Billing & Usage" });
       await expect(billing).toBeVisible();
@@ -675,7 +629,7 @@ for (const width of [320, 390, 768, 1024, 1280]) {
 test("Settings deep link reload and Back preserve the current chat", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
       await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
-  await page.getByRole("button", { name: "User menu" }).click();
+  await openAccountMenu(page);
   await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
   const panel = page.getByRole("dialog", { name: "Account Settings" });
   await panel.getByRole("tab", { name: "Security" }).click();
@@ -708,7 +662,7 @@ test("a panel survives unresolved draft adoption and the completed chat stays mo
     };
   });
   await sendMessage(page, "A delayed draft");
-  await page.getByRole("button", { name: "User menu" }).click();
+  await openAccountMenu(page);
   await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
   const panel = page.getByRole("dialog", { name: "Account Settings" });
   await expect(panel).toBeVisible();

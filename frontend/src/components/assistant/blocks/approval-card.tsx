@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import {
   Ban,
   Check,
@@ -115,7 +116,7 @@ function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
   const style = DECIDED_STYLE[decision];
 
   return (
-    <section className={`rounded-xl border p-4 ${style.container}`}>
+    <section className={`${STATUS_CARD_MAX_W} rounded-xl border p-4 ${style.container}`}>
       <div className="flex flex-wrap items-center gap-2 text-12 font-semibold text-foreground">
         <DecidedIcon decision={decision} />
         <span>{style.title}</span>
@@ -157,7 +158,7 @@ function SubmittedCard({
 }) {
   if (!block.decision_submission) return null;
   return (
-    <section className="rounded-xl border border-warning/30 bg-warning/[0.06] p-4">
+    <section className={`${STATUS_CARD_MAX_W} rounded-xl border border-warning/30 bg-warning/[0.06] p-4`}>
       <div className="flex items-center gap-2 text-12 font-semibold text-foreground">
         <Loader2 className="h-4 w-4 animate-spin text-warning" />
         Decision sent
@@ -230,7 +231,7 @@ export function ApprovalCard({
   const busy = pendingAction !== null;
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <section className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-xl border border-border bg-card shadow-sm`}>
       <div className="flex items-start gap-3 border-b border-border px-4 py-3.5">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-nyx-secondary-400/30 bg-nyx-secondary-400/10">
           <ShieldAlert className="h-4 w-4 text-nyx-secondary-400" />

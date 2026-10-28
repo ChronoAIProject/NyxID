@@ -167,6 +167,7 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
           dragging.current = { pointer: event.pointerId, first, last: index, top: bounds.top, pitch: bounds.height / count, count };
           setKeyboardIndex(null);
           setBrowseStart(first);
+          preview(index, target);
           navigate(index);
         }}
         onPointerMove={(event) => {
@@ -175,6 +176,8 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
           const index = Math.max(drag.first, Math.min(drag.first + drag.count - 1, drag.first + Math.floor((event.clientY - drag.top) / drag.pitch)));
           if (index === drag.last) return;
           drag.last = index;
+          const tick = ticks.current?.querySelector<HTMLElement>(`[data-chat-index-target="${index}"]`);
+          if (tick) preview(index, tick);
           navigate(index);
         }}
         onPointerUp={() => { dragging.current = null; setBrowseStart(null); setHover(null); }}
@@ -197,14 +200,14 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
                 tabIndex={index === focusIndex ? 0 : -1}
                 className="group flex w-full cursor-pointer items-center justify-end pr-1 outline-none"
                 style={{ height: layout.pitch }}
-                onMouseEnter={(event) => preview(index, event.currentTarget)}
+                // Previews follow focus and a held pointer, never a passing one.
                 onFocus={(event) => preview(index, event.currentTarget)}
                 onClick={(event) => { if (event.detail === 0) navigate(index); }}
               >
                 <span aria-hidden="true" className={cn(
-                  "h-0.5 origin-right rounded-full transition-[transform,background-color] duration-150 group-hover:scale-x-150 group-focus-visible:scale-x-150 motion-reduce:transition-none",
+                  "h-0.5 origin-right rounded-full transition-[transform,background-color] duration-150 group-focus-visible:scale-x-150 group-active:scale-x-150 motion-reduce:transition-none",
                   entry.role === "user" ? "w-2" : "w-4",
-                  selected ? "bg-primary" : "bg-text-tertiary/80 group-hover:bg-foreground group-focus-visible:bg-foreground",
+                  selected ? "bg-primary" : "bg-text-tertiary/80 group-focus-visible:bg-foreground group-active:bg-foreground",
                 )} />
               </button>
             );

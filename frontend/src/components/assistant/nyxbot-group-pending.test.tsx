@@ -173,13 +173,14 @@ it("group message composition toggles pressed state through the feedback handler
     "/assistant/nyxagent/groups/g/messages/m/feedback",
     { vote: "down", comment: undefined },
   );
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(screen.getByRole("button", { name: "Not helpful" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );
 });
 
-it("group replies take an optional comment after a vote without blocking it", async () => {
+it("group replies offer reasons and a comment only after a vote, which saves first", async () => {
   vi.mocked(api.put).mockReset();
   vi.mocked(api.put).mockResolvedValue({ vote: "down" });
   render(
@@ -201,21 +202,20 @@ it("group replies take an optional comment after a vote without blocking it", as
       onOpenAgent={() => undefined}
     />,
   );
-  await userEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
-  // Sending a comment needs a vote first; the vote itself never waits for one.
-  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Not helpful" }));
   expect(api.put).toHaveBeenLastCalledWith(
     "/assistant/nyxagent/groups/g/messages/m2/feedback",
     { vote: "down", comment: undefined },
   );
-  await userEvent.type(screen.getByLabelText("Optional feedback comment"), "wrong calendar");
-  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await userEvent.click(screen.getByRole("button", { name: "Not accurate" }));
+  await userEvent.type(screen.getByLabelText("Details (optional)"), "wrong calendar");
+  await userEvent.click(screen.getByRole("button", { name: "Submit" }));
   expect(api.put).toHaveBeenLastCalledWith(
     "/assistant/nyxagent/groups/g/messages/m2/feedback",
-    { vote: "down", comment: "wrong calendar" },
+    { vote: "down", comment: "Not accurate — wrong calendar" },
   );
-  expect(screen.queryByLabelText("Optional feedback comment")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 it("group feedback failures are visible", async () => {
