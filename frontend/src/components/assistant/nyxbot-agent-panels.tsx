@@ -1,5 +1,7 @@
-import { useContext, type ReactNode } from "react";
-import { ChatHeaderCompactContext } from "./chat-header-context";
+import { ThreadTitle } from "./thread-title";
+import { useContext, type ComponentProps, type ReactNode } from "react";
+import { MotionConfig, motion } from "motion/react";
+import { ChatHeaderAnimateContext, ChatHeaderCompactContext } from "./chat-header-context";
 import { PanelRightOpen } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,6 +10,7 @@ import {
   AGENT_KIND_LABEL,
   channelPlatformName,
 } from "@/lib/assistant/nyxbot-labels";
+import { REFLOW } from "@/hooks/use-card-sequence";
 import { cn, formatTimeDistance } from "@/lib/utils";
 import type {
   AssistantAgentKind,
@@ -63,6 +66,46 @@ export function ThreadPanels({ children }: { readonly children: ReactNode }) {
 }
 
 /**
+ * A thread's header row. Once the transcript scrolls past it, the row glides
+ * into a pill aligned with the header's right edge, above the conversation
+ * index rail (`ChatContentLayout` decides when). A pill too narrow for one
+ * line wraps after the name instead of cutting it. Wrap each child in
+ * `HeaderItem` so it slides at its final size instead of stretching with the
+ * row.
+ */
+export function HeaderBar({ children }: { readonly children: ReactNode }) {
+  const compact = useContext(ChatHeaderCompactContext);
+  const animate = useContext(ChatHeaderAnimateContext);
+  return (
+    <MotionConfig reducedMotion="user" transition={animate ? REFLOW : { duration: 0 }}>
+      <motion.div
+        layout
+        layoutDependency={compact}
+        role="group"
+        aria-label="Conversation controls"
+        data-compact={compact}
+        style={{ borderRadius: 12 }}
+        className={cn(
+          "flex flex-wrap items-center",
+          compact
+            // 12px from the top and from the column's edge: level with the
+            // machine card's top and mirroring its inset across the divider.
+            ? "absolute top-3 right-3 z-35 max-w-[calc(100%-1.5rem)] gap-x-2 gap-y-1 border border-hairline bg-background/95 px-2 py-1 shadow-sm backdrop-blur-sm"
+            : "gap-2",
+        )}
+      >
+        {children}
+      </motion.div>
+    </MotionConfig>
+  );
+}
+
+export function HeaderItem(props: ComponentProps<typeof motion.div>) {
+  const compact = useContext(ChatHeaderCompactContext);
+  return <motion.div {...props} layout="position" layoutDependency={compact} />;
+}
+
+/**
  * Which agent this thread talks to. Threads of a destroyed specialist are
  * read-only; the banner says so and the page disables the composer.
  */
@@ -75,7 +118,16 @@ export function ThreadHeader({
   channelPlatform,
   onOpenDetails,
   controls,
+  title,
+  titleKey,
+  onRenameTitle,
 }: {
+  /** The thread's title, shown after the agent in the expanded header. */
+  readonly title?: string;
+  /** Resets an open rename when another thread is shown. */
+  readonly titleKey?: string;
+  /** Makes the title editable in place. */
+  readonly onRenameTitle?: (title: string) => Promise<void>;
   /** The agent's display name (or handle). */
   readonly name: string;
   /** "@handle", shown when a display name hides it. */
@@ -93,24 +145,45 @@ export function ThreadHeader({
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <div className="space-y-2">
-      <div
-        role="group"
-        aria-label="Conversation controls"
-        data-compact={compact}
-        className={cn(
-          "flex items-center gap-2",
-          compact
-            ? "absolute top-2 right-[calc(var(--spacing)*4+var(--assistant-content-inset,0px))] z-20 max-w-[calc(100%-2rem)] rounded-xl border border-hairline bg-background/95 px-2 py-1 shadow-sm backdrop-blur-sm sm:right-[calc(var(--spacing)*6+var(--assistant-content-inset,0px))]"
-            : "flex-wrap",
-        )}
-      >
-        <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size={compact ? "sm" : "md"} />
-        <h2 className={cn("min-w-0 truncate font-semibold text-foreground", compact ? "max-w-24 text-11" : "text-13")}>{name}</h2>
-        {handle && !compact ? <span className="shrink-0 text-11 text-text-tertiary">{handle}</span> : null}
-        {!compact ? <AgentKindBadge kind={kind} /> : null}
-        {channelPlatform && !compact ? <ChannelBadge platform={channelPlatform} /> : null}
+      {/* The thread's title is the page heading, on a row of its own above
+          the agent it talks to; the pill the header becomes on scroll stays
+          name-only. */}
+      {title && !compact ? (
+        <div className="flex min-w-0 items-center">
+          {onRenameTitle ? (
+            <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
+          ) : (
+            <h1 title={title} className="truncate text-15 font-semibold text-foreground">{title}</h1>
+          )}
+        </div>
+      ) : null}
+      <HeaderBar>
+        <HeaderItem className="shrink-0">
+          <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size={compact ? "sm" : handle ? "xl" : "md"} />
+        </HeaderItem>
+        <HeaderItem className={cn("min-w-0", !compact && "self-start")}>
+          {compact ? (
+            <h2 className="truncate text-11 font-semibold text-foreground">{name}</h2>
+          ) : (
+            // The name line is as tall as the controls so both share one top
+            // line; the @handle sits under it.
+            <div className="min-w-0">
+              <div className="flex h-7 min-w-0 items-center gap-2">
+                <h2 className="truncate text-13 font-semibold text-foreground">{name}</h2>
+                <span className="flex shrink-0 items-center gap-2 whitespace-nowrap">
+                  <AgentKindBadge kind={kind} />
+                  {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
+                </span>
+              </div>
+              {handle ? <p className="truncate text-11 leading-4 text-text-tertiary">{handle}</p> : null}
+            </div>
+          )}
+        </HeaderItem>
+        {/* Pushes the controls right while they fit on the name line; when
+            they wrap to their own line they start at the left. */}
+        {controls || onOpenDetails ? <div aria-hidden="true" className="min-w-0 flex-1 basis-0" /> : null}
         {controls || onOpenDetails ? (
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          <HeaderItem className={cn("flex flex-wrap items-center gap-1.5", !compact && "min-h-7 self-start")}>
             {controls}
             {onOpenDetails ? (
               <Button
@@ -125,9 +198,9 @@ export function ThreadHeader({
                 <span className={compact ? "sr-only" : undefined}>Details</span>
               </Button>
             ) : null}
-          </div>
+          </HeaderItem>
         ) : null}
-      </div>
+      </HeaderBar>
       {destroyed ? (
         <p
           role="status"

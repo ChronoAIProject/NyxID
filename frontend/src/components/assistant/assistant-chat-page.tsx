@@ -1,3 +1,4 @@
+import { useConnectionDown } from "@/hooks/use-connection-down";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { PreparedMicrophone } from "@/lib/microphone-capture";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
@@ -5,11 +6,13 @@ import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary, withAssistantTrace } from "@/lib/assistant/request-error";
 import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
-import { ConversationMachineDesktops } from "./machine-desktop-panel";
+import { ConversationMachineDesktops, MachinePane, MachinePaneToggle } from "./machine-desktop-panel";
+import { useConversationDesktops } from "@/hooks/use-machines";
+import { useMediaQuery } from "@/hooks/use-media-query";
+import { useMachinePaneStore } from "@/stores/machine-pane-store";
 import { ReviewCardTarget } from "./review-card-target";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
-import { NyxBotSettingsButton } from "./nyxbot-settings-button";
 import {
   ChannelBadge,
   PendingEventsNote,
@@ -837,6 +840,24 @@ function NyxAgentThreadPage() {
   }, [voiceEnabled, destroyed, channelPlatform]);
   // The home stays until the first message of its new NyxBot thread shows.
   const showHome = home && !chat.isStreaming && !chat.session.messages.length;
+  // Open desktops for this thread: a docked column on wide screens, inline
+  // above the transcript otherwise. The pill's Machine button shows or hides
+  // them per thread.
+  const machineConversation = showHome ? "" : (chat.session.conversationId ?? "");
+  const desktops = useConversationDesktops(machineConversation, chat.isStreaming);
+  const wideScreen = useMediaQuery("(min-width: 1024px)");
+  const machineHidden = useMachinePaneStore((state) => state.hidden.includes(machineConversation));
+  const setMachineHidden = useMachinePaneStore((state) => state.setHidden);
+  const machinePercent = useMachinePaneStore((state) => state.percent);
+  const setMachinePercent = useMachinePaneStore((state) => state.setPercent);
+  const machineOpen = desktops.length > 0 && !machineHidden;
+  const machineToggle = desktops.length ? (
+    <MachinePaneToggle
+      open={machineOpen}
+      live={chat.isStreaming && desktops.some((desktop) => desktop.status === "agent")}
+      onToggle={() => setMachineHidden(machineConversation, machineOpen)}
+    />
+  ) : null;
   const agentOverride = agents.data?.agents.find(
     (row) => row.id === headerAgent?.id,
   )?.access_mode_override;
@@ -869,6 +890,14 @@ function NyxAgentThreadPage() {
         .find(
           (message) => message.role === "assistant" || message.role === "user",
         );
+  // While the window's banner reports the connection, a dropped request is
+  // not repeated here; the open chat reloads once the connection returns.
+  const connectionDown = useConnectionDown();
+  const wasDown = useRef(connectionDown);
+  useEffect(() => {
+    if (wasDown.current && !connectionDown && selectedId) void chat.refreshHistory();
+    wasDown.current = connectionDown;
+  }, [connectionDown, selectedId, chat]);
   const turnError =
     lastReply?.status === "error"
       ? withAssistantTrace(
@@ -877,6 +906,10 @@ function NyxAgentThreadPage() {
           lastReply.turnId ?? null,
         )
       : undefined;
+  const dockedError =
+    chat.error ??
+    (requestError?.scope === errorScope ? requestError.message : undefined) ??
+    turnError;
   const threadPanels = headerAgent && !showHome ? (
     <ThreadPanels>
       <ThreadHeader
@@ -887,8 +920,20 @@ function NyxAgentThreadPage() {
         destroyed={destroyed}
         channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
         onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
-        controls={selectedId ? (
-          <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} />
+        title={selectedId ? chat.session.title : undefined}
+        titleKey={selectedId}
+        onRenameTitle={
+          selectedId && !destroyed
+            ? (title) => chat.renameConversation(selectedId, title)
+            : undefined
+        }
+        controls={selectedId || machineToggle ? (
+          <>
+            {machineToggle}
+            {selectedId ? (
+              <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} />
+            ) : null}
+          </>
         ) : undefined}
       />
       {conversation && !chat.isStreaming ? (
@@ -903,6 +948,15 @@ function NyxAgentThreadPage() {
   return (
     <AssistantShell
       resizableContent
+      aside={machineOpen && wideScreen ? (
+        <MachinePane
+          conversationId={machineConversation}
+          desktops={desktops}
+          turnActive={chat.isStreaming}
+        />
+      ) : undefined}
+      asidePercent={machinePercent}
+      onAsidePercentChange={setMachinePercent}
       title={showHome ? "Home" : chat.session.title}
       titleKey={selectedId}
       onRenameTitle={
@@ -910,7 +964,6 @@ function NyxAgentThreadPage() {
           ? (title) => chat.renameConversation(selectedId, title)
           : undefined
       }
-      headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
@@ -923,15 +976,6 @@ function NyxAgentThreadPage() {
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
-        <AssistantErrorNotice
-          message={
-            chat.error ??
-            (requestError?.scope === errorScope
-              ? requestError.message
-              : undefined) ??
-            turnError
-          }
-        />
         {threadPanels}
         <AgentDetailsSheet
           agentId={openDetailsAgentId}
@@ -1006,9 +1050,10 @@ function NyxAgentThreadPage() {
           </div>
         ) : (
           <AssistantLinkModalHost>
-            {chat.session.conversationId ? (
+            {machineOpen && !wideScreen ? (
               <ConversationMachineDesktops
-                conversationId={chat.session.conversationId}
+                conversationId={machineConversation}
+                desktops={desktops}
                 turnActive={chat.isStreaming}
               />
             ) : null}
@@ -1128,9 +1173,12 @@ function NyxAgentThreadPage() {
               ].join(",")}
               bottomInset={composerHeight}
               // A linked review card may sit outside the mounted window.
+              // A settled decision is folded into its reply's turn summary.
               focusMessageId={
                 search.card
-                  ? `nyxagent-acknowledgement:${search.card}`
+                  ? (chat.session.messages.find((message) =>
+                      message.decisions?.some((row) => row.id === search.card),
+                    )?.id ?? `nyxagent-acknowledgement:${search.card}`)
                   : undefined
               }
               emptyDescription={
@@ -1152,7 +1200,12 @@ function NyxAgentThreadPage() {
               onClose={() => setVoiceSettingsOpen(false)} />
           </DialogContent>
         </Dialog>}
-        <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+        <div ref={composerRef} data-composer-dock="" className="absolute inset-x-0 bottom-0 z-10">
+          {/* Failures sit with the composer, where the next attempt starts. */}
+          <AssistantErrorNotice
+            docked
+            message={connectionDown && dockedError?.startsWith("Connection interrupted") ? undefined : dockedError}
+          />
           <NyxAgentComposer
             onVoiceSettings={voiceEnabled && !destroyed && !channelPlatform ? () => setVoiceSettingsOpen(true) : undefined}
             onVoicePrepare={() => {

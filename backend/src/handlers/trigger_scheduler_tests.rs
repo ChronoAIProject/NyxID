@@ -1127,6 +1127,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            activity_id: None,
             invocation_id: None,
             routing: None,
             link: None,

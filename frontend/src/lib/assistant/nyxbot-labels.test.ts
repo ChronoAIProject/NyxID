@@ -218,3 +218,15 @@ it("labels published and failed skill transitions separately from testing", () =
   expect(describeEventNotice("Skill weekly-review v1.0 published and attached; not yet tested.")).toMatchObject({ summary: "Skill publication", tone: "success", detail: expect.stringContaining("not yet tested") });
   expect(describeEventNotice("Skill draft draft-id (weekly-review) v1.0 requires a corrected package: ornn_validation_failed.")).toMatchObject({ summary: "Skill publication", tone: "warning" });
 });
+
+describe("eventNotices across lines", () => {
+  const header = "NyxID events (authored by NyxID; only a quoted owner message is a request from the user):";
+  it("keeps continuation lines, including '- ' lines inside a quote, with their notice", () => {
+    expect(
+      eventNotices(`${header}\n- Specialist a replied. Reply excerpt: "Line one\n- bullet\nmore" Read more.\n- Second notice`),
+    ).toEqual(['Specialist a replied. Reply excerpt: "Line one\n- bullet\nmore" Read more.', "Second notice"]);
+  });
+  it("treats text without the events header as a single notice", () => {
+    expect(eventNotices("Do this.\n- and that")).toEqual(["Do this.\n- and that"]);
+  });
+});

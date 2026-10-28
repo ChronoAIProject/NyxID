@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import {
   Check,
   Circle,
@@ -220,7 +221,7 @@ export function TaskPlanCard({
   return (
     <section
       aria-label="Task plan"
-      className="overflow-hidden rounded-lg border border-border bg-card shadow-sm"
+      className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-lg border border-border bg-card shadow-sm`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-border bg-overlay/50 px-3 py-2.5">
         <div className="min-w-0 flex-1">

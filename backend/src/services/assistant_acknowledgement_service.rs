@@ -612,11 +612,30 @@ pub async fn record_auto_allowed_with_link(
     summary: &str,
     link: Option<&str>,
 ) {
+    let activity = super::machine_activity_service::activity_id();
+    record_auto_allowed_for_activity(db, chat, tool, args, auto, summary, link, activity).await;
+}
+
+/// As [`record_auto_allowed_with_link`], for receipts written after the tool
+/// call's scope has ended (a streamed response's clean EOF): the caller
+/// captures the activity while the call is still running.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_auto_allowed_for_activity(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+    link: Option<&str>,
+    activity_id: Option<String>,
+) {
     if chat.guest {
         return;
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        activity_id,
         invocation_id: None,
         id: Uuid::new_v4().to_string(),
         conversation_id: chat.conversation_id.clone(),
@@ -1987,6 +2006,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        activity_id: super::machine_activity_service::activity_id(),
         invocation_id: None,
         authored_skill: if request.tool == Some(super::assistant_agent_learning_review::TOOL) {
             request

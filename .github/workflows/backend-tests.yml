@@ -16,9 +16,11 @@ permissions:
 
 env:
   # The execution matrix below must contain exactly SHARD_COUNT shards.
-  SHARD_COUNT: 4
+  SHARD_COUNT: 8
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  CARGO_INCREMENTAL: 1
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # libtest runs each #[tokio::test] body on a 2 MiB thread by default. Debug
   # builds keep a slot for every temporary of a long async test on that stack
@@ -44,10 +46,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: ${{ inputs.coverage && 'coverage-backend' || 'backend' }}
+          shared-key: ${{ inputs.coverage && 'coverage-backend-build' || 'backend-build' }}
+          incremental: 'true'
       - uses: taiki-e/install-action@v2
         with:
           tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}
@@ -58,15 +60,28 @@ jobs:
       - name: Build ordinary test archive
         if: '!inputs.coverage'
         run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/backend-build.log" --
           python3 .github/scripts/ci_resources.py backend-build
           cargo nextest archive -p nyxid -p nyxid-service-adapters
           --archive-file backend-tests.tar.zst
       - name: Build instrumented test archive
         if: inputs.coverage
         run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/coverage-build.log" --
           python3 .github/scripts/ci_resources.py coverage-build
           cargo llvm-cov nextest-archive --package nyxid
           --archive-file backend-tests.tar.zst
+      - name: Save incremental build cache
+        if: github.ref == 'refs/heads/main' && success()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/debug/incremental
+            target/llvm-cov-target/debug/incremental
+          key: v0-rust-incremental-${{ inputs.coverage && 'coverage-backend-build' || 'backend-build' }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
       - name: Record full test inventory
         env:
           LLVM_PROFILE_FILE: ${{ runner.temp }}/list-%p.profraw
@@ -100,6 +115,48 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  billing-smoke:
+    name: Billing route coverage smoke
+    needs: build
+    if: '!inputs.coverage'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-test-build-archive
+      - name: Start transaction-capable MongoDB
+        run: bash .github/scripts/start-test-mongodb.sh
+      - name: Billing route coverage smoke
+        run: >-
+          python3 .github/scripts/ci_resources.py billing-smoke
+          cargo nextest run --archive-file backend-tests.tar.zst
+          --workspace-remap "$GITHUB_WORKSPACE" --profile ci --no-capture
+          --no-tests=fail -E 'test(=billing_integration_tests::billing_route_coverage_smoke)'
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-backend-billing-smoke
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
   run:
     name: Test shard ${{ matrix.shard }}
     needs: build
@@ -109,7 +166,7 @@ jobs:
       fail-fast: false
       matrix:
         # Must agree with SHARD_COUNT; partitioning and verification share it.
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
@@ -190,7 +247,7 @@ jobs:
 
   report:
     name: Verify complete suite
-    needs: [build, run]
+    needs: [build, billing-smoke, run]
     if: always() && !cancelled() && needs.build.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -226,6 +283,26 @@ jobs:
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-4
           path: results/shard-4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-5
+          path: results/shard-5
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-6
+          path: results/shard-6
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-7
+          path: results/shard-7
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-8
+          path: results/shard-8
       - name: Summarize available shard evidence
         if: always()
         run: >-
@@ -245,6 +322,11 @@ jobs:
         env:
           SHARD_RESULT: ${{ needs.run.result }}
         run: test "$SHARD_RESULT" = success
+      - name: Require billing smoke to pass
+        if: '!inputs.coverage'
+        env:
+          BILLING_SMOKE_RESULT: ${{ needs.billing-smoke.result }}
+        run: test "$BILLING_SMOKE_RESULT" = success
       - name: Verify full ordinary test inventory
         if: '!inputs.coverage'
         run: python3 .github/scripts/backend_shards.py test-inventory.json results --count "$SHARD_COUNT"
@@ -292,7 +374,9 @@ jobs:
           python3 .github/scripts/coverage_identity.py --require-identities
           build-identity.json results/shard-1/identity.json
           results/shard-2/identity.json results/shard-3/identity.json
-          results/shard-4/identity.json
+          results/shard-4/identity.json results/shard-5/identity.json
+          results/shard-6/identity.json results/shard-7/identity.json
+          results/shard-8/identity.json
           --record coverage-backend.identity.json
       - name: Prepare reusable base report
         if: inputs.coverage && github.event_name != 'pull_request'

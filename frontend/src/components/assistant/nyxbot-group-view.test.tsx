@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
+import { messageTime } from "@/lib/assistant/message-time";
 import type {
   AssistantGroup,
   AssistantGroupMessage,
@@ -52,9 +53,6 @@ vi.mock("@/components/assistant/nyxbot-agent-details", () => ({
 }));
 vi.mock("@/components/assistant/nyxbot-group-forms", () => ({
   GroupSettingsDialog: () => null,
-}));
-vi.mock("@/components/assistant/nyxbot-settings-button", () => ({
-  NyxBotSettingsButton: () => null,
 }));
 // The real composer is covered by its own tests; this stand-in keeps its
 // contract: content changes are reported, Send hands over the text and the
@@ -330,7 +328,12 @@ describe("group message timestamps", () => {
       "2026-10-01T00:00:00.000Z",
       "2026-10-02T09:15:00.000Z",
     ]);
-    for (const time of times) expect(time).toHaveTextContent(/2026/);
+    for (const time of times) {
+      const expected = messageTime(time.getAttribute("datetime"))!;
+      expect(time).toHaveTextContent(expected.short);
+      expect(time).toHaveAttribute("title", expected.label);
+      expect(time.getAttribute("title")).toMatch(/2026/);
+    }
   });
 });
 

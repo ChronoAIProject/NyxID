@@ -53,3 +53,76 @@ export function useAssistantFeedback(
     cacheKey: [scope, parentId, messageId] as const,
   };
 }
+
+export interface ReplyFeedback {
+  readonly vote: AssistantFeedbackVote | undefined;
+  readonly pending: boolean;
+  readonly formOpen: boolean;
+  /** The vote itself failed to save. */
+  readonly error: boolean;
+  readonly toggle: (next: AssistantFeedbackVote) => Promise<void>;
+  /** Saves the optional details and closes the form; false when saving failed. */
+  readonly send: (comment: string) => Promise<boolean>;
+  readonly close: () => void;
+}
+
+/**
+ * One reply's vote. Choosing a vote saves it at once and opens the optional
+ * reasons and details form; choosing it again withdraws it.
+ */
+export function useReplyFeedback({
+  scope,
+  parentId,
+  messageId,
+  initialVote,
+  onVoted,
+}: {
+  readonly scope: "conversation" | "group";
+  readonly parentId: string;
+  readonly messageId: string;
+  readonly initialVote: AssistantFeedbackVote | undefined;
+  readonly onVoted?: (vote: AssistantFeedbackVote) => void;
+}): ReplyFeedback {
+  const feedback = useAssistantFeedback(scope, parentId, messageId);
+  const [vote, setVote] = useState(initialVote);
+  const [formOpen, setFormOpen] = useState(false);
+  const [error, setError] = useState(false);
+  const toggle = async (next: AssistantFeedbackVote) => {
+    const previous = vote;
+    const selected = previous === next ? undefined : next;
+    setVote(selected);
+    setFormOpen(Boolean(selected));
+    try {
+      await feedback.mutateAsync(selected ? { vote: selected } : {});
+      setError(false);
+    } catch {
+      setVote(previous);
+      setFormOpen(false);
+      setError(true);
+      return;
+    }
+    if (selected) onVoted?.(selected);
+  };
+  const send = async (comment: string) => {
+    if (!vote) return false;
+    // The vote is already saved; empty details leave it as it is.
+    if (comment) {
+      try {
+        await feedback.mutateAsync({ vote, comment });
+      } catch {
+        return false;
+      }
+    }
+    setFormOpen(false);
+    return true;
+  };
+  return {
+    vote,
+    pending: feedback.isPending,
+    formOpen,
+    error,
+    toggle,
+    send,
+    close: () => setFormOpen(false),
+  };
+}
