@@ -23,6 +23,12 @@ mod tools;
 pub(crate) use tools::{tool_claim, tool_complete, tool_prepare, tool_status};
 mod observer;
 mod persistence;
+mod read_observation;
+pub(crate) use read_observation::unobserved_http;
+pub(crate) use read_observation::admit_recorder_in_session;
+mod redirect_observation;
+pub use redirect_observation::HttpClient;
+mod initial_compact;
 #[cfg(test)]
 mod tests;
 pub(crate) use callback::{
@@ -33,7 +39,7 @@ pub(crate) use issuance::{IssueRequest, issue};
 pub(crate) use observer::CompletionObserver;
 pub use persistence::ensure_indexes;
 
-pub const READINESS_CAPABILITY: &str = "assistant:model-control-protocol-v1";
+pub const READINESS_CAPABILITY: &str = "assistant:model-control-initial-compact-recorder-v1";
 pub const AUDIENCE: &str = "nyxagent-model-control";
 const TOKEN_TYPE: &str = "nyxid_owner_model_control";
 const MAX_STEPS: usize = 128;
@@ -94,6 +100,29 @@ struct RootPrivate {
     card_arguments: Option<Value>,
     effective_headers_binding: Option<String>,
     steps: Vec<Step>,
+    #[serde(default)]
+    preconsent: read_observation::State,
+    #[serde(default)]
+    initial_operation: StepOperation,
+    #[serde(default)]
+    initial_request_binding: Option<String>,
+}
+impl RootPrivate {
+    fn tool_steps(&self) -> impl Iterator<Item=&Step> {
+        self.steps.iter().chain(self.preconsent.reads.iter().map(|read| &read.record))
+    }
+    fn active_tool_step_mut(&mut self, phase: &str, control: &str) -> AppResult<&mut Step> {
+        if phase == "allowed" { return self.steps.last_mut().ok_or_else(conflict); }
+        if phase == "unactivated" && !self.preconsent.ineligible {
+            let read = self.preconsent.reads.last_mut().filter(|read|read.control_hash==control).ok_or_else(conflict)?;
+            return Ok(&mut read.record);
+        }
+        Err(conflict())
+    }
+    fn tool_step_mut(&mut self, id: &str) -> AppResult<&mut Step> {
+        if let Some(step)=self.steps.iter_mut().find(|step|step.id==id) { return Ok(step); }
+        self.preconsent.reads.iter_mut().find(|read|read.record.id==id).map(|read|&mut read.record).ok_or_else(conflict)
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Step {
@@ -210,10 +239,24 @@ pub(crate) struct PreparedDispatch {
     connection_id: String,
     connection_binding: String,
     operation: StepOperation,
+    read_observation: bool,
 }
 impl PreparedDispatch {
+    pub(crate) fn matches_read_admission(&self,connection:&str,binding:&str)->bool {
+        self.read_observation && self.connection_id==connection && self.connection_binding==binding
+    }
+    pub(crate) fn requires_no_redirect(&self) -> bool { !self.read_observation }
+
+    pub(crate) async fn disable_observation(&self) -> AppResult<()> {
+        if !self.read_observation { return Err(conflict()); }
+        read_observation::disable(&self.state, &self.chat, &self.root_id).await
+    }
     pub(crate) async fn claim(&self) -> AppResult<CompletionObserver> {
-        let claim = final_send_claim(&self.state, self).await?;
+        let claim = if self.read_observation {
+            read_observation::claim(&self.state, self).await?
+        } else {
+            final_send_claim(&self.state, self).await?
+        };
         Ok(CompletionObserver::new(self.state.clone(), claim))
     }
 }
@@ -222,6 +265,7 @@ pub(crate) struct ClaimedDispatch {
     step_id: String,
     dispatch_id: String,
     operation: StepOperation,
+    read_observation: bool,
 }
 
 pub(crate) async fn verify(
@@ -252,13 +296,19 @@ pub(crate) async fn status(
     request: wire::StatusRequest,
 ) -> AppResult<wire::PrepareReply> {
     if request.protocol != wire::PROTOCOL
-        || request.step_id.is_some() != request.request_binding.is_some()
+        || (request.step_id.is_some() && request.request_binding.is_none())
     {
         return Err(invalid());
     }
     let (row, private, _) = persistence::authenticated(state, chat, token, None).await?;
     if row.id != request.root_id {
         return Err(invalid());
+    }
+    if row.phase == "unactivated" && request.step_id.is_none() && request.request_binding.is_some() {
+        return Ok(read_observation::status(&private, request.request_binding.as_deref(), &token_hash(token.expose())));
+    }
+    if row.phase == "allowed" && private.steps.is_empty() && private.initial_operation == StepOperation::Compact {
+        return Ok(wire::PrepareReply::InitialCompact);
     }
     if let Some(id) = request.step_id.as_deref() {
         let step = private
@@ -297,6 +347,9 @@ pub(crate) async fn prepare(
     candidate: wire::PrepareRequest,
 ) -> AppResult<wire::PrepareReply> {
     let (row, mut private, control) = persistence::authenticated(state, chat, token, None).await?;
+    if row.phase == "unactivated" && candidate.relative_path == "responses/compact" {
+        return initial_compact::prepare(state, chat, token, &row, &private, &candidate).await;
+    }
     if row.phase == "unactivated"
         && super::assistant_service_execution::stateless_inference(
             &candidate.relative_path,
@@ -384,14 +437,20 @@ pub(crate) async fn prepare(
                     wire::ControlOrigin::AllowedContinuation {acknowledgement_id,..} if row.acknowledgement_id.as_ref() == Some(acknowledgement_id))),
             _ => false,
         };
-        if operation != StepOperation::Generation
+        if operation != private.initial_operation
             || !saved_allow
             || candidate.preceding_receipt.is_some()
             || !candidate.tool_results.is_empty()
         {
             return Err(conflict());
         }
-        envelope::allowed_resume(&private.initial_input, &input, &control.resumed_input)?;
+        if operation == StepOperation::Compact {
+            if private.initial_request_binding.as_deref() != Some(binding.as_str()) || input != private.initial_input {
+                return Err(conflict());
+            }
+        } else {
+            envelope::allowed_resume(&private.initial_input, &input, &control.resumed_input)?;
+        }
     }
     let id = uuid::Uuid::new_v4().to_string();
     let token = persistence::new_token()?;
@@ -522,6 +581,7 @@ pub(crate) async fn final_send_claim(
         step_id: prepared.step_id.clone(),
         dispatch_id,
         operation: prepared.operation,
+        read_observation: false,
     })
 }
 

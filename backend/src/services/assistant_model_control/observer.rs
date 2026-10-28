@@ -1,5 +1,19 @@
 use super::*;
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static FAIL_PASSIVE_PERSISTENCE: bool;
+}
+
+fn require_observation_persistence(passive:bool)->AppResult<()> {
+    #[cfg(test)]
+    if passive && FAIL_PASSIVE_PERSISTENCE.try_with(|fail|*fail).unwrap_or(false) {
+        return Err(AppError::Internal("Injected passive observation persistence failure".into()));
+    }
+    let _=passive;
+    Ok(())
+}
+
 /// Only the concrete NyxID transport can construct this observer from a
 /// successful final-send claim. There is no client completion-report endpoint.
 pub(crate) struct CompletionObserver {
@@ -9,6 +23,17 @@ pub(crate) struct CompletionObserver {
 impl CompletionObserver {
     pub(super) fn new(state: AppState, claim: ClaimedDispatch) -> Self {
         Self { state, claim }
+    }
+    pub(crate) fn requires_no_redirect(&self) -> bool { !self.claim.read_observation }
+
+    pub(crate) fn redirect_probe(&self, actual: &reqwest::Client) -> Option<super::redirect_observation::Probe> {
+        if !self.claim.read_observation { return None; }
+        self.state.http_client.probe(actual)
+    }
+
+    pub(crate) async fn disable_observation(&self) -> AppResult<()> {
+        if !self.claim.read_observation { return Err(conflict()); }
+        self.unknown().await
     }
 
     pub(crate) fn wrap(self, response: reqwest::Response) -> AppResult<reqwest::Response> {
@@ -64,10 +89,18 @@ impl CompletionObserver {
     }
 
     async fn unknown(&self) -> AppResult<()> {
+        require_observation_persistence(self.claim.read_observation)?;
         let mut session = self.state.db.client().start_session().await?;
         session.start_transaction().and_run2(async |session| {
             let result = async {
                 let (mut row, mut private) = persistence::load(&self.state, &self.claim.root_id, Some(&mut *session)).await?;
+                if self.claim.read_observation {
+                    if row.phase == "unactivated" && !private.preconsent.ineligible {
+                        private.preconsent.disable();
+                        persistence::save(&self.state, &mut row, &private, session).await?;
+                    }
+                    return Ok(());
+                }
                 let step = private.steps.iter_mut().find(|s| s.id == self.claim.step_id).ok_or_else(conflict)?;
                 if matches!(&step.phase, StepPhase::Dispatched {dispatch_id} if dispatch_id == &self.claim.dispatch_id) {
                     step.phase = StepPhase::OutcomeUnknown { dispatch_id:self.claim.dispatch_id.clone() };
@@ -80,16 +113,22 @@ impl CompletionObserver {
     }
 
     async fn complete(&self, value: Value, body_sha256: String) -> AppResult<()> {
+        require_observation_persistence(self.claim.read_observation)?;
         let mut session = self.state.db.client().start_session().await?;
         session.start_transaction().and_run2(async |session| {
             let result = async {
                 let (mut row, mut private) = persistence::load(&self.state, &self.claim.root_id, Some(&mut *session)).await?;
-                let step = private.steps.iter_mut().find(|s| s.id == self.claim.step_id).ok_or_else(conflict)?;
+                if self.claim.read_observation && private.preconsent.ineligible { return Ok(()); }
+                let fixed = if self.claim.read_observation {
+                    &private.preconsent.reads.iter().find(|r|r.record.id==self.claim.step_id).ok_or_else(conflict)?.envelope.fixed
+                } else { &private.envelope.as_ref().ok_or_else(conflict)?.fixed }.clone();
+                let step = if self.claim.read_observation {
+                    &mut private.preconsent.reads.iter_mut().find(|r|r.record.id==self.claim.step_id).ok_or_else(conflict)?.record
+                } else { private.steps.iter_mut().find(|s| s.id == self.claim.step_id).ok_or_else(conflict)? };
                 if !matches!(&step.phase, StepPhase::Dispatched {dispatch_id} if dispatch_id == &self.claim.dispatch_id) { return Err(conflict()); }
                 let (complete, compaction) = match step.operation {
                     StepOperation::Generation => {
-                        let fixed = &private.envelope.as_ref().ok_or_else(conflict)?.fixed;
-                        (envelope::verify_completion(&value, fixed)?, None)
+                        (envelope::verify_completion(&value, &fixed)?, None)
                     }
                     StepOperation::Compact => {
                         let complete = compact::verify(value.clone(), &step.input)?;

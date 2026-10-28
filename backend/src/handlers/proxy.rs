@@ -4542,7 +4542,7 @@ async fn execute_resolved_proxy_inner<'a>(
         && assistant_decision
             .admission
             .as_ref()
-            .is_some_and(|a| a.model_control.is_some())
+            .is_some_and(|a| a.model_control.as_ref().is_some_and(|control| control.requires_no_redirect()))
     {
         return Err(AppError::Conflict(
             "Model control requires direct server transport".into(),
@@ -6747,7 +6747,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             || assistant_decision
                                 .admission
                                 .as_ref()
-                                .is_some_and(|a| a.model_control.is_some())
+                                .is_some_and(|a| a.model_control.as_ref().is_some_and(|control| control.requires_no_redirect()))
                             || operation_scoped
                             || operation_guest
                             || permission_ingress.is_some()

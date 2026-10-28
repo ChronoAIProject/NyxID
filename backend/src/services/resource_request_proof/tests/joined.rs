@@ -240,11 +240,11 @@ async fn serve_joined_cma_acceptance_fixture() {
     require_dedicated_mongo().await;
     let mut f = Fixture::new().await;
     f.key.full_key.zeroize(); // The provider needs its key ID, never the raw chat key.
-    f.state.http_client = reqwest::Client::builder()
+    f.state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(reqwest::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .unwrap();
+        .unwrap());
     let db = &f.state.db;
     let role = Uuid::new_v4().to_string();
     let now = mongodb::bson::DateTime::now();

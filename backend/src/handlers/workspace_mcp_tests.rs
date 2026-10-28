@@ -17,7 +17,7 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
     connect(&db, &owner, "api-google-drive").await;
     let echo = Echo::start().await;
     let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
+    state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     let auth = McpAuthContext::user(owner, AuthMethod::AccessToken);
     crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(),async {
         for active in [false,true] {

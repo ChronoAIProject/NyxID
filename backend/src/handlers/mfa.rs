@@ -1052,10 +1052,10 @@ mod tests {
             started.notify_one();
             std::future::pending::<()>().await;
         });
-        state.http_client = reqwest::Client::builder()
+        state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(reqwest::Client::builder()
             .proxy(reqwest::Proxy::all(proxy_url).unwrap())
             .build()
-            .unwrap();
+            .unwrap());
         state.config.telegram_bot_token = Some("fixture-not-real-token".into());
         db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME).insert_one(doc! {
             "_id":uuid::Uuid::new_v4().to_string(),"user_id":&id,"telegram_enabled":true,"telegram_chat_id":1_i64,

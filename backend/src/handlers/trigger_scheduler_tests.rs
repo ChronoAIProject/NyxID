@@ -1506,7 +1506,7 @@ async fn result_transport() -> (
 async fn schedule_result_delivers_to_telegram_and_push_with_live_acl() {
     let (mut state, _, agent_server) = setup("schedule_result_transport").await;
     let (client, requests, transport_server) = result_transport().await;
-    state.http_client = client;
+    state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(client);
     let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
     let trigger = automation(&state, &agent.id, None).await;
     let thread = team::home_thread(&state.db, &state.encryption_keys, &agent)

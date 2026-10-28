@@ -1,8 +1,14 @@
 use super::*;
+use futures::TryStreamExt;
 use crate::models::{
     assistant_acknowledgement::AssistantAcknowledgement,
     assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
 };
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static BEFORE_ISSUE_TRANSACTION: (tokio::sync::mpsc::Sender<()>,std::sync::Arc<tokio::sync::Semaphore>);
+}
 
 /// Constructed only by NyxID's owner runtime request, after negotiating the
 /// registered runtime's v1 capability. Neither a raw key nor a client header
@@ -53,7 +59,11 @@ pub(crate) async fn issue(
             filter.insert("api_key_id", &chat.api_key_id);
         }
     }
-    let existing = roots.find_one(filter).await?;
+    // Preflight only. The authoritative lookup is repeated after the shared
+    // live-turn fence on EVERY transaction retry before choosing a root.
+    let hinted:Vec<ModelControlRoot>=roots.find(filter.clone()).limit(2).await?.try_collect().await?;
+    if hinted.len()>1 {return Err(conflict());}
+    let existing = hinted.first();
     // Resolve saved lineage BEFORE testing the new key. Rotation invalidates
     // that lineage; it must never look like a new, uncontrolled legacy action.
     if existing
@@ -84,12 +94,21 @@ pub(crate) async fn issue(
         Err(error) => return Err(error),
     };
     let now = Utc::now();
+    #[cfg(test)]
+    if let Ok((entered,release))=BEFORE_ISSUE_TRANSACTION.try_with(Clone::clone) {
+        entered.send(()).await.map_err(|_|conflict())?;
+        tokio::time::timeout(std::time::Duration::from_secs(15),release.acquire()).await
+            .map_err(|_|conflict())?.map_err(|_|conflict())?.forget();
+    }
     let mut session = state.db.client().start_session().await?;
     let token = session.start_transaction().and_run2(async |session| {
         let result = async {
             let (live, _, _) = acks::fence(&state.db, chat, session).await?;
             super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
-            let (mut row, mut private, new) = if let Some(expected) = &existing {
+            let mut cursor=roots.find(filter.clone()).limit(2).session(&mut *session).await?;
+            let current:Vec<ModelControlRoot>=cursor.stream(&mut *session).try_collect().await?;
+            if current.len()>1 {return Err(conflict());}
+            let (mut row, mut private, new) = if let Some(expected) = current.first() {
                 let (row, private) = persistence::load(state, &expected.id, Some(&mut *session)).await?;
                 (row, private, false)
             } else {
@@ -104,7 +123,7 @@ pub(crate) async fn issue(
                     expires_at:now+Duration::minutes(35),
                 },RootPrivate {controls:vec![],envelope:None,initial_input:vec![],
                     connection_id:None,connection_binding:None,owner_id:None,catalog_id:None,
-                    card_arguments:None,effective_headers_binding:None,steps:vec![]},true)
+                    card_arguments:None,effective_headers_binding:None,steps:vec![],preconsent:read_observation::State::default(),initial_operation:StepOperation::Generation,initial_request_binding:None},true)
             };
             if row.user_id != chat.user_id || row.conversation_id != chat.conversation_id
                 || row.api_key_id != chat.api_key_id
@@ -115,6 +134,11 @@ pub(crate) async fn issue(
             // it under the old writer first; Deny retirement remains available.
             if private.controls.iter().any(|c| c.claims.protocol != wire::PROTOCOL) {
                 return Err(invalid());
+            }
+            if new && (!read_observation::covered_in_session(state,chat,session).await?
+                || state.db.collection::<Document>(super::super::assistant_service_execution::COLLECTION)
+                .find_one(read_observation::marker_scope(chat)?).session(&mut *session).await?.is_some()) {
+                private.preconsent.disable();
             }
             if let Some(bound) = private.controls.iter().find(|c|
                 c.claims.active_turn_id == turn_id && c.claims.outer_request_binding == binding)

@@ -181,6 +181,7 @@ mod tests {
             query: None,
             semantic_headers: vec![("content-type".into(), "application/json".into())],
             body: json!({"model":"fixed-model","instructions":"fixed privileged instructions","input":[]}),
+            generation_proposal: None,
             preceding_receipt: None,
             tool_results: vec![],
         };
@@ -212,6 +213,7 @@ mod tests {
             query: None,
             semantic_headers: vec![("content-type".into(), "application/json".into())],
             body: json!({"model":"fixed-model","store":false,"input":[{"role":"user","content":"question"}]}),
+            generation_proposal: None,
             preceding_receipt: None,
             tool_results: vec![],
         };
@@ -223,6 +225,7 @@ mod tests {
             query: None,
             semantic_headers: generation.semantic_headers.clone(),
             body: json!({"model":"fixed-model","input":generation.body["input"]}),
+            generation_proposal: None,
             preceding_receipt: None,
             tool_results: vec![],
         };

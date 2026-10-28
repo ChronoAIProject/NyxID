@@ -384,6 +384,10 @@ impl<'a> HttpEgressGuard<'a> {
             && let Some(control) = &guard.admission.model_control
         {
             if guard.route.is_some_and(|route| route.is_some()) {
+                if !control.requires_no_redirect() {
+                    control.disable_observation().await?;
+                    return Ok(None);
+                }
                 return Err(AppError::Conflict(
                     "Model control requires direct server transport".into(),
                 ));

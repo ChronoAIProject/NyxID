@@ -819,7 +819,7 @@ async fn machine_gateway_streaming_and_git_performance() {
     let mut f = orchestrator_fixture("machine_gateway_stream_git").await;
     let secret = format!("synthetic-provider-{}", Uuid::new_v4());
     let upstream = GitUpstream::start(&secret, true, false).await;
-    f.state.http_client = upstream.client.clone();
+    f.state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(upstream.client.clone());
     connect_service(&f, "api-github", "https://api.github.com", &secret).await;
     let (peer, node) = super::proxy_service::TARGET_HTTP_CLIENT_BUILDER
         .scope(upstream.client_builder.clone(), Peer::start(&f))
@@ -916,7 +916,7 @@ async fn machine_gateway_git_clone_fetch_pull_push_and_sdk_preserve_gzip() {
     let mut f = orchestrator_fixture("machine_git_gzip_correctness").await;
     let secret = format!("synthetic-provider-{}", Uuid::new_v4());
     let upstream = GitUpstream::start(&secret, false, true).await;
-    f.state.http_client = upstream.client.clone();
+    f.state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(upstream.client.clone());
     connect_service(&f, "api-github", "https://api.github.com", &secret).await;
     let (peer, node) = super::proxy_service::TARGET_HTTP_CLIENT_BUILDER
         .scope(upstream.client_builder.clone(), Peer::start(&f))

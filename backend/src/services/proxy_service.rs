@@ -4832,7 +4832,7 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let observer = if let Some(guard) = egress_guard {
+    let mut observer = if let Some(guard) = egress_guard {
         guard
             .claim_model_dispatch()
             .await
@@ -4840,13 +4840,44 @@ async fn forward_request_with_egress_guard_inner(
     } else {
         None
     };
+    // Passive Read must preserve the selected client's existing redirect
+    // behavior. Only an actual known no-redirect sender can certify its output;
+    // final URL equality cannot detect A -> B -> A redirect histories.
+    let known_no_redirect = resource_proof.is_some()
+        || target.target_id.is_some()
+        || target.auth_method == "github_git"
+        || target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        || std::ptr::eq(client, no_redirect_http_client());
+    let redirect_probe = observer.as_ref().and_then(|observer| observer.redirect_probe(client));
+    if observer.as_ref().is_some_and(|observer| !observer.requires_no_redirect())
+        && !known_no_redirect && redirect_probe.is_none() {
+        if let Some(passive) = observer.take() {
+            // The successful live-authority claim already persisted an
+            // incomplete passive intent (or found durable ineligibility).
+            // Losing this retirement write cannot resurrect an older receipt.
+            let _ = passive.disable_observation().await;
+        }
+    }
     // Cancellation, panic or any transport error after the CAS leaves the
     // durable Dispatched tombstone intact. Nothing here resets it to Prepared.
-    let response = if resource_proof.is_some() || observer.is_some() {
+    let response = if resource_proof.is_some() || observer.as_ref().is_some_and(|observer| observer.requires_no_redirect()) {
         // Enforce this at the common send boundary, including LLM gateway
         // callers whose ordinary client follows redirects. One dispatch claim
         // must never permit a second request through a 307/308 response.
         no_redirect_http_client().execute(request).await?
+    } else if let Some(probe) = redirect_probe {
+        // The consuming probe builds and polls this exact client's execute
+        // future. Evidence exists only after it returns; cancellation/errors
+        // leave the passive record incomplete. Preserve every policy action.
+        let (response, direct) = probe.execute(request).await?;
+        if !direct && let Some(passive) = observer.take() {
+            // Provider sends have already happened. Even if this best-effort
+            // retirement cannot persist, the BEFORE-send Dispatched record
+            // stays incomplete and cannot certify compact history. Return the
+            // ordinary redirect outcome without mislabeling it pre-dispatch.
+            let _ = passive.disable_observation().await;
+        }
+        response
     } else {
         client.execute(request).await?
     };

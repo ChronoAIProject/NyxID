@@ -444,7 +444,7 @@ async fn google_upload_post_patch_preserve_binary_multipart_and_html_bytes_direc
     let echo = Echo::start().await;
     let owner = uuid::Uuid::new_v4().to_string();
     let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
+    state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     let spec = crate::services::catalog_spec_registry::spec_for_key("google-drive").unwrap();
     for slug in ["api-google-drive", "api-google-workspace"] {
         connect(&db, &owner, slug).await;
@@ -528,7 +528,7 @@ async fn google_upload_mcp_projection_rejects_before_dispatch_and_keeps_binary_m
     let echo = Echo::start().await;
     let owner = uuid::Uuid::new_v4().to_string();
     let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
+    state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     for slug in ["api-google-drive", "api-google-workspace"] {
         connect(&db, &owner, slug).await;
     }
@@ -697,7 +697,7 @@ async fn google_service_disabled_403_passes_through_rest_and_mcp_distinct_from_a
     let owner = uuid::Uuid::new_v4().to_string();
     let echo = Echo::start().await;
     let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
+    state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     for slug in ["api-google-drive", "api-google-workspace"] {
         connect(&db, &owner, slug).await;
     }
@@ -1104,7 +1104,7 @@ async fn google_generic_mcp_cannot_set_multipart_content_type() {
     let owner = uuid::Uuid::new_v4().to_string();
     connect(&db, &owner, "api-google-drive").await;
     let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
+    state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     let mut catalog = mcp_service::load_operation_catalog(
         &db,
         &state.node_ws_manager,

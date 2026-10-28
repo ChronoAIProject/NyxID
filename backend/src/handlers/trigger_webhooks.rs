@@ -71,7 +71,7 @@ pub async fn receive_trigger(
         trigger_service::dispatch_webhook_event(
             state.db.clone(),
             state.encryption_keys.clone(),
-            state.http_client.clone(),
+            state.http_client.as_client().clone(),
             trigger,
             *record,
             body,
