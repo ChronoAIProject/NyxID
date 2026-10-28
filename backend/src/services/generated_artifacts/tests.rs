@@ -719,6 +719,401 @@ async fn generated_artifacts_exact_event_binding_cancellation_capacity_and_recov
     db.drop().await.unwrap();
 }
 
+// Real pending persistence/enqueue, with one in-flight materialization row.
+async fn pending_stop_watch(
+    db: &Database,
+    keys: &EncryptionKeys,
+    home: &AsyncServiceOperation,
+    turn: &str,
+) -> (AsyncServiceOperation, Vec<String>) {
+    let mut w = watch();
+    w.user_id = home.user_id.clone();
+    w.conversation_id = home.conversation_id.clone();
+    w.turn_id = turn.into();
+    w.operation_id = Some(Uuid::new_v4().to_string());
+    db.collection::<AsyncServiceOperation>(WATCHES)
+        .insert_one(&w)
+        .await
+        .unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&body("pending.png", PNG)).unwrap();
+    wire["output"]["files"].as_array_mut().unwrap().push(json!({
+        "path":"materializing.png", "content":base64::engine::general_purpose::STANDARD.encode(PNG)
+    }));
+    let result = sandbox::parse(&wire.to_string(), w.operation_id.as_deref().unwrap()).unwrap();
+    let reservation = byte_budget::reserve(sandbox::RESERVATION).await.unwrap();
+    Box::pin(persist(
+        db,
+        keys,
+        &w,
+        &result,
+        &sandbox::Status {
+            expires_at: None,
+            version: Some("7".into()),
+        },
+        &reservation,
+    ))
+    .await
+    .unwrap();
+    let ready = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        Box::pin(super::super::async_service_operation::enqueue(db, &ready))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        db.collection::<Document>(ARTIFACTS)
+            .update_one(
+                doc! {"watch_id":&w.id,"artifact_index":1},
+                doc! {"$set":{"state":"materializing"}}
+            )
+            .await
+            .unwrap()
+            .modified_count,
+        1
+    );
+    let files: Vec<PendingArtifact> = db
+        .collection::<PendingArtifact>(ARTIFACTS)
+        .find(doc! {"watch_id":&w.id})
+        .sort(doc! {"artifact_index":1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].state, "pending");
+    assert_eq!(files[1].state, "materializing");
+    assert!(files.iter().all(|file| file.data_encrypted.is_some()
+        && file.secret_context_versions.get("data_encrypted") == Some(&3)));
+    (ready, files.into_iter().map(|file| file.id).collect())
+}
+
+#[tokio::test]
+async fn generated_artifacts_stop_discards_only_selected_pending_bytes_and_preserves_saved_files() {
+    use super::super::{assistant_nyxagent as engine, async_service_operation as watches};
+    let db = crate::test_utils::connect_transaction_test_database("artstop2037").await;
+    let keys = crate::test_utils::test_encryption_keys();
+    ensure_indexes(&db).await.unwrap();
+    let (saved, mut row) = Box::pin(seeded(&db, &keys)).await;
+    // First save a real terminal attachment in the same owner/conversation.
+    let (saved_file, attachment) = Box::pin(async {
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        Box::pin(bind_in_session(&db, &keys, &mut row, &saved, &mut session))
+            .await
+            .unwrap();
+        Box::pin(associate_in_session(
+            &db,
+            &row,
+            "stop-saved-message",
+            &mut session,
+        ))
+        .await
+        .unwrap();
+        watches::delivered_in_session(&db, &row, &mut session)
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .insert_one(doc! {"_id":"stop-saved-message","user_id":&saved.user_id,
+            "conversation_id":&row.id,"turn_id":"completion2037","role":"assistant",
+            "origin":"event","seq":2,"text":"saved file","status":"completed",
+            "created_at":bson::DateTime::now(),
+            "attachments":bson::to_bson(&row.active_turn.as_ref().unwrap().attachments).unwrap()})
+            .session(&mut session)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        let file = db
+            .collection::<PendingArtifact>(ARTIFACTS)
+            .find_one(doc! {"watch_id":&saved.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(file.state, "materialized");
+        assert!(file.data_encrypted.is_none());
+        (file.id, file.assistant_attachment_id)
+    })
+    .await;
+    let (current, current_files) =
+        Box::pin(pending_stop_watch(&db, &keys, &saved, "stop-current-turn")).await;
+    let (waiting, waiting_files) = Box::pin(pending_stop_watch(
+        &db,
+        &keys,
+        &saved,
+        "unrelated-waiting-turn",
+    ))
+    .await;
+    let mut protected = vec![
+        (WATCHES, saved.id.clone()),
+        (ARTIFACTS, saved_file),
+        (ATTACHMENTS, attachment.clone()),
+        (
+            crate::models::assistant_message::COLLECTION_NAME,
+            "stop-saved-message".into(),
+        ),
+    ];
+    Box::pin(async {
+        // Adversarial same-watch rows independently exercise both owner and
+        // conversation fences. Their ciphertext uses each row's real context.
+        let template = db
+            .collection::<PendingArtifact>(ARTIFACTS)
+            .find_one(doc! {"_id":&current_files[0]})
+            .await
+            .unwrap()
+            .unwrap();
+        // Same selected watch and owner/conversation: only the artifact state
+        // excludes this terminal sentinel. Real saved bytes are checked above.
+        let mut terminal = template.clone();
+        terminal.id = Uuid::new_v4().to_string();
+        terminal.artifact_index = 4;
+        terminal.assistant_attachment_id = Uuid::new_v4().to_string();
+        terminal.state = "materialized".into();
+        terminal.data_encrypted = None;
+        terminal.secret_context_versions.clear();
+        db.collection::<PendingArtifact>(ARTIFACTS)
+            .insert_one(&terminal)
+            .await
+            .unwrap();
+        protected.push((ARTIFACTS, terminal.id));
+        for (index, user, conversation) in [
+            (2, "foreign-owner", row.id.as_str()),
+            (3, saved.user_id.as_str(), "foreign-conversation"),
+        ] {
+            let mut file = template.clone();
+            file.id = Uuid::new_v4().to_string();
+            file.artifact_index = index;
+            file.user_id = user.into();
+            file.conversation_id = conversation.into();
+            file.assistant_attachment_id = Uuid::new_v4().to_string();
+            file.data_encrypted = Some(
+                keys.encrypt_record(
+                    PNG,
+                    &RecordContext::new(ARTIFACTS, &file.id, &file.user_id, &context_path(&file))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+            );
+            db.collection::<PendingArtifact>(ARTIFACTS)
+                .insert_one(&file)
+                .await
+                .unwrap();
+            protected.push((ARTIFACTS, file.id));
+        }
+    })
+    .await;
+    let terminal_count = protected.len();
+    protected.push((WATCHES, waiting.id.clone()));
+    protected.extend(waiting_files.iter().cloned().map(|id| (ARTIFACTS, id)));
+    let snapshots = Box::pin(async {
+        let mut snapshots = Vec::new();
+        for (collection, id) in protected {
+            let document = db
+                .collection::<Document>(collection)
+                .find_one(doc! {"_id":&id})
+                .await
+                .unwrap()
+                .unwrap();
+            snapshots.push((collection, id, bson::to_vec(&document).unwrap()));
+        }
+        snapshots
+    })
+    .await;
+    Box::pin(async {
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.turn_id = current.turn_id.clone();
+        turn.origin = TurnOrigin::User;
+        turn.events.clear();
+        turn.attachments.clear();
+        turn.lease_expires_at = Some(Utc::now() + Duration::minutes(5));
+        // No heartbeat worker is running in this fixture. The explicit live
+        // lease reaches request_stop's durable CAS, not expired-legacy cleanup.
+        assert!(turn.heartbeat_at.is_none());
+        db.collection::<Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"active_turn":bson::to_bson(&row.active_turn).unwrap()}},
+            )
+            .await
+            .unwrap();
+        assert!(engine::live_turn(&row, Utc::now()).is_some());
+        Box::pin(engine::request_stop(&db, &saved.user_id, &row.id))
+            .await
+            .unwrap();
+        let stopped = engine::get(&db, &saved.user_id, &row.id).await.unwrap();
+        assert!(stopped.active_turn.as_ref().unwrap().stop_requested);
+        assert_eq!(
+            stopped.active_turn.as_ref().unwrap().turn_id,
+            current.turn_id
+        );
+        assert_eq!(
+            stopped
+                .pending_events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![waiting.id.as_str()]
+        );
+        assert_eq!(
+            db.collection::<AsyncServiceOperation>(WATCHES)
+                .find_one(doc! {"_id":&current.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "cancelling"
+        );
+        for id in &current_files {
+            let file = db
+                .collection::<PendingArtifact>(ARTIFACTS)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(file.state, "discarded");
+            assert!(file.data_encrypted.is_none());
+            assert!(file.secret_context_versions.is_empty());
+        }
+        for (collection, id, before) in &snapshots {
+            let after = db
+                .collection::<Document>(collection)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                bson::to_vec(&after).unwrap(),
+                *before,
+                "active Stop changed protected {collection}/{id}"
+            );
+        }
+    })
+    .await;
+    Box::pin(async {
+        db.collection::<Document>(CONVERSATIONS)
+            .update_one(doc! {"_id":&row.id}, doc! {"$set":{"active_turn":null}})
+            .await
+            .unwrap();
+        let idle = engine::get(&db, &saved.user_id, &row.id).await.unwrap();
+        assert!(idle.active_turn.is_none());
+        let (replacement, replacement_files) =
+            Box::pin(pending_stop_watch(&db, &keys, &saved, "replacement-turn")).await;
+        let mut turn = row.active_turn.clone().unwrap();
+        turn.turn_id = replacement.turn_id.clone();
+        turn.stop_requested = false;
+        db.collection::<Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"active_turn":bson::to_bson(&turn).unwrap()}},
+            )
+            .await
+            .unwrap();
+        // Deterministically replay the idle snapshot after replacement is persisted.
+        // The entire conversation/watch/artifact/attachment BSON must stay exact.
+        let mut before = Vec::new();
+        for collection in [CONVERSATIONS, WATCHES, ARTIFACTS, ATTACHMENTS] {
+            let documents: Vec<Document> = db
+                .collection::<Document>(collection)
+                .find(doc! {})
+                .sort(doc! {"_id":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            before.push((
+                collection,
+                documents
+                    .iter()
+                    .map(|document| bson::to_vec(document).unwrap())
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        Box::pin(watches::cancel_for_stop(&db, &idle))
+            .await
+            .unwrap();
+        for (collection, expected) in before {
+            let documents: Vec<Document> = db
+                .collection::<Document>(collection)
+                .find(doc! {})
+                .sort(doc! {"_id":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(
+                documents
+                    .iter()
+                    .map(|document| bson::to_vec(document).unwrap())
+                    .collect::<Vec<_>>(),
+                expected,
+                "stale idle Stop changed {collection}"
+            );
+        }
+        // A matching idle Stop still selects all pending watches in this home.
+        db.collection::<Document>(CONVERSATIONS)
+            .update_one(doc! {"_id":&row.id}, doc! {"$set":{"active_turn":null}})
+            .await
+            .unwrap();
+        Box::pin(engine::request_stop(&db, &saved.user_id, &row.id))
+            .await
+            .unwrap();
+        let stopped = engine::get(&db, &saved.user_id, &row.id).await.unwrap();
+        assert!(stopped.active_turn.is_none());
+        assert!(stopped.pending_events.is_empty());
+        for watch in [&waiting, &replacement] {
+            assert_eq!(
+                db.collection::<AsyncServiceOperation>(WATCHES)
+                    .find_one(doc! {"_id":&watch.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "cancelling"
+            );
+        }
+        for id in waiting_files.iter().chain(&replacement_files) {
+            let file = db
+                .collection::<PendingArtifact>(ARTIFACTS)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(file.state, "discarded");
+            assert!(file.data_encrypted.is_none());
+            assert!(file.secret_context_versions.is_empty());
+        }
+        for (collection, id, before) in &snapshots[..terminal_count] {
+            let after = db
+                .collection::<Document>(collection)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                bson::to_vec(&after).unwrap(),
+                *before,
+                "idle Stop changed terminal/foreign {collection}/{id}"
+            );
+        }
+        assert_eq!(
+            engine::read_attachment(&db, &keys, &saved.user_id, &row.id, &attachment)
+                .await
+                .unwrap()
+                .1,
+            MP4
+        );
+    })
+    .await;
+    db.drop().await.unwrap();
+}
+
 #[test]
 fn generated_artifacts_saved_admission_is_web_user_only_and_legacy_stays_legacy() {
     let admitted_watch = watch();
