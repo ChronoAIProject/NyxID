@@ -205,3 +205,27 @@ it("replaces the expiry schedule and cancels its remaining timer on unmount", ()
     vi.useRealTimers();
   }
 });
+
+it.each(["absent", "invalid", "future"] as const)("resets local expiry after replacing an expired deadline with %s metadata", (replacement) => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-01T00:00:00Z"));
+  const attachment = { ...video, previewKind: "download" as const, expiresAt: new Date(Date.now() - 1).toISOString() };
+  const { rerender, unmount } = render(<ToolImage image={attachment} />);
+  try {
+    expect(screen.getByRole("status")).toHaveTextContent("expired");
+    const expiresAt = replacement === "future"
+      ? new Date(Date.now() + 2000).toISOString()
+      : replacement === "invalid" ? "not-a-date" : undefined;
+    rerender(<ToolImage image={{ ...attachment, expiresAt }} />);
+    act(() => vi.advanceTimersByTime(0));
+    expect(screen.getByRole("button", { name: "Download movie.mp4" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).not.toHaveTextContent("expired");
+    expect(assistantHttp).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(replacement === "future" ? 1 : 0);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
+});
