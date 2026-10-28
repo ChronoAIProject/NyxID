@@ -430,7 +430,7 @@ async fn check_http_projected_inner(
     }
     let read = matches!(method, "GET" | "HEAD" | "OPTIONS") && !method_override;
     let destructive = method == "DELETE" || method_override;
-    let summary = if raw_inference {
+    let mut summary = if raw_inference {
         format!(
             "Use {} / {} for this turn",
             crate::services::assistant_nyxagent::identifier(&target.service.slug),
@@ -446,6 +446,15 @@ async fn check_http_projected_inner(
             crate::services::assistant_nyxagent::identifier(&target.service.slug)
         )
     };
+    if legacy_inference
+        && let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(reason) = super::request_identity::inference_fallback_reason(path, &parsed)
+    {
+        super::request_identity::record_fallback_reason(&state.db, chat, &operation, reason)
+            .await?;
+        summary.push_str(". ");
+        summary.push_str(reason.message());
+    }
     let decision = check(
         &state.db,
         &state.node_ws_manager,

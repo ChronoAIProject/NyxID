@@ -113,6 +113,153 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         && stateless_model_transport(path, body)
 }
 
+/// Presentation only. Never include this diagnosis in an operation identity,
+/// consent digest or dispatch key. Messages contain no caller-supplied values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InferenceFallbackReason {
+    MetadataShape,
+    MetadataUnknownField,
+    MetadataIdentifier,
+    MetadataTextLimit,
+    MetadataObjectLimit,
+    CompactProtocolUnverified,
+    ProviderStateOrEffect,
+    UnsupportedGeneration,
+}
+
+impl InferenceFallbackReason {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::MetadataShape => "metadata_shape",
+            Self::MetadataUnknownField => "metadata_unknown_field",
+            Self::MetadataIdentifier => "metadata_identifier",
+            Self::MetadataTextLimit => "metadata_text_limit",
+            Self::MetadataObjectLimit => "metadata_object_limit",
+            Self::CompactProtocolUnverified => "compact_protocol_unverified",
+            Self::ProviderStateOrEffect => "provider_state_or_effect",
+            Self::UnsupportedGeneration => "unsupported_generation",
+        }
+    }
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::MetadataShape => {
+                "Automatic model Read requires the complete seven-field metadata contract. Review this exact request or use a supported client shape."
+            }
+            Self::MetadataUnknownField => {
+                "Unrecognized metadata has no reviewed inert meaning. Approval covers this exact request only."
+            }
+            Self::MetadataIdentifier => {
+                "A correlation identifier is outside the bounded client grammar. Use a supported client shape or review this exact request."
+            }
+            Self::MetadataTextLimit => {
+                "Automatic model Read allows at most 1024 UTF-8 bytes of turn metadata. Approval covers this exact request only."
+            }
+            Self::MetadataObjectLimit => {
+                "Automatic model Read allows at most 2048 bytes of compact canonical client metadata. Approval covers this exact request only."
+            }
+            Self::CompactProtocolUnverified => {
+                "Compaction has no reviewed reusable protocol. Approval covers this exact body; changed compaction requires separate review."
+            }
+            Self::ProviderStateOrEffect => {
+                "Provider state or executable configuration is outside automatic model Read. Review the exact request and its effects."
+            }
+            Self::UnsupportedGeneration => {
+                "This generation shape has no reviewed automatic model contract. Review this exact request or use a supported shape."
+            }
+        }
+    }
+}
+
+pub(super) async fn record_fallback_reason(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    operation: &Value,
+    reason: InferenceFallbackReason,
+) -> AppResult<()> {
+    // Retain an actionable diagnosis even when an existing policy permits the
+    // exact request without a card. Only the operation digest and static text
+    // are stored; none of the request's raw metadata or body is copied here.
+    db.collection::<Document>(COLLECTION)
+        .update_one(
+            doc! {"kind":"model_fallback_diagnostic", "user_id":&chat.user_id,
+            "conversation_id":&chat.conversation_id, "api_key_id":&chat.api_key_id,
+            "turn_id":&chat.turn_id, "operation":digest(operation.clone())},
+            doc! {"$setOnInsert": {"_id":uuid::Uuid::new_v4().to_string(),
+            "reason":reason.code(), "explanation":reason.message(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35))}},
+        )
+        .upsert(true)
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn inference_fallback_reason(
+    path: &str,
+    body: &Value,
+) -> Option<InferenceFallbackReason> {
+    use InferenceFallbackReason as Reason;
+    if stateless_inference(path, body) {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path.strip_prefix("v1/").unwrap_or(path);
+    if !matches!(
+        path,
+        "responses" | "responses/compact" | "chat/completions" | "messages" | "embeddings"
+    ) {
+        return Some(Reason::UnsupportedGeneration);
+    }
+    let mut without_metadata = body.clone();
+    let Some(object) = without_metadata.as_object_mut() else {
+        return Some(Reason::UnsupportedGeneration);
+    };
+    object.remove("client_metadata");
+    // Diagnose executable/stateful changes first. Oversized telemetry must not
+    // disguise an unrelated effect or provider resource as a metadata problem.
+    let transport_path = if path == "responses/compact" {
+        "responses"
+    } else {
+        path
+    };
+    if !stateless_model_transport(transport_path, &without_metadata) {
+        return Some(Reason::ProviderStateOrEffect);
+    }
+    if path == "responses/compact" {
+        return Some(Reason::CompactProtocolUnverified);
+    }
+    let Some(metadata) = body.get("client_metadata").and_then(Value::as_object) else {
+        return Some(Reason::MetadataShape);
+    };
+    const KEYS: &[&str] = &[
+        "root_turn_id",
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "x-codex-installation-id",
+        "x-codex-window-id",
+        "x-codex-turn-metadata",
+    ];
+    if metadata.keys().any(|key| !KEYS.contains(&key.as_str())) {
+        return Some(Reason::MetadataUnknownField);
+    }
+    if metadata.len() != KEYS.len() || metadata.values().any(|value| !value.is_string()) {
+        return Some(Reason::MetadataShape);
+    }
+    if metadata["x-codex-turn-metadata"]
+        .as_str()
+        .is_some_and(|text| text.len() > 1024)
+    {
+        return Some(Reason::MetadataTextLimit);
+    }
+    // The existing strict validator remains the sole grammar authority. A
+    // failed object under its size ceiling can only be an identifier failure.
+    let sorted: std::collections::BTreeMap<_, _> = metadata.iter().collect();
+    if serde_json::to_vec(&sorted).is_ok_and(|bytes| bytes.len() > 2048) {
+        return Some(Reason::MetadataObjectLimit);
+    }
+    Some(Reason::MetadataIdentifier)
+}
+
 /// Closed generation contract used only for guest model transport and recording
 /// an already-admitted owner route. It never selects an owner's admission path.
 pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {

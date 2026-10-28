@@ -369,6 +369,139 @@ async fn projected(
 }
 
 #[tokio::test]
+async fn codex_exact_fallback_reason_survives_card_reuse_without_changing_identity() {
+    use super::super::request_identity::{
+        InferenceFallbackReason as Reason, inference_fallback_reason,
+    };
+    let f = orchestrator_fixture("permissions_fallback_reason").await;
+    mode(&f, AccessMode::AskEveryTime).await;
+    let c = catalog(&f).await;
+    let id = connection(&f, &f.owner, "chrono-llm-public", Some(&c)).await;
+    let resolved = target(&f, &id).await;
+    let mut auth = f.auth.clone();
+    auth.assistant_chat = Some(std::sync::Arc::new(f.chat.clone()));
+    let mut body = callback();
+    body["client_metadata"]["unknown"] = json!("private value must not appear in diagnosis");
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let before = http_operation(&resolved, "POST", "responses", None, &bytes);
+    let first = projected(
+        &f,
+        &auth,
+        &resolved,
+        &id,
+        &bytes,
+        "responses",
+        &HeaderMap::new(),
+    )
+    .await
+    .refusal
+    .unwrap();
+    let second = projected(
+        &f,
+        &auth,
+        &resolved,
+        &id,
+        &bytes,
+        "responses",
+        &HeaderMap::new(),
+    )
+    .await
+    .refusal
+    .unwrap();
+    assert_eq!(first["acknowledgement_id"], second["acknowledgement_id"]);
+    assert!(
+        first["summary"]
+            .as_str()
+            .unwrap()
+            .contains(Reason::MetadataUnknownField.message())
+    );
+    assert!(!first["summary"].as_str().unwrap().contains("private value"));
+    let saved = f
+        .state
+        .db
+        .collection::<Document>("assistant_acknowledgements")
+        .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.get_str("summary").unwrap(),
+        first["summary"].as_str().unwrap()
+    );
+    assert_eq!(
+        http_operation(&resolved, "POST", "responses", None, &bytes),
+        before
+    );
+    assert_eq!(f.state.db.collection::<Document>(COLLECTION).count_documents(doc! {
+        "conversation_id":&f.row.id,"kind":"model_fallback_diagnostic","reason":"metadata_unknown_field"
+    }).await.unwrap(), 1);
+    body["store"] = json!(true);
+    body["client_metadata"]["x-codex-turn-metadata"] = json!("x".repeat(1025));
+    assert_eq!(
+        inference_fallback_reason("responses", &body),
+        Some(Reason::ProviderStateOrEffect)
+    );
+    let refusal = projected(
+        &f,
+        &auth,
+        &resolved,
+        &id,
+        &serde_json::to_vec(&body).unwrap(),
+        "responses",
+        &HeaderMap::new(),
+    )
+    .await
+    .refusal
+    .unwrap();
+    assert!(
+        refusal["summary"]
+            .as_str()
+            .unwrap()
+            .contains(Reason::ProviderStateOrEffect.message())
+    );
+    assert!(
+        !refusal["summary"]
+            .as_str()
+            .unwrap()
+            .contains(Reason::MetadataTextLimit.message())
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[test]
+fn codex_fallback_reasons_are_closed_and_preserve_strict_read() {
+    use super::super::request_identity::{
+        InferenceFallbackReason as Reason, inference_fallback_reason,
+    };
+    assert_eq!(inference_fallback_reason("responses", &callback()), None);
+    let mut body = callback();
+    body["client_metadata"]["x-codex-turn-metadata"] = json!("x".repeat(1025));
+    assert_eq!(
+        inference_fallback_reason("responses", &body),
+        Some(Reason::MetadataTextLimit)
+    );
+    body["client_metadata"] = json!({"thread_id":"t", "turn_id":"u"});
+    assert_eq!(
+        inference_fallback_reason("responses", &body),
+        Some(Reason::MetadataShape)
+    );
+    assert_eq!(
+        inference_fallback_reason("responses/compact", &body),
+        Some(Reason::CompactProtocolUnverified)
+    );
+    body["client_metadata"]["unknown"] = json!("opaque");
+    assert_eq!(
+        inference_fallback_reason("responses", &body),
+        Some(Reason::MetadataUnknownField)
+    );
+    body["previous_response_id"] = json!("state");
+    assert_eq!(
+        inference_fallback_reason("responses", &body),
+        Some(Reason::ProviderStateOrEffect)
+    );
+}
+
+#[tokio::test]
 async fn codex_callback_projected_read_path_keeps_exact_negative_approvals() {
     let f = orchestrator_fixture("permissions_codex_projection").await;
     mode(&f, AccessMode::AskEveryTime).await;
