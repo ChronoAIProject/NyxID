@@ -110,7 +110,24 @@ struct Step {
 struct HostTool {
     call_id: String,
     capability: wire::SecretToken,
+    #[serde(default = "wire::default_tool_result_chars")]
+    result_char_limit: usize,
+    #[serde(default)]
+    control_hash: Option<String>,
+    #[serde(default)]
+    refusal_evidence: Option<RefusalEvidence>,
+    #[serde(default)]
+    refusal_source_hash: Option<String>,
     phase: HostToolPhase,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct RefusalEvidence {
+    kind: wire::RefusalKind,
+    target_name: String,
+    target_arguments_hash: String,
+    attempt_hash: String,
+    origin_step_id: String,
+    origin_call_id: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]

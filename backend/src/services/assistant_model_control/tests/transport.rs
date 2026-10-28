@@ -14,7 +14,7 @@ use axum::{
     extract::{Extension, Path, State},
     http::{Request, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
 };
 use futures::TryStreamExt;
 use std::sync::{
@@ -28,6 +28,9 @@ struct Provider {
     terminal: tokio::sync::Notify,
     eof: tokio::sync::Semaphore,
     mode: &'static str,
+    call_override: tokio::sync::Mutex<Option<Value>>,
+    repeat_call: tokio::sync::Mutex<Option<Value>>,
+    tool_calls: AtomicUsize,
 }
 fn completion(call: usize) -> Value {
     json!({"id":format!("resp-{call}"),"object":"response","status":"completed","error":null,"incomplete_details":null,
@@ -48,6 +51,16 @@ async fn provider(
             .into_response();
     }
     let mut completed = completion(call);
+    if call == 0
+        && let Some(calls) = peer.call_override.lock().await.as_ref()
+    {
+        completed["output"] = calls.clone();
+    }
+    if call == 1
+        && let Some(calls) = peer.repeat_call.lock().await.as_ref()
+    {
+        completed["output"] = calls.clone();
+    }
     if peer.mode == "malformed_id" {
         completed["output"][0]["id"] = json!({"not":"a native item id"});
     } else if peer.mode == "reasoning_status" {
@@ -79,10 +92,20 @@ async fn fixture(mode: &'static str) -> (Controlled, Arc<Provider>, tokio::task:
         terminal: tokio::sync::Notify::new(),
         eof: tokio::sync::Semaphore::new(0),
         mode,
+        call_override: tokio::sync::Mutex::new(None),
+        repeat_call: tokio::sync::Mutex::new(None),
+        tool_calls: AtomicUsize::new(0),
     });
     let second = peer.clone();
     let app = Router::new()
         .route("/responses", post(provider))
+        .route(
+            "/tool-output",
+            get(|State(peer): State<Arc<Provider>>| async move {
+                peer.tool_calls.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({"blob":"界🙂".repeat(60_000)}))
+            }),
+        )
         .route(
             "/second-send",
             post(move || {
@@ -359,6 +382,20 @@ async fn current(c: &Controlled, step: &wire::PreparedStep) -> wire::PrepareRepl
     .unwrap()
 }
 async fn actual_tool(c: &Controlled, tool: &wire::PreparedTool) -> Value {
+    actual_named_tool(
+        c,
+        tool,
+        "nyx__search_tools",
+        json!({"query":"missing-test-tool"}),
+    )
+    .await
+}
+async fn actual_named_tool(
+    c: &Controlled,
+    tool: &wire::PreparedTool,
+    name: &str,
+    arguments: Value,
+) -> Value {
     let credential = crate::services::assistant_agent_credential_service::load_for_conversation(
         &c.f.state.db,
         &c.f.state.encryption_keys,
@@ -371,7 +408,7 @@ async fn actual_tool(c: &Controlled, tool: &wire::PreparedTool) -> Value {
     let req=Request::builder().method("POST").uri("/mcp").header("x-api-key",credential.raw_key.as_str())
         .header("content-type","application/json").header("accept","application/json")
         .header(wire::CONTROL_HEADER,c.token.expose()).header(wire::TOOL_HEADER,tool.tool_bearer.expose())
-        .body(Body::from(json!({"jsonrpc":"2.0","id":"rpc-host-call","method":"tools/call","params":{"name":"nyx__search_tools","arguments":{"query":"missing-test-tool"}}}).to_string())).unwrap();
+        .body(Body::from(json!({"jsonrpc":"2.0","id":"rpc-host-call","method":"tools/call","params":{"name":name,"arguments":arguments}}).to_string())).unwrap();
     let response = Box::pin(crate::handlers::mcp_transport::mcp_post(
         State(c.f.state.clone()),
         Extension(BillingRoutePolicy::Metered(BillingIngress::Mcp)),
@@ -525,7 +562,10 @@ async fn counted_followup(metadata: Option<Value>) {
             wire::ToolPrepareRequest {
                 protocol: wire::PROTOCOL.into(),
                 name: "nyx__search_tools".into(),
-                arguments: json!({"query":"missing-test-tool"})
+                arguments: json!({"query":"missing-test-tool"}),
+                call_id: Some("call-1".into()),
+                result_char_limit: wire::default_tool_result_chars(),
+                refusal_source: None,
             }
         )
         .await
@@ -544,6 +584,9 @@ async fn counted_followup(metadata: Option<Value>) {
             protocol: wire::PROTOCOL.into(),
             name: "nyx__search_tools".into(),
             arguments: json!({"query":"missing-test-tool"}),
+            call_id: Some("call-1".into()),
+            result_char_limit: wire::default_tool_result_chars(),
+            refusal_source: None,
         },
     )
     .await
@@ -1283,4 +1326,833 @@ async fn real_catalog_inference_removal_preserves_unactivated_exact_only_but_nev
         server.abort();
         c.f.state.db.drop().await.unwrap();
     }
+}
+
+/// Real provider declarations and actual MCP dispatch, including duplicate
+/// equal name/arguments selected by native callId. No forged tool receipt.
+#[tokio::test]
+async fn real_native_call_ids_select_equal_declarations_and_bind_first_projection_limit() {
+    let (mut c, peer, server) = fixture("completed").await;
+    let first = completion(0)["output"][0].clone();
+    let mut second = first.clone();
+    second["id"] = json!("fc-2");
+    second["call_id"] = json!("call-2");
+    let calls = json!([first, second]);
+    *peer.call_override.lock().await = Some(calls.clone());
+    c.allow_resume().await;
+    let candidate = request(vec![user("Saved Allow narration")]);
+    let body = candidate.body.clone();
+    let wire::PrepareReply::Prepared { step } = prepare(&c.f.state, &c.f.chat, &c.token, candidate)
+        .await
+        .unwrap()
+    else {
+        panic!("prepared");
+    };
+    peer.eof.add_permits(1);
+    to_bytes(
+        callback(&c, &body, Some(&step)).await.unwrap().into_body(),
+        wire::MAX_STREAM_BYTES,
+    )
+    .await
+    .unwrap();
+    let wire::PrepareReply::Completed { receipt } = current(&c, &step).await else {
+        panic!("completed");
+    };
+    let prepare_call = |id: Option<&str>, limit| wire::ToolPrepareRequest {
+        protocol: wire::PROTOCOL.into(),
+        name: "nyx__search_tools".into(),
+        arguments: json!({"query":"missing-test-tool"}),
+        call_id: id.map(str::to_owned),
+        result_char_limit: limit,
+        refusal_source: None,
+    };
+    assert!(
+        tool_prepare(&c.f.state, &c.f.chat, &c.token, prepare_call(None, 1024))
+            .await
+            .is_err()
+    );
+    for id in ["", "forged", "call-3"] {
+        assert!(
+            tool_prepare(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                prepare_call(Some(id), 1024)
+            )
+            .await
+            .is_err()
+        );
+    }
+    let mut proofs = vec![];
+    let mut outputs = vec![];
+    for id in ["call-1", "call-2"] {
+        let tool = tool_prepare(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            prepare_call(Some(id), 1024),
+        )
+        .await
+        .unwrap();
+        let recovered = tool_prepare(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            prepare_call(Some(id), 1024),
+        )
+        .await
+        .unwrap();
+        assert_eq!(tool.tool_bearer.expose(), recovered.tool_bearer.expose());
+        assert!(
+            tool_prepare(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                prepare_call(Some(id), 2048)
+            )
+            .await
+            .is_err()
+        );
+        let rpc = actual_tool(&c, &tool).await;
+        assert!(rpc["error"].is_null());
+        let projected = wire::tool_result_projection(&rpc["result"], 1024);
+        let proof = tool_status(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            wire::ToolStatusRequest {
+                protocol: wire::PROTOCOL.into(),
+                tool: tool.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(proof.call_id, id);
+        assert_eq!(proof.result_binding, digest(json!(projected.text)));
+        outputs.push(json!({"type":"function_call_output","call_id":id,"output":projected.text}));
+        proofs.push(proof);
+        assert!(!actual_tool(&c, &tool).await["error"].is_null());
+    }
+    let mut next = request(vec![user("Saved Allow narration")]);
+    next.body["input"]
+        .as_array_mut()
+        .unwrap()
+        .extend(calls.as_array().unwrap().iter().cloned());
+    next.body["input"].as_array_mut().unwrap().extend(outputs);
+    next.preceding_receipt = Some(receipt.receipt_bearer);
+    next.tool_results = proofs;
+    assert!(matches!(
+        prepare(&c.f.state, &c.f.chat, &c.token, next)
+            .await
+            .unwrap(),
+        wire::PrepareReply::Prepared { .. }
+    ));
+    assert_eq!(peer.calls.load(Ordering::SeqCst), 1);
+    c.f.state.db.drop().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn real_policy_deny_and_large_successful_tool_results_bind_exact_existing_projection() {
+    for kind in ["denied", "truncated"] {
+        let (mut c, peer, server) = fixture("completed").await;
+        let inner = if kind == "denied" {
+            json!({"service_id":c.connection,"enabled":false})
+        } else {
+            json!({})
+        };
+        let inner_name = if kind == "denied" {
+            "nyxid__set_service_enabled"
+        } else {
+            "p2-model__read_blob"
+        };
+        let arguments = json!({"tool_name":inner_name,"arguments_json":inner.to_string()});
+        let call = json!({"id":"fc-projection","type":"function_call","status":"completed","call_id":"call-projection","name":"nyx__call_tool","arguments":arguments.to_string()});
+        *peer.call_override.lock().await = Some(json!([call.clone()]));
+        if kind == "truncated" {
+            let mut endpoint = crate::test_utils::test_service_endpoint(
+                &c.target.service.id,
+                "read_blob",
+                "GET",
+                "/tool-output",
+            );
+            endpoint.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+            c.f.state
+                .db
+                .collection("service_endpoints")
+                .insert_one(endpoint)
+                .await
+                .unwrap();
+        }
+        let mut initial = request(vec![user("initial")]);
+        initial.body["tools"][0]["name"] = json!("nyx__call_tool");
+        let card = c.observe_request(initial).await;
+        c.resume_card(card).await;
+        let effect_card = if kind == "denied" {
+            let facts = acks::ActionFacts::of(acks::classify_owner_action(inner_name, &inner));
+            let need = acks::confirmation_needed(&c.f.state.db, &c.f.chat, facts, false)
+                .await
+                .unwrap()
+                .ask()
+                .unwrap();
+            let refusal = acks::confirm_action(
+                &c.f.state.db,
+                &c.f.chat,
+                inner_name,
+                &inner,
+                &need,
+                "Disable this exact saved connection",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let id = refusal["acknowledgement_id"].as_str().unwrap().to_owned();
+            acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &id, false)
+                .await
+                .unwrap();
+            Some(id)
+        } else {
+            None
+        };
+        let mut candidate = request(vec![user("Saved Allow narration")]);
+        candidate.body["tools"][0]["name"] = json!("nyx__call_tool");
+        let body = candidate.body.clone();
+        let wire::PrepareReply::Prepared { step } =
+            prepare(&c.f.state, &c.f.chat, &c.token, candidate)
+                .await
+                .unwrap()
+        else {
+            panic!("prepared");
+        };
+        peer.eof.add_permits(1);
+        to_bytes(
+            callback(&c, &body, Some(&step)).await.unwrap().into_body(),
+            wire::MAX_STREAM_BYTES,
+        )
+        .await
+        .unwrap();
+        let wire::PrepareReply::Completed { receipt } = current(&c, &step).await else {
+            panic!("completed");
+        };
+        let tool = tool_prepare(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            wire::ToolPrepareRequest {
+                protocol: wire::PROTOCOL.into(),
+                name: "nyx__call_tool".into(),
+                arguments: arguments.clone(),
+                call_id: Some("call-projection".into()),
+                result_char_limit: 1024,
+                refusal_source: None,
+            },
+        )
+        .await
+        .unwrap();
+        let rpc = actual_named_tool(&c, &tool, "nyx__call_tool", arguments.clone()).await;
+        assert!(rpc["error"].is_null());
+        let result = &rpc["result"];
+        let projected = wire::tool_result_projection(result, 1024);
+        assert!(projected.success);
+        if let Some(effect_card) = effect_card {
+            assert!(matches!(
+                projected.refusal.as_ref().map(|r| r.kind),
+                Some(wire::RefusalKind::Denied)
+            ));
+            assert!(
+                projected
+                    .text
+                    .starts_with("Acknowledgement denied on the card. END the turn.")
+            );
+            let saved =
+                c.f.state
+                    .db
+                    .collection::<Document>("assistant_acknowledgements")
+                    .find_one(doc! {"_id":effect_card})
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(saved.get_str("status").unwrap(), "denied");
+            let connection = crate::services::user_service_service::find_user_service_by_id(
+                &c.f.state.db,
+                &c.connection,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(connection.is_active);
+            assert_eq!(peer.tool_calls.load(Ordering::SeqCst), 0);
+        } else {
+            assert!(result.to_string().len() > 256 * 1024);
+            assert!(result.to_string().len() < wire::MAX_TOOL_RESULT_BYTES);
+            let small: Value = serde_json::from_str(&projected.text).unwrap();
+            assert_eq!(small["truncated"], true);
+            assert_eq!(peer.tool_calls.load(Ordering::SeqCst), 1);
+        }
+        let proof = tool_status(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            wire::ToolStatusRequest {
+                protocol: wire::PROTOCOL.into(),
+                tool: tool.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(proof.result_binding, digest(json!(projected.text)));
+        let live = engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+            .await
+            .unwrap();
+        assert!(
+            live.active_turn
+                .as_ref()
+                .unwrap()
+                .activities
+                .iter()
+                .any(|a| a.id == proof.server_activity_id)
+        );
+        assert!(
+            !actual_named_tool(&c, &tool, "nyx__call_tool", arguments).await["error"].is_null()
+        );
+        let mut next = request(vec![user("Saved Allow narration")]);
+        next.body["tools"][0]["name"] = json!("nyx__call_tool");
+        next.body["input"].as_array_mut().unwrap().extend([call,json!({"type":"function_call_output","call_id":"call-projection","output":projected.text})]);
+        next.preceding_receipt = Some(receipt.receipt_bearer);
+        next.tool_results = vec![proof];
+        let original_proof = next.tool_results[0].clone();
+        let repeated = if kind == "denied" {
+            let mut again = next.body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["type"] == "function_call")
+                .unwrap()
+                .clone();
+            again["id"] = json!("fc-repeated");
+            again["call_id"] = json!("call-repeated");
+            *peer.repeat_call.lock().await = Some(json!([again.clone()]));
+            Some(again)
+        } else {
+            None
+        };
+        let next_body = next.body.clone();
+        let wire::PrepareReply::Prepared { step: next_step } =
+            prepare(&c.f.state, &c.f.chat, &c.token, next)
+                .await
+                .unwrap()
+        else {
+            panic!("projected receipt allows explanation");
+        };
+        to_bytes(
+            callback(&c, &next_body, Some(&next_step))
+                .await
+                .unwrap()
+                .into_body(),
+            wire::MAX_STREAM_BYTES,
+        )
+        .await
+        .unwrap();
+        if let Some(repeated) = repeated {
+            let wire::PrepareReply::Completed {
+                receipt: second_receipt,
+            } = current(&c, &next_step).await
+            else {
+                panic!("repeat declaration observed");
+            };
+            let args: Value =
+                serde_json::from_str(repeated["arguments"].as_str().unwrap()).unwrap();
+            let reuse = |source: wire::ToolResultReceipt, limit| wire::ToolPrepareRequest {
+                protocol: wire::PROTOCOL.into(),
+                name: "nyx__call_tool".into(),
+                arguments: args.clone(),
+                call_id: Some("call-repeated".into()),
+                result_char_limit: limit,
+                refusal_source: Some(source),
+            };
+            let mut forged = original_proof.clone();
+            forged.evidence = wire::ToolResultEvidence::ReusedRefusal {
+                origin_step_id: "forged".into(),
+                origin_call_id: "forged".into(),
+            };
+            assert!(
+                tool_prepare(&c.f.state, &c.f.chat, &c.token, reuse(forged, 1024))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                tool_prepare(
+                    &c.f.state,
+                    &c.f.chat,
+                    &c.token,
+                    reuse(original_proof.clone(), 2048)
+                )
+                .await
+                .is_err()
+            );
+            let activity = engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+                .await
+                .unwrap()
+                .active_turn
+                .unwrap()
+                .activity_total;
+            let prepared = tool_prepare(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                reuse(original_proof.clone(), 1024),
+            )
+            .await
+            .unwrap();
+            let same = tool_prepare(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                reuse(original_proof.clone(), 1024),
+            )
+            .await
+            .unwrap();
+            assert_eq!(prepared.tool_bearer.expose(), same.tool_bearer.expose());
+            let proof = tool_status(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                wire::ToolStatusRequest {
+                    protocol: wire::PROTOCOL.into(),
+                    tool: prepared.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(&proof.evidence,wire::ToolResultEvidence::ReusedRefusal{origin_step_id,origin_call_id} if origin_step_id==&step.step_id && origin_call_id=="call-projection")
+            );
+            assert_eq!(proof.server_activity_id, original_proof.server_activity_id);
+            assert_eq!(proof.result_binding, original_proof.result_binding);
+            assert!(
+                !actual_named_tool(&c, &prepared, "nyx__call_tool", args).await["error"].is_null()
+            );
+            assert_eq!(
+                engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+                    .await
+                    .unwrap()
+                    .active_turn
+                    .unwrap()
+                    .activity_total,
+                activity
+            );
+            let mut final_request = request_with_body(&next_body);
+            final_request.body["input"].as_array_mut().unwrap().extend([repeated,json!({"type":"function_call_output","call_id":"call-repeated","output":projected.text})]);
+            final_request.preceding_receipt = Some(second_receipt.receipt_bearer);
+            final_request.tool_results = vec![proof.clone()];
+            let mut dropped = request_with_body(&final_request.body);
+            dropped.body["input"].as_array_mut().unwrap().pop();
+            dropped.preceding_receipt = final_request.preceding_receipt.clone();
+            dropped.tool_results = vec![proof.clone()];
+            assert!(
+                prepare(&c.f.state, &c.f.chat, &c.token, dropped)
+                    .await
+                    .is_err()
+            );
+            let mut twice = request_with_body(&final_request.body);
+            let extra = twice.body["input"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .clone();
+            twice.body["input"].as_array_mut().unwrap().push(extra);
+            twice.preceding_receipt = final_request.preceding_receipt.clone();
+            twice.tool_results = vec![proof.clone(), proof];
+            assert!(
+                prepare(&c.f.state, &c.f.chat, &c.token, twice)
+                    .await
+                    .is_err()
+            );
+            let final_body = final_request.body.clone();
+            let wire::PrepareReply::Prepared { step: final_step } =
+                prepare(&c.f.state, &c.f.chat, &c.token, final_request)
+                    .await
+                    .unwrap()
+            else {
+                panic!("cached refusal proof");
+            };
+            to_bytes(
+                callback(&c, &final_body, Some(&final_step))
+                    .await
+                    .unwrap()
+                    .into_body(),
+                wire::MAX_STREAM_BYTES,
+            )
+            .await
+            .unwrap();
+            assert!(callback(&c, &final_body, Some(&final_step)).await.is_err());
+        }
+        assert_eq!(
+            peer.calls.load(Ordering::SeqCst),
+            if kind == "denied" { 3 } else { 2 }
+        );
+        assert_eq!(
+            peer.tool_calls.load(Ordering::SeqCst),
+            usize::from(kind == "truncated")
+        );
+        assert_eq!(
+            c.f.state
+                .db
+                .collection::<Document>("assistant_acknowledgements")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            if kind == "denied" { 2 } else { 1 }
+        );
+        c.f.state.db.drop().await.unwrap();
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn real_invalid_a_b_a_reuses_b_activity_only_after_two_actual_policy_attempts() {
+    let (mut c, peer, server) = fixture("completed").await;
+    let connection = c.connection.clone();
+    let args = |ack: &str| json!({"tool_name":"nyxid__set_service_enabled","arguments_json":json!({"service_id":connection,"enabled":false,"acknowledgement_id":ack}).to_string()});
+    let declarations:Vec<Value>=[("call-a","A"),("call-b","B"),("call-c","A")].into_iter().map(|(id,ack)|
+        json!({"type":"function_call","id":format!("fc-{id}"),"status":"completed","call_id":id,"name":"nyx__call_tool","arguments":args(ack).to_string()})).collect();
+    *peer.call_override.lock().await = Some(json!(declarations));
+    let mut initial = request(vec![user("initial")]);
+    initial.body["tools"][0]["name"] = json!("nyx__call_tool");
+    let card = c.observe_request(initial).await;
+    c.resume_card(card).await;
+    let mut candidate = request(vec![user("Saved Allow narration")]);
+    candidate.body["tools"][0]["name"] = json!("nyx__call_tool");
+    let body = candidate.body.clone();
+    let wire::PrepareReply::Prepared { step } = prepare(&c.f.state, &c.f.chat, &c.token, candidate)
+        .await
+        .unwrap()
+    else {
+        panic!("prepared");
+    };
+    peer.eof.add_permits(1);
+    to_bytes(
+        callback(&c, &body, Some(&step)).await.unwrap().into_body(),
+        wire::MAX_STREAM_BYTES,
+    )
+    .await
+    .unwrap();
+    let wire::PrepareReply::Completed { receipt } = current(&c, &step).await else {
+        panic!("completed");
+    };
+    let attempt = |id: &str, ack: &str, source| wire::ToolPrepareRequest {
+        protocol: wire::PROTOCOL.into(),
+        name: "nyx__call_tool".into(),
+        arguments: args(ack),
+        call_id: Some(id.into()),
+        result_char_limit: 1024,
+        refusal_source: source,
+    };
+    let before = engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .activity_total;
+    let mut proofs = Vec::new();
+    let mut outputs = Vec::new();
+    for (id, ack) in [("call-a", "A"), ("call-b", "B")] {
+        let tool = tool_prepare(&c.f.state, &c.f.chat, &c.token, attempt(id, ack, None))
+            .await
+            .unwrap();
+        let rpc = actual_named_tool(&c, &tool, "nyx__call_tool", args(ack)).await;
+        assert!(rpc["error"].is_null());
+        let projection = wire::tool_result_projection(&rpc["result"], 1024);
+        assert!(projection.success);
+        assert!(matches!(
+            projection.refusal.as_ref().map(|r| r.kind),
+            Some(wire::RefusalKind::Invalid)
+        ));
+        let proof = tool_status(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            wire::ToolStatusRequest {
+                protocol: wire::PROTOCOL.into(),
+                tool,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(proof.step_id, step.step_id);
+        assert_eq!(proof.result_binding, digest(json!(projection.text)));
+        proofs.push(proof);
+        outputs.push(projection.text);
+    }
+    // Production confirm_action intentionally uses fixed wording for both
+    // invalid IDs. Companion HTTP tests separately discriminate differing text.
+    assert_eq!(outputs[0], outputs[1]);
+    assert_ne!(proofs[0].server_activity_id, proofs[1].server_activity_id);
+    let live = engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap();
+    assert_eq!(live.activity_total, before + 2);
+    for proof in &proofs {
+        assert!(
+            live.activities
+                .iter()
+                .any(|a| a.id == proof.server_activity_id)
+        );
+    }
+    let reused = tool_prepare(
+        &c.f.state,
+        &c.f.chat,
+        &c.token,
+        attempt("call-c", "A", Some(proofs[1].clone())),
+    )
+    .await
+    .unwrap();
+    let repeated = tool_prepare(
+        &c.f.state,
+        &c.f.chat,
+        &c.token,
+        attempt("call-c", "A", Some(proofs[1].clone())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reused.tool_bearer.expose(), repeated.tool_bearer.expose());
+    let proof = tool_status(
+        &c.f.state,
+        &c.f.chat,
+        &c.token,
+        wire::ToolStatusRequest {
+            protocol: wire::PROTOCOL.into(),
+            tool: reused.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(proof.server_activity_id, proofs[1].server_activity_id);
+    assert_eq!(proof.result_binding, proofs[1].result_binding);
+    assert!(
+        matches!(&proof.evidence,wire::ToolResultEvidence::ReusedRefusal{origin_step_id,origin_call_id} if origin_step_id==&step.step_id && origin_call_id=="call-b")
+    );
+    assert!(!actual_named_tool(&c, &reused, "nyx__call_tool", args("A")).await["error"].is_null());
+    assert_eq!(
+        engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .activity_total,
+        before + 2
+    );
+    outputs.push(outputs[1].clone());
+    proofs.push(proof);
+    let mut next = request_with_body(&body);
+    next.body["input"]
+        .as_array_mut()
+        .unwrap()
+        .extend(declarations.iter().cloned());
+    for (call, text) in declarations.into_iter().zip(outputs) {
+        next.body["input"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"function_call_output","call_id":call["call_id"],"output":text}));
+    }
+    next.preceding_receipt = Some(receipt.receipt_bearer);
+    next.tool_results = proofs;
+    let next_body = next.body.clone();
+    let wire::PrepareReply::Prepared { step } = prepare(&c.f.state, &c.f.chat, &c.token, next)
+        .await
+        .unwrap()
+    else {
+        panic!("receipt progression");
+    };
+    to_bytes(
+        callback(&c, &next_body, Some(&step))
+            .await
+            .unwrap()
+            .into_body(),
+        wire::MAX_STREAM_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(peer.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(peer.tool_calls.load(Ordering::SeqCst), 0);
+    let connection = crate::services::user_service_service::find_user_service_by_id(
+        &c.f.state.db,
+        &c.connection,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(connection.is_active);
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    c.f.state.db.drop().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn real_tool_prepared_control_drift_and_stale_turn_refuse_claim_and_status_without_activity()
+{
+    let (mut c, peer, server) = fixture("completed").await;
+    let call = |id: &str| json!({"type":"function_call","id":format!("fc-{id}"),"status":"completed","call_id":id,"name":"nyx__search_tools","arguments":"{\"query\":\"missing-test-tool\"}"});
+    *peer.call_override.lock().await = Some(json!([call("call-a"), call("call-b")]));
+    let (_, step) = admitted(&mut c, &peer).await;
+    peer.eof.add_permits(1);
+    let body = request(vec![user("Saved Allow narration")]).body;
+    to_bytes(
+        callback(&c, &body, Some(&step)).await.unwrap().into_body(),
+        wire::MAX_STREAM_BYTES,
+    )
+    .await
+    .unwrap();
+    let mut tools = Vec::new();
+    for id in ["call-a", "call-b"] {
+        tools.push(
+            tool_prepare(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                wire::ToolPrepareRequest {
+                    protocol: wire::PROTOCOL.into(),
+                    name: "nyx__search_tools".into(),
+                    arguments: json!({"query":"missing-test-tool"}),
+                    call_id: Some(id.into()),
+                    result_char_limit: 1024,
+                    refusal_source: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let original = c.token.clone();
+    let different=issue(&c.f.state,IssueRequest{chat:&c.f.chat,runtime_catalog_id:&c.target.service.id,outer_body:&json!({"input":"Saved Allow narration","store":true,"instructions":"different outer snapshot"}),negotiated_v1:true}).await.unwrap().unwrap().token;
+    assert_ne!(different.expose(), original.expose());
+    let before = engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .activity_total;
+    c.token = different;
+    assert!(!actual_tool(&c, &tools[0]).await["error"].is_null());
+    assert!(
+        tool_status(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            wire::ToolStatusRequest {
+                protocol: wire::PROTOCOL.into(),
+                tool: tools[0].clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .activity_total,
+        before
+    );
+    let different = c.token.clone();
+    c.token = original.clone();
+    assert!(actual_tool(&c, &tools[0]).await["error"].is_null());
+    let proof = tool_status(
+        &c.f.state,
+        &c.f.chat,
+        &c.token,
+        wire::ToolStatusRequest {
+            protocol: wire::PROTOCOL.into(),
+            tool: tools[0].clone(),
+        },
+    )
+    .await
+    .unwrap();
+    c.token = different;
+    assert!(
+        tool_status(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            wire::ToolStatusRequest {
+                protocol: wire::PROTOCOL.into(),
+                tool: tools[0].clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    c.token = original.clone();
+    let recovered = tool_status(
+        &c.f.state,
+        &c.f.chat,
+        &c.token,
+        wire::ToolStatusRequest {
+            protocol: wire::PROTOCOL.into(),
+            tool: tools[0].clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(recovered.bearer.expose(), proof.bearer.expose());
+    let old_turn = c.f.chat.turn_id.clone().unwrap();
+    settle_failed(&c, "invalid_stream").await;
+    c.f.row = engine::begin_turn(
+        &c.f.state.db,
+        &c.f.owner,
+        &continuation(&c, None, Some(&old_turn)),
+        &c.f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    refresh_control(&mut c).await;
+    let retry_activity = engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .activity_total;
+    for token in [c.token.clone(), original] {
+        c.token = token;
+        assert!(!actual_tool(&c, &tools[1]).await["error"].is_null());
+        assert!(
+            tool_status(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                wire::ToolStatusRequest {
+                    protocol: wire::PROTOCOL.into(),
+                    tool: tools[0].clone()
+                }
+            )
+            .await
+            .is_err()
+        );
+    }
+    assert_eq!(
+        engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .activity_total,
+        retry_activity
+    );
+    assert_eq!(peer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(peer.tool_calls.load(Ordering::SeqCst), 0);
+    c.f.state.db.drop().await.unwrap();
+    server.abort();
 }

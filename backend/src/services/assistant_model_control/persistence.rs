@@ -220,11 +220,14 @@ pub(super) fn verify_tool_results(
             .iter()
             .find_map(|tool| match &tool.phase {
                 HostToolPhase::Completed { receipt: saved }
-                    if saved.call_id == receipt.call_id
+                    if saved.step_id == receipt.step_id
+                        && saved.call_id == receipt.call_id
                         && saved.tool_name == receipt.tool_name
                         && saved.arguments_binding == receipt.arguments_binding
                         && saved.result_binding == receipt.result_binding
+                        && saved.success == receipt.success
                         && saved.server_activity_id == receipt.server_activity_id
+                        && saved.evidence == receipt.evidence
                         && token_hash(saved.bearer.expose())
                             == token_hash(receipt.bearer.expose()) =>
                 {

@@ -983,3 +983,92 @@ async fn private_status_uses_real_conversation_key_extractor_and_requires_separa
     );
     c.f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn retired_wire_root_cannot_migrate_allow_or_dispatch_but_saved_deny_retires_it() {
+    let c = Controlled::new("p2_retired_wire").await;
+    let card = c.observe().await;
+    assert!(
+        issue(
+            &c.f.state,
+            IssueRequest {
+                chat: &c.f.chat,
+                runtime_catalog_id: &c.target.service.id,
+                outer_body: &json!({"input":"initial","store":true}),
+                negotiated_v1: false
+            }
+        )
+        .await
+        .is_err()
+    );
+    let roots = c.f.state.db.collection::<ModelControlRoot>(COLLECTION_NAME);
+    let mut row = roots
+        .find_one(doc! {"acknowledgement_id":&card})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut private = persistence::open(&c.f.state, &row).await.unwrap();
+    // Storage compatibility fixture, not a live old-peer/protocol acceptance.
+    for control in &mut private.controls {
+        control.claims.protocol = wire::RETIRED_PROTOCOL.into();
+    }
+    let mut arguments = row.card_arguments.clone().unwrap();
+    arguments["protocol"] = json!(wire::RETIRED_PROTOCOL);
+    row.card_arguments = Some(arguments.clone());
+    private.card_arguments = Some(arguments.clone());
+    row.private_ciphertext = persistence::seal(&c.f.state, &row, &private).await.unwrap();
+    roots.replace_one(doc! {"_id":&row.id}, &row).await.unwrap();
+    c.f.state
+        .db
+        .collection::<Document>("assistant_acknowledgements")
+        .update_one(
+            doc! {"_id":&card},
+            doc! {"$set":{"arguments_digest":acks::arguments_digest(&arguments)}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        issue(
+            &c.f.state,
+            IssueRequest {
+                chat: &c.f.chat,
+                runtime_catalog_id: &c.target.service.id,
+                outer_body: &json!({"input":"initial","store":true}),
+                negotiated_v1: true
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &card, true)
+            .await
+            .is_err()
+    );
+    acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &card, false)
+        .await
+        .unwrap();
+    let retained = roots.find_one(doc! {"_id":&row.id}).await.unwrap().unwrap();
+    assert_eq!(retained.phase, "denied");
+    assert_eq!(retained.control_hashes, row.control_hashes);
+    assert!(
+        prepare(
+            &c.f.state,
+            &c.f.chat,
+            &c.token,
+            request(vec![user("initial")])
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        c.f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    c.f.state.db.drop().await.unwrap();
+}

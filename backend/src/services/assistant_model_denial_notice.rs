@@ -47,7 +47,10 @@ async fn model_source_turn(
             root.card_arguments.as_ref().is_some_and(|args| {
                 card.arguments_digest.as_deref() == Some(acks::arguments_digest(args).as_str())
                     && args["root_id"] == root.id
-                    && args["protocol"] == super::assistant_model_control_protocol::PROTOCOL
+                    // Deny retirement only: neither value grants dispatch compatibility.
+                    && args["protocol"].as_str().is_some_and(|protocol|
+                        matches!(protocol, super::assistant_model_control_protocol::PROTOCOL
+                            | super::assistant_model_control_protocol::RETIRED_PROTOCOL))
             })
         });
         return Ok(Some((
