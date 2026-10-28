@@ -182,6 +182,7 @@ async fn run_member(
         group_request_id: Some(request.id.clone()),
         attachment_ids: Vec::new(),
         group_attachments: groups::request_attachments(&state.db, access, &request.id).await?,
+        automation_parent: None,
         trigger: None,
         conversation_id: Some(thread.id),
         text: engine::excerpt(

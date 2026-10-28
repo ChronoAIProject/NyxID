@@ -28,6 +28,7 @@ env:
   RUST_MIN_STACK: 8388608
   LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
   NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+  AUTOMATION_CONTINUATION_V2_ENABLED: "true"
 
 jobs:
   build:

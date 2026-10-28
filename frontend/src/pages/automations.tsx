@@ -843,9 +843,10 @@ function AutomationHistory({
                 key={run.id}
                 className="rounded-lg border border-border p-3 text-12"
               >
-                <strong className="capitalize">{run.outcome}</strong> ·{" "}
+                <strong className="capitalize">{run.outcome === "waiting" && run.wait_kind === "coordinator" ? "Waiting for coordinator work" : run.outcome}</strong> ·{" "}
                 Scheduled {formatAutomationTime(run.scheduled_at, zone, true)}
                 {run.started_at && <p>Started {formatAutomationTime(run.started_at, zone, true)}</p>}
+                {run.outcome === "waiting" && run.wait_kind === "coordinator" && run.coordinator_deadline && <p>Completion deadline {formatAutomationTime(run.coordinator_deadline, zone, true)}</p>}
                 {run.capacity_wait_ms != null && run.capacity_wait_ms > 0 && <p>waited {formatCapacityWait(run.capacity_wait_ms)} for capacity</p>}
                 {run.missed ? (
                   <p>

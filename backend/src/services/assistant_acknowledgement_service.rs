@@ -876,6 +876,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            trigger_run_id: None,
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,
@@ -908,6 +909,8 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    /// Exact live, unstopped server turn; never derived from tool arguments.
+    pub trigger_run_id: Option<String>,
     pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
     pub invocation_controlled: bool,
     pub invocation_id: Option<String>,
@@ -1416,6 +1419,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        trigger_run_id: live.and_then(|t| t.trigger_run_id.clone()),
         channel_adapter_origin: conversation
             .active_turn
             .as_ref()
@@ -2839,6 +2843,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        trigger_run_id: None,
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: row.invocation_id.clone(),

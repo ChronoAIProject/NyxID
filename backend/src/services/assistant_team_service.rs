@@ -128,6 +128,8 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        trigger_run_id: None,
+        continuation_protocol_version: 0,
         media_event_ids: Vec::new(),
         media_declared: None,
         media_sent_at: None,
@@ -650,6 +652,7 @@ async fn create_thread_with_kind(
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        coordinator_run_ids: Vec::new(),
         owner_model_route: None,
         invocation_controlled: false,
         credential_invocation_id: None,
@@ -2809,6 +2812,7 @@ pub async fn consume_settled_events(
     owner: &str,
     conversation_id: &str,
     agent_ids: &[String],
+    run_id: Option<&str>,
 ) -> AppResult<()> {
     if agent_ids.is_empty() {
         return Ok(());
@@ -2818,6 +2822,7 @@ pub async fn consume_settled_events(
             doc! {"_id": conversation_id, "user_id": owner},
             doc! {"$pull": {"pending_events": {
                 "kind": "subagent_settled", "agent_id": {"$in": agent_ids},
+                "trigger_run_id": run_id,
             }}},
         )
         .await?;

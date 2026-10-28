@@ -449,6 +449,31 @@ async fn server_main() {
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    if std::env::var("AUTOMATION_CONTINUATION_V2_CHECK_ROLLBACK").is_ok_and(|v| v == "true") {
+        assert!(
+            services::trigger_schedule::continuation::rollback_ready(&db)
+                .await
+                .expect("check automation rollback"),
+            "v2 automation work remains; keep old binaries stopped"
+        );
+        tracing::info!("Automation continuation rollback drain verified");
+        return;
+    }
+    if let Ok(started_at) = std::env::var("AUTOMATION_CONTINUATION_V2_MIGRATE_DRAIN_STARTED_AT") {
+        let started_at = chrono::DateTime::parse_from_rfc3339(&started_at)
+            .expect("migration drain timestamp must be RFC3339")
+            .with_timezone(&chrono::Utc);
+        let result =
+            services::trigger_schedule::continuation::migrate_continuation_v2(&db, started_at)
+                .await
+                .expect("automation continuation migration failed; keep admission paused");
+        tracing::info!(
+            classified = result.get_i64("classified").unwrap_or_default(),
+            "Automation continuation migration complete"
+        );
+        return;
+    }
+
     // Preparation reads the unchanged legacy bytes and bounded chain evidence.
     // It neither loads a signer nor starts normal server writers, so an older
     // weak signer can be exported before the strict JWT cutover.
