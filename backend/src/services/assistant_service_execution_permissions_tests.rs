@@ -468,6 +468,191 @@ async fn codex_exact_fallback_reason_survives_card_reuse_without_changing_identi
     f.state.db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn fallback_diagnostic_write_failure_preserves_legacy_execution_denial_and_authority() {
+    use super::super::request_identity::{
+        InferenceFallbackReason as Reason, record_fallback_reason,
+    };
+    use crate::services::assistant_agent_credential_service as credentials;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let f = orchestrator_fixture("permissions_diagnostic_write_failure").await;
+    assert!(!f.state.config.assistant_model_control_v1_enabled);
+    mode(&f, AccessMode::Autopilot).await;
+    let c = catalog(&f).await;
+    let id = connection(&f, &f.owner, "chrono-llm-public", Some(&c)).await;
+    let provider = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/responses"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"output":[]})))
+        .mount(&provider)
+        .await;
+    let row = crate::services::user_service_service::find_user_service_by_id(&f.state.db, &id)
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_endpoints")
+        .update_one(
+            doc! {"_id":row.endpoint_id},
+            doc! {"$set":{"url":provider.uri()}},
+        )
+        .await
+        .unwrap();
+    compatibility::grant(&f, &id).await;
+    let resolved = target(&f, &id).await;
+    let mut body = callback();
+    body["client_metadata"]["unknown"] = json!("private diagnostic input");
+    let bytes = serde_json::to_vec(&body).unwrap();
+    assert!(!stateless_inference("responses", &body));
+    let operation = http_operation(&resolved, "POST", "responses", None, &bytes);
+    assert_eq!(operation["kind"], "http");
+    f.state
+        .db
+        .run_command(doc! {
+            "collMod":COLLECTION,
+            "validator":{"kind":{"$ne":"model_fallback_diagnostic"}},
+            "validationLevel":"strict","validationAction":"error"
+        })
+        .await
+        .unwrap();
+    assert!(
+        record_fallback_reason(
+            &f.state.db,
+            &f.chat,
+            &operation,
+            Reason::MetadataUnknownField,
+            false,
+        )
+        .await
+        .is_err(),
+        "the actual diagnostic upsert must encounter the Mongo validator"
+    );
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, router) = crate::routes::build_router();
+    let router = router.with_state(f.state.clone());
+    let send = |ack: Option<&str>| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/proxy/s/chrono-llm-public/responses")
+            .header("content-type", "application/json")
+            .header("x-request-id", "diagnostic-write-failure")
+            .header("x-api-key", key.raw_key.as_str());
+        if let Some(ack) = ack {
+            request = request.header(ACK_HEADER, ack);
+        }
+        // No model-control header: this is the ordinary legacy callback path.
+        router
+            .clone()
+            .oneshot(request.body(Body::from(bytes.clone())).unwrap())
+    };
+    let response = send(None).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let response = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response).unwrap(),
+        json!({"output":[]})
+    );
+    let sent = provider.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].body, bytes);
+
+    let mut auth = f.auth.clone();
+    auth.assistant_chat = Some(std::sync::Arc::new(f.chat.clone()));
+    let held = projected(
+        &f,
+        &auth,
+        &resolved,
+        &id,
+        &bytes,
+        "responses",
+        &HeaderMap::new(),
+    )
+    .await
+    .admission
+    .unwrap();
+    held.revalidate(&f.state.db, &id, Some(&resolved))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(doc! {"_id":&id}, doc! {"$inc":{"state_version":1_i64}})
+        .await
+        .unwrap();
+    assert!(matches!(
+        held.revalidate(&f.state.db, &id, Some(&resolved)).await,
+        Err(AppError::Conflict(_))
+    ));
+
+    mode(&f, AccessMode::AskEveryTime).await;
+    let response = send(None).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let response = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let refusal: Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(refusal["error"], "acknowledgement_required");
+    let summary = refusal["summary"].as_str().unwrap();
+    assert!(summary.contains(Reason::MetadataUnknownField.message()));
+    assert!(!summary.contains("private diagnostic input"));
+    let ack = refusal["acknowledgement_id"].as_str().unwrap();
+    let denied = acks::decide(&f.state.db, &f.owner, &f.row.id, ack, false)
+        .await
+        .unwrap();
+    assert_eq!(denied.status, "denied");
+    let response = send(Some(ack)).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let response = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let refusal: Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(refusal["error"], "acknowledgement_denied");
+    assert_eq!(refusal["acknowledgement_id"], ack);
+    assert_eq!(provider.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(COLLECTION)
+            .count_documents(doc! {"kind":"model_fallback_diagnostic"})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(COLLECTION)
+            .count_documents(doc! {"kind":"model_control_unobserved","conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        1,
+        "mandatory lineage recording still succeeds"
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
 #[test]
 fn codex_fallback_reasons_are_closed_and_preserve_strict_read() {
     use super::super::request_identity::{
