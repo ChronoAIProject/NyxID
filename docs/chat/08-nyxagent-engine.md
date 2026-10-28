@@ -305,14 +305,30 @@ uses a different projection. Previously it made the normal generation classify
 as stateful: owners succeeded through legacy transport without recording a
 route, while guests were refused even with matching profiles. Unknown/nested
 metadata remains refused, and actual provider handles anywhere in executable
-input remain disallowed. Correlation values do not enter route identity. The extended classification is
-not used for owner admission: owner callbacks with `client_metadata` retain
-`legacy_inference`, their exact body identity, approval verb, connection selection
-and fallback behavior. Their route is recorded separately after assistant
-admission, without creating model consent. Ordinary callbacks without this
-extension retain their existing raw-inference behavior. Classification inspects
-a cloned JSON value; the forwarded request body, including `client_metadata`,
-is unchanged.
+input remain disallowed. Correlation values do not enter route identity.
+
+Owner admission separately recognizes a narrower contract: exactly those seven
+scalar string fields, six IDs of 1–128 ASCII bytes (letters, digits, `_`, `-`),
+with an optional `:<decimal digits>` suffix only on the window ID within the same
+128-byte total limit, turn metadata of at most 1,024 UTF-8 bytes, and sorted
+compact JSON of at most 2,048 bytes. This strict subset uses stateless Read
+classification and server-input-bound owner model consent. Partial, unknown or
+over-budget metadata retains legacy Write/exact-body approval and connection
+identity; it does not inherit automatic Read from the broader guest transport
+classifier. Actual stateful/provider-hosted effects retain exact approval.
+
+Explicit `_nyxid_via` routing is constrained to the requested catalog and saved
+connection. A saved explicit owner choice fails closed if unavailable.
+Without that choice, catalog-only routing considers eligible personal/org
+connections in saved preference order; strict inference may skip a candidate
+with verified unavailability. A policy Deny is never outage evidence. Read
+classification does not override an explicit choice or exempt the call from
+generic service policy: the writes-only default permits reads, while an explicit
+Deny still blocks them. Billing uses the final resolved connection, credential
+class and resource owner; the guest payer rule does not rewrite owner billing.
+Route recording remains separate from consent and requires an admitted owner
+model attempt. Classification inspects a cloned JSON value; the forwarded body,
+including `client_metadata`, is unchanged.
 
 New channel threads inherit their linked agent's configured profile. Existing
 threads retain their model, including legacy channels created with the global

@@ -21,6 +21,8 @@ mod journeys;
 mod managed;
 #[path = "assistant_service_execution_native_tests.rs"]
 mod native;
+#[path = "assistant_service_execution_permissions_tests.rs"]
+mod permissions;
 #[path = "assistant_service_execution_receipt_tests.rs"]
 mod receipts;
 #[path = "assistant_service_execution_ssh_session_tests.rs"]
@@ -785,8 +787,15 @@ fn guest_1995_codex_correlation_metadata_is_stateless_but_provider_handles_are_n
             "x-codex-turn-metadata":"{\"thread_id\":\"client-correlation\"}","x-codex-window-id":"window"}});
     assert!(stateless_model_transport("v1/responses", &body));
     assert!(
-        !stateless_inference("v1/responses", &body),
-        "owner classification stays legacy"
+        stateless_inference("v1/responses", &body),
+        "the seven-field metadata contract permits owner inference"
+    );
+    let mut partial = body.clone();
+    partial["client_metadata"] = json!({"thread_id":"thread","turn_id":"turn"});
+    assert!(stateless_model_transport("v1/responses", &partial));
+    assert!(
+        !stateless_inference("v1/responses", &partial),
+        "partial correlation metadata retains exact owner approval"
     );
     let unchanged = body.clone();
     assert!(stateless_model_transport("v1/responses", &body));

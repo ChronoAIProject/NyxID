@@ -287,8 +287,9 @@ async fn check_http_projected_inner(
     let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
     let generation = !method_override
         && super::request_identity::legacy_model_generation(target, method, path, body);
-    // Separate route identity from admission: Codex metadata remains legacy for
-    // owners, including approval, exact selection and fallback classification.
+    // Route recognition uses the broader closed transport shape. Only the
+    // strict metadata subset below gains owner inference consent; other shapes
+    // retain legacy approval, exact selection and fallback classification.
     let model_route = (generation && pool.is_none())
         .then(|| super::request_identity::model_route_operation(target, method, path, query, body))
         .flatten()
@@ -429,7 +430,7 @@ async fn check_http_projected_inner(
     }
     let read = matches!(method, "GET" | "HEAD" | "OPTIONS") && !method_override;
     let destructive = method == "DELETE" || method_override;
-    let summary = if raw_inference {
+    let mut summary = if raw_inference {
         format!(
             "Use {} / {} for this turn",
             crate::services::assistant_nyxagent::identifier(&target.service.slug),
@@ -445,6 +446,15 @@ async fn check_http_projected_inner(
             crate::services::assistant_nyxagent::identifier(&target.service.slug)
         )
     };
+    if legacy_inference
+        && let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(reason) = super::request_identity::inference_fallback_reason(path, &parsed)
+    {
+        super::request_identity::record_fallback_reason(&state.db, chat, &operation, reason)
+            .await?;
+        summary.push_str(". ");
+        summary.push_str(reason.message());
+    }
     let decision = check(
         &state.db,
         &state.node_ws_manager,
