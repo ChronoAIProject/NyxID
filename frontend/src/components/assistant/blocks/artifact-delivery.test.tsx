@@ -49,6 +49,7 @@ it("shows a distinct expired source and permits another attempt after an HTTP fa
 });
 it.each([
   ["result_expired", "expired before delivery"],
+  ["retention_expired", "no longer available under retention policy"],
   ["cancelled", "cancelled"],
   ["delivery_capacity_exhausted", "attachment limit"],
   ["delivery_failed", "delivery failed"],

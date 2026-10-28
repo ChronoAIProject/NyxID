@@ -202,13 +202,47 @@ async fn run(
             let delivery = database.collection::<Delivery>(DELIVERIES)
                 .find_one(doc! {"_id":&message,"user_id":&user,"conversation_id":&conversation})
                 .session(&mut *session).await?.ok_or_else(missing)?;
-            if delivery.expires_at <= Utc::now() { return Err(AppError::AssistantAttachmentExpired); }
             let source = database.collection::<AssistantMessage>(MESSAGES)
                 .find_one(doc! {"_id":&message,"user_id":&user,"conversation_id":&conversation,
                     "role":"assistant","turn_id":&delivery.event_turn_id})
                 .session(&mut *session).await?.ok_or_else(missing)?;
             if source.origin != Some(TurnOrigin::Event) || !matches!(source.status.as_str(), "completed" | "failed" | "stopped") {
                 return Err(invalid());
+            }
+            let lineage: Vec<String> = source.attachments.iter()
+                .filter(|a| a.artifact.source_watch_id.as_deref() == Some(delivery.watch_id.as_str()))
+                .map(|a| a.id.clone()).collect();
+            if lineage != delivery.attachment_ids { return Err(invalid()); }
+            // Validate present saved metadata before interpreting expiry. A
+            // contradictory retained row must never look like a harmless expired peer.
+            for attachment in source.attachments.iter()
+                .filter(|a| delivery.attachment_ids.contains(&a.id)) {
+                if let Some(saved) = database.collection::<Document>(ATTACHMENTS)
+                    .find_one(doc! {"_id":&attachment.id}).projection(doc! {"data_encrypted":0})
+                    .session(&mut *session).await?
+                    && ([
+                        ("user_id", user.as_str()),
+                        ("conversation_id", conversation.as_str()),
+                        ("turn_id", delivery.event_turn_id.as_str()),
+                        ("origin", "generated_artifact"),
+                        ("source_watch_id", delivery.watch_id.as_str()),
+                        ("source_turn_id", delivery.originating_turn_id.as_str()),
+                        ("source_operation_id", delivery.operation_id.as_str()),
+                        ("source_result_identity", delivery.source_result_identity.as_str()),
+                        ("content_type", attachment.content_type.as_str()),
+                    ].iter().any(|(key, value)| saved.get_str(key).ok() != Some(*value))
+                        || saved.get_i64("size").ok() != Some(attachment.size)) {
+                    return Err(invalid());
+                }
+            }
+            // A saved expiry can outlive terminal watch TTL. Report that stable
+            // owner-visible outcome before requiring retained recovery authority.
+            let expired = super::super::assistant_upload_retention::expired_ids(
+                &database, &user, &delivery.attachment_ids).await?;
+            if (delivery.attachment_ids.is_empty() && delivery.expires_at <= Utc::now())
+                || (!delivery.attachment_ids.is_empty()
+                    && delivery.attachment_ids.iter().all(|id| expired.contains(id))) {
+                return Err(AppError::AssistantAttachmentExpired);
             }
             let w = database.collection::<AsyncServiceOperation>(WATCHES)
                 .find_one_and_update(doc! {"_id":&delivery.watch_id,"user_id":&user,"conversation_id":&conversation,
@@ -217,22 +251,18 @@ async fn run(
                     "artifact_event_turn_id":&delivery.event_turn_id,"state":{"$in":["queued","delivered"]}},
                     doc! {"$inc":{"artifact_recovery_generation":1}})
                 .session(&mut *session).await?.ok_or_else(missing)?;
-            if w.artifact_result.as_ref().is_none_or(|m| m.expires_at <= Utc::now()) {
-                return Err(AppError::AssistantAttachmentExpired);
-            }
-            let lineage: Vec<String> = source.attachments.iter()
-                .filter(|a| a.artifact.source_watch_id.as_deref() == Some(w.id.as_str()))
-                .map(|a| a.id.clone()).collect();
-            if lineage != delivery.attachment_ids { return Err(invalid()); }
             let (attachments, reason) = materialize(&database, keys, &w, session,
                 &delivery.event_turn_id, &source.attachments).await?;
+            if matches!(reason, "result_expired" | "retention_expired") {
+                return Err(AppError::AssistantAttachmentExpired);
+            }
             if reason != "materialized" { return Err(AppError::Conflict(reason.into())); }
+            let expiry = attachment_expiry_in_session(&database, session, &w,
+                &delivery.event_turn_id, &attachments).await?;
             let mut merged = source.attachments;
             for attachment in attachments {
                 if !merged.iter().any(|a| a.id == attachment.id) { merged.push(attachment); }
             }
-            let expiry = attachment_expiry_in_session(&database, session, &w,
-                &delivery.event_turn_id, &merged).await?.min(delivery.expires_at);
             if expiry <= Utc::now() { return Err(AppError::AssistantAttachmentExpired); }
             database.collection::<Document>(MESSAGES)
                 .update_one(doc! {"_id":&message,"user_id":&user},

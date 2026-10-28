@@ -268,6 +268,7 @@ pub async fn persist(
         rows.push(row);
     }
     let manifest = ResultManifest {
+        materialized_expires_at: None,
         files: rows
             .iter()
             .map(|row| crate::models::generated_artifact::AcceptedFile {
@@ -597,7 +598,7 @@ async fn attachment_expiry_in_session(
     attachments: &[TurnAttachment],
 ) -> AppResult<DateTime<Utc>> {
     let manifest = w.artifact_result.as_ref().ok_or_else(invalid)?;
-    let mut expiry = manifest.expires_at;
+    let mut expiry: Option<DateTime<Utc>> = None;
     for attachment in attachments
         .iter()
         .filter(|a| a.artifact.source_watch_id.as_deref() == Some(w.id.as_str()))
@@ -614,14 +615,17 @@ async fn attachment_expiry_in_session(
             .session(&mut *session)
             .await?
             .ok_or_else(invalid)?;
-        expiry = expiry.min(
-            saved
-                .get_datetime("expires_at")
-                .map_err(|_| invalid())?
-                .to_chrono(),
-        );
+        let saved_expiry = saved
+            .get_datetime("expires_at")
+            .map_err(|_| invalid())?
+            .to_chrono();
+        expiry = Some(expiry.map_or(saved_expiry, |expiry| expiry.max(saved_expiry)));
     }
-    Ok(expiry)
+    Ok(expiry.unwrap_or(
+        manifest
+            .materialized_expires_at
+            .unwrap_or(manifest.expires_at),
+    ))
 }
 /// Runs within completion admission or exact owner-message recovery. No new execution.
 async fn materialize(
@@ -635,15 +639,15 @@ async fn materialize(
     if !admitted(w) {
         return Err(invalid());
     }
-    if !matches!(w.reason.as_deref(), Some("completed" | "operation_failed")) {
+    if !matches!(
+        w.reason.as_deref(),
+        Some("completed" | "operation_failed" | "result_expired")
+    ) {
         return Ok((Vec::new(), "delivery_failed"));
     }
     let Some(manifest) = &w.artifact_result else {
         return Ok((Vec::new(), "delivery_failed"));
     };
-    if manifest.expires_at <= Utc::now() {
-        return Ok((Vec::new(), "result_expired"));
-    }
     let _reservation = byte_budget::reserve(sandbox::RESERVATION).await?;
     let rows = pending_rows_in_session(db, session, w, manifest, true).await?;
     if manifest.files.is_empty() && rows.len() != manifest.count {
@@ -676,6 +680,7 @@ async fn materialize(
     let policy = super::assistant_upload_retention::artifact_policy_in_session(db, session).await?;
     let mut attachments = Vec::new();
     let mut total = 0usize;
+    let mut retention_expired = false;
     for row in rows {
         if row.state == "missing"
             || manifest.rejected.iter().any(|f| {
@@ -688,7 +693,9 @@ async fn materialize(
         {
             continue;
         }
-        if row.expires_at <= Utc::now() {
+        if row.state != "materialized"
+            && (row.expires_at <= Utc::now() || manifest.expires_at <= Utc::now())
+        {
             return Ok((Vec::new(), "result_expired"));
         }
         let normal_days =
@@ -699,10 +706,9 @@ async fn materialize(
                 } else {
                     policy.document_days
                 });
-        let expiry = row
-            .expires_at
-            .min(manifest.expires_at)
-            .min(Utc::now() + Duration::days(i64::from(normal_days)));
+        // Pending acquisition is source-bounded. Once copied, these private
+        // bytes use ordinary retention from their own attachment creation time.
+        let expiry = Utc::now() + Duration::days(i64::from(normal_days));
         let mut meta = TurnAttachment {
             artifact: metadata(&row, expiry),
             id: row.assistant_attachment_id.clone(),
@@ -716,9 +722,46 @@ async fn materialize(
             pages: None,
         };
         if row.state == "materialized" {
-            super::assistant_upload_retention::generated_available_in_session(db, session, doc! {"_id":&row.assistant_attachment_id,"user_id":&w.user_id,"conversation_id":&w.conversation_id}, policy).await?;
-            let saved = db.collection::<AssistantAttachment>(ATTACHMENTS).find_one(doc!{"_id":&row.assistant_attachment_id,"user_id":&w.user_id,"conversation_id":&w.conversation_id,"source_watch_id":&w.id,"source_result_identity":&manifest.source_result_identity}).session(&mut *session).await?.ok_or_else(missing)?;
-            meta.artifact = saved.artifact;
+            let saved = db
+                .collection::<Document>(ATTACHMENTS)
+                .find_one(doc! {"_id":&row.assistant_attachment_id})
+                .projection(doc! {"data_encrypted":0})
+                .session(&mut *session)
+                .await?;
+            if let Some(saved) = &saved
+                && ([
+                    ("user_id", w.user_id.as_str()),
+                    ("conversation_id", w.conversation_id.as_str()),
+                    ("turn_id", turn_id),
+                    ("origin", "generated_artifact"),
+                    ("source_watch_id", w.id.as_str()),
+                    ("source_turn_id", w.turn_id.as_str()),
+                    (
+                        "source_operation_id",
+                        w.operation_id.as_deref().ok_or_else(invalid)?,
+                    ),
+                    (
+                        "source_result_identity",
+                        manifest.source_result_identity.as_str(),
+                    ),
+                    ("content_type", row.content_type.as_str()),
+                ]
+                .iter()
+                .any(|(key, value)| saved.get_str(key).ok() != Some(*value))
+                    || saved.get_i64("size").ok() != Some(row.size))
+            {
+                return Err(invalid());
+            }
+            match super::assistant_upload_retention::generated_available_in_session(db, session, doc! {"_id":&row.assistant_attachment_id,"user_id":&w.user_id,"conversation_id":&w.conversation_id}, policy).await {
+                Ok(()) => {},
+                Err(AppError::AssistantAttachmentExpired) => {
+                    retention_expired = true;
+                    continue;
+                },
+                Err(error) => return Err(error),
+            }
+            meta.artifact =
+                bson::from_document(saved.ok_or_else(missing)?).map_err(|_| invalid())?;
             attachments.push(meta);
             continue;
         }
@@ -763,8 +806,23 @@ async fn materialize(
             .insert_one(&attachment)
             .session(&mut *session)
             .await?;
-        db.collection::<Document>(ARTIFACTS).update_one(doc!{"_id":&row.id,"state":"pending"},doc!{"$set":{"state":"materialized","data_encrypted":null,"secret_context_versions":{}}}).session(&mut *session).await?;
+        db.collection::<Document>(ARTIFACTS).update_one(doc!{"_id":&row.id,"state":"pending"},doc!{"$set":{"state":"materialized","expires_at":bson::DateTime::from_chrono(expiry),"data_encrypted":null,"secret_context_versions":{}}}).session(&mut *session).await?;
         attachments.push(meta);
+    }
+    if let Some(expiry) = attachments
+        .iter()
+        .filter_map(|a| a.artifact.expires_at)
+        .max()
+    {
+        // Keep exact watch authority alive through saved attachment retention.
+        // The immutable manifest/source expiry and worker deadline do not move.
+        db.collection::<Document>(WATCHES).update_one(doc! {"_id":&w.id},
+            doc! {"$max":{"artifact_result.materialized_expires_at":bson::DateTime::from_chrono(expiry),
+                "expires_at":bson::DateTime::from_chrono(expiry)}})
+            .session(&mut *session).await?;
+    }
+    if attachments.is_empty() && retention_expired {
+        return Ok((attachments, "retention_expired"));
     }
     Ok((attachments, "materialized"))
 }
@@ -1096,13 +1154,18 @@ pub async fn delivery_states(
         .collect();
     for delivery in deliveries {
         let watch = watches.iter().find(|w| w.id == delivery.watch_id);
-        let state = if delivery.expires_at <= Utc::now()
-            || delivery
-                .attachment_ids
-                .iter()
-                .any(|id| expired.contains(id))
+        let state = if (delivery.attachment_ids.is_empty() && delivery.expires_at <= Utc::now())
+            || (!delivery.attachment_ids.is_empty()
+                && delivery
+                    .attachment_ids
+                    .iter()
+                    .all(|id| expired.contains(id)))
         {
-            "result_expired"
+            if delivery.attachment_ids.is_empty() {
+                "result_expired"
+            } else {
+                "retention_expired"
+            }
         } else {
             watches
                 .iter()
@@ -1110,7 +1173,12 @@ pub async fn delivery_states(
                 .and_then(|w| {
                     if matches!(w.state.as_str(), "cancelling" | "cancelled") {
                         Some("cancelled")
-                    } else if w.reason.as_deref() == Some("result_expired") {
+                    } else if w.reason.as_deref() == Some("result_expired")
+                        && delivery.attachment_ids.is_empty()
+                        && w.artifact_result
+                            .as_ref()
+                            .is_none_or(|m| m.materialized_expires_at.is_none())
+                    {
                         Some("result_expired")
                     } else {
                         w.artifact_result
@@ -1118,7 +1186,11 @@ pub async fn delivery_states(
                             .map(|m| m.delivery_reason.as_str())
                     }
                 })
-                .unwrap_or("delivery_failed")
+                .unwrap_or(if delivery.attachment_ids.is_empty() {
+                    "delivery_failed"
+                } else {
+                    "materialized"
+                })
         };
         let rejected = watch
             .and_then(|w| w.artifact_result.as_ref())

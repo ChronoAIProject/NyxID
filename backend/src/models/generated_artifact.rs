@@ -63,6 +63,13 @@ pub struct AcceptedFile {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ResultManifest {
+    /// Durable lineage lifetime; never authorizes fresh source acquisition.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::bson_datetime::optional"
+    )]
+    pub materialized_expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<AcceptedFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -721,8 +721,13 @@ pub async fn input_context(
     let Some(w) = bound(db, row).await? else {
         return Ok(zeroize::Zeroizing::new(String::new()));
     };
-    let expired = Utc::now() >= w.expires_at.min(w.created_at + Duration::hours(4));
-    let data = if expired {
+    let source_expired = Utc::now() >= w.expires_at.min(w.created_at + Duration::hours(4));
+    let durable_expiry = w
+        .artifact_result
+        .as_ref()
+        .and_then(|m| m.materialized_expires_at);
+    let expired = durable_expiry.map_or(source_expired, |expiry| expiry <= Utc::now());
+    let data = if source_expired {
         zeroize::Zeroizing::new(String::new())
     } else if w.artifact_mode.is_some() {
         // Do not forward arbitrary saved process output from an older generated
@@ -754,8 +759,12 @@ pub async fn input_context(
         },
         data: &data,
         artifact_delivery: w.artifact_result.as_ref().map(|m| {
-            if m.expires_at <= Utc::now() {
-                "result_expired"
+            if m.materialized_expires_at.unwrap_or(m.expires_at) <= Utc::now() {
+                if m.materialized_expires_at.is_some() {
+                    "retention_expired"
+                } else {
+                    "result_expired"
+                }
             } else {
                 m.delivery_reason.as_str()
             }
@@ -893,9 +902,17 @@ pub async fn pending_voice_in_session(
 /// TTL only removes terminal metadata. Pending events retain their identity even
 /// after the encrypted payload expires, so admission can deliver a stable reason.
 pub async fn expire_results(db: &Database) -> AppResult<()> {
-    db.collection::<bson::Document>(WATCHES).update_many(
-        doc!{"state":{"$in":["ready","queued"]},"$or":[{"expires_at":{"$lte":bson::DateTime::now()}},{"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::hours(4))}}],"result_encrypted":{"$ne":null}},
-        doc!{"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"result_encrypted":null,"reason":"result_expired"}}).await?;
+    let expired = doc! {"state":{"$in":["ready","queued"]},"$or":[{"expires_at":{"$lte":bson::DateTime::now()}},{"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::hours(4))}}],"result_encrypted":{"$ne":null}};
+    let mut durable = expired.clone();
+    durable.insert("artifact_result.materialized_expires_at", doc! {"$ne":null});
+    // Source summaries expire at four hours even when saved bytes remain. Do
+    // not relabel already-materialized delivery or shorten its recovery TTL.
+    db.collection::<bson::Document>(WATCHES).update_many(durable,
+        doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"result_encrypted":null}}).await?;
+    let mut pending = expired;
+    pending.insert("artifact_result.materialized_expires_at", bson::Bson::Null);
+    db.collection::<bson::Document>(WATCHES).update_many(pending,
+        doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"result_encrypted":null,"reason":"result_expired"}}).await?;
     super::generated_artifacts::sweep(db).await?;
     Ok(())
 }

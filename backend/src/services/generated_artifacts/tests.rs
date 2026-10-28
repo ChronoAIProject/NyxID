@@ -430,7 +430,7 @@ async fn generated_artifacts_materialize_history_owner_http_ranges_recovery_and_
             .artifact
             .expires_at
             .unwrap()
-            < Utc::now() + Duration::minutes(31)
+            > Utc::now() + Duration::days(29)
     );
     associate_in_session(&db, &row, "assistant-message2037", &mut session)
         .await
@@ -1162,7 +1162,7 @@ async fn delivery_expiry_uses_effective_attachment_retention_and_recovery_checks
     let states = delivery_states(&db, &w.user_id, &row.id, &["retention-message".into()])
         .await
         .unwrap();
-    assert_eq!(states["retention-message"].state, "result_expired");
+    assert_eq!(states["retention-message"].state, "retention_expired");
     assert!(!states["retention-message"].recovery_available);
     assert!(matches!(
         recover(&db, &keys, &w.user_id, &row.id, "retention-message").await,

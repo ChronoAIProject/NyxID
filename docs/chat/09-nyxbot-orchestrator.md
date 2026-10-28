@@ -1589,7 +1589,18 @@ producer sets require a manifest/per-file acquisition follow-up, not a raised
 in-memory ceiling.
 
 The worker checks the exact operation status before and after reading bytes.
-A `410` or elapsed source expiry prevents publication. SHA-256 over the operation
+A `410` or elapsed source expiry prevents fresh acquisition or materialization
+of pending bytes. Pending ciphertext and process summaries keep their bounded
+source/watch deadline (summaries expire within four hours). A materialized
+private attachment instead keeps ordinary image/document retention from its own
+creation time, including live policy shortening and erasure/tombstones. It can
+remain downloadable and recoverable after 24 hours even when the source is gone.
+The shared watch and saved-message association survive through the longest
+materialized file retention; each file still has its own expiry. Recovery reuses
+retained peers and never extends or recreates expired/deleted bytes. Once every
+file is unavailable under retention, owner reads/recovery return `410` and the
+reply explains retention expiry, rather than claiming delivery never happened.
+SHA-256 over the operation
 ID, ordered normalized file metadata and decoded bytes is the immutable source
 identity; Sandbox status `version` is diagnostic only. A changed verified digest
 for the same operation fails closed. A content modification requires a new
@@ -1601,8 +1612,10 @@ materialized and currently readable. It must never send an owner to machine
 setup, handle base64 in its prompt, or invent a public URL to recover a cloud
 result. The owner button uses the empty-body owner/message recovery route.
 Natural-language recovery uses `nyx__artifact_delivery` with `{}`. That internal
-action requires a live owner Web user turn and selects the immediately preceding
-assistant message on the server. It accepts no IDs, URLs or revisions; the saved
+action requires a live owner Web user turn and selects the latest server-associated
+assistant result before the initiating owner request, across unrelated messages.
+An expired newest result reports expiry; it never silently falls back to older
+retained content. It accepts no IDs, URLs or revisions; the saved
 message association is the sole authority. It never calls Sandbox or generic
 failed-turn retry. Direct and wrapped calls share the owner's action policy.
 If that policy asks for approval, the next browser continuation supplies the

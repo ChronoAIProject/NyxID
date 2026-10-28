@@ -1956,3 +1956,467 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
         assert_eq!(a.calls.lock().unwrap().len(), calls);
     })
 }
+
+#[tokio::test]
+async fn generated_artifact_retention_outlives_source_and_keeps_latest_recovery_selection() {
+    let a = Box::pin(AsyncFixture::build(true)).await;
+    prepare_mixed_artifact_retention(&a).await;
+    let (mut event, watch) = start_retention_result(&a).await;
+    age_materialized_result(&a, &mut event, &watch).await;
+    let older = settle_retention_result(&a, &event, &watch).await;
+    check_retained_result(&a, &older).await;
+    let next = Box::pin(engine::begin_turn(
+        &a.f.state.db,
+        &a.f.owner,
+        &user_start(&event.id, "Create another video and image"),
+        &a.f.state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    assert!(next.active_turn.is_some());
+    let (event, watch) = start_retention_result(&a).await;
+    let newer = settle_retention_result(&a, &event, &watch).await;
+    check_latest_expired_result(&a, &older, &newer).await;
+}
+
+struct RetainedArtifactResult {
+    message: crate::models::assistant_message::AssistantMessage,
+    watch: String,
+}
+fn prepare_mixed_artifact_retention(a: &AsyncFixture) -> futures::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        use crate::models::{
+            assistant_upload_retention::{Policy, Settings},
+            platform_settings::COLLECTION_NAME as SETTINGS,
+        };
+        enabled(a, true).await;
+        a.f.state
+            .db
+            .collection::<Settings>(SETTINGS)
+            .insert_one(Settings {
+                policy: Some(Policy {
+                    image_days: 1,
+                    document_days: 30,
+                    tool_image_days: None,
+                    ..Policy::default()
+                }),
+                ..Settings::default()
+            })
+            .await
+            .unwrap();
+        let png = include_bytes!("../../tests/fixtures/generated-artifacts/blue.png");
+        *a.output.lock().unwrap() = json!({"success":true,"output":{"stdout":"created","stderr":"","exit_code":0,
+        "files":[
+            {"path":"/tmp/movie.mp4","content":base64::engine::general_purpose::STANDARD.encode(MP4)},
+            {"path":"/tmp/image.png","content":base64::engine::general_purpose::STANDARD.encode(png)}
+        ]}});
+    })
+}
+fn start_retention_result(
+    a: &AsyncFixture,
+) -> futures::future::BoxFuture<
+    '_,
+    (
+        crate::models::assistant_conversation::AssistantConversation,
+        AsyncServiceOperation,
+    ),
+> {
+    Box::pin(async move {
+        let row = engine::get(&a.f.state.db, &a.f.owner, &a.f.row.id)
+            .await
+            .unwrap();
+        let auth = authenticate(&a.f).await;
+        let response = direct_call(&a.f, &auth, "sandbox__submit_execution_handler",
+            json!({"Idempotency-Key":uuid::Uuid::new_v4().to_string(),"script":"create files","language":"python"})).await;
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"],
+            false
+        );
+        let watch =
+            a.f.state
+                .db
+                .collection::<AsyncServiceOperation>(WATCHES)
+                .find_one(doc! {"turn_id":&row.active_turn.as_ref().unwrap().turn_id})
+                .await
+                .unwrap()
+                .unwrap();
+        complete(a).await;
+        finish(a, &row, "Submitted.").await;
+        let event = admit_event(a).await;
+        assert_eq!(event.active_turn.as_ref().unwrap().attachments.len(), 2);
+        (event, watch)
+    })
+}
+fn age_materialized_result<'a>(
+    a: &'a AsyncFixture,
+    event: &'a mut crate::models::assistant_conversation::AssistantConversation,
+    watch: &'a AsyncServiceOperation,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
+        use chrono::{Duration, Utc};
+        let elapsed = Duration::hours(25);
+        let db = &a.f.state.db;
+        let stored = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let manifest = stored.artifact_result.as_ref().unwrap();
+        let last_expiry = manifest.materialized_expires_at.unwrap();
+        let turn = event.active_turn.as_mut().unwrap();
+        let expiry = turn
+            .attachments
+            .iter()
+            .filter_map(|a| a.artifact.expires_at)
+            .max()
+            .unwrap();
+        assert_eq!(
+            bson::DateTime::from_chrono(last_expiry),
+            bson::DateTime::from_chrono(expiry)
+        );
+        assert!(last_expiry > Utc::now() + Duration::days(29));
+        assert!(stored.expires_at >= last_expiry);
+        for attachment in &mut turn.attachments {
+            let saved = db
+                .collection::<crate::models::assistant_attachment::AssistantAttachment>(ATTACHMENTS)
+                .find_one(doc! {"_id":&attachment.id})
+                .await
+                .unwrap()
+                .unwrap();
+            attachment.artifact.expires_at = Some(saved.artifact.expires_at.unwrap() - elapsed);
+            db.collection::<bson::Document>(ATTACHMENTS).update_one(doc! {"_id":&attachment.id},
+                doc! {"$set":{"created_at":bson::DateTime::from_chrono(saved.created_at-elapsed),
+                    "expires_at":bson::DateTime::from_chrono(attachment.artifact.expires_at.unwrap())}})
+                .await.unwrap();
+            db.collection::<bson::Document>(ARTIFACTS).update_one(doc! {"assistant_attachment_id":&attachment.id},
+                doc! {"$set":{"expires_at":bson::DateTime::from_chrono(attachment.artifact.expires_at.unwrap())}})
+                .await.unwrap();
+        }
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&event.id},
+                doc! {"$set":{"active_turn.attachments":bson::to_bson(&turn.attachments).unwrap()}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(WATCHES).update_one(doc! {"_id":&watch.id},
+            doc! {"$set":{"created_at":bson::DateTime::from_chrono(stored.created_at-elapsed),
+                "deadline":bson::DateTime::from_chrono(stored.deadline-elapsed),
+                "expires_at":bson::DateTime::from_chrono(stored.expires_at-elapsed),
+                "artifact_result.expires_at":bson::DateTime::from_chrono(manifest.expires_at-elapsed),
+                "artifact_result.materialized_expires_at":bson::DateTime::from_chrono(last_expiry-elapsed)}}).await.unwrap();
+        let calls = a.calls.lock().unwrap().len();
+        watches::expire_results(db).await.unwrap();
+        Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+        let aged = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(aged.artifact_result.as_ref().unwrap().expires_at < Utc::now());
+        assert!(aged.deadline < Utc::now());
+        assert!(aged.result_encrypted.is_none());
+        assert_eq!(aged.reason.as_deref(), Some("completed"));
+        let context = watches::input_context(db, &a.f.state.encryption_keys, event)
+            .await
+            .unwrap();
+        assert!(context.contains("\"artifact_delivery\":\"materialized\""));
+        assert!(context.contains("\"reason\":\"completed\""));
+        assert!(!context.contains("result_expired"));
+        assert_eq!(a.calls.lock().unwrap().len(), calls);
+    })
+}
+fn settle_retention_result<'a>(
+    a: &'a AsyncFixture,
+    event: &'a crate::models::assistant_conversation::AssistantConversation,
+    watch: &'a AsyncServiceOperation,
+) -> futures::future::BoxFuture<'a, RetainedArtifactResult> {
+    Box::pin(async move {
+        finish(a, event, "Saved generated files.").await;
+        let message =
+            a.f.state
+                .db
+                .collection::<crate::models::assistant_message::AssistantMessage>(
+                    crate::models::assistant_message::COLLECTION_NAME,
+                )
+                .find_one(doc! {"conversation_id":&event.id,"role":"assistant",
+                "turn_id":&event.active_turn.as_ref().unwrap().turn_id})
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(message.attachments.len(), 2);
+        RetainedArtifactResult {
+            message,
+            watch: watch.id.clone(),
+        }
+    })
+}
+fn check_retained_result<'a>(
+    a: &'a AsyncFixture,
+    saved: &'a RetainedArtifactResult,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
+        let db = &a.f.state.db;
+        let calls = a.calls.lock().unwrap().len();
+        // Apply the exact terminal-watch TTL eligibility predicate, rather than
+        // assuming an extant watch could have survived Mongo's TTL monitor.
+        let eligible = doc! {"state":{"$in":["delivered","cancelled"]},
+        "expires_at":{"$lte":bson::DateTime::now()}};
+        assert_eq!(
+            db.collection::<bson::Document>(WATCHES)
+                .delete_many(eligible)
+                .await
+                .unwrap()
+                .deleted_count,
+            0
+        );
+        let delivery = db
+            .collection::<crate::models::generated_artifact::Delivery>(DELIVERIES)
+            .find_one(doc! {"_id":&saved.message.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Some(delivery.expires_at),
+            saved.message.attachments[0].artifact.expires_at
+        );
+        assert!(delivery.expires_at > saved.message.attachments[1].artifact.expires_at.unwrap());
+        let mut range = axum::http::HeaderMap::new();
+        range.insert("range", "bytes=4-15".parse().unwrap());
+        let response = artifacts::http::owner_response(
+            db,
+            &a.f.state.encryption_keys,
+            &a.f.owner,
+            &saved.message.conversation_id,
+            &saved.message.attachments[0].id,
+            &range,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 206);
+        assert_eq!(
+            response.headers()["content-range"],
+            format!("bytes 4-15/{}", MP4.len())
+        );
+        assert_eq!(
+            &axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()[..],
+            &MP4[4..16]
+        );
+        assert!(matches!(
+            engine::read_attachment(
+                db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &saved.message.conversation_id,
+                &saved.message.attachments[1].id
+            )
+            .await,
+            Err(crate::errors::AppError::AssistantAttachmentExpired)
+        ));
+        // Even an expired present peer must pass provenance checks before it
+        // can be skipped. Its valid sibling does not hide contradictory metadata.
+        let image = &saved.message.attachments[1];
+        db.collection::<bson::Document>(ATTACHMENTS)
+            .update_one(
+                doc! {"_id":&image.id},
+                doc! {"$set":{"source_result_identity":"tampered-expired-peer"}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            artifacts::recover(
+                db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &saved.message.conversation_id,
+                &saved.message.id
+            )
+            .await,
+            Err(crate::errors::AppError::Conflict(_))
+        ));
+        db.collection::<bson::Document>(ATTACHMENTS).update_one(doc! {"_id":&image.id},
+            doc! {"$set":{"source_result_identity":image.artifact.source_result_identity.as_deref().unwrap()}})
+            .await.unwrap();
+        // The real retention sweep removes the expired image, while recovery
+        // still reuses the longer-retained video and never recreates that image.
+        crate::services::assistant_upload_retention::sweep(db)
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<bson::Document>(ATTACHMENTS)
+                .find_one(doc! {"_id":&saved.message.attachments[1].id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for legacy in [false, true] {
+            if legacy {
+                db.collection::<bson::Document>(WATCHES).update_one(doc! {"_id":&saved.watch},
+                    doc! {"$unset":{"artifact_result.files":"","artifact_result.materialized_expires_at":""},
+                        "$set":{"reason":"result_expired"}}).await.unwrap();
+            }
+            artifacts::recover(
+                db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &saved.message.conversation_id,
+                &saved.message.id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                db.collection::<bson::Document>(ATTACHMENTS)
+                    .count_documents(doc! {"conversation_id":&saved.message.conversation_id})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        let states = artifacts::delivery_states(
+            db,
+            &a.f.owner,
+            &saved.message.conversation_id,
+            std::slice::from_ref(&saved.message.id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(states[&saved.message.id].state, "materialized");
+        let axum::Json(history) = crate::handlers::assistant_nyxagent::history(
+            axum::extract::State(a.f.state.clone()),
+            crate::test_utils::test_auth_user(&a.f.owner),
+            axum::extract::Path(saved.message.conversation_id.clone()),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        let history = serde_json::to_value(history).unwrap();
+        let message = history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == saved.message.id)
+            .unwrap();
+        assert_eq!(message["artifact_delivery"]["state"], "materialized");
+        assert_eq!(message["attachments"][0]["expired"], false);
+        assert_eq!(message["attachments"][1]["expired"], true);
+        assert_eq!(a.calls.lock().unwrap().len(), calls);
+    })
+}
+fn check_latest_expired_result<'a>(
+    a: &'a AsyncFixture,
+    older: &'a RetainedArtifactResult,
+    newer: &'a RetainedArtifactResult,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
+        use chrono::{Duration, Utc};
+        let db = &a.f.state.db;
+        let calls = a.calls.lock().unwrap().len();
+        let ids: Vec<_> = newer
+            .message
+            .attachments
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        db.collection::<bson::Document>(ATTACHMENTS).update_many(doc! {"_id":{"$in":&ids}},
+            doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+        db.collection::<bson::Document>(WATCHES).update_one(doc! {"_id":&newer.watch},
+            doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+        watches::expire_results(db).await.unwrap();
+        assert_eq!(db.collection::<bson::Document>(WATCHES).delete_many(doc! {
+            "state":{"$in":["delivered","cancelled"]},"expires_at":{"$lte":bson::DateTime::now()}})
+            .await.unwrap().deleted_count, 1);
+        crate::services::assistant_upload_retention::sweep(db)
+            .await
+            .unwrap();
+        let states = artifacts::delivery_states(
+            db,
+            &a.f.owner,
+            &newer.message.conversation_id,
+            &[older.message.id.clone(), newer.message.id.clone()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(states[&older.message.id].state, "materialized");
+        assert_eq!(states[&newer.message.id].state, "retention_expired");
+        for attachment in &newer.message.attachments {
+            assert!(matches!(
+                engine::read_attachment(
+                    db,
+                    &a.f.state.encryption_keys,
+                    &a.f.owner,
+                    &newer.message.conversation_id,
+                    &attachment.id
+                )
+                .await,
+                Err(crate::errors::AppError::AssistantAttachmentExpired)
+            ));
+        }
+        assert!(matches!(
+            artifacts::recover(
+                db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &newer.message.conversation_id,
+                &newer.message.id
+            )
+            .await,
+            Err(crate::errors::AppError::AssistantAttachmentExpired)
+        ));
+        artifacts::recover(
+            db,
+            &a.f.state.encryption_keys,
+            &a.f.owner,
+            &older.message.conversation_id,
+            &older.message.id,
+        )
+        .await
+        .unwrap();
+        let turn = engine::begin_turn(
+            db,
+            &a.f.owner,
+            &user_start(
+                &newer.message.conversation_id,
+                "Recover my latest generated result",
+            ),
+            &a.f.state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        let auth = authenticate(&a.f).await;
+        assert!(matches!(
+            artifacts::recover_for_chat(
+                db,
+                &a.f.state.encryption_keys,
+                auth.chat.as_ref().unwrap(),
+                &json!({})
+            )
+            .await,
+            Err(crate::errors::AppError::AssistantAttachmentExpired)
+        ));
+        finish(
+            a,
+            &turn,
+            "The latest result expired; no earlier result was selected.",
+        )
+        .await;
+        Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+        assert_eq!(a.calls.lock().unwrap().len(), calls);
+        assert_eq!(
+            db.collection::<bson::Document>(ATTACHMENTS)
+                .count_documents(doc! {"conversation_id":&newer.message.conversation_id})
+                .await
+                .unwrap(),
+            1
+        );
+    })
+}
