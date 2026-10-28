@@ -1,7 +1,6 @@
 import { useRef, useState } from "react";
-import { Columns2, RotateCcw } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { CHAT_CONTENT_WIDTH, COMPOSER_MAX_HEIGHT, useThemeStore } from "@/stores/theme-store";
 
 export function ChatWidthControl() {
@@ -68,29 +67,5 @@ function ChatDimensionControl({ label, saved, onChange, range }: {
         <RotateCcw aria-hidden="true" className="size-3" />
       </Button>
     </div>
-  );
-}
-
-export function ChatLayoutMenu() {
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label="Chat layout"
-          title="Chat layout"
-          className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring md:flex"
-        >
-          <Columns2 aria-hidden="true" className="size-3.5" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="end" aria-label="Chat layout" className="space-y-3">
-        <div>
-          <p className="text-12 font-medium">Chat content width</p>
-          <p className="mt-1 text-11 text-muted-foreground">Applies to all chats in this browser. You can also adjust this in Settings → Display.</p>
-        </div>
-        <ChatWidthControl />
-      </PopoverContent>
-    </Popover>
   );
 }

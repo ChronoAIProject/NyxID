@@ -730,7 +730,7 @@
     height: 20px;
     margin: -4px 0;
     color: var(--color-muted-foreground);
-    cursor: help;
+    cursor: pointer;
     border-radius: 4px;
   }
   .benefit-help-trigger:hover,

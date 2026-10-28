@@ -415,9 +415,18 @@ Automatic allowance receipts are action rows with `status: allowed`,
 written best effort only after success, with creation and decision at the same
 instant and expiry equal to creation. They never satisfy card consumption,
 never count as pending and are excluded from the model's user-decision note.
-Their metadata-only audit is `assistant_action_auto_allowed`. History renders
-“Allowed automatically · Full access” with the action summary, risk and the
-bypassed automation, machine/saved-login or service-approval policy. Full-access
+Their metadata-only audit is `assistant_action_auto_allowed`. Cards and receipts
+raised inside a tracked tool call record that call's turn activity ID as optional,
+presentation-only `activity_id` (streamed HTTP receipts capture it before the body
+is drained); it never authorizes, consumes or retries anything. History folds every
+settled decision of a turn into that reply's single turn summary line, beside its
+tool call when `activity_id` matches and otherwise as one grouped line per identical
+action; denials stay visible on the line. Pending cards and authored-skill reviews
+keep their own transcript rows, and the full receipt text (including the bypassed
+automation, machine/saved-login or service-approval policy) is shown on hover.
+Automation-started messages expose `origin: "trigger"` and, while the run record
+is retained, `automation: {trigger_id, run_id, label}` from two owner-scoped,
+projected reads only when the page holds such a message. Full-access
 authored publication uses the same leased publication-and-pin core, under the
 chat owner's signed identity, and links the persisted proposal for inspection or discard.
 Switching to Full access retires pending owner confirmations, respecting agent
@@ -1852,6 +1861,12 @@ means concurrent first votes produce one row and one `submitted` event.
 DELETE withdraws an existing vote and is idempotent when none exists. History
 responses include the person's current vote. Conversation, group and user
 deletion purge feedback rows.
+
+The browser offers no comment control until the person votes. A vote is saved
+at once and opens a dialog with optional reason pills and a details box; Submit
+stores both as one `comment`, reasons first in their offered order (`Not
+accurate, Bad response — wrong date`), and an empty Submit writes nothing more. Reasons are display text only: the API keeps a single
+free-text comment and does not validate or aggregate them.
 
 Each write stores a metadata-only reply context snapshot (`context`):
 surface, agent id and kind (from the thread's agent), model, effective access

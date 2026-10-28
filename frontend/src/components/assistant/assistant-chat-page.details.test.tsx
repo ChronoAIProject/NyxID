@@ -72,7 +72,7 @@ vi.mock("./nyxbot-agent-details", () => ({
 }));
 vi.mock("./nyxbot-home", () => ({ NyxBotHome: () => <div>Home</div> }));
 vi.mock("./working-context-panel", () => ({ WorkingContextPanel: () => null }));
-vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null }));
+vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null, MachinePane: () => null, MachinePaneToggle: () => null }));
 vi.mock("./chat-message", () => ({ ChatMessageList: ({ emptyDescription }: { emptyDescription?: string }) => (
   <p data-testid="empty-description">{emptyDescription}</p>
 ) }));

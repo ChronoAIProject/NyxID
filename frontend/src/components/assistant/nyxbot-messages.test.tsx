@@ -1,3 +1,4 @@
+import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it } from "vitest";
@@ -54,6 +55,70 @@ it("still shows unknown notices by their first sentence", () => {
   expect(
     screen.getByRole("note", { name: "NyxID event: Something new happened" }),
   ).toBeInTheDocument();
+});
+
+it("keeps a multi-line reply excerpt in one card, not a card per line", async () => {
+  const user = userEvent.setup();
+  render(
+    <NyxBotEventNotice
+      message={message(
+        "event",
+        `${HEADER}\n- Specialist reservation-test replied. Reply excerpt: "Configured FAQ answers:\n• Address: Junction 8\n- Hours: 11:00-21:30" Read more with nyxid__read_subagent.\n- The user finished connecting github (connect_link_id cl-1).`,
+      )}
+    />,
+  );
+  const cards = within(screen.getByRole("group", { name: "NyxID updates" })).getAllByRole("note");
+  expect(cards.map((card) => card.getAttribute("aria-label"))).toEqual([
+    "NyxID event: reservation-test replied",
+    "NyxID event: Finished connecting github",
+  ]);
+  await user.click(within(cards[0]!).getByRole("button"));
+  expect(cards[0]).toHaveTextContent("• Address: Junction 8");
+  expect(cards[0]).toHaveTextContent("- Hours: 11:00-21:30");
+});
+
+it("shows an automation run by its automation's name, the instruction on demand", async () => {
+  const user = userEvent.setup();
+  const root = createRootRoute();
+  const route = createRoute({
+    getParentRoute: () => root,
+    path: "/",
+    component: () => (
+      <NyxBotEventNotice
+        message={{
+          ...message("event", "Maintain only Notion FAQ KEK specs.\nEvery day recheck each outlet."),
+          origin: "trigger",
+          automation: { triggerId: "t1", runId: "r1", label: "Keep KEK restaurant FAQ current" },
+        }}
+      />
+    ),
+  });
+  const automations = createRoute({ getParentRoute: () => root, path: "/assistant/automations" });
+  const router = createRouter({
+    routeTree: root.addChildren([route, automations]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await router.load();
+  render(<RouterProvider router={router} />);
+  const card = await screen.findByRole("note", { name: "NyxID event: Automation · Keep KEK restaurant FAQ current" });
+  expect(card).not.toHaveTextContent("Maintain only");
+  await user.click(within(card).getByRole("button"));
+  expect(card).toHaveTextContent("Every day recheck each outlet.");
+  expect(within(card).getByRole("link", { name: "Open Automations" })).toBeInTheDocument();
+});
+
+it("names an automation run whose record has expired generically", () => {
+  render(<NyxBotEventNotice message={{ ...message("event", "Do the thing."), origin: "trigger" }} />);
+  expect(screen.getByRole("note", { name: "NyxID event: Automation run" })).toBeInTheDocument();
+});
+
+it("labels a finished background task", () => {
+  render(
+    <NyxBotEventNotice
+      message={message("event", `${HEADER}\n- Asynchronous service operation finished: done. Its result is quoted in this turn's context.`)}
+    />,
+  );
+  expect(screen.getByRole("note", { name: "NyxID event: Background task finished" })).toBeInTheDocument();
 });
 
 it("labels an orchestrator instruction as coming from NyxBot", () => {

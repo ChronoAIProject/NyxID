@@ -2,10 +2,12 @@ import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
 import { MachineToolCard } from "./machine-tool-card";
-import { ThumbsDown, ThumbsUp } from "lucide-react";
-import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
+import { useReplyFeedback } from "@/hooks/use-assistant-feedback";
+import { ReplyFeedbackFollowUp, ReplyFeedbackVotes } from "./reply-feedback";
 import {
   Fragment,
+  useContext,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -21,13 +23,17 @@ import { UploadComposer } from "@/components/assistant/upload-composer";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { HeaderBar, HeaderItem, ThreadPanels } from "@/components/assistant/nyxbot-agent-panels";
+import { JumpToLatestButton } from "@/components/assistant/jump-to-latest-button";
+import { JUMP_TO_LATEST_DISTANCE, glideToEnd, prefersReducedMotion } from "@/lib/assistant/jump-to-latest";
+import { ChatHeaderCompactContext } from "./chat-header-context";
 import { MessageCopyAction } from "./message-copy-action";
 import { MessageTime } from "@/components/assistant/message-time";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
-import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
 import { AccessModeSwitcher } from "@/components/assistant/nyxbot-access-controls";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroupMessages } from "@/hooks/use-nyxbot-groups";
@@ -129,13 +135,12 @@ export function GroupMessageRow({
   readonly members?: readonly AssistantGroupMember[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
-  const feedback = useAssistantFeedback("group", groupId, message.id);
-  const [vote, setVote] = useState<"up" | "down" | undefined>(
-    message.feedback?.vote,
-  );
-  const [commentOpen, setCommentOpen] = useState(false);
-  const [comment, setComment] = useState(message.feedback?.comment ?? "");
-  const [feedbackError, setFeedbackError] = useState(false);
+  const feedback = useReplyFeedback({
+    scope: "group",
+    parentId: groupId,
+    messageId: message.id,
+    initialVote: message.feedback?.vote,
+  });
   if (message.role === "notice") {
     return (
       <div className="min-w-0 px-8">
@@ -237,83 +242,11 @@ export function GroupMessageRow({
             />
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
-          <div className="mt-2 flex gap-1">
+          <div className="mt-2 flex items-center gap-1">
             <MessageCopyAction text={sanitizeAssistantMessageContent(message.text)} />
-            {(["up", "down"] as const).map((next) => (
-              <button
-                key={next}
-                type="button"
-                disabled={feedback.isPending}
-                aria-label={next === "up" ? "Helpful" : "Not helpful"}
-                aria-pressed={vote === next}
-                onClick={() => {
-                  const selected = vote === next ? undefined : next;
-                  setVote(selected);
-                  void feedback
-                    .mutateAsync(selected ? { vote: selected } : {})
-                    .then(() => setFeedbackError(false))
-                    .catch(() => {
-                      setVote(vote);
-                      setFeedbackError(true);
-                    });
-                }}
-                className={`rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50 ${vote === next ? "text-nyx-secondary-400" : ""}`}
-              >
-                {next === "up" ? (
-                  <ThumbsUp className="h-3.5 w-3.5" />
-                ) : (
-                  <ThumbsDown className="h-3.5 w-3.5" />
-                )}
-              </button>
-            ))}
-            <button
-              type="button"
-              aria-label="Add feedback comment"
-              aria-expanded={commentOpen}
-              onClick={() => setCommentOpen((open) => !open)}
-              className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
-            >
-              Comment
-            </button>
+            <ReplyFeedbackVotes feedback={feedback} />
           </div>
-          {commentOpen ? (
-            <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
-              <textarea
-                autoFocus
-                aria-label="Optional feedback comment"
-                value={comment}
-                maxLength={1000}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") setCommentOpen(false);
-                }}
-                onChange={(event) => setComment(event.target.value)}
-                className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none"
-                placeholder={vote ? "Optional comment" : "Choose helpful or not helpful first"}
-              />
-              <button
-                type="button"
-                disabled={!vote || feedback.isPending}
-                className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10 disabled:opacity-50"
-                onClick={() => {
-                  if (!vote) return;
-                  void feedback
-                    .mutateAsync({ vote, comment })
-                    .then(() => {
-                      setFeedbackError(false);
-                      setCommentOpen(false);
-                    })
-                    .catch(() => setFeedbackError(true));
-                }}
-              >
-                Send
-              </button>
-            </div>
-          ) : null}
-          {feedbackError ? (
-            <p role="alert" className="mt-1 text-11 text-destructive">
-              Unable to save feedback. Try again.
-            </p>
-          ) : null}
+          <ReplyFeedbackFollowUp feedback={feedback} />
         </div>
       </div>
     </article>
@@ -339,6 +272,9 @@ function GroupTranscript({
   const scrollRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const lastScrollTop = useRef(0);
+  const [awayFromLatest, setAwayFromLatest] = useState(false);
+  const stopGlide = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopGlide.current?.(), []);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const names = group.members.map((member) => member.name);
   const working = group.members.filter((member) =>
@@ -373,6 +309,22 @@ function GroupTranscript({
     else if (element.scrollTop < lastScrollTop.current - 1)
       following.current = false;
     lastScrollTop.current = element.scrollTop;
+    setAwayFromLatest(distance > JUMP_TO_LATEST_DISTANCE);
+  }
+
+  function jumpToLatest() {
+    const element = scrollRef.current;
+    if (!element) return;
+    stopGlide.current?.();
+    const pin = () => {
+      following.current = true;
+      element.scrollTop = element.scrollHeight;
+      lastScrollTop.current = element.scrollTop;
+      setAwayFromLatest(false);
+    };
+    following.current = true;
+    if (prefersReducedMotion()) pin();
+    else stopGlide.current = glideToEnd(element, pin);
   }
 
   async function loadOlder() {
@@ -396,93 +348,102 @@ function GroupTranscript({
   }
 
   return (
-    <div
-      ref={scrollRef}
-      onScroll={handleScroll}
-      data-chat-transcript=""
-      data-scroll-fade=""
-      className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6"
-    >
+    <>
       <div
-        className="mx-auto flex min-h-full w-full max-w-[var(--chat-content-width,758px)] flex-col gap-4 pt-4"
-        style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
+        ref={scrollRef}
+        onScroll={handleScroll}
+        data-chat-transcript=""
+        data-scroll-fade=""
+        className="assistant-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 sm:px-6"
       >
-        {hasOlder ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="self-center"
-            isLoading={loadingOlder}
-            onClick={() => void loadOlder()}
-          >
-            Load earlier messages
-          </Button>
-        ) : null}
-        {!messages.length ? (
-          <p className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
-            Say hello. Mention an agent with @ to ask it directly.
-          </p>
-        ) : null}
-        {messages.map((message) => (
-          <GroupMessageRow
-            key={message.id}
-            message={message}
-            groupId={group.id}
-            names={names}
-            members={group.members}
-            onOpenAgent={onOpenAgent}
-          />
-        ))}
-        {working.length ? (
-          <div
-            role="status"
-            aria-label="Agents working"
-            className="grid grid-cols-[30px_minmax(0,1fr)] items-center"
-          >
-            <span className="flex w-6 justify-center">
-              <AgentAvatar agent={working[0]!} size="md" />
-            </span>
-            <span className="flex items-center gap-2 text-11 text-muted-foreground">
-              <WorkingDots />
-              {workingLabel(working.map((member) => agentTitle(member)))}
-            </span>
-          </div>
-        ) : null}
+        <div
+          className="mx-auto flex min-h-full w-full max-w-[var(--chat-content-width,758px)] flex-col gap-4 pt-4"
+          style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
+        >
+          {hasOlder ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="self-center"
+              isLoading={loadingOlder}
+              onClick={() => void loadOlder()}
+            >
+              Load earlier messages
+            </Button>
+          ) : null}
+          {!messages.length ? (
+            <p className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
+              Say hello. Mention an agent with @ to ask it directly.
+            </p>
+          ) : null}
+          {messages.map((message) => (
+            <GroupMessageRow
+              key={message.id}
+              message={message}
+              groupId={group.id}
+              names={names}
+              members={group.members}
+              onOpenAgent={onOpenAgent}
+            />
+          ))}
+          {working.length ? (
+            <div
+              role="status"
+              aria-label="Agents working"
+              className="grid grid-cols-[30px_minmax(0,1fr)] items-center"
+            >
+              <span className="flex w-6 justify-center">
+                <AgentAvatar agent={working[0]!} size="md" />
+              </span>
+              <span className="flex items-center gap-2 text-11 text-muted-foreground">
+                <WorkingDots />
+                {workingLabel(working.map((member) => agentTitle(member)))}
+              </span>
+            </div>
+          ) : null}
+        </div>
       </div>
-    </div>
+      <JumpToLatestButton visible={awayFromLatest} bottomInset={bottomInset} onJump={jumpToLatest} />
+    </>
   );
 }
 
 function MemberButton({
   member,
+  size,
   onOpen,
 }: {
   readonly member: AssistantGroupMember;
+  readonly size: "sm" | "md";
   readonly onOpen: () => void;
 }) {
+  const handle = agentHandle(member);
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
-      title={
-        agentHandle(member)
-          ? `${agentTitle(member)} (${agentHandle(member)!})`
-          : agentTitle(member)
-      }
-      className={cn(
-        "relative rounded-full transition-opacity hover:opacity-80",
-        member.destroyed && "opacity-50",
-      )}
-    >
-      <AgentAvatar agent={member} size="md" />
-      {member.working ? (
-        <span
-          aria-hidden="true"
-          className="absolute -bottom-0.5 -right-0.5 h-2 w-2 animate-pulse rounded-full bg-success ring-2 ring-background"
-        />
-      ) : null}
-    </button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
+          className={cn(
+            "relative rounded-full transition-opacity hover:opacity-80",
+            member.destroyed && "opacity-50",
+          )}
+        >
+          <AgentAvatar agent={member} size={size} />
+          {member.working ? (
+            <span
+              aria-hidden="true"
+              className="absolute -bottom-0.5 -right-0.5 h-2 w-2 animate-pulse rounded-full bg-success ring-2 ring-background"
+            />
+          ) : null}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="text-11">
+        <p className="font-medium">{agentTitle(member)}</p>
+        {handle ? <p className="text-text-tertiary">{handle}</p> : null}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -499,51 +460,62 @@ function GroupHeader({
     (member) => member.id === group.lead_agent_id,
   );
   const working = group.working_agent_ids.length;
+  const compact = useContext(ChatHeaderCompactContext);
   return (
-    <div className="shrink-0 px-4 pt-3 sm:px-6" style={{ width: "calc(100% - var(--assistant-content-inset, 0px))" }}>
-      <div className="mx-auto w-full max-w-[var(--chat-content-width,758px)] space-y-1.5">
-        <div className="flex items-center gap-3">
-          <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">
-            {group.name}
-          </h2>
-          <div
+    <ThreadPanels>
+      <div className="space-y-1.5">
+        <HeaderBar>
+          <HeaderItem className="min-w-0">
+            <h2 className={cn("truncate font-semibold text-foreground", compact ? "text-11" : "text-13")}>
+              {group.name}
+            </h2>
+          </HeaderItem>
+          <HeaderItem
             aria-label="Members"
             role="group"
-            className="flex items-center gap-1"
+            className={cn("flex shrink-0 items-center", compact ? "gap-0.5" : "gap-1")}
           >
-            {group.members.map((member) => (
-              <MemberButton
-                key={member.id}
-                member={member}
-                onOpen={() => onOpenAgent(member.id)}
-              />
-            ))}
-          </div>
-          {working ? (
-            <span className="flex items-center gap-1.5 text-11 text-muted-foreground">
+            <TooltipProvider delayDuration={200}>
+              {group.members.map((member) => (
+                <MemberButton
+                  key={member.id}
+                  member={member}
+                  size={compact ? "sm" : "md"}
+                  onOpen={() => onOpenAgent(member.id)}
+                />
+              ))}
+            </TooltipProvider>
+          </HeaderItem>
+          {working && !compact ? (
+            <HeaderItem className="flex shrink-0 items-center gap-1.5 text-11 text-muted-foreground">
               <span
                 aria-hidden="true"
                 className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
               />
               {working} working
-            </span>
+            </HeaderItem>
           ) : null}
-          <Button
-            size="sm"
-            variant="ghost"
-            className="ml-auto"
-            aria-label="Group settings"
-            onClick={onOpenSettings}
-          >
-            <Settings2 aria-hidden="true" />
-            Settings
-          </Button>
-        </div>
-        <p className="text-11 text-text-tertiary">
-          {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.
-        </p>
+          <HeaderItem className="ml-auto">
+            <Button
+              size="sm"
+              variant="ghost"
+              className={compact ? "h-7 w-7 px-0" : undefined}
+              aria-label="Group settings"
+              title="Group settings"
+              onClick={onOpenSettings}
+            >
+              <Settings2 aria-hidden="true" />
+              <span className={compact ? "sr-only" : undefined}>Settings</span>
+            </Button>
+          </HeaderItem>
+        </HeaderBar>
+        {compact ? null : (
+          <p className="text-11 text-text-tertiary">
+            {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.
+          </p>
+        )}
       </div>
-    </div>
+    </ThreadPanels>
   );
 }
 
@@ -817,7 +789,6 @@ export function NyxAgentGroupPage({
     <AssistantShell
       resizableContent
       title={group?.name ?? "Group"}
-      headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"

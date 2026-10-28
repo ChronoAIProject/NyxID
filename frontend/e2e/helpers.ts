@@ -49,7 +49,7 @@ export async function openAssistant(
           .getByRole("button", { name: "New chat", exact: true })
           .first()
           .isVisible()) ||
-        (await page.getByRole("button", { name: "New agent", exact: true }).first().isVisible()) ||
+        (await page.getByRole("button", { name: "Create new agent", exact: true }).first().isVisible()) ||
         (await page.getByRole("button", { name: "Open chats" }).isVisible()),
       { timeout: 20_000 },
     )
@@ -65,6 +65,13 @@ export function composerInput(page: Page) {
   // Placeholder flips to "Assistant is working..." while a turn runs; match
   // the element, not one placeholder value.
   return page.locator("[data-composer-textbox]");
+}
+
+/** Opens the sidebar account menu, through the drawer on narrow viewports. */
+export async function openAccountMenu(page: Page): Promise<void> {
+  const drawer = page.getByRole("button", { name: "Open chats" });
+  if (await drawer.isVisible()) await drawer.click();
+  await page.getByRole("button", { name: "Account menu" }).click();
 }
 
 export async function sendMessage(page: Page, text: string): Promise<void> {

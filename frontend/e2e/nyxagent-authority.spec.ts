@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { openAssistant, sendMessage, composerInput, stopButton } from "./helpers";
+import { openAccountMenu, openAssistant, sendMessage, composerInput, stopButton } from "./helpers";
 import { mockDashboard } from "./managed-onboarding-fixtures";
 
 const unexpectedRequests = new WeakMap<Page, string[]>();
@@ -155,7 +155,8 @@ test("NyxBot settings ask before destructive actions in Auto; Full access delete
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await page.getByRole("button", { name: "NyxBot settings" }).click();
+  await openAccountMenu(page);
+  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
   const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
   const mode = settings.getByRole("combobox", { name: "Access mode" });
   await expect(mode).toHaveText("Auto");
@@ -188,7 +189,8 @@ test("NyxBot settings ask before destructive actions in Auto; Full access delete
   await settled(page);
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
   await page.reload();
-  await page.getByRole("button", { name: "NyxBot settings" }).click();
+  await openAccountMenu(page);
+  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
   await expect(
     settings.getByRole("combobox", { name: "Access mode" }),
   ).toHaveText("Full access");
@@ -258,7 +260,8 @@ test("creating an agent opens its home thread, and each agent keeps its own thre
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   const nav = agentsNav(page);
-  await nav.getByRole("button", { name: "New agent" }).click();
+  await nav.getByRole("button", { name: "Create new agent" }).click();
+  await page.getByRole("menuitem", { name: "Personal agent" }).click();
   const dialog = page.getByRole("dialog", { name: "New agent" });
   await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("writer");
   await dialog.getByRole("textbox", { name: "Role" }).fill("Drafts release notes.");
@@ -343,7 +346,8 @@ test("NyxBot delegates to a sidebar specialist and is woken by its reply", async
 
 test("channel bots can be relinked to a specialist", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await page.getByRole("button", { name: "NyxBot settings" }).click();
+  await openAccountMenu(page);
+  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
   const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
   await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
   const connected = settings.getByRole("list", { name: "Connected channel bots" });
@@ -369,7 +373,8 @@ test("a bot's chats: who can talk, how it answers, and posting are set per chat"
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await page.getByRole("button", { name: "NyxBot settings" }).click();
+  await openAccountMenu(page);
+  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
   const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
   await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
   const connected = settings.getByRole("list", { name: "Connected channel bots" });
@@ -566,12 +571,14 @@ test("chat width resizes the transcript and composer together, persists, and fit
   const grip = await handle.boundingBox();
   expect(original).not.toBeNull();
   expect(grip).not.toBeNull();
-  expect(grip!.y).toBeCloseTo((await page.locator("header").boundingBox())!.height, 0);
-  expect((await handle.locator("svg").boundingBox())!.y).toBeCloseTo(grip!.y, 0);
+  // The tab rises from the content slab into the gap above it, overlapping the slab by 4px.
+  const tab = (await handle.locator("[data-chat-width-grip]").boundingBox())!;
+  expect(tab.y).toBeCloseTo(grip!.y + 4, 0);
+  expect(tab.y + tab.height).toBeCloseTo((await page.getByRole("main").boundingBox())!.y + 4, 0);
   expect(grip!.x + grip!.width / 2).toBeCloseTo(original!.x + original!.width, 0);
   const guide = handle.locator("..").locator("[data-chat-width-guide]");
   await expect(guide).toHaveCSS("opacity", "0");
-  // Grab the triangular marker at the top of the column.
+  // Grab the handle tab at the top of the column.
   const gripY = grip!.y + 8;
   await page.mouse.move(grip!.x + grip!.width / 2, gripY);
   await expect(guide).toHaveCSS("opacity", "1");
@@ -593,7 +600,9 @@ test("chat width resizes the transcript and composer together, persists, and fit
   await expect(guide).toHaveCSS("opacity", "1");
   await page.keyboard.press("ArrowLeft");
   expect((await composer.boundingBox())!.width).toBeCloseTo(expanded!.width - 16, 0);
-  await page.getByRole("button", { name: "Chat layout", exact: true }).click();
+  await openAccountMenu(page);
+  await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
+  await page.getByRole("tab", { name: "Display", exact: true }).click();
   await expect(page.getByRole("slider", { name: "Chat content width" })).toHaveValue(String(Math.round(expanded!.width - 16)));
   await page.getByRole("button", { name: "Reset chat content width" }).click();
   expect((await composer.boundingBox())!.width).toBeCloseTo(original!.width, 0);
@@ -653,10 +662,11 @@ test("display settings share chat width and composer height across chats and rel
 
   await agentsNav(page).getByRole("button", { name: "New chat with researcher" }).click();
   await expectLayout(536, savedHeight - 24);
-  await agentsNav(page).getByRole("button", { name: "New group", exact: true }).click();
-  const group = page.getByRole("dialog", { name: "New group", exact: true });
+  await agentsNav(page).getByRole("button", { name: "Create new agent", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Crew" }).click();
+  const group = page.getByRole("dialog", { name: "New crew", exact: true });
   await group.getByRole("textbox", { name: "Name", exact: true }).fill("Shared layout");
-  await group.getByRole("button", { name: "Create group", exact: true }).click();
+  await group.getByRole("button", { name: "Create crew", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Shared layout", exact: true })).toBeVisible();
   await expectLayout(536, savedHeight - 24);
   await page.reload();
@@ -677,9 +687,11 @@ test("display settings share chat width and composer height across chats and rel
 });
 
 test("chat scroll fades follow hidden content at both edges and inside code blocks", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 600 });
+  // Short enough that the compact sidebar still overflows.
+  await page.setViewportSize({ width: 1280, height: 480 });
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  const sidebar = agentsNav(page);
+  // The whole sidebar column scrolls as one area around the agents list.
+  const sidebar = page.locator("[data-scroll-fade]").filter({ has: agentsNav(page) });
   await expect(sidebar).toHaveAttribute("data-scroll-edges", "bottom");
   await sidebar.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await expect(sidebar).toHaveAttribute("data-scroll-edges", "top");
@@ -750,8 +762,16 @@ test("conversation index previews and navigates messages outside the rendered wi
     return bounds.height;
   }
   await expectRailFitsAboveComposer();
-  await rail.locator('[data-message-id="index-message-159"]').hover();
+  // A passing pointer previews nothing; a pressed tick previews its message.
+  const lastTick = rail.locator('[data-message-id="index-message-159"]');
+  await lastTick.hover();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  const lastBox = (await lastTick.boundingBox())!;
+  await page.mouse.move(lastBox.x + lastBox.width / 2, lastBox.y + lastBox.height / 2);
+  await page.mouse.down();
   await expect(page.getByRole("tooltip")).toContainText("Review item 160");
+  await page.mouse.up();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
 
   const initialScroll = await transcript.evaluate((element) => element.scrollTop);
   const firstIndex = Number(await rail.locator("[data-chat-index-target]").first().getAttribute("data-chat-index-target"));
@@ -774,7 +794,7 @@ test("conversation index previews and navigates messages outside the rendered wi
   await expect(rail.locator('[data-message-id="index-message-0"]')).toBeFocused();
   const userTick = await rail.locator('[data-message-id="index-message-0"] span').boundingBox();
   const agentTick = await rail.locator('[data-message-id="index-message-1"] span').boundingBox();
-  // Keyboard focus magnifies the current tick, as hovering does in Heca.
+  // Keyboard focus magnifies the current tick.
   expect(agentTick!.width).toBeGreaterThan(userTick!.width);
   await page.keyboard.press("ArrowDown");
   await expect(page.locator("#message-index-message-1")).toBeInViewport();
@@ -812,6 +832,31 @@ test("conversation index previews and navigates messages outside the rendered wi
   await page.setViewportSize({ width: 390, height: 700 });
   await expect(rail).toBeHidden();
   expect(await page.getByRole("main").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+});
+
+test("jump to latest returns a reader who scrolled up to the newest message", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await agentsNav(page).getByRole("button", { name: /^researcher, specialist/ }).click();
+  const text = Array.from({ length: 30 }, (_, index) => `Section ${index + 1}: Check the current work and report the result.`).join("\n\n");
+  await sendMessage(page, text);
+  await settled(page);
+  const transcript = page.locator("[data-chat-transcript]");
+  const jump = page.getByRole("button", { name: "Jump to latest message" });
+  await expect(jump).toHaveCount(0);
+
+  await transcript.evaluate((element) => { element.scrollTop = 0; });
+  await expect(jump).toBeVisible();
+  const button = (await jump.boundingBox())!;
+  const composer = (await page.locator("[data-composer-input]").boundingBox())!;
+  expect(button.x + button.width / 2).toBeCloseTo(composer.x + composer.width / 2, 0);
+  expect(button.y + button.height).toBeLessThan(composer.y);
+
+  // The header collapses on the way down; the jump must still land at the end.
+  await jump.click();
+  await expect.poll(() => transcript.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
+  await expect(jump).toHaveCount(0);
+  await expect(page.getByRole("group", { name: "Conversation controls" })).toHaveAttribute("data-compact", "true");
 });
 
 test("conversation controls float after scrolling without moving the reading position", async ({ page }) => {

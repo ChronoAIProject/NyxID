@@ -193,6 +193,10 @@ export const nyxAgentMessageSchema = z.object({
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
+  /** Who started the turn this message opens; absent on older rows. */
+  origin: z.string().nullish(),
+  /** The automation an automation-started message came from, while its run is retained. */
+  automation: z.object({ trigger_id: z.string(), run_id: z.string(), label: z.string() }).nullish(),
 });
 /** How NyxBot asks before acting: never, for sensitive/destructive actions, or for every change. */
 export const nyxAgentAccessModeSchema = z.enum(["autopilot", "nyxmode", "ask_every_time"]);
@@ -217,6 +221,8 @@ export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
   creation_turn_id: z.string().nullish(),
+  /** The tool call (turn activity) this card or receipt belongs to. */
+  activity_id: z.string().nullish(),
   authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
   continuation_receipt_id: z.string().uuid().nullish(),

@@ -58,6 +58,12 @@ export interface ChatMessage {
   readonly via?: string | null;
   readonly activityTotal?: number;
   readonly turnStatus?: import("./turn-status").TurnStatus | null;
+  /** Settled permission decisions and automatic receipts of this reply's turn. */
+  readonly decisions?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement[];
+  /** Who started the turn this message opens (`trigger` for an automation). */
+  readonly origin?: string | null;
+  /** The automation behind an automation-started message. */
+  readonly automation?: { readonly triggerId: string; readonly runId: string; readonly label: string } | null;
 }
 
 export interface ChatImage {

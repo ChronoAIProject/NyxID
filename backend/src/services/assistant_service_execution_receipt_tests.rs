@@ -205,3 +205,39 @@ async fn actual_http_receipts_choose_one_approval_on_success_head_and_bodyless_s
     server.abort();
     provider.abort();
 }
+
+#[tokio::test]
+async fn streamed_receipt_keeps_the_tool_call_it_ran_in() {
+    let f = orchestrator_fixture("receipt_activity_id").await;
+    mode(&f, AccessMode::Autopilot).await;
+    let owner = org(&f).await;
+    let id = connection(&f, &owner, "receipt", None).await;
+    let decision = gate(&f, &id, &owner, &json!({"path":"clean"}), None).await;
+    assert!(decision.automatic.is_some());
+    let source = futures::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+        b"part",
+    ))]);
+    let response = axum::response::Response::builder()
+        .body(Body::from_stream(source))
+        .unwrap();
+    // The receipt is chosen while the tool call runs; its body reaches EOF
+    // after that scope has ended, as Hyper polls it.
+    let response = crate::services::machine_activity_service::ACTIVITY_ID
+        .scope(
+            Some("activity-1".into()),
+            decision.finish_http(
+                response,
+                f.state.db.clone(),
+                Some(f.chat.clone()),
+                "GET",
+                None,
+            ),
+        )
+        .await;
+    axum::body::to_bytes(response.into_body(), 1000)
+        .await
+        .unwrap();
+    let rows = receipts(&f).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get_str("activity_id").ok(), Some("activity-1"));
+}
