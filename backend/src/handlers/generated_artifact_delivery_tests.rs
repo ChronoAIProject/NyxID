@@ -1837,6 +1837,7 @@ fn check_ordinary_async_lossy_result() -> futures::future::BoxFuture<'static, ()
 async fn generated_artifact_worker_delivers_valid_peers_and_settles_envelope_refusals() {
     for case in [
         "mixed",
+        "malformed_entry",
         "missing_pending",
         "missing_saved",
         "moved_pending",
@@ -1854,6 +1855,15 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
         let a = boxed_generated().await;
         let valid = a.output.lock().unwrap()["output"]["files"][0].clone();
         let files = match case {
+            "malformed_entry" => {
+                let mut peer = valid.clone();
+                peer["path"] = json!("/private/after.mp4");
+                json!([
+                    valid.clone(),
+                    {"path":"/private/bad.mp4","content":valid["content"],"size":-1},
+                    peer
+                ])
+            }
             "overcount" => json!(vec![valid; 9]),
             "transport_limit" => {
                 json!([{"path":"huge.bin","content":"x".repeat(artifacts::sandbox::RESPONSE_BYTES)}])
@@ -1894,7 +1904,9 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
         let attachments = &event.active_turn.as_ref().unwrap().attachments;
         assert_eq!(
             attachments.len(),
-            usize::from(!refused) + usize::from(preserves_peer)
+            usize::from(!refused)
+                + usize::from(preserves_peer)
+                + usize::from(case == "malformed_entry")
         );
         if !refused {
             let (mime, bytes) = engine::read_attachment(
@@ -2040,8 +2052,41 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
         assert_eq!(outcome["recovery_available"], false);
         assert_eq!(
             outcome["count"],
-            usize::from(!refused && !missing) + usize::from(preserves_peer)
+            usize::from(!refused && !missing)
+                + usize::from(preserves_peer)
+                + usize::from(case == "malformed_entry")
         );
+        if case == "malformed_entry" {
+            assert_eq!(message["attachments"].as_array().unwrap().len(), 2);
+            for attachment in message["attachments"].as_array().unwrap() {
+                let (mime, bytes) = engine::read_attachment(
+                    &a.f.state.db,
+                    &a.f.state.encryption_keys,
+                    &a.f.owner,
+                    &event.id,
+                    attachment["id"].as_str().unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(mime, "video/mp4");
+                assert_eq!(bytes, MP4);
+            }
+            let provider_calls = a.calls.lock().unwrap();
+            assert_eq!(
+                provider_calls
+                    .iter()
+                    .filter(|p| p.as_str() == "/executions")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                provider_calls
+                    .iter()
+                    .filter(|p| p.ends_with("/result"))
+                    .count(),
+                1
+            );
+        }
         if let Some(peer) = &retained_peer {
             assert_eq!(message["attachments"].as_array().unwrap().len(), 1);
             assert_eq!(message["attachments"][0]["id"], *peer);
@@ -2058,13 +2103,15 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
             assert_eq!(bytes, MP4);
         }
         if !refused && !missing {
-            assert_eq!(
-                outcome["rejected"],
+            let expected = if case == "malformed_entry" {
+                json!([{"index":1,"filename":"bad.mp4","reason":"invalid"}])
+            } else {
                 json!([
                     {"index":0,"filename":"bad.mp4","reason":"invalid"},
                     {"index":2,"filename":"bad.mp4","reason":"unavailable"}
                 ])
-            );
+            };
+            assert_eq!(outcome["rejected"], expected);
         } else if refused || case == "legacy_missing" {
             assert_eq!(
                 a.f.state
