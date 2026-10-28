@@ -537,7 +537,16 @@ pub async fn prepare_settlement_in_session(
         {
             return Err(invalid());
         }
-        if pending.is_none() || saved.is_none() {
+        let rejected_missing = pending.is_some_and(|p| {
+            manifest.rejected.iter().any(|f| {
+                f.index == p.artifact_index
+                    && matches!(
+                        f.reason,
+                        crate::models::generated_artifact::RejectionReason::Missing
+                    )
+            })
+        });
+        if pending.is_none() || saved.is_none() || rejected_missing {
             remove.push(attachment.id.clone());
             if manifest.files.is_empty()
                 && let Some(pending) = pending
@@ -650,7 +659,15 @@ async fn materialize(
     let additional = rows
         .iter()
         .filter(|r| {
-            r.state != "missing" && !existing.iter().any(|a| a.id == r.assistant_attachment_id)
+            r.state != "missing"
+                && !manifest.rejected.iter().any(|f| {
+                    f.index == r.artifact_index
+                        && matches!(
+                            f.reason,
+                            crate::models::generated_artifact::RejectionReason::Missing
+                        )
+                })
+                && !existing.iter().any(|a| a.id == r.assistant_attachment_id)
         })
         .count();
     if existing.len() + additional > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS {
@@ -660,7 +677,15 @@ async fn materialize(
     let mut attachments = Vec::new();
     let mut total = 0usize;
     for row in rows {
-        if row.state == "missing" {
+        if row.state == "missing"
+            || manifest.rejected.iter().any(|f| {
+                f.index == row.artifact_index
+                    && matches!(
+                        f.reason,
+                        crate::models::generated_artifact::RejectionReason::Missing
+                    )
+            })
+        {
             continue;
         }
         if row.expires_at <= Utc::now() {

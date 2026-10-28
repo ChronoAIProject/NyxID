@@ -1663,6 +1663,13 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
                 {"path":"/private/bad.mp4","error":"private-error-marker"}
             ]),
         };
+        let mut files = files;
+        let preserves_peer = matches!(case, "missing_pending" | "missing_saved" | "legacy_missing");
+        if preserves_peer {
+            let mut peer = files[1].clone();
+            peer["path"] = json!("/private/retained-peer.mp4");
+            files.as_array_mut().unwrap().push(peer);
+        }
         a.output.lock().unwrap()["output"]["files"] = files;
         a.submit().await;
         complete(&a).await;
@@ -1684,7 +1691,10 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
         finish(&a, &a.f.row, "submitted").await;
         let event = admit_event(&a).await;
         let attachments = &event.active_turn.as_ref().unwrap().attachments;
-        assert_eq!(attachments.len(), usize::from(!refused));
+        assert_eq!(
+            attachments.len(),
+            usize::from(!refused) + usize::from(preserves_peer)
+        );
         if !refused {
             let (mime, bytes) = engine::read_attachment(
                 &a.f.state.db,
@@ -1713,6 +1723,18 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
             );
         }
         let missing = matches!(case, "missing_pending" | "missing_saved" | "legacy_missing");
+        let retained_peer = preserves_peer.then(|| attachments[1].id.clone());
+        let vanished = if case == "missing_pending" {
+            a.f.state
+                .db
+                .collection::<bson::Document>(ARTIFACTS)
+                .find_one(doc! {"assistant_attachment_id":&attachments[0].id})
+                .await
+                .unwrap()
+        } else {
+            None
+        };
+
         if !refused {
             let attachment = &attachments[0];
             let pending = a.f.state.db.collection::<bson::Document>(ARTIFACTS);
@@ -1815,7 +1837,25 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
             }
         );
         assert_eq!(outcome["recovery_available"], false);
-        assert_eq!(outcome["count"], usize::from(!refused && !missing));
+        assert_eq!(
+            outcome["count"],
+            usize::from(!refused && !missing) + usize::from(preserves_peer)
+        );
+        if let Some(peer) = &retained_peer {
+            assert_eq!(message["attachments"].as_array().unwrap().len(), 1);
+            assert_eq!(message["attachments"][0]["id"], *peer);
+            let (mime, bytes) = engine::read_attachment(
+                &a.f.state.db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &event.id,
+                peer,
+            )
+            .await
+            .unwrap();
+            assert_eq!(mime, "video/mp4");
+            assert_eq!(bytes, MP4);
+        }
         if !refused && !missing {
             assert_eq!(
                 outcome["rejected"],
@@ -1852,6 +1892,16 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
                 .count_documents(doc! {})
                 .await
                 .unwrap();
+            if let Some(row) = vanished {
+                // Even a matching retained/reappearing metadata row cannot
+                // override the saved Missing outcome and reattach its bytes.
+                a.f.state
+                    .db
+                    .collection::<bson::Document>(ARTIFACTS)
+                    .insert_one(row)
+                    .await
+                    .unwrap();
+            }
             artifacts::recover(
                 &a.f.state.db,
                 &a.f.state.encryption_keys,
@@ -1872,6 +1922,23 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
                     .unwrap(),
                 before,
                 "missing bytes must never be recreated"
+            );
+            let saved_message =
+                a.f.state
+                    .db
+                    .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+                    .find_one(doc! {"_id":message["id"].as_str().unwrap()})
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(saved_message.get_array("attachments").unwrap().len(), 1);
+            assert_eq!(
+                saved_message.get_array("attachments").unwrap()[0]
+                    .as_document()
+                    .unwrap()
+                    .get_str("id")
+                    .unwrap(),
+                retained_peer.as_deref().unwrap()
             );
         }
         if case == "legacy" {
