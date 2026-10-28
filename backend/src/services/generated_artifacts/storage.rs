@@ -21,8 +21,10 @@ fn validate(row: &PendingArtifact, bytes: &[u8]) -> AppResult<()> {
 pub(crate) async fn verify(keys: &EncryptionKeys, source: &Document) -> AppResult<()> {
     let row = decode(source)?;
     let Some(ciphertext) = row.data_encrypted.as_deref() else {
-        return if matches!(row.state.as_str(), "materialized" | "expired" | "discarded")
-            && row.secret_context_versions.is_empty()
+        return if matches!(
+            row.state.as_str(),
+            "materialized" | "expired" | "discarded" | "missing"
+        ) && row.secret_context_versions.is_empty()
         {
             Ok(())
         } else {
