@@ -4818,20 +4818,44 @@ async fn forward_request_with_egress_guard_inner(
         }
     }
 
+    // Finish all fallible local request/proof preparation before the one-way
+    // model dispatch claim. Repeatable revalidation never consumes that claim.
+    let mut request = request.build()?;
+    if let Some(proof) = resource_proof {
+        proof
+            .attach(&mut request)
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
     if let Some(guard) = egress_guard {
         Box::pin(guard.revalidate())
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(proof) = resource_proof {
-        let mut request = request.build()?;
-        proof
-            .attach(&mut request)
+    let observer = if let Some(guard) = egress_guard {
+        guard
+            .claim_model_dispatch()
             .await
-            .map_err(ForwardRequestError::PreDispatchRejected)?;
+            .map_err(ForwardRequestError::PreDispatchRejected)?
+    } else {
+        None
+    };
+    // Cancellation, panic or any transport error after the CAS leaves the
+    // durable Dispatched tombstone intact. Nothing here resets it to Prepared.
+    let response = if resource_proof.is_some() || observer.is_some() {
+        // Enforce this at the common send boundary, including LLM gateway
+        // callers whose ordinary client follows redirects. One dispatch claim
+        // must never permit a second request through a 307/308 response.
         no_redirect_http_client().execute(request).await?
     } else {
-        request.send().await?
+        client.execute(request).await?
+    };
+    let response = if let Some(observer) = observer {
+        observer
+            .wrap(response)
+            .map_err(|_| ForwardRequestError::OutcomeUnknown)?
+    } else {
+        response
     };
 
     // Cache successful billing-API responses so a follow-up request

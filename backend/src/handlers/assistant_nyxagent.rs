@@ -1534,6 +1534,7 @@ async fn proxy(
         body,
         turn_id,
         policy,
+        None,
     )
     .await
 }
@@ -1548,6 +1549,7 @@ async fn proxy_raw(
     body: Option<Value>,
     turn_id: Option<&str>,
     policy: Option<BillingRoutePolicy>,
+    model_control: Option<&crate::services::assistant_model_control::TargetedControl>,
 ) -> AppResult<Response> {
     let service =
         assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG).await?;
@@ -1586,6 +1588,15 @@ async fn proxy_raw(
     let mut headers = vec![("authorization".into(), format!("Bearer {}", raw_key))];
     if let Some(turn_id) = turn_id {
         headers.push(("idempotency-key".into(), turn_id.into()));
+    }
+    if let Some(control) = model_control {
+        if method != "POST" || path != "v1/responses" {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        headers.push((
+            crate::services::assistant_model_control_protocol::CONTROL_HEADER.into(),
+            control.for_target(&service.id)?.expose().into(),
+        ));
     }
     super::proxy::execute_admin_proxy(
         state,
@@ -1685,6 +1696,7 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
             request.body,
             (!request.idempotency_key.is_empty()).then_some(request.idempotency_key.as_str()),
             request.billing_policy,
+            request.model_control.as_ref(),
         )
         .await
     }

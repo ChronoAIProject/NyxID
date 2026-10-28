@@ -3961,10 +3961,11 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
-    let assistant_projection =
+    let mut assistant_projection =
         crate::services::assistant_service_execution::HttpProjection::for_machine(
             machine_ingress.as_ref(),
         );
+    assistant_projection.model_control_ineligible = node_route.is_some();
     if machine_git {
         let git = machine_ingress
             .as_ref()
@@ -4537,6 +4538,16 @@ async fn execute_resolved_proxy_inner<'a>(
     let assistant_decision = assistant_decision_slot
         .as_ref()
         .expect("service decision was just installed");
+    if node_route.is_some()
+        && assistant_decision
+            .admission
+            .as_ref()
+            .is_some_and(|a| a.model_control.is_some())
+    {
+        return Err(AppError::Conflict(
+            "Model control requires direct server transport".into(),
+        ));
+    }
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
         return Ok(ProxyExecutionPhase::Complete(
             (axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response(),
@@ -6733,6 +6744,10 @@ async fn execute_resolved_proxy_inner<'a>(
                 box_proxy_future(|| {
                     proxy_service::forward_request_with_resource_proof(
                         if is_pool_attempt
+                            || assistant_decision
+                                .admission
+                                .as_ref()
+                                .is_some_and(|a| a.model_control.is_some())
                             || operation_scoped
                             || operation_guest
                             || permission_ingress.is_some()

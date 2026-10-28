@@ -245,6 +245,14 @@ impl AuthUser {
             || path.contains("/approvals/exact-service/requests/") && path.ends_with("/status")
             || path.contains("/approvals/exact-service/requests/") && path.ends_with("/redeem")
             || path.starts_with("/assistant-attachments/")
+            || matches!(
+                path,
+                "/assistant/model-control/v1/verify"
+                    | "/assistant/model-control/v1/tool-prepare"
+                    | "/assistant/model-control/v1/tool-status"
+                    | "/assistant/model-control/v1/prepare"
+                    | "/assistant/model-control/v1/status"
+            )
             || (path.contains("/assistant/nyxagent/conversations/")
                 || path.contains("/assistant/nyxagent/groups/"))
                 && path.contains("/attachments/");

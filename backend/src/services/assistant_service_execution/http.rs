@@ -5,6 +5,8 @@ use super::*;
 pub struct HttpProjection {
     pub apply_agent_override: bool,
     pub replace_headers: bool,
+    /// Server-resolved node/other sender has no model-control final claim.
+    pub(crate) model_control_ineligible: bool,
     pub base_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
     pub(crate) machine_git: Option<crate::models::downstream_service::GitHttp>,
@@ -14,6 +16,7 @@ impl Default for HttpProjection {
         Self {
             apply_agent_override: true,
             replace_headers: false,
+            model_control_ineligible: false,
             base_url: None,
             extra_headers: Vec::new(),
             machine_git: None,
@@ -310,6 +313,23 @@ async fn check_http_projected_inner(
             .ok_or(AppError::GuestModelRouteRequired)?;
         super::guest_model::require(&state.db, chat, id, target, &mut operation).await?;
     }
+    let control_lineage = crate::services::assistant_model_control::require_http_control_lineage(
+        state, chat, id, target, path,
+    )
+    .await?;
+    let control_header =
+        headers.contains_key(crate::services::assistant_model_control_protocol::CONTROL_HEADER);
+    let control_transport_eligible = id.is_some() && pool.is_none() && !method_override;
+    if !control_transport_eligible
+        && (control_lineage
+            || control_header
+            || headers.contains_key(crate::services::assistant_model_control_protocol::STEP_HEADER))
+    {
+        crate::services::assistant_model_control::require_unactivated_exact_only(
+            state, chat, headers,
+        )
+        .await?;
+    }
     let Some(id) = id else {
         if !chat.guest
             && chat.turn_live
@@ -323,6 +343,31 @@ async fn check_http_projected_inner(
             automatic: None,
         });
     };
+    let control = if control_transport_eligible {
+        crate::services::assistant_model_control::callback(
+            state,
+            crate::services::assistant_model_control::CallbackRequest {
+                chat,
+                connection: id,
+                owner: owner.unwrap_or(&chat.user_id),
+                target,
+                method,
+                path,
+                query,
+                body,
+                headers,
+                semantic_headers: projection.headers(target, headers),
+                instrumented_transport: !projection.replace_headers
+                    && !projection.model_control_ineligible,
+            },
+        )
+        .await?
+    } else {
+        None
+    };
+    if let Some(control) = &control {
+        operation = control.operation();
+    }
     if pool.is_none() {
         verify_resolved_projected(
             &state.db,
@@ -353,7 +398,8 @@ async fn check_http_projected_inner(
         // neither installs turn consent nor proves cross-account equivalence.
         operation["kind"] = json!("legacy_inference");
     }
-    let raw_inference = chat.turn_live && stateless && !chat.guest && !method_override;
+    let raw_inference =
+        chat.turn_live && stateless && !chat.guest && !method_override && control.is_none();
     let mut model_consent = false;
     let mut consent_binding = None;
     if raw_inference {
@@ -450,12 +496,22 @@ async fn check_http_projected_inner(
         && let Ok(parsed) = serde_json::from_slice::<Value>(body)
         && let Some(reason) = super::request_identity::inference_fallback_reason(path, &parsed)
     {
-        super::request_identity::record_fallback_reason(&state.db, chat, &operation, reason)
-            .await?;
+        super::request_identity::record_fallback_reason(
+            &state.db,
+            chat,
+            &operation,
+            reason,
+            control.is_some(),
+        )
+        .await?;
         summary.push_str(". ");
-        summary.push_str(reason.message());
+        summary.push_str(if control.is_some() {
+            reason.reusable_message()
+        } else {
+            reason.message()
+        });
     }
-    let decision = check(
+    let decision = super::check_inner(
         &state.db,
         &state.node_ws_manager,
         chat,
@@ -477,6 +533,10 @@ async fn check_http_projected_inner(
                 .get("content-type")
                 .and_then(|value| value.to_str().ok()),
         )),
+        false,
+        control
+            .as_ref()
+            .map(|callback| super::ModelControlConfirmation { state, callback }),
     )
     .await?;
     if let Some(binding) = consent_binding.as_deref() {

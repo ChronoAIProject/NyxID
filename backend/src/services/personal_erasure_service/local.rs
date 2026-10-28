@@ -226,6 +226,11 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::assistant_model_control::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        ("assistant_model_denial_notices", doc! {"user_id":owner}),
+        (
             m::nyxbot_channel::THREADS_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),

@@ -43,6 +43,7 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:machine-capabilities",
     "assistant:machine-contexts",
     "assistant:live-turn-gate",
+    super::assistant_model_control::READINESS_CAPABILITY,
     PLATFORM_POLICY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.
