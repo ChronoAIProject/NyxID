@@ -2198,7 +2198,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
-        http_client: crate::services::assistant_model_control::HttpClient::unobserved(http_client.clone()),
+        http_client: crate::services::assistant_model_control::HttpClient::unobserved(
+            http_client.clone(),
+        ),
         jwk_json: serde_json::json!({}),
         mcp_sessions: Arc::new(McpSessionStore::new()),
         jwks_cache: Arc::new(JwksCache::new(http_client.clone())),

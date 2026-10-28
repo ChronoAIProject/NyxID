@@ -4539,10 +4539,11 @@ async fn execute_resolved_proxy_inner<'a>(
         .as_ref()
         .expect("service decision was just installed");
     if node_route.is_some()
-        && assistant_decision
-            .admission
-            .as_ref()
-            .is_some_and(|a| a.model_control.as_ref().is_some_and(|control| control.requires_no_redirect()))
+        && assistant_decision.admission.as_ref().is_some_and(|a| {
+            a.model_control
+                .as_ref()
+                .is_some_and(|control| control.requires_no_redirect())
+        })
     {
         return Err(AppError::Conflict(
             "Model control requires direct server transport".into(),
@@ -6744,10 +6745,11 @@ async fn execute_resolved_proxy_inner<'a>(
                 box_proxy_future(|| {
                     proxy_service::forward_request_with_resource_proof(
                         if is_pool_attempt
-                            || assistant_decision
-                                .admission
-                                .as_ref()
-                                .is_some_and(|a| a.model_control.as_ref().is_some_and(|control| control.requires_no_redirect()))
+                            || assistant_decision.admission.as_ref().is_some_and(|a| {
+                                a.model_control
+                                    .as_ref()
+                                    .is_some_and(|control| control.requires_no_redirect())
+                            })
                             || operation_scoped
                             || operation_guest
                             || permission_ingress.is_some()

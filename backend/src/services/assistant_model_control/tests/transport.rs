@@ -91,10 +91,13 @@ async fn provider(
         .into_response()
 }
 async fn fixture(mode: &'static str) -> (Controlled, Arc<Provider>, tokio::task::JoinHandle<()>) {
-    fixture_with_issuance(mode,true).await
+    fixture_with_issuance(mode, true).await
 }
-async fn fixture_with_issuance(mode:&'static str,issuance:bool)->(Controlled,Arc<Provider>,tokio::task::JoinHandle<()>) {
-    let mut c = Controlled::configured("p2_real_transport",issuance).await;
+async fn fixture_with_issuance(
+    mode: &'static str,
+    issuance: bool,
+) -> (Controlled, Arc<Provider>, tokio::task::JoinHandle<()>) {
+    let mut c = Controlled::configured("p2_real_transport", issuance).await;
     let peer = Arc::new(Provider {
         calls: AtomicUsize::new(0),
         headers: tokio::sync::Mutex::new(vec![]),
@@ -124,10 +127,14 @@ async fn fixture_with_issuance(mode:&'static str,issuance:bool)->(Controlled,Arc
             "/second-send",
             post(move || {
                 second.calls.fetch_add(1, Ordering::SeqCst);
-                let back=second.mode=="redirect_back";
+                let back = second.mode == "redirect_back";
                 async move {
-                    if back {(StatusCode::TEMPORARY_REDIRECT,[("location","/responses")]).into_response()}
-                    else {"unexpected redirect".into_response()}
+                    if back {
+                        (StatusCode::TEMPORARY_REDIRECT, [("location", "/responses")])
+                            .into_response()
+                    } else {
+                        "unexpected redirect".into_response()
+                    }
                 }
             }),
         )

@@ -331,9 +331,8 @@ async fn check_http_projected_inner(
         .await?;
     }
     if !control_lineage && (!control_transport_eligible || !control_header) {
-        crate::services::assistant_model_control::unobserved_http(
-            state,chat,id,target,path,
-        ).await?;
+        crate::services::assistant_model_control::unobserved_http(state, chat, id, target, path)
+            .await?;
     }
     let Some(id) = id else {
         if !chat.guest
@@ -372,9 +371,14 @@ async fn check_http_projected_inner(
     };
     // Passive Read facts do not replace its ordinary operation, confirmation,
     // route selection or policy. Attach only after the usual admission gates.
-    let read_observation = if control.as_ref().is_some_and(|callback| callback.read_observation) {
+    let read_observation = if control
+        .as_ref()
+        .is_some_and(|callback| callback.read_observation)
+    {
         control.take()
-    } else { None };
+    } else {
+        None
+    };
     if let Some(control) = &control {
         operation = control.operation();
     }
@@ -567,8 +571,8 @@ async fn check_http_projected_inner(
         admission.revalidate(&state.db, id, Some(target)).await?;
     }
     if let (Some(admission), Some(observation)) = (decision.admission.as_mut(), read_observation) {
-        if let Some(prepared)=observation.prepared() {
-            if prepared.matches_read_admission(id,&admission.binding) {
+        if let Some(prepared) = observation.prepared() {
+            if prepared.matches_read_admission(id, &admission.binding) {
                 admission.model_control = Some(prepared);
             } else {
                 prepared.disable_observation().await?;

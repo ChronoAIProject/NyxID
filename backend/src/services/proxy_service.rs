@@ -4848,9 +4848,15 @@ async fn forward_request_with_egress_guard_inner(
         || target.auth_method == "github_git"
         || target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
         || std::ptr::eq(client, no_redirect_http_client());
-    let redirect_probe = observer.as_ref().and_then(|observer| observer.redirect_probe(client));
-    if observer.as_ref().is_some_and(|observer| !observer.requires_no_redirect())
-        && !known_no_redirect && redirect_probe.is_none() {
+    let redirect_probe = observer
+        .as_ref()
+        .and_then(|observer| observer.redirect_probe(client));
+    if observer
+        .as_ref()
+        .is_some_and(|observer| !observer.requires_no_redirect())
+        && !known_no_redirect
+        && redirect_probe.is_none()
+    {
         if let Some(passive) = observer.take() {
             // The successful live-authority claim already persisted an
             // incomplete passive intent (or found durable ineligibility).
@@ -4860,7 +4866,11 @@ async fn forward_request_with_egress_guard_inner(
     }
     // Cancellation, panic or any transport error after the CAS leaves the
     // durable Dispatched tombstone intact. Nothing here resets it to Prepared.
-    let response = if resource_proof.is_some() || observer.as_ref().is_some_and(|observer| observer.requires_no_redirect()) {
+    let response = if resource_proof.is_some()
+        || observer
+            .as_ref()
+            .is_some_and(|observer| observer.requires_no_redirect())
+    {
         // Enforce this at the common send boundary, including LLM gateway
         // callers whose ordinary client follows redirects. One dispatch claim
         // must never permit a second request through a 307/308 response.

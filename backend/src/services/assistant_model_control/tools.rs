@@ -164,13 +164,17 @@ pub(crate) async fn tool_status(
         return Err(invalid());
     }
     let (row, private, _) = persistence::authenticated(state, chat, token, None).await?;
-    if row.id != request.tool.root_id || !matches!(row.phase.as_str(), "allowed" | "unactivated")
-        || (row.phase == "unactivated" && private.preconsent.ineligible) {
+    if row.id != request.tool.root_id
+        || !matches!(row.phase.as_str(), "allowed" | "unactivated")
+        || (row.phase == "unactivated" && private.preconsent.ineligible)
+    {
         return Err(invalid());
     }
     let tool = private
         .tool_steps()
-        .filter(|step| (row.phase=="allowed")==private.steps.iter().any(|written|written.id==step.id))
+        .filter(|step| {
+            (row.phase == "allowed") == private.steps.iter().any(|written| written.id == step.id)
+        })
         .find(|s| s.id == request.tool.step_id)
         .and_then(|s| {
             s.tools.iter().find(|t| {
@@ -207,7 +211,9 @@ pub(crate) async fn tool_claim(
                 let (mut row, mut private) =
                     persistence::load(state, &root.id, Some(&mut *session)).await?;
                 persistence::require_row(&row, chat)?;
-                if !matches!(row.phase.as_str(), "allowed" | "unactivated") || (row.phase == "unactivated" && private.preconsent.ineligible) {
+                if !matches!(row.phase.as_str(), "allowed" | "unactivated")
+                    || (row.phase == "unactivated" && private.preconsent.ineligible)
+                {
                     return Err(conflict());
                 }
                 let step = private.active_tool_step_mut(&row.phase, &token_hash(token.expose()))?;

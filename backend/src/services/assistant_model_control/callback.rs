@@ -176,24 +176,30 @@ pub(crate) async fn callback(
         )
         || method != "POST"
         || !matches!(path, "responses" | "responses/compact")
-        || (path == "responses/compact" && row.phase == "unactivated" && private.preconsent.compact.is_none())
+        || (path == "responses/compact"
+            && row.phase == "unactivated"
+            && private.preconsent.compact.is_none())
     {
         if row.phase == "unactivated" {
             // Share the admission marker's positive model-path/related-target
             // scope. Unsupported model sends cannot look like pristine history;
             // unrelated effects keep their ordinary contract.
-            read_observation::unobserved_http(state,chat,Some(connection),target,path).await?;
+            read_observation::unobserved_http(state, chat, Some(connection), target, path).await?;
         }
         return exact_only_before_activation(&row);
     }
     if body.len() > wire::MAX_PREPARE_BYTES {
-        if row.phase == "unactivated" { read_observation::disable(state, chat, &row.id).await?; }
+        if row.phase == "unactivated" {
+            read_observation::disable(state, chat, &row.id).await?;
+        }
         return exact_only_before_activation(&row);
     }
     let body = match serde_json::from_slice::<Value>(body) {
         Ok(body) => body,
         Err(_) => {
-            if row.phase == "unactivated" { read_observation::disable(state, chat, &row.id).await?; }
+            if row.phase == "unactivated" {
+                read_observation::disable(state, chat, &row.id).await?;
+            }
             return exact_only_before_activation(&row);
         }
     };
@@ -216,11 +222,34 @@ pub(crate) async fn callback(
             &candidate.body,
         )
     {
-        let binding = super::super::assistant_service_execution::connection_binding(&state.db, connection, &chat.api_key_id).await?;
-        let prepared = read_observation::prepare(state, chat, &token, &row, &candidate,
-            read_observation::Authority { connection:connection.into(), binding,
-                owner:owner.into(), catalog:target.service.id.clone(), headers:effective_header_binding(semantic_headers) }).await?;
-        return Ok(prepared.map(|prepared| Callback { root:row, private, candidate, prepared:Some(prepared), read_observation:true }));
+        let binding = super::super::assistant_service_execution::connection_binding(
+            &state.db,
+            connection,
+            &chat.api_key_id,
+        )
+        .await?;
+        let prepared = read_observation::prepare(
+            state,
+            chat,
+            &token,
+            &row,
+            &candidate,
+            read_observation::Authority {
+                connection: connection.into(),
+                binding,
+                owner: owner.into(),
+                catalog: target.service.id.clone(),
+                headers: effective_header_binding(semantic_headers),
+            },
+        )
+        .await?;
+        return Ok(prepared.map(|prepared| Callback {
+            root: row,
+            private,
+            candidate,
+            prepared: Some(prepared),
+            read_observation: true,
+        }));
     }
     if row.phase == "unactivated" && path == "responses" && private.preconsent.seen {
         // A new generation card cannot erase known prior Read/tool history.
@@ -231,17 +260,19 @@ pub(crate) async fn callback(
     let parsed = if row.phase == "unactivated" && path == "responses/compact" {
         let saved = private.preconsent.compact.as_ref().ok_or_else(conflict)?;
         envelope::within_family(&saved.envelope, &candidate)
-            .map(|(operation,input)| (saved.envelope.clone(),input,operation))
-    } else { match private
-        .envelope
-        .as_ref()
-        .filter(|_| row.phase != "unactivated")
-    {
-        Some(saved) => envelope::within_family(saved, &candidate)
-            .map(|(operation, input)| (saved.clone(), input, operation)),
-        None => envelope::envelope(&candidate)
-            .map(|(envelope, input)| (envelope, input, StepOperation::Generation)),
-    }};
+            .map(|(operation, input)| (saved.envelope.clone(), input, operation))
+    } else {
+        match private
+            .envelope
+            .as_ref()
+            .filter(|_| row.phase != "unactivated")
+        {
+            Some(saved) => envelope::within_family(saved, &candidate)
+                .map(|(operation, input)| (saved.clone(), input, operation)),
+            None => envelope::envelope(&candidate)
+                .map(|(envelope, input)| (envelope, input, StepOperation::Generation)),
+        }
+    };
     let (envelope, input, operation) = match parsed {
         Ok(candidate) => candidate,
         Err(_) if row.phase == "unactivated" && path != "responses/compact" => {
@@ -260,10 +291,18 @@ pub(crate) async fn callback(
     )
     .await?;
     if row.phase == "unactivated" && path == "responses/compact" {
-        initial_compact::callback(&private, &token, &candidate, &read_observation::Authority {
-            connection:connection.into(),binding:binding.clone(),owner:owner.into(),catalog:target.service.id.clone(),
-            headers:effective_header_binding(semantic_headers.clone()),
-        })?;
+        initial_compact::callback(
+            &private,
+            &token,
+            &candidate,
+            &read_observation::Authority {
+                connection: connection.into(),
+                binding: binding.clone(),
+                owner: owner.into(),
+                catalog: target.service.id.clone(),
+                headers: effective_header_binding(semantic_headers.clone()),
+            },
+        )?;
     }
     let prepared = if row.phase == "unactivated" {
         if step_header.is_some() {

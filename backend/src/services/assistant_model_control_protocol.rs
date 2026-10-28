@@ -12,7 +12,10 @@ pub const RETIRED_PROTOCOL: &str = "nyxid-owner-model-control-v1";
 pub const RETIRED_TOOL_PROTOCOL: &str = "nyxid-owner-model-control-v1-tool-projection-1";
 pub const RETIRED_COMPACT_PROTOCOL: &str = "nyxid-owner-model-control-v1-canonical-compact-1";
 pub fn is_retired(protocol: &str) -> bool {
-    matches!(protocol, RETIRED_PROTOCOL | RETIRED_TOOL_PROTOCOL | RETIRED_COMPACT_PROTOCOL)
+    matches!(
+        protocol,
+        RETIRED_PROTOCOL | RETIRED_TOOL_PROTOCOL | RETIRED_COMPACT_PROTOCOL
+    )
 }
 pub const CONTROL_HEADER: &str = "x-nyxid-runtime-model-control";
 pub const STEP_HEADER: &str = "x-nyxid-runtime-model-step";
@@ -236,7 +239,9 @@ pub struct PreparedStep {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PrepareReply {
     AutomaticRead,
-    ReadCompleted { receipt: CompletionReceipt },
+    ReadCompleted {
+        receipt: CompletionReceipt,
+    },
     ReadInProgress,
     ReadIneligible,
     /// Only endpoint schema selection; no dispatch or replay capability.
@@ -389,14 +394,30 @@ pub enum BridgePhase {
     Unactivated,
     /// Passive Read has no recoverable provider-send token. Only actual server
     /// observation can complete it; status uncertainty never authorizes replay.
-    ReadForwarding { request_binding: String },
-    ReadCompleted { receipt: CompletionReceipt },
-    ReadIneligible { request_binding: Option<String> },
-    AwaitingDecision { acknowledgement_id: String },
-    Prepared { step: PreparedStep },
-    Forwarding { step: PreparedStep },
-    Completed { receipt: CompletionReceipt },
-    OutcomeUnknown { step_id: String },
+    ReadForwarding {
+        request_binding: String,
+    },
+    ReadCompleted {
+        receipt: CompletionReceipt,
+    },
+    ReadIneligible {
+        request_binding: Option<String>,
+    },
+    AwaitingDecision {
+        acknowledgement_id: String,
+    },
+    Prepared {
+        step: PreparedStep,
+    },
+    Forwarding {
+        step: PreparedStep,
+    },
+    Completed {
+        receipt: CompletionReceipt,
+    },
+    OutcomeUnknown {
+        step_id: String,
+    },
     Denied,
 }
 

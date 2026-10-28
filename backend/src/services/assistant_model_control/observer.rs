@@ -5,12 +5,18 @@ tokio::task_local! {
     pub(super) static FAIL_PASSIVE_PERSISTENCE: bool;
 }
 
-fn require_observation_persistence(passive:bool)->AppResult<()> {
+fn require_observation_persistence(passive: bool) -> AppResult<()> {
     #[cfg(test)]
-    if passive && FAIL_PASSIVE_PERSISTENCE.try_with(|fail|*fail).unwrap_or(false) {
-        return Err(AppError::Internal("Injected passive observation persistence failure".into()));
+    if passive
+        && FAIL_PASSIVE_PERSISTENCE
+            .try_with(|fail| *fail)
+            .unwrap_or(false)
+    {
+        return Err(AppError::Internal(
+            "Injected passive observation persistence failure".into(),
+        ));
     }
-    let _=passive;
+    let _ = passive;
     Ok(())
 }
 
@@ -24,15 +30,24 @@ impl CompletionObserver {
     pub(super) fn new(state: AppState, claim: ClaimedDispatch) -> Self {
         Self { state, claim }
     }
-    pub(crate) fn requires_no_redirect(&self) -> bool { !self.claim.read_observation }
+    pub(crate) fn requires_no_redirect(&self) -> bool {
+        !self.claim.read_observation
+    }
 
-    pub(crate) fn redirect_probe(&self, actual: &reqwest::Client) -> Option<super::redirect_observation::Probe> {
-        if !self.claim.read_observation { return None; }
+    pub(crate) fn redirect_probe(
+        &self,
+        actual: &reqwest::Client,
+    ) -> Option<super::redirect_observation::Probe> {
+        if !self.claim.read_observation {
+            return None;
+        }
         self.state.http_client.probe(actual)
     }
 
     pub(crate) async fn disable_observation(&self) -> AppResult<()> {
-        if !self.claim.read_observation { return Err(conflict()); }
+        if !self.claim.read_observation {
+            return Err(conflict());
+        }
         self.unknown().await
     }
 

@@ -1,9 +1,9 @@
 use super::*;
-use futures::TryStreamExt;
 use crate::models::{
     assistant_acknowledgement::AssistantAcknowledgement,
     assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
 };
+use futures::TryStreamExt;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -61,8 +61,15 @@ pub(crate) async fn issue(
     }
     // Preflight only. The authoritative lookup is repeated after the shared
     // live-turn fence on EVERY transaction retry before choosing a root.
-    let hinted:Vec<ModelControlRoot>=roots.find(filter.clone()).limit(2).await?.try_collect().await?;
-    if hinted.len()>1 {return Err(conflict());}
+    let hinted: Vec<ModelControlRoot> = roots
+        .find(filter.clone())
+        .limit(2)
+        .await?
+        .try_collect()
+        .await?;
+    if hinted.len() > 1 {
+        return Err(conflict());
+    }
     let existing = hinted.first();
     // Resolve saved lineage BEFORE testing the new key. Rotation invalidates
     // that lineage; it must never look like a new, uncontrolled legacy action.
@@ -95,10 +102,13 @@ pub(crate) async fn issue(
     };
     let now = Utc::now();
     #[cfg(test)]
-    if let Ok((entered,release))=BEFORE_ISSUE_TRANSACTION.try_with(Clone::clone) {
-        entered.send(()).await.map_err(|_|conflict())?;
-        tokio::time::timeout(std::time::Duration::from_secs(15),release.acquire()).await
-            .map_err(|_|conflict())?.map_err(|_|conflict())?.forget();
+    if let Ok((entered, release)) = BEFORE_ISSUE_TRANSACTION.try_with(Clone::clone) {
+        entered.send(()).await.map_err(|_| conflict())?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), release.acquire())
+            .await
+            .map_err(|_| conflict())?
+            .map_err(|_| conflict())?
+            .forget();
     }
     let mut session = state.db.client().start_session().await?;
     let token = session.start_transaction().and_run2(async |session| {
