@@ -5,17 +5,8 @@ tokio::task_local! {
     pub(super) static FAIL_PASSIVE_PERSISTENCE: bool;
 }
 
+#[cfg(not(test))]
 fn require_observation_persistence(passive: bool) -> AppResult<()> {
-    #[cfg(test)]
-    if passive
-        && FAIL_PASSIVE_PERSISTENCE
-            .try_with(|fail| *fail)
-            .unwrap_or(false)
-    {
-        return Err(AppError::Internal(
-            "Injected passive observation persistence failure".into(),
-        ));
-    }
     let _ = passive;
     Ok(())
 }
@@ -25,10 +16,36 @@ fn require_observation_persistence(passive: bool) -> AppResult<()> {
 pub(crate) struct CompletionObserver {
     state: AppState,
     claim: ClaimedDispatch,
+    #[cfg(test)]
+    fail_passive_persistence: bool,
 }
 impl CompletionObserver {
+    #[cfg(not(test))]
     pub(super) fn new(state: AppState, claim: ClaimedDispatch) -> Self {
         Self { state, claim }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new(state: AppState, claim: ClaimedDispatch) -> Self {
+        Self {
+            state,
+            claim,
+            // The shared response relay polls this observer on a spawned task.
+            // Capture the test fault before that task loses its caller's scope.
+            fail_passive_persistence: FAIL_PASSIVE_PERSISTENCE
+                .try_with(|fail| *fail)
+                .unwrap_or(false),
+        }
+    }
+
+    #[cfg(test)]
+    fn require_observation_persistence(&self) -> AppResult<()> {
+        if self.claim.read_observation && self.fail_passive_persistence {
+            return Err(AppError::Internal(
+                "Injected passive observation persistence failure".into(),
+            ));
+        }
+        Ok(())
     }
     pub(crate) fn requires_no_redirect(&self) -> bool {
         !self.claim.read_observation
@@ -104,6 +121,9 @@ impl CompletionObserver {
     }
 
     async fn unknown(&self) -> AppResult<()> {
+        #[cfg(test)]
+        self.require_observation_persistence()?;
+        #[cfg(not(test))]
         require_observation_persistence(self.claim.read_observation)?;
         let mut session = self.state.db.client().start_session().await?;
         session.start_transaction().and_run(
@@ -134,6 +154,9 @@ impl CompletionObserver {
     }
 
     async fn complete(&self, value: Value, body_sha256: String) -> AppResult<()> {
+        #[cfg(test)]
+        self.require_observation_persistence()?;
+        #[cfg(not(test))]
         require_observation_persistence(self.claim.read_observation)?;
         let mut session = self.state.db.client().start_session().await?;
         session.start_transaction().and_run(
