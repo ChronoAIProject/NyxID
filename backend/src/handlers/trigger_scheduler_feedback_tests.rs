@@ -116,49 +116,134 @@ async fn feedback_legacy_ingress() {
     assert_eq!(hooked.continuation_protocol_version, 0);
     assert_eq!(calls.lock().await.len(), 2);
 
-    // Keep the real run identity for confirmation/settlement, but preserve
-    // legacy group-follow semantics instead of passing it to the v2 fence.
-    let (_, run, row) = Box::pin(completion_coordinator(&state)).await;
-    assert_eq!(run.continuation_protocol_version, 0);
-    assert!(row.coordinator_run_ids.is_empty());
-    let group = completion_groups::create(
-        &state.db,
-        OWNER,
-        "Legacy group",
-        std::slice::from_ref(&agent.id),
-        "user",
-    )
-    .await
-    .unwrap();
-    let chat = crate::services::assistant_acknowledgement_service::for_key(
-        &state.db,
-        OWNER,
-        Some(&row.credential_api_key_id),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(chat.trigger_run_id.as_deref(), Some(run.id.as_str()));
-    let (posted, error) = Box::pin(super::super::assistant_team::execute_tool(
-        &state,
-        &chat,
-        "nyxid__post_to_group",
-        &json!({"group":group.id,"text":"Legacy group note"}),
-    ))
-    .await;
-    assert!(!error, "{posted}");
-    assert!(posted["posted"].is_i64());
-    let group = completion_groups::get(&state.db, OWNER, &group.id)
+    Box::pin(async {
+        // Agent-authored posts follow explicitly mentioned members, not plain
+        // notes. Hold that member's real response until the follower is read.
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let signal = entered.clone();
+        let gate = release.clone();
+        let sink = calls.clone();
+        let upstream = Router::new().route(
+            "/v1/responses",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let signal = signal.clone();
+                let gate = gate.clone();
+                let sink = sink.clone();
+                async move {
+                    let is_member = {
+                        let mut calls = sink.lock().await;
+                        calls.push(Call {
+                            authorization: headers["authorization"].to_str().unwrap().into(),
+                            body,
+                        });
+                        calls.len() == 3 // The schedule and webhook completed first.
+                    };
+                    if is_member {
+                        signal.notify_one();
+                        gate.acquire().await.unwrap().forget();
+                    }
+                    let session = format!("conv_{}", Uuid::new_v4().simple());
+                    let response = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
+                    let stream = async_stream::stream! {
+                        yield Ok::<_, Infallible>(Event::default().data(json!({
+                            "type":"response.completed", "sequence_number":1,
+                            "response":{"id":response,"conversation":{"id":session},
+                            "status":"completed","output":[{"type":"message","role":"assistant",
+                            "content":[{"type":"output_text","text":"Legacy group work finished"}]}]}
+                        }).to_string()));
+                    };
+                    Sse::new(stream).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let group_server =
+            tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        state.db.collection::<Document>(SERVICES).update_one(
+            doc! {"slug":engine::SERVICE_SLUG},
+            doc! {"$set":{"base_url":format!("http://{address}")}},
+        ).await.unwrap();
+
+        // Keep the real run identity for confirmation/settlement, but preserve
+        // legacy group-follow semantics instead of passing it to the v2 fence.
+        let (_, run, row) = Box::pin(completion_coordinator(&state)).await;
+        assert_eq!(run.continuation_protocol_version, 0);
+        assert!(row.coordinator_run_ids.is_empty());
+        let member = specialist(&state).await;
+        let group = completion_groups::create(
+            &state.db,
+            OWNER,
+            "Legacy group",
+            &[agent.id.clone(), member.id.clone()],
+            "user",
+        )
         .await
         .unwrap();
-    assert_eq!(group.followers.len(), 1);
-    assert_eq!(group.followers[0].conversation_id, row.id);
-    assert!(group.followers[0].trigger_run_id.is_none());
-    Box::pin(completion_reply(&state, &row, &run)).await;
-    assert_eq!(
-        completion_load(&state, &run.id).await.outcome,
-        RunOutcome::Completed
-    );
+        let chat = crate::services::assistant_acknowledgement_service::for_key(
+            &state.db,
+            OWNER,
+            Some(&row.credential_api_key_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(chat.trigger_run_id.as_deref(), Some(run.id.as_str()));
+        let (posted, error) = Box::pin(super::super::assistant_team::execute_tool(
+            &state,
+            &chat,
+            "nyxid__post_to_group",
+            &json!({"group":group.id,"text":format!("@{} Legacy group note", member.name)}),
+        ))
+        .await;
+        assert!(!error, "{posted}");
+        assert!(posted["posted"].is_i64());
+        assert_eq!(posted["addressed_agent_ids"], json!([member.id]));
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .expect("mentioned specialist reached the actual upstream");
+        let group = completion_groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap();
+        assert_eq!(group.followers.len(), 1);
+        assert_eq!(group.followers[0].conversation_id, row.id);
+        assert!(group.followers[0].trigger_run_id.is_none());
+        Box::pin(completion_reply(&state, &row, &run)).await;
+        assert_eq!(
+            completion_load(&state, &run.id).await.outcome,
+            RunOutcome::Completed
+        );
+        release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let group = completion_groups::get(&state.db, OWNER, &group.id)
+                    .await
+                    .unwrap();
+                let call_count = calls.lock().await.len();
+                let home = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+                if group.followers.is_empty()
+                    && call_count == 4
+                    && home.active_turn.is_none()
+                    && home.pending_events.is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("legacy group reply and follower wake both completed");
+        let messages = completion_groups::messages(&state.db, OWNER, &group.id, 100, None)
+            .await
+            .unwrap();
+        assert!(messages.iter().any(|message| {
+            message.agent_id.as_deref() == Some(member.id.as_str())
+                && message.text == "Legacy group work finished"
+        }));
+        group_server.abort();
+    })
+    .await;
     let persisted = state
         .db
         .collection::<Trigger>(TRIGGERS)
@@ -473,8 +558,25 @@ async fn feedback_direct_tool(tool: &str) {
             .pending_events
             .is_empty()
     );
-    assert_eq!(state.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
-        .count_documents(doc! {"user_id":OWNER,"event_type":"trigger_run_outcome","event_data.run_id":&run.id}).await.unwrap(),1);
+    // completed() observes the terminal run and trigger projection before
+    // finish_record() appends its audit. Wait for that actual write as well.
+    let outcomes = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let count = state
+                .db
+                .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"user_id":OWNER,"event_type":"trigger_run_outcome","event_data.run_id":&run.id})
+                .await
+                .unwrap();
+            if count != 0 {
+                break count;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal outcome audit was published");
+    assert_eq!(outcomes, 1);
     server.abort();
 }
 
