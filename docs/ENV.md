@@ -193,12 +193,31 @@ for the complete limits, failure behavior and deployment contract.
 
 ### Engine and diagnostics
 
-The default NyxAgent assistant introduces **no environment variable**. Its catalog
+The default NyxAgent assistant uses catalog and feature-flag configuration. Its catalog
 slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
 configuration. The catalog row provides the upstream base URL. Readiness reports
 its required authentication settings; see [NyxAgent engine](chat/08-nyxagent-engine.md).
 Existing encryption-provider settings protect its per-conversation assistant credentials. Chat acknowledgements and access modes
 introduce no environment variables; permissions are stored per conversation.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ASSISTANT_MODEL_CONTROL_V1_ENABLED` | `false` | Exact `true` permits issuance of private owner model controls after paired v1 negotiation and security readiness. Separate from the `assistant:model-controls` UI flag; does not change automatic Read classification. |
+
+Before enabling, upgrade both NyxID and NxyAgent and drain all old serving
+replicas and participating writers. Declare the complete `INSTANCE_NAME` roster
+in `SECURITY_ROLLOUT_REPLICAS`, acknowledge `SECURITY_ROLLOUT_DRAINED=true`, and
+verify readiness for `assistant:model-control-protocol-v1`. The paired runtime
+must enable `NYXAGENT_MODEL_CONTROL_V1_ENABLED`, trust the exact NyxID
+`JWT_ISSUER` through `NYXID_ISSUER`, and use the matching existing NyxID model-source
+profile. Runtime negotiation does not replace roster/drain readiness.
+
+Disabling stops issuance; active roots cannot downgrade to legacy execution if
+control or negotiation is lost. Drain and settle affected work before rollback;
+retain durable dispatch/uncertainty tombstones and revocations, and never let an
+old writer serve an activated root. See the [owner model approval contract](chat/08-nyxagent-engine.md#negotiated-owner-model-approval)
+for supported envelopes, recovery limits and explicit unsupported cases, and
+[security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for roster checks.
 
 The Aevatar assistant chat wire-log diagnostic has no environment variable. It
 is gated by the `experimental:aevatar-chat-wire-log` runtime feature flag

@@ -313,9 +313,11 @@ with an optional `:<decimal digits>` suffix only on the window ID within the sam
 128-byte total limit, turn metadata of at most 1,024 UTF-8 bytes, and sorted
 compact JSON of at most 2,048 bytes. This strict subset uses stateless Read
 classification and server-input-bound owner model consent. Partial, unknown or
-over-budget metadata retains legacy Write/exact-body approval and connection
-identity; it does not inherit automatic Read from the broader guest transport
-classifier. Actual stateful/provider-hosted effects retain exact approval.
+over-budget metadata retains Write classification and connection identity; it
+does not inherit automatic Read from the broader guest transport classifier.
+Approval remains exact-body unless the separate negotiated contract below
+positively admits reusable consent. Actual stateful/provider-hosted effects
+retain exact approval.
 
 Explicit `_nyxid_via` routing is constrained to the requested catalog and saved
 connection. A saved explicit owner choice fails closed if unavailable.
@@ -329,6 +331,64 @@ class and resource owner; the guest payer rule does not rewrite owner billing.
 Route recording remains separate from consent and requires an admitted owner
 model attempt. Classification inspects a cloned JSON value; the forwarded body,
 including `client_metadata`, is unchanged.
+
+### Negotiated owner model approval
+
+`ASSISTANT_MODEL_CONTROL_V1_ENABLED` defaults to `false`. This private paired
+protocol is separate from automatic Read and the `assistant:model-controls` UI
+flag. Initial strict Read keeps its existing zero-card path without a reusable
+dispatch step. An eligible non-strict callback creates a Write card without
+sending; only its saved human Allow and server-bound continuation can prepare
+the resumed request. Existing exact-body cards never upgrade into reusable
+authority. Both ordinary authenticated owner and captured personal-platform
+owner turns are eligible; guest/public and direct-provider profiles are not.
+
+The reusable subset is bounded standard `POST responses`, no query,
+`store=false`, no background/provider-hosted effects or resource URLs, closed
+text input/configuration and declared host function tools. Selected connection,
+catalog, owner/key/credential epochs, model, path, semantic headers, instructions,
+tools and metadata remain fixed. For example, fixed partial-known
+`client_metadata: {"thread_id":"fixed"}` can require Write approval while
+satisfying this subset. First Allow permits only the saved continuation text
+with the exact original prefix, or the supported reset with identical leading
+system/developer items. Later steps require exact server-observed provider output
+and subsequent actual MCP tool results. A provider call declaration is not a
+tool-result receipt; ambiguous declarations or transformed, truncated or refused
+results cannot authorize another step.
+
+Prepare fixes the complete send digest. Duplicate decisions, continuation
+redelivery and Retry retain the logical root/step; they cannot rearm a claimed
+send. The final transactional claim follows billing admission; a losing callback
+releases its unused reservation. Authenticated recovery returns the same
+Prepared capability without extending expiry or allocating a new step.
+Cancellation or an uncertain outcome after claim never permits replay;
+known-completed lost output is refused rather than resent. Consent expires no
+later than the saved Allow deadline. This is not an external exactly-once promise.
+
+Unknown/scalar or oversized metadata, unproven native opaque correlation
+changes, reusable `responses/compact`, external image/file inputs and unsupported
+tool projections remain outside this contract. Compact is not classified as
+inherently stateful. Before activation, unsupported shapes/transports retain
+their legacy exact-only behavior; translated senders, node routes, pools,
+overrides and catalog-only selections cannot activate reusable authority.
+After activation, missing controls, changed authority or unsupported transitions
+fail closed, even if a later body looks like strict Read.
+
+Model Deny uses a durable deterministic notice and exact saved destination for
+app and supported modern captured-platform replies, with no model call or new
+card. Legacy one-shot Nyxbot additional-reply delivery remains unsupported;
+expired/unproven destinations or full saved-source snapshot drift are refusals,
+not successful explanations. Proven HTTP/SSH effect-Deny explanations retain
+their existing path.
+
+Deploy both sides and configure the matching existing NyxID model-source profile;
+verify `assistant:model-control-protocol-v1` against the full serving roster and
+drained old writers, then enable the paired flags. Issuance still requires actual
+v1 negotiation. Disabling cannot reset active roots or restore legacy execution.
+Drain/settle affected work before
+rollback; preserve dispatch/uncertainty tombstones and key revocations, and keep
+old writers away from activated roots. See [environment configuration](../ENV.md#engine-and-diagnostics)
+and [security readiness](../SECURITY_ROLLOUT_READINESS.md).
 
 New channel threads inherit their linked agent's configured profile. Existing
 threads retain their model, including legacy channels created with the global
