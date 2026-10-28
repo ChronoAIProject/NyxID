@@ -323,7 +323,7 @@ pub(crate) async fn observe(
             let model=super::super::assistant_nyxagent::identifier(callback.candidate.body["model"].as_str().ok_or_else(invalid)?);
             let cause=super::super::assistant_service_execution::inference_fallback_reason("responses",&callback.candidate.body)
                 .ok_or_else(invalid)?;
-            let summary=format!("Connection {label} ({}), model {model}. {} Only saved Allow narration and server-observed output/host-tool results may advance the transcript. Changed configuration, unsupported metadata and compaction require separate review.",connection.id,cause.reusable_message());
+            let summary=format!("Connection {label} ({}), model {model}. {} Approval includes the same exact opaque provider metadata options; they are not treated as automatic Read. Only saved Allow narration and server-observed output/host-tool results may advance the transcript. Changed configuration or metadata and unsupported compaction require separate review.",connection.id,cause.reusable_message());
             let mut card = acks::request_in_session(&state.db, chat, acks::Request {
                 kind:"action",service:Some((&connection.id,&label,&label)),tool:Some("nyxid.model_control_v1"),arguments:Some(&args),
                 summary:&summary,platform:false,

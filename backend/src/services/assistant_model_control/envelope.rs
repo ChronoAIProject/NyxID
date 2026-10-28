@@ -31,12 +31,20 @@ pub(super) fn envelope(candidate: &wire::PrepareRequest) -> AppResult<(Envelope,
     let mut fixed = candidate.body.clone();
     let object = fixed.as_object_mut().ok_or_else(unsupported)?;
     responses_configuration(object)?;
-    // Main's broader route recognizer is unchanged. Reusable consent has an
-    // additional closed protocol: only declared host function tools, no hosted
-    // web search or provider-managed effects, state or replay handles.
+    // Automatic Read and the broader route recognizer stay unchanged. The
+    // Codex producer serializes client_metadata as HashMap<String, String>
+    // (codex-api/common.rs ResponsesApiRequest). Under explicit owner Write,
+    // retain that entire bounded map as opaque fixed provider configuration.
+    // It is never assumed inert, removed from the saved envelope, or accepted
+    // as executable configuration outside this one field.
+    let mut executable = candidate.body.clone();
+    executable
+        .as_object_mut()
+        .ok_or_else(unsupported)?
+        .remove("client_metadata");
     if !super::super::assistant_service_execution::stateless_model_transport(
         "responses",
-        &candidate.body,
+        &executable,
     ) || object
         .get("background")
         .is_some_and(|v| v != &Value::Bool(false))
@@ -61,46 +69,19 @@ pub(super) fn envelope(candidate: &wire::PrepareRequest) -> AppResult<(Envelope,
     }
     if let Some(metadata) = object.get("client_metadata") {
         let metadata = metadata.as_object().ok_or_else(unsupported)?;
-        if metadata.is_empty() || metadata.len() > 7 {
+        if metadata.is_empty() || metadata.len() > 64 {
             return Err(unsupported());
         }
         for (key, value) in metadata {
             let value = value.as_str().ok_or_else(unsupported)?;
-            if key == "x-codex-turn-metadata" {
-                if value.len() > 1024 {
-                    return Err(unsupported());
-                }
-            } else if !matches!(
-                key.as_str(),
-                "root_turn_id"
-                    | "session_id"
-                    | "thread_id"
-                    | "turn_id"
-                    | "x-codex-installation-id"
-                    | "x-codex-window-id"
-            ) || value.is_empty()
-                || value.len() > 128
-                || !value.bytes().all(|b| {
-                    b.is_ascii_alphanumeric()
-                        || b"_-".contains(&b)
-                        || key == "x-codex-window-id" && b == b':'
-                })
-                || key == "x-codex-window-id"
-                    && value.contains(':')
-                    && !value.split_once(':').is_some_and(|(id, index)| {
-                        !id.is_empty()
-                            && !id.contains(':')
-                            && !index.is_empty()
-                            && index.bytes().all(|b| b.is_ascii_digit())
-                    })
-            {
+            if key.is_empty() || key.len() > 128 || value.len() > 32 * 1024 {
                 return Err(unsupported());
             }
         }
         if serde_json::to_vec(metadata)
             .map_err(|_| unsupported())?
             .len()
-            > 2048
+            > 64 * 1024
         {
             return Err(unsupported());
         }
@@ -148,6 +129,7 @@ fn responses_configuration(object: &serde_json::Map<String, Value>) -> AppResult
         "service_tier",
         "truncation",
         "client_metadata",
+        "prompt_cache_key",
     ];
     if object.keys().any(|key| !KEYS.contains(&key.as_str())) {
         return Err(unsupported());
@@ -177,6 +159,9 @@ fn responses_configuration(object: &serde_json::Map<String, Value>) -> AppResult
             v.as_array()
                 .is_none_or(|a| a.len() > 1 || a.iter().any(|v| v != "reasoning.encrypted_content"))
         })
+        || object
+            .get("prompt_cache_key")
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 256))
     {
         return Err(unsupported());
     }
@@ -269,20 +254,29 @@ fn validate_items(items: &[Value]) -> AppResult<()> {
                 optional_item_identity(item)?;
             }
             Some("function_call_output") => {
-                closed_keys(item, &["type", "call_id", "output"])?;
+                closed_keys(item, &["id", "type", "call_id", "output"])?;
                 if !item["call_id"].is_string() || !item["output"].is_string() {
                     return Err(unsupported());
                 }
+                optional_item_identity(item)?;
             }
             Some("reasoning") => {
                 closed_keys(
                     item,
-                    &["id", "type", "status", "summary", "encrypted_content"],
+                    &[
+                        "id",
+                        "type",
+                        "status",
+                        "summary",
+                        "encrypted_content",
+                        "content",
+                    ],
                 )?;
                 optional_item_identity(item)?;
                 if item
                     .get("encrypted_content")
                     .is_some_and(|v| !v.is_null() && !v.is_string())
+                    || item.get("content").is_some_and(|v| !v.is_null())
                 {
                     return Err(unsupported());
                 }
@@ -299,8 +293,14 @@ fn validate_items(items: &[Value]) -> AppResult<()> {
                     Some("user" | "assistant" | "system" | "developer")
                 ) =>
             {
-                closed_keys(item, &["id", "type", "status", "role", "content"])?;
+                closed_keys(item, &["id", "type", "status", "role", "content", "phase"])?;
                 optional_item_identity(item)?;
+                if item.get("phase").is_some_and(|phase| {
+                    item["role"] != "assistant"
+                        || !matches!(phase.as_str(), Some("commentary" | "final_answer"))
+                }) {
+                    return Err(unsupported());
+                }
                 if !item["content"].is_string() {
                     for part in item["content"].as_array().ok_or_else(unsupported)? {
                         // Initial history is fixed, text-only input. Future
@@ -352,7 +352,7 @@ fn closed_keys(value: &Value, allowed: &[&str]) -> AppResult<()> {
 fn optional_item_identity(item: &Value) -> AppResult<()> {
     if item
         .get("id")
-        .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 256))
+        .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.is_empty() || s.len() > 256))
         || item.get("status").is_some_and(|v| v != "completed")
     {
         return Err(unsupported());
@@ -389,6 +389,17 @@ pub(super) fn allowed_resume(
     {
         return Ok(());
     }
+    // Native input also contains a user-role environment wrapper before the
+    // actual final user message. Preserve that whole observed prefix exactly;
+    // role alone is never authority to rewrite or discard the wrapper.
+    if let Some((last, prefix)) = initial.split_last()
+        && last["role"] == "user"
+        && resumed.len() == initial.len()
+        && resumed[..prefix.len()] == *prefix
+        && exact_user_text(&resumed[prefix.len()], saved_text)
+    {
+        return Ok(());
+    }
     // A rejected outer runtime turn may discard its disposable native session.
     // Its saved Allow continuation then starts a fresh native transcript. Only
     // the previously observed exact privileged prefix may survive that reset;
@@ -412,7 +423,8 @@ fn exact_user_text(item: &Value, text: &str) -> bool {
     };
     if object
         .keys()
-        .any(|key| !matches!(key.as_str(), "type" | "role" | "content"))
+        .any(|key| !matches!(key.as_str(), "id" | "type" | "role" | "content"))
+        || item.get("id").is_some_and(|id| !id.is_null())
         || item["role"] != "user"
         || item.get("type").is_some_and(|v| v != "message")
     {
@@ -431,9 +443,7 @@ pub(super) fn next_input(
     results: &[VerifiedToolResult],
 ) -> AppResult<()> {
     let tail = next.strip_prefix(previous).ok_or_else(conflict)?;
-    let results_tail = tail
-        .strip_prefix(completion.output.as_slice())
-        .ok_or_else(conflict)?;
+    let results_tail = observed_output_tail(&completion.output, tail).ok_or_else(conflict)?;
     if results_tail.len() != completion.calls.len() || results.len() != completion.calls.len() {
         return Err(conflict());
     }
@@ -444,8 +454,9 @@ pub(super) fn next_input(
             || item["type"] != "function_call_output"
             || item.as_object().is_none_or(|o| {
                 o.keys()
-                    .any(|k| !matches!(k.as_str(), "type" | "call_id" | "output"))
+                    .any(|k| !matches!(k.as_str(), "id" | "type" | "call_id" | "output"))
             })
+            || item.get("id").is_some_and(|id| !id.is_null())
         {
             return Err(conflict());
         }
@@ -468,6 +479,86 @@ pub(super) fn next_input(
         }
     }
     Ok(())
+}
+
+fn observed_output_tail<'a>(observed: &[Value], input: &'a [Value]) -> Option<&'a [Value]> {
+    if let Some(tail) = input.strip_prefix(observed) {
+        return Some(tail);
+    }
+    // Whole-vector projections, never independently optional field edits.
+    for ids in [InputIds::Preserve, InputIds::Null, InputIds::Omit] {
+        if let Some(projected) = responses_input_projection(observed, ids)
+            && let Some(tail) = input.strip_prefix(projected.as_slice())
+        {
+            return Some(tail);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum InputIds {
+    Preserve,
+    Null,
+    Omit,
+}
+
+/// Complete standard text/function ResponseItem serialization observed in
+/// Codex protocol/models.rs and client.rs::prepare_response_items_for_request.
+/// Raw provider output and receipt binding remain unchanged. These exact
+/// projections only compare its next-input representation; ciphertext, text,
+/// phase, call identity, arguments and unknown fields are never normalized.
+fn responses_input_projection(output: &[Value], ids: InputIds) -> Option<Vec<Value>> {
+    output
+        .iter()
+        .map(|item| {
+            let mut item = item.clone();
+            let kind = item["type"].as_str()?.to_owned();
+            let object = item.as_object_mut()?;
+            if object.get("status").is_some_and(|v| v != "completed") {
+                return None;
+            }
+            object.remove("status");
+            match ids {
+                InputIds::Preserve => {}
+                InputIds::Null => {
+                    object.insert("id".into(), Value::Null);
+                }
+                InputIds::Omit => {
+                    object.remove("id");
+                }
+            }
+            match kind.as_str() {
+                "function_call" => {}
+                "reasoning" => {
+                    if object.get("content").is_some_and(|v| !v.is_null()) {
+                        return None;
+                    }
+                    object.insert("content".into(), Value::Null);
+                    object.entry("encrypted_content").or_insert(Value::Null);
+                }
+                "message" => {
+                    for part in object.get_mut("content")?.as_array_mut()? {
+                        if part["type"] != "output_text" {
+                            return None;
+                        }
+                        let part = part.as_object_mut()?;
+                        for key in ["annotations", "logprobs"] {
+                            if part
+                                .get(key)
+                                .is_some_and(|v| !v.is_null() && v != &json!([]))
+                            {
+                                return None;
+                            }
+                            part.remove(key);
+                        }
+                    }
+                }
+                _ => return None,
+            }
+            Some(item)
+        })
+        .collect()
 }
 
 pub(super) fn verify_completion(
@@ -498,6 +589,9 @@ pub(super) fn verify_completion(
             return Err(unsupported());
         }
         let object = item.as_object().ok_or_else(unsupported)?;
+        // Validate native-deserializable identities/status before a complete
+        // next-input projection can omit them. The raw output remains bound.
+        optional_item_identity(item)?;
         match item["type"].as_str() {
             Some("function_call") => {
                 if object.keys().any(|key| {
@@ -542,7 +636,13 @@ pub(super) fn verify_completion(
                 if item["role"] != "assistant"
                     || item["status"] != "completed"
                     || object.keys().any(|key| {
-                        !matches!(key.as_str(), "id" | "type" | "status" | "role" | "content")
+                        !matches!(
+                            key.as_str(),
+                            "id" | "type" | "status" | "role" | "content" | "phase"
+                        )
+                    })
+                    || item.get("phase").is_some_and(|phase| {
+                        !matches!(phase.as_str(), Some("commentary" | "final_answer"))
                     })
                     || item["content"].as_array().is_none_or(|content| {
                         content.iter().any(|part| match part["type"].as_str() {
@@ -574,11 +674,12 @@ pub(super) fn verify_completion(
                 if object.keys().any(|key| {
                     !matches!(
                         key.as_str(),
-                        "id" | "type" | "status" | "summary" | "encrypted_content"
+                        "id" | "type" | "status" | "summary" | "encrypted_content" | "content"
                     )
                 }) || item
                     .get("encrypted_content")
                     .is_some_and(|v| !v.is_null() && !v.is_string())
+                    || item.get("content").is_some_and(|v| !v.is_null())
                     || item["summary"].as_array().is_none_or(|items| {
                         items.iter().any(|part| {
                             part["type"] != "summary_text"

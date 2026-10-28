@@ -99,6 +99,9 @@ async fn execute_with_credential(
 }
 async fn deny(c: &Controlled) -> String {
     let card = c.observe().await;
+    deny_card(c, card).await
+}
+async fn deny_card(c: &Controlled, card: String) -> String {
     let (a, b) = tokio::join!(
         acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &card, false),
         acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &card, false)
@@ -122,6 +125,57 @@ async fn deny(c: &Controlled) -> String {
     )
     .await;
     card
+}
+
+#[tokio::test]
+async fn unknown_and_oversized_fixed_metadata_deny_settles_without_model_or_second_card() {
+    for metadata in [
+        json!({"unknown-provider-option":"opaque-value"}),
+        json!({"x-codex-turn-metadata":"x".repeat(1025)}),
+    ] {
+        let c = Controlled::new("p2_opaque_metadata_deny").await;
+        let mut candidate = request(vec![user("initial")]);
+        candidate.body["client_metadata"] = metadata;
+        let card = c.observe_request(candidate).await;
+        let card = deny_card(&c, card).await;
+        let row = begin_notice(&c).await;
+        assert_eq!(row.active_turn.as_ref().unwrap().events[0].id, card);
+        let egress = NoModel(AtomicUsize::new(0));
+        let result = execute(&c, &row, &egress).await.unwrap();
+        assert!(result.error.is_none());
+        assert!(result.text.contains("You denied this model request"));
+        assert_eq!(egress.0.load(Ordering::SeqCst), 0);
+        let reply = uuid::Uuid::new_v4().to_string();
+        settle(&c, &row, &result, &reply).await;
+        settle(&c, &row, &result, &reply).await;
+        notice::recover(&c.f.state.db).await.unwrap();
+        assert_eq!(
+            c.f.state
+                .db
+                .collection::<Document>("assistant_acknowledgements")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            c.f.state
+                .db
+                .collection::<Document>("assistant_model_denial_notices")
+                .count_documents(doc! {"_id":&card,"state":"settled","reply_id":&reply})
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            engine::get(&c.f.state.db, &c.f.owner, &row.id)
+                .await
+                .unwrap()
+                .pending_events
+                .is_empty()
+        );
+        c.f.state.db.drop().await.unwrap();
+    }
 }
 
 #[tokio::test]

@@ -131,7 +131,19 @@ impl InferenceFallbackReason {
     pub(crate) fn reusable_message(self) -> &'static str {
         match self {
             Self::MetadataShape => {
-                "Correlation metadata does not match the complete automatic Read contract. Explicit approval permits validated continuation text with the same exact connection, model and fixed Responses configuration."
+                "Automatic Read requires the complete seven-field metadata contract. Explicit approval permits validated continuation text with the same exact connection, model and fixed Responses configuration."
+            }
+            Self::MetadataUnknownField => {
+                "Unrecognized provider metadata stays opaque and fully fixed under this approval. Validated continuation text may change with the same exact connection, model and fixed Responses configuration."
+            }
+            Self::MetadataIdentifier => {
+                "A correlation identifier is outside the automatic Read grammar. Explicit approval fixes its exact value and permits validated continuation text with the same exact connection, model and fixed Responses configuration."
+            }
+            Self::MetadataTextLimit => {
+                "Turn metadata exceeds the 1024-byte automatic Read limit. Explicit approval fixes the complete bounded metadata and permits validated continuation text with the same exact connection, model and fixed Responses configuration."
+            }
+            Self::MetadataObjectLimit => {
+                "Client metadata exceeds the 2048-byte automatic Read limit. Explicit approval fixes the complete bounded map and permits validated continuation text with the same exact connection, model and fixed Responses configuration."
             }
             _ => {
                 "This shape is outside automatic Read. Reusable approval requires the closed Responses v1 contract; unsupported metadata, resources or compaction remain exact-only."

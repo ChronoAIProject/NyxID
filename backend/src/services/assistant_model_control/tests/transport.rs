@@ -47,9 +47,15 @@ async fn provider(
         )
             .into_response();
     }
+    let mut completed = completion(call);
+    if peer.mode == "malformed_id" {
+        completed["output"][0]["id"] = json!({"not":"a native item id"});
+    } else if peer.mode == "reasoning_status" {
+        completed["output"].as_array_mut().unwrap().push(json!({"type":"reasoning","id":"rs-invalid-status","status":"in_progress","summary":[],"encrypted_content":null}));
+    }
     let frame = format!(
         "data: {}\n\n",
-        json!({"type":"response.completed","response":completion(call)})
+        json!({"type":"response.completed","response":completed})
     );
     let stream = async_stream::stream! {
         let middle=frame.len()/2;
@@ -223,9 +229,21 @@ async fn callback_control(
     .await
 }
 async fn admitted(c: &mut Controlled, peer: &Provider) -> (String, wire::PreparedStep) {
-    let response = callback(c, &request(vec![user("initial")]).body, None)
-        .await
-        .unwrap();
+    admitted_request(
+        c,
+        peer,
+        request(vec![user("initial")]),
+        request(vec![user("Saved Allow narration")]),
+    )
+    .await
+}
+async fn admitted_request(
+    c: &mut Controlled,
+    peer: &Provider,
+    initial: wire::PrepareRequest,
+    resumed: wire::PrepareRequest,
+) -> (String, wire::PreparedStep) {
+    let response = callback(c, &initial.body, None).await.unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let refusal: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap()).unwrap();
@@ -261,9 +279,7 @@ async fn admitted(c: &mut Controlled, peer: &Provider) -> (String, wire::Prepare
             .contains("Approval covers this exact request only")
     );
     assert!(!saved.summary.contains("thread_id"));
-    let repeated = callback(c, &request(vec![user("initial")]).body, None)
-        .await
-        .unwrap();
+    let repeated = callback(c, &initial.body, None).await.unwrap();
     let repeated: Value =
         serde_json::from_slice(&to_bytes(repeated.into_body(), 16384).await.unwrap()).unwrap();
     assert_eq!(
@@ -282,6 +298,13 @@ async fn admitted(c: &mut Controlled, peer: &Provider) -> (String, wire::Prepare
         diagnosis.get_str("scope").unwrap(),
         "validated_model_continuation_v1"
     );
+    let cause = crate::services::assistant_service_execution::inference_fallback_reason(
+        "responses",
+        &initial.body,
+    )
+    .unwrap();
+    assert_eq!(diagnosis.get_str("reason").unwrap(), cause.code());
+    assert!(saved.summary.contains(cause.reusable_message()));
     assert!(
         !diagnosis
             .get_str("explanation")
@@ -312,14 +335,10 @@ async fn admitted(c: &mut Controlled, peer: &Provider) -> (String, wire::Prepare
         root.expires_at <= allowed.expires_at,
         "reusable use never extends the actual saved Allow expiry"
     );
-    let wire::PrepareReply::Prepared { step } = prepare(
-        &c.f.state,
-        &c.f.chat,
-        &c.token,
-        request(vec![user("Saved Allow narration")]),
-    )
-    .await
-    .unwrap() else {
+    let wire::PrepareReply::Prepared { step } = prepare(&c.f.state, &c.f.chat, &c.token, resumed)
+        .await
+        .unwrap()
+    else {
         panic!("saved Allow must prepare");
     };
     (card, step)
@@ -371,8 +390,36 @@ async fn actual_tool(c: &Controlled, tool: &wire::PreparedTool) -> Value {
 #[tokio::test]
 async fn real_billed_duplicate_callbacks_claim_once_then_observed_tool_completion_allows_one_followup()
  {
+    counted_followup(None).await;
+}
+
+#[tokio::test]
+async fn real_unknown_and_oversized_metadata_one_allow_followup_keeps_opaque_options_and_claims_once()
+ {
+    for metadata in [
+        json!({"unknown-provider-option":"opaque-value"}),
+        json!({"x-codex-turn-metadata":"x".repeat(1025)}),
+    ] {
+        counted_followup(Some(metadata)).await;
+    }
+}
+
+async fn counted_followup(metadata: Option<Value>) {
+    let make = |input| {
+        let mut candidate = request(input);
+        if let Some(metadata) = &metadata {
+            candidate.body["client_metadata"] = metadata.clone();
+        }
+        candidate
+    };
     let (mut c, peer, server) = fixture("completed").await;
-    let (card, step) = admitted(&mut c, &peer).await;
+    let (card, step) = admitted_request(
+        &mut c,
+        &peer,
+        make(vec![user("initial")]),
+        make(vec![user("Saved Allow narration")]),
+    )
+    .await;
     // The prepare response was lost: authenticated root status retrieves the
     // identical capability, expiry and logical step, then that recovered token
     // participates in the actual two-reservation/final-send race below.
@@ -395,7 +442,36 @@ async fn real_billed_duplicate_callbacks_claim_once_then_observed_tool_completio
         serde_json::to_value(&step).unwrap(),
         serde_json::to_value(&recovered).unwrap()
     );
-    let body = request(vec![user("Saved Allow narration")]).body;
+    let body = make(vec![user("Saved Allow narration")]).body;
+    if metadata.is_some() {
+        for changed in [
+            json!({"changed-key":"opaque-value"}),
+            json!({"unknown-provider-option":"changed-value"}),
+            json!({"x-codex-turn-metadata":"x".repeat(1026)}),
+        ] {
+            let mut tampered = body.clone();
+            tampered["client_metadata"] = changed;
+            assert!(callback(&c, &tampered, Some(&step)).await.is_err());
+        }
+        let mut tampered = body.clone();
+        tampered["model"] = json!("different-model");
+        assert!(callback(&c, &tampered, Some(&step)).await.is_err());
+        let mut tampered = body.clone();
+        tampered["tools"][0]["parameters"] =
+            json!({"type":"object","properties":{"new-authority":{"type":"string"}}});
+        assert!(callback(&c, &tampered, Some(&step)).await.is_err());
+        let selected = c.connection.clone();
+        c.connection = connected(
+            &c.f.state.db,
+            &c.f.owner,
+            "p2-model",
+            "https://example.invalid",
+        )
+        .await;
+        assert!(callback(&c, &body, Some(&step)).await.is_err());
+        c.connection = selected;
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 0);
+    }
     let (entered, mut arrivals) = tokio::sync::mpsc::channel(2);
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let first = BEFORE_FINAL_CLAIM.scope(
@@ -506,13 +582,22 @@ async fn real_billed_duplicate_callbacks_claim_once_then_observed_tool_completio
         live.active_turn.as_ref().unwrap().activity_total,
         after.active_turn.as_ref().unwrap().activity_total
     );
-    let mut next = request(vec![user("Saved Allow narration")]);
+    let mut next = make(vec![user("Saved Allow narration")]);
     next.body["input"]
         .as_array_mut()
         .unwrap()
         .extend(completion(0)["output"].as_array().unwrap().iter().cloned());
+    if metadata.is_some() {
+        let native_call = next.body["input"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap();
+        native_call.as_object_mut().unwrap().remove("status");
+        native_call["id"] = Value::Null;
+    }
     next.body["input"].as_array_mut().unwrap().push(
-        json!({"type":"function_call_output","call_id":"call-1","output":result.to_string()}),
+        json!({"id":null,"type":"function_call_output","call_id":"call-1","output":result.to_string()}),
     );
     next.preceding_receipt = Some(receipt.receipt_bearer);
     next.tool_results = vec![proof];
@@ -546,7 +631,7 @@ async fn real_billed_duplicate_callbacks_claim_once_then_observed_tool_completio
             &c.f.state,
             &c.f.chat,
             &c.token,
-            request(vec![user("new after expiry")])
+            make(vec![user("new after expiry")])
         )
         .await
         .is_err()
@@ -650,6 +735,39 @@ async fn real_truncated_dropped_and_redirected_provider_steps_never_replay() {
     }
 }
 
+#[tokio::test]
+async fn real_malformed_provider_item_identity_or_status_never_mints_completion_or_replays() {
+    for mode in ["malformed_id", "reasoning_status"] {
+        let (mut c, peer, server) = fixture(mode).await;
+        let (_, step) = admitted(&mut c, &peer).await;
+        let body = request(vec![user("Saved Allow narration")]).body;
+        let response = callback(&c, &body, Some(&step)).await.unwrap();
+        peer.eof.add_permits(1);
+        to_bytes(response.into_body(), wire::MAX_STREAM_BYTES)
+            .await
+            .unwrap();
+        assert!(matches!(
+            current(&c, &step).await,
+            wire::PrepareReply::OutcomeUnknown
+        ));
+        assert!(callback(&c, &body, Some(&step)).await.is_err());
+        assert!(matches!(
+            prepare(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                request(vec![user("Saved Allow narration")])
+            )
+            .await
+            .unwrap(),
+            wire::PrepareReply::OutcomeUnknown
+        ));
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 1);
+        server.abort();
+        c.f.state.db.drop().await.unwrap();
+    }
+}
+
 fn continuation(c: &Controlled, card: Option<&str>, retry: Option<&str>) -> engine::TurnRequest {
     engine::TurnRequest {
         acknowledgement_id: card.map(str::to_owned),
@@ -704,10 +822,37 @@ async fn settle_failed(c: &Controlled, code: &str) {
 
 #[tokio::test]
 async fn real_allow_continuation_redelivery_and_failed_turn_retry_preserve_uncertain_step() {
+    uncertain_redelivery(None).await;
+}
+
+#[tokio::test]
+async fn real_unknown_and_oversized_metadata_uncertain_continuation_retry_never_resends() {
+    for metadata in [
+        json!({"unknown-provider-option":"opaque-value"}),
+        json!({"x-codex-turn-metadata":"x".repeat(1025)}),
+    ] {
+        uncertain_redelivery(Some(metadata)).await;
+    }
+}
+
+async fn uncertain_redelivery(metadata: Option<Value>) {
+    let make = |input| {
+        let mut candidate = super::request(input);
+        if let Some(metadata) = &metadata {
+            candidate.body["client_metadata"] = metadata.clone();
+        }
+        candidate
+    };
     for delivery in ["continuation", "retry", "explicit_unknown_retry"] {
         let (mut c, peer, server) = fixture("truncated").await;
-        let (card, step) = admitted(&mut c, &peer).await;
-        let body = request(vec![user("Saved Allow narration")]).body;
+        let (card, step) = admitted_request(
+            &mut c,
+            &peer,
+            make(vec![user("initial")]),
+            make(vec![user("Saved Allow narration")]),
+        )
+        .await;
+        let body = make(vec![user("Saved Allow narration")]).body;
         let response = callback(&c, &body, Some(&step)).await.unwrap();
         let _ = to_bytes(response.into_body(), wire::MAX_STREAM_BYTES).await;
         assert!(matches!(
@@ -763,7 +908,7 @@ async fn real_allow_continuation_redelivery_and_failed_turn_retry_preserve_uncer
                     &c.f.state,
                     &c.f.chat,
                     &c.token,
-                    super::request(vec![user("Saved Allow narration")])
+                    make(vec![user("Saved Allow narration")])
                 )
                 .await
                 .unwrap(),
