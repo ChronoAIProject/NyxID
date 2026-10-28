@@ -10,7 +10,7 @@ async fn automation_legacy_flag_off_preserves_create_edit_schedule_webhook_and_g
         // mutation and no skipped/ignored test entrypoint.
         for value in [None, Some("false")] {
             let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact", concat!(module_path!(), "::automation_legacy_flag_off_preserves_create_edit_schedule_webhook_and_group"),
+            command.args(["--exact", "handlers::trigger_scheduler::tests::automation_legacy_flag_off_preserves_create_edit_schedule_webhook_and_group",
                 "--nocapture", "--test-threads=1"])
                 .env(CHILD, "1").env_remove("AUTOMATION_CONTINUATION_V2_ENABLED").kill_on_drop(true);
             if let Some(value) = value {
