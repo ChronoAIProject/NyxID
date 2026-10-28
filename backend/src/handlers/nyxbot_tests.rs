@@ -6564,9 +6564,10 @@ async fn hosted_watch_reports_gateway_configuration_separately_from_outage() {
         );
         // CLI/mobile consume this same HTTP envelope; the MCP tool above also
         // retains the bounded code alongside guidance, without upstream prose.
-        let error = connect(&state, OWNER, Some(&home.id), &bot_id, &agent)
-            .await
-            .unwrap_err();
+        let error = match connect(&state, OWNER, Some(&home.id), &bot_id, &agent).await {
+            Err(error) => error,
+            Ok(_) => panic!("gateway rejection must fail the HTTP connection"),
+        };
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let envelope: Value = serde_json::from_str(&body_text(response).await).unwrap();
