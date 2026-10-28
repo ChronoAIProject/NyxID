@@ -1382,6 +1382,8 @@ fn winning_plan(report: &Document) -> String {
 
 #[tokio::test]
 async fn automation_v2_mongo_source_work_history_and_readiness_query_bounds() {
+    use crate::models::assistant_direct_handoff::{COLLECTION_NAME as HANDOFFS, DirectHandoff};
+
     let reads = MongoReads::default();
     let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
         "auto2040_query_bounds",
@@ -1391,14 +1393,36 @@ async fn automation_v2_mongo_source_work_history_and_readiness_query_bounds() {
     let (state, calls, server) = setup_with_database(db).await;
     let (_, run, row) = completion_coordinator(&state).await;
     let group = completion_group(&state, &row, &run).await;
-    // Unrelated groups/runs/work must not inflate the exact-source lookup.
+    // Unrelated groups/receipts/runs/work must not inflate the exact-source lookup.
     let mut group_rows = Vec::new();
+    let mut handoff_rows = Vec::new();
     for n in 0..256 {
         let mut other = group.clone();
         other.id = format!("nyxg-{}", Uuid::new_v4().simple());
         other.followers[0].trigger_run_id = Some(Uuid::new_v4().to_string());
         other.followers[0].conversation_id = format!("nyxa-noise-{n}");
         group_rows.push(other);
+        // Neither pending receipts for other runs nor terminal receipts for
+        // this run are a live source. Both index keys must bound this lookup.
+        let terminal = n % 2 == 0;
+        handoff_rows.push(DirectHandoff {
+            id: Uuid::new_v4().to_string(),
+            user_id: OWNER.into(),
+            run_id: if terminal {
+                run.id.clone()
+            } else {
+                Uuid::new_v4().to_string()
+            },
+            parent_thread_id: row.id.clone(),
+            parent_turn_id: run.turn_id.clone().unwrap(),
+            child_thread_id: format!("nyxa-receipt-noise-{n}"),
+            child_turn_id: Uuid::new_v4().to_string(),
+            agent_id: row.agent_id.clone().unwrap(),
+            invocation_id: None,
+            state: if terminal { "delivered" } else { "pending" }.into(),
+            retry_at: run.expires_at,
+            expires_at: run.expires_at,
+        });
     }
     state
         .db
@@ -1406,6 +1430,12 @@ async fn automation_v2_mongo_source_work_history_and_readiness_query_bounds() {
             crate::models::assistant_group::COLLECTION_NAME,
         )
         .insert_many(group_rows)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<DirectHandoff>(HANDOFFS)
+        .insert_many(handoff_rows)
         .await
         .unwrap();
     let mut work = Vec::new();
@@ -1421,6 +1451,11 @@ async fn automation_v2_mongo_source_work_history_and_readiness_query_bounds() {
         .await
         .unwrap();
     for (collection, name, keys) in [
+        (
+            HANDOFFS,
+            "direct_handoff_run",
+            doc! {"run_id": 1, "state": 1},
+        ),
         (
             schedules::WORK,
             "trigger_work_due",
@@ -1484,7 +1519,28 @@ async fn automation_v2_mongo_source_work_history_and_readiness_query_bounds() {
     );
     session.abort_transaction().await.unwrap();
     let finds = reads.finds();
-    assert_eq!(finds.len(), 3);
+    assert_eq!(
+        finds
+            .iter()
+            .map(|q| q.get_str("find").unwrap())
+            .collect::<Vec<_>>(),
+        [
+            CONVERSATIONS,
+            RUNS,
+            HANDOFFS,
+            crate::models::assistant_group::COLLECTION_NAME
+        ],
+        "exact thread, capacity retry, pending direct receipt, then group follower"
+    );
+    let direct_query = &finds[2];
+    assert_eq!(
+        direct_query.get_document("filter").unwrap(),
+        &doc! {"user_id": OWNER, "run_id": &run.id, "parent_thread_id": &row.id, "state": "pending"}
+    );
+    assert_eq!(
+        direct_query.get_document("projection").unwrap(),
+        &doc! {"_id": 1}
+    );
     assert!(
         reads
             .batches
@@ -1496,6 +1552,8 @@ async fn automation_v2_mongo_source_work_history_and_readiness_query_bounds() {
     for command in &finds {
         explain_find(&state.db, command, 1, 4).await;
     }
+    let direct_report = explain_find(&state.db, direct_query, 0, 4).await;
+    assert!(winning_plan(&direct_report).contains("direct_handoff_run"));
     let group_query = finds
         .iter()
         .find(|q| q.get_str("find") == Ok(crate::models::assistant_group::COLLECTION_NAME))
