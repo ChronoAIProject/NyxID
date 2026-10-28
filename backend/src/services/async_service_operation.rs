@@ -557,6 +557,9 @@ pub async fn cancel_for_stop(db: &Database, saved: &AssistantConversation) -> Ap
                 doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"state":"cancelling",
                     "result_encrypted":null,"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}})
                 .session(&mut *session).await?;
+            super::generated_artifacts::discard_in_session(&db,
+                doc! {"user_id":&saved.user_id,"conversation_id":&saved.id,"watch_id":{"$in":&ids},
+                    "state":{"$in":["pending","materializing"]}},session).await?;
             db.collection::<bson::Document>(CONVERSATIONS).update_one(
                 doc! {"_id":&saved.id,"user_id":&saved.user_id},
                 doc! {"$pull":{"pending_events":{"kind":EVENT_KIND,"id":{"$in":ids}}}},
