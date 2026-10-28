@@ -141,8 +141,8 @@ jobs:
         run: >-
           python3 .github/scripts/ci_resources.py billing-smoke
           cargo nextest run --archive-file backend-tests.tar.zst
-          --workspace-remap "$GITHUB_WORKSPACE" --profile ci --exact
-          billing_route_coverage_smoke -- --nocapture
+          --workspace-remap "$GITHUB_WORKSPACE" --profile ci --no-capture
+          --no-tests=fail -E 'test(=billing_integration_tests::billing_route_coverage_smoke)'
       - name: Test MongoDB diagnostics
         if: failure() || cancelled()
         continue-on-error: true
