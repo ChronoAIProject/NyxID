@@ -94,12 +94,126 @@ fn bounded_files<'de, D: serde::Deserializer<'de>>(
     }
     deserializer.deserialize_any(Files)
 }
-#[derive(Deserialize)]
+#[derive(Default)]
 struct RetrievedFile {
     path: String,
     content: Option<Zeroizing<String>>,
-    error: Option<String>,
+    unavailable: bool,
     size: Option<u64>,
+    invalid: bool,
+}
+// A syntactically valid peer with a malformed shape is a per-file refusal.
+// Inspect only selected primitives; nested/unknown values are consumed without
+// an arbitrary JSON tree or an extra content copy. JSON syntax errors still
+// fail the complete response, and the enclosing byte/entry limits stay intact.
+enum FileValue {
+    Text(Zeroizing<String>),
+    Size(u64),
+    Null,
+    Entry(RetrievedFile),
+    Invalid,
+}
+struct FileVisitor {
+    entry: bool,
+}
+impl<'de> Deserialize<'de> for FileValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(FileVisitor { entry: false })
+    }
+}
+impl<'de> Deserialize<'de> for RetrievedFile {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(
+            match deserializer.deserialize_any(FileVisitor { entry: true })? {
+                FileValue::Entry(file) => file,
+                _ => Self {
+                    invalid: true,
+                    ..Self::default()
+                },
+            },
+        )
+    }
+}
+impl<'de> serde::de::Visitor<'de> for FileVisitor {
+    type Value = FileValue;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a result file or selected primitive field")
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(FileValue::Null)
+    }
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(FileValue::Invalid)
+    }
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(FileValue::Invalid)
+    }
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        match u64::try_from(value) {
+            Ok(value) => self.visit_u64(value),
+            Err(_) => Ok(FileValue::Invalid),
+        }
+    }
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(if self.entry {
+            FileValue::Invalid
+        } else {
+            FileValue::Size(value)
+        })
+    }
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(if self.entry {
+            FileValue::Invalid
+        } else {
+            FileValue::Text(Zeroizing::new(value.to_owned()))
+        })
+    }
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(if self.entry {
+            FileValue::Invalid
+        } else {
+            FileValue::Text(Zeroizing::new(value))
+        })
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(FileValue::Invalid)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        if !self.entry {
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {}
+            return Ok(FileValue::Invalid);
+        }
+        let mut file = RetrievedFile::default();
+        let mut seen = 0u8;
+        while let Some(key) = map.next_key::<String>()? {
+            let field = match key.as_str() {
+                "path" => 1,
+                "content" => 2,
+                "error" => 4,
+                "size" => 8,
+                _ => {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                    continue;
+                }
+            };
+            file.invalid |= seen & field != 0;
+            seen |= field;
+            match (field, map.next_value::<FileValue>()?) {
+                (1, FileValue::Text(mut text)) => file.path = std::mem::take(&mut *text),
+                (2, FileValue::Text(text)) => file.content = Some(text),
+                (4, FileValue::Text(_)) => file.unavailable = true,
+                (8, FileValue::Size(size)) => file.size = Some(size),
+                (2 | 4 | 8, FileValue::Null) => {}
+                _ => file.invalid = true,
+            }
+        }
+        file.invalid |= seen & 1 == 0;
+        Ok(FileValue::Entry(file))
+    }
 }
 pub struct File {
     pub index: usize,
@@ -254,7 +368,10 @@ fn decode_file(
     name: String,
     remaining: usize,
 ) -> Checked<File> {
-    if entry.error.is_some() {
+    if entry.invalid {
+        return Err("artifact_invalid");
+    }
+    if entry.unavailable {
         return Err("result_unavailable");
     }
     let encoded = entry.content.ok_or("artifact_invalid")?;

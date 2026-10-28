@@ -1449,6 +1449,75 @@ fn generated_file_rejections_preserve_good_peers_and_accepted_budget() {
     let good = entry("good.png", encoded(PNG));
     let invalid = entry("/private/secret-path/bad.png", encoded(b"invalid-image"));
     let oversized = entry("too-big.bin", encoded(&vec![0; sandbox::FILE_BYTES + 1]));
+    let mut nested = json!("private-upstream-detail");
+    for _ in 0..16 {
+        nested = json!([nested]);
+    }
+    let mut malformed: Vec<String> = vec![
+        json!(null),
+        json!(false),
+        json!(12),
+        json!("private-entry"),
+        nested.clone(),
+        json!({}),
+        json!({"content":encoded(PNG)}),
+        json!({"path":null,"content":encoded(PNG)}),
+        json!({"path":12,"content":encoded(PNG)}),
+        json!({"path":{"private":nested.clone()},"content":encoded(PNG)}),
+        json!({"path":"/private/bad.png","content":nested.clone()}),
+        json!({"path":"/private/bad.png","content":true}),
+        json!({"path":"/private/bad.png","content":encoded(PNG),"error":{"private":nested.clone()}}),
+        json!({"path":"/private/bad.png","content":encoded(PNG),"size":-1}),
+        json!({"path":"/private/bad.png","content":encoded(PNG),"size":"1"}),
+        json!({"path":"/private/bad.png","content":encoded(PNG),"size":1.5}),
+        json!({"path":"/private/bad.png","error":null,"size":null}),
+    ]
+    .into_iter()
+    .map(|value| value.to_string())
+    .collect();
+    malformed.push(format!(
+        r#"{{"path":"/private/first.png","path":"/private/bad.png","content":"{}"}}"#,
+        encoded(PNG)
+    ));
+    let before = entry("before.png", encoded(PNG)).to_string();
+    let after = entry("after.png", encoded(PNG)).to_string();
+    for peer in malformed {
+        let wire = format!(
+            r#"{{"success":true,"output":{{"stdout":"","stderr":"","exit_code":0,"files":[{before},{peer},{after}]}}}}"#
+        );
+        let result = sandbox::parse(&wire, "op").unwrap();
+        assert_eq!(result.files.len(), 2);
+        assert_eq!(result.files[0].index, 0);
+        assert_eq!(result.files[1].index, 2);
+        for file in &result.files {
+            assert_eq!(&*file.bytes, PNG);
+        }
+        assert_eq!(result.rejected.len(), 1);
+        assert_eq!(result.rejected[0].index, 1);
+        assert!(matches!(
+            result.rejected[0].reason,
+            RejectionReason::Invalid
+        ));
+        assert!(
+            !serde_json::to_string(&result.rejected)
+                .unwrap()
+                .contains("private")
+        );
+    }
+    // Unknown fields and absent/null optional hints keep their prior behavior.
+    let wire = json!({"success":true,"output":{"stdout":"","stderr":"","exit_code":0,"files":[
+        {"path":"good.png","content":encoded(PNG),"error":null,"size":null,"future":{"private":nested}},
+        {"path":"unavailable.bin","error":"private-upstream-detail"}
+    ]}}).to_string();
+    let result = sandbox::parse(&wire, "op").unwrap();
+    assert_eq!(result.files.len(), 1);
+    assert_eq!(&*result.files[0].bytes, PNG);
+    assert_eq!(result.rejected[0].index, 1);
+    assert!(matches!(
+        result.rejected[0].reason,
+        RejectionReason::Unavailable
+    ));
+    assert_eq!(sandbox::parse("{", "op").err(), Some("artifact_invalid"));
     for entries in [
         vec![invalid.clone(), good.clone(), oversized.clone()],
         vec![oversized, good.clone(), invalid],
