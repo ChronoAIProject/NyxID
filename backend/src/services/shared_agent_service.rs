@@ -615,6 +615,81 @@ pub struct SharingPreview {
     pub summary: String,
 }
 
+fn clean_summary_text(value: &str, max_chars: usize) -> String {
+    let mut cleaned = String::with_capacity(value.len().min(max_chars));
+    let mut pending_space = false;
+    for character in value.chars() {
+        if character == '"' {
+            if !cleaned.is_empty() {
+                cleaned.push('\'');
+            }
+            pending_space = false;
+        } else if character.is_whitespace() {
+            pending_space = !cleaned.is_empty();
+        } else if character.is_control() {
+            continue;
+        } else {
+            if pending_space {
+                cleaned.push(' ');
+            }
+            cleaned.push(character);
+            pending_space = false;
+        }
+    }
+    let mut chars = cleaned.chars();
+    let truncated: String = chars.by_ref().take(max_chars.saturating_sub(1)).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn summary_label(value: &str) -> String {
+    clean_summary_text(value, 80)
+}
+
+fn summary_subject_label(subject: &Audience, users: &[User]) -> String {
+    let Some(user) = users.iter().find(|user| {
+        user.id == subject.subject_id
+            && user.is_active
+            && match subject.subject_kind {
+                ShareSubject::Person => user.user_type.is_person(),
+                ShareSubject::Org => user.user_type.is_org(),
+            }
+    }) else {
+        return summary_label(&subject.subject_id);
+    };
+    match subject.subject_kind {
+        ShareSubject::Person => {
+            let email = summary_label(&user.email);
+            let display = user
+                .display_name
+                .as_deref()
+                .map(summary_label)
+                .filter(|display| !display.is_empty());
+            match display {
+                Some(display) => format!("{email} (self-chosen name '{display}')"),
+                None => email,
+            }
+        }
+        ShareSubject::Org => {
+            let slug = user
+                .slug
+                .as_deref()
+                .map(summary_label)
+                .filter(|slug| !slug.is_empty())
+                .unwrap_or_else(|| summary_label(&subject.subject_id));
+            let name = user
+                .display_name
+                .as_deref()
+                .map(summary_label)
+                .filter(|name| !name.is_empty());
+            name.map_or(slug.clone(), |name| format!("{slug} ({name})"))
+        }
+    }
+}
+
 /// Read the current policy and audience for the owner-card preview. The
 /// proposed `SharingUpdate` is also the card's argument digest, so a later
 /// version change cannot be approved accidentally.
@@ -625,14 +700,36 @@ pub async fn preview_update(
     input: &SharingUpdate,
 ) -> AppResult<SharingPreview> {
     personal_owner(db, actor, &agent.id).await?;
-    let current = policy(db, agent).await?;
-    let rows: Vec<AgentShare> = db
-        .collection(model::SHARES_COLLECTION_NAME)
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().await?;
+    let current = db
+        .collection::<AgentSharing>(model::COLLECTION_NAME)
+        .find_one(doc! {"_id": &agent.id})
+        .session(&mut session)
+        .await?
+        .unwrap_or_else(|| AgentSharing {
+            agent_id: agent.id.clone(),
+            owner_id: agent.user_id.clone(),
+            enabled: false,
+            version: 0,
+            revision: 0,
+            shared_access: BTreeMap::new(),
+            memory: Vec::new(),
+            updated_at: Utc::now(),
+        });
+    if current.version != input.expected_version {
+        session.abort_transaction().await?;
+        return Err(AppError::Conflict(
+            "Sharing changed; reload before saving".into(),
+        ));
+    }
+    let mut share_cursor = db
+        .collection::<AgentShare>(model::SHARES_COLLECTION_NAME)
         .find(doc! {"agent_id": &agent.id, "owner_id": actor})
         .limit(MAX_SHARES as i64)
-        .await?
-        .try_collect()
+        .session(&mut session)
         .await?;
+    let rows: Vec<AgentShare> = share_cursor.stream(&mut session).try_collect().await?;
     let current_audience: Vec<Audience> = rows
         .iter()
         .map(|row| Audience {
@@ -648,89 +745,143 @@ pub async fn preview_update(
         input,
     );
 
-    let subject_gains: Vec<&Audience> = input.audience.iter().filter(|_| widening).collect();
-    let service_gains: Vec<(&String, &GuestAccess)> =
-        input.shared_access.iter().filter(|_| widening).collect();
+    let subject_gains: Vec<(&Audience, &'static str)> = input
+        .audience
+        .iter()
+        .filter_map(|wanted| {
+            let existing = current_audience.iter().find(|existing| {
+                existing.subject_kind == wanted.subject_kind
+                    && existing.subject_id == wanted.subject_id
+            });
+            match existing {
+                None => Some((wanted, "new")),
+                Some(existing) if role_rank(wanted.role) > role_rank(existing.role) => {
+                    Some((wanted, "upgraded"))
+                }
+                Some(_) => None,
+            }
+        })
+        .collect();
+    let service_gains: Vec<(&String, &GuestAccess, &'static str)> = input
+        .shared_access
+        .iter()
+        .filter_map(
+            |(service, level)| match current.shared_access.get(service) {
+                None => Some((service, level, "new")),
+                Some(old) if access_rank(*level) > access_rank(*old) => {
+                    Some((service, level, "upgraded"))
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    let unchanged_subjects = input
+        .audience
+        .iter()
+        .filter(|wanted| {
+            current_audience.iter().any(|existing| {
+                existing.subject_kind == wanted.subject_kind
+                    && existing.subject_id == wanted.subject_id
+                    && existing.role == wanted.role
+            })
+        })
+        .count();
+    let unchanged_services = input
+        .shared_access
+        .iter()
+        .filter(|(service, level)| current.shared_access.get(*service) == Some(*level))
+        .count();
 
     let subject_ids: Vec<_> = subject_gains
         .iter()
-        .map(|subject| subject.subject_id.clone())
+        .map(|(subject, _)| subject.subject_id.clone())
         .collect();
     let users: Vec<User> = if subject_ids.is_empty() {
         Vec::new()
     } else {
-        db.collection(crate::models::user::COLLECTION_NAME)
+        let mut cursor = db
+            .collection(crate::models::user::COLLECTION_NAME)
             .find(doc! {"_id": {"$in": &subject_ids}})
+            .session(&mut session)
             .limit(MAX_SHARES as i64)
-            .await?
-            .try_collect()
-            .await?
-    };
-    let subject_label = |subject: &Audience| {
-        users
-            .iter()
-            .find(|user| user.id == subject.subject_id)
-            .map(|user| {
-                user.display_name
-                    .as_deref()
-                    .or(user.slug.as_deref())
-                    .unwrap_or(&user.email)
-                    .to_owned()
-            })
-            .unwrap_or_else(|| subject.subject_id.clone())
+            .await?;
+        cursor.stream(&mut session).try_collect().await?
     };
     let subjects = subject_gains
         .iter()
-        .map(|subject| format!("{} ({})", subject_label(subject), role_name(subject.role)))
+        .map(|(subject, change)| {
+            format!(
+                "{} [{change}, role={}]",
+                summary_subject_label(subject, &users),
+                role_name(subject.role)
+            )
+        })
         .collect::<Vec<_>>();
 
     let service_ids: Vec<_> = service_gains
         .iter()
-        .map(|(service, _)| (*service).clone())
+        .map(|(service, _, _)| (*service).clone())
         .collect();
     let owner_services: Vec<UserService> = if service_ids.is_empty() {
         Vec::new()
     } else {
-        db.collection(crate::models::user_service::COLLECTION_NAME)
+        let mut cursor = db
+            .collection(crate::models::user_service::COLLECTION_NAME)
             .find(doc! {"user_id": &agent.user_id, "_id": {"$in": &service_ids}})
-            .await?
-            .try_collect()
-            .await?
+            .session(&mut session)
+            .await?;
+        cursor.stream(&mut session).try_collect().await?
     };
     let catalogs: Vec<crate::models::downstream_service::DownstreamService> =
         if service_ids.is_empty() {
             Vec::new()
         } else {
-            db.collection(crate::models::downstream_service::COLLECTION_NAME)
+            let mut cursor = db
+                .collection(crate::models::downstream_service::COLLECTION_NAME)
                 .find(doc! {"_id": {"$in": &service_ids}})
-                .await?
-                .try_collect()
-                .await?
+                .session(&mut session)
+                .await?;
+            cursor.stream(&mut session).try_collect().await?
         };
     let service_label = |service: &str| {
         owner_services
             .iter()
             .find(|row| row.id == service || row.catalog_service_id.as_deref() == Some(service))
-            .map(|row| row.slug.clone())
+            .map(|row| summary_label(&row.slug))
             .or_else(|| {
                 catalogs
                     .iter()
                     .find(|row| row.id == service)
-                    .map(|row| row.name.clone())
+                    .map(|row| summary_label(&row.name))
             })
-            .unwrap_or_else(|| service.to_owned())
+            .unwrap_or_else(|| summary_label(service))
     };
     let access = service_gains
         .iter()
-        .map(|(service, level)| format!("{} ({})", service_label(service), access_name(**level)))
+        .map(|(service, level, change)| {
+            format!(
+                "{} [{change}, level={}]",
+                service_label(service),
+                access_name(**level)
+            )
+        })
         .collect::<Vec<_>>();
     let agent_label = agent.display_name.as_deref().unwrap_or(&agent.name);
+    let agent_label = summary_label(agent_label);
     let mut details = Vec::new();
     if !subjects.is_empty() {
         details.push(format!("people/orgs: {}", subjects.join(", ")));
     }
     if !access.is_empty() {
         details.push(format!("owner services: {}", access.join(", ")));
+    }
+    if widening && unchanged_subjects > 0 {
+        details.push(format!(
+            "{unchanged_subjects} existing recipients unchanged"
+        ));
+    }
+    if widening && unchanged_services > 0 {
+        details.push(format!("{unchanged_services} existing services unchanged"));
     }
     if !current.enabled && input.enabled {
         details.push("sharing enabled".into());
@@ -740,7 +891,11 @@ pub async fn preview_update(
     } else {
         format!("Delegate {agent_label}: {}", details.join("; "))
     };
-    Ok(SharingPreview { widening, summary })
+    session.commit_transaction().await?;
+    Ok(SharingPreview {
+        widening,
+        summary: clean_summary_text(&summary, 2_000),
+    })
 }
 
 pub async fn policy(db: &Database, agent: &AssistantAgent) -> AppResult<AgentSharing> {
@@ -797,6 +952,7 @@ pub async fn update(
     actor: &str,
     id: &str,
     input: SharingUpdate,
+    delegation_approved: bool,
 ) -> AppResult<AgentSharing> {
     let agent = personal_owner(db, actor, id).await?;
     if input.enabled && !super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await?
@@ -879,6 +1035,21 @@ pub async fn update(
     let current_access = previous
         .as_ref()
         .map_or_else(BTreeMap::new, |p| p.shared_access.clone());
+    let current_audience: Vec<Audience> = previous_shares
+        .iter()
+        .map(|row| Audience {
+            subject_kind: row.subject_kind,
+            subject_id: row.subject_id.clone(),
+            role: row.role,
+        })
+        .collect();
+    let widening = sharing_widens(current_enabled, &current_audience, &current_access, &input);
+    if widening && !delegation_approved {
+        session.abort_transaction().await?;
+        return Err(AppError::Forbidden(
+            "Owner confirmation is required for sharing delegation".into(),
+        ));
+    }
     let is_noop =
         current_enabled == input.enabled && same_audience && current_access == input.shared_access;
     let current_policy = previous.clone().unwrap_or_else(|| AgentSharing {

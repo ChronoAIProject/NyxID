@@ -1217,6 +1217,7 @@ async fn execute_authorized_tool_impl(
         // updates, permission decisions) or are specialists' own permission
         // requests; never consume a second digest for them.
         let mut auto_allowed = None;
+        let mut delegation_approved = false;
         let sharing_preview = if name == "set_agent_sharing" {
             let target =
                 team::specialist(&state.db, &chat.user_id, text_arg(args, "agent")).await?;
@@ -1263,15 +1264,32 @@ async fn execute_authorized_tool_impl(
                 .filter(|preview| preview.widening)
                 .map(|preview| preview.summary.clone())
                 .unwrap_or_else(|| action_summary(name, args));
-            if let Some(need) = gate.ask()
-                && let Some(refusal) =
-                    acks::confirm_action(&state.db, chat, tool_name, args, &need, &summary).await?
-            {
-                return Ok((refusal, true));
+            if let Some(need) = gate.ask() {
+                if sharing_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.widening)
+                    && let Some(acknowledgement_id) = args["acknowledgement_id"].as_str()
+                {
+                    delegation_approved = acks::consume_delegation_action(
+                        &state.db,
+                        chat,
+                        acknowledgement_id,
+                        tool_name,
+                        args,
+                    )
+                    .await?;
+                }
+                if !delegation_approved
+                    && let Some(refusal) =
+                        acks::confirm_action(&state.db, chat, tool_name, args, &need, &summary)
+                            .await?
+                {
+                    return Ok((refusal, true));
+                }
             }
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
-        let outcome = dispatch(state, chat, name, args).await?;
+        let outcome = dispatch(state, chat, name, args, delegation_approved).await?;
         if !outcome.1
             && let Some(auto) = auto_allowed
         {
@@ -1335,6 +1353,7 @@ fn dispatch<'a>(
     chat: &'a ChatAuthority,
     name: &'a str,
     args: &'a Value,
+    delegation_approved: bool,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
         "task_status" => Box::pin(async move {
@@ -1352,9 +1371,13 @@ fn dispatch<'a>(
         }),
         "remember" | "forget" | "get_agent_sharing" | "set_agent_sharing" | "spawn_subagent"
         | "message_subagent" | "wait_for_subagents" | "list_subagents" | "read_subagent"
-        | "grant_subagent" | "revoke_subagent" => {
-            Box::pin(dispatch_specialists(state, chat, name, args))
-        }
+        | "grant_subagent" | "revoke_subagent" => Box::pin(dispatch_specialists(
+            state,
+            chat,
+            name,
+            args,
+            delegation_approved,
+        )),
         "request_agent_operations" | "get_agent_operations" | "set_agent_operations" => {
             Box::pin(dispatch_operation_scopes(state, chat, name, args))
         }
@@ -1404,6 +1427,7 @@ async fn dispatch_specialists(
     chat: &ChatAuthority,
     name: &str,
     args: &Value,
+    delegation_approved: bool,
 ) -> AppResult<(Value, bool)> {
     let db = &state.db;
     let owner = chat.user_id.as_str();
@@ -1466,9 +1490,14 @@ async fn dispatch_specialists(
             if name == "set_agent_sharing" {
                 let input = serde_json::from_value(args["sharing"].clone())
                     .map_err(|_| AppError::ValidationError("Invalid sharing policy".into()))?;
-                let result =
-                    crate::services::shared_agent_service::update(db, owner, &agent.id, input)
-                        .await?;
+                let result = crate::services::shared_agent_service::update(
+                    db,
+                    owner,
+                    &agent.id,
+                    input,
+                    delegation_approved,
+                )
+                .await?;
                 (
                     json!({"version": result.version, "revision": result.revision, "enabled": result.enabled}),
                     false,

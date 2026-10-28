@@ -3191,24 +3191,52 @@ pub async fn consume_action(
     tool: &str,
     arguments: &Value,
 ) -> AppResult<bool> {
+    consume_action_with_reason(db, chat, id, tool, arguments, None).await
+}
+
+/// Consume an owner card only when it explicitly represented sharing
+/// delegation. This keeps a card for the same tool and arguments from being
+/// mistaken for authorization to widen an agent's audience or credentials.
+pub async fn consume_delegation_action(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+    tool: &str,
+    arguments: &Value,
+) -> AppResult<bool> {
+    consume_action_with_reason(db, chat, id, tool, arguments, Some("delegation")).await
+}
+
+async fn consume_action_with_reason(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+    tool: &str,
+    arguments: &Value,
+    reason: Option<&str>,
+) -> AppResult<bool> {
     let db = db.clone();
     let chat = chat.clone();
     let id = id.to_owned();
     let tool = tool.to_owned();
     let digest = arguments_digest(arguments);
+    let reason = reason.map(str::to_owned);
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let operation = async {
             Box::pin(fence(&db, &chat, session)).await?;
-            let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
-                doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
+            let mut filter = doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                     "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": &tool,
                     "arguments_digest": &digest,
                     "invocation_id": &chat.invocation_id,
                     "status": "allowed",
                     "decided_by": {"$ne": "access_mode"},
-                    "expires_at": {"$gt": bson::DateTime::now()},
-                },
+                    "expires_at": {"$gt": bson::DateTime::now()}};
+            if let Some(reason) = reason.as_deref() {
+                filter.insert("confirmation.reason", reason);
+            }
+            let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
+                filter,
                 doc! {"$set": {"status": "used"}},
             ).session(&mut *session).await?;
             Ok(result.modified_count == 1)

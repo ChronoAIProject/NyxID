@@ -98,7 +98,7 @@ pub async fn update(
     Json(body): Json<sharing::SharingUpdate>,
 ) -> AppResult<Json<Value>> {
     let actor = human(&state, &auth).await?;
-    let row = sharing::update(&state.db, &actor, &id, body).await?;
+    let row = sharing::update(&state.db, &actor, &id, body, true).await?;
     Ok(Json(
         json!({"enabled": row.enabled, "version": row.version, "revision": row.revision}),
     ))

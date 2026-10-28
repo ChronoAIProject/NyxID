@@ -120,6 +120,148 @@ fn shared_agent_widening_classifier_covers_each_authority_change() {
     ));
 }
 
+#[tokio::test]
+async fn shared_agent_preview_lists_only_sanitized_delta_and_rejects_stale_versions() {
+    let f = Fixture::new("shared_agent_preview_delta").await;
+    let agent = publish(&f, false).await;
+    let service = f.service(&f.admin, "preview-service").await;
+    f.state
+        .db
+        .collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &agent.id},
+            doc! {"$set": {"grants.service_ids": [&service]}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.member},
+            doc! {"$set": {"display_name": "Mallory\n(manager)"}},
+        )
+        .await
+        .unwrap();
+    let input = sharing::SharingUpdate {
+        expected_version: 1,
+        enabled: true,
+        audience: vec![
+            sharing::Audience {
+                subject_kind: ShareSubject::Person,
+                subject_id: f.outsider.clone(),
+                role: ShareRole::User,
+            },
+            sharing::Audience {
+                subject_kind: ShareSubject::Org,
+                subject_id: f.org.clone(),
+                role: ShareRole::User,
+            },
+            sharing::Audience {
+                subject_kind: ShareSubject::Person,
+                subject_id: f.member.clone(),
+                role: ShareRole::Manager,
+            },
+        ],
+        shared_access: BTreeMap::from([(service.clone(), GuestAccess::All)]),
+    };
+    let preview = sharing::preview_update(&f.state.db, &f.admin, &agent, &input)
+        .await
+        .unwrap();
+    assert!(preview.widening);
+    let member_email = format!("{}@example.com", f.member);
+    assert!(preview.summary.contains(&member_email));
+    assert!(
+        preview
+            .summary
+            .contains("self-chosen name 'Mallory (manager)'")
+    );
+    assert!(!preview.summary.contains('\n'));
+    assert!(!preview.summary.contains(&f.outsider));
+    assert!(preview.summary.contains("2 existing recipients unchanged"));
+    assert!(preview.summary.contains("preview-service"));
+    assert!(!preview.summary.contains("existing services unchanged"));
+
+    let stale = sharing::SharingUpdate {
+        expected_version: 0,
+        enabled: true,
+        audience: Vec::new(),
+        shared_access: BTreeMap::new(),
+    };
+    assert!(matches!(
+        sharing::preview_update(&f.state.db, &f.admin, &agent, &stale).await,
+        Err(crate::errors::AppError::Conflict(_))
+    ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_agent_write_rechecks_widening_and_requires_delegation_approval() {
+    let f = Fixture::new("shared_agent_write_widening_fence").await;
+    let agent = publish(&f, false).await;
+    let input = sharing::SharingUpdate {
+        expected_version: 1,
+        enabled: true,
+        audience: vec![sharing::Audience {
+            subject_kind: ShareSubject::Person,
+            subject_id: f.outsider.clone(),
+            role: ShareRole::User,
+        }],
+        shared_access: BTreeMap::new(),
+    };
+    let preview = sharing::preview_update(&f.state.db, &f.admin, &agent, &input)
+        .await
+        .unwrap();
+    assert!(!preview.widening);
+
+    // Simulate an authority change after preview without a version change.
+    // The write snapshot now sees false -> true and must fail closed.
+    f.state
+        .db
+        .collection::<Document>(crate::models::assistant_sharing::COLLECTION_NAME)
+        .update_one(doc! {"_id": &agent.id}, doc! {"$set": {"enabled": false}})
+        .await
+        .unwrap();
+    let refused = sharing::update(&f.state.db, &f.admin, &agent.id, input, false).await;
+    assert!(matches!(
+        refused,
+        Err(crate::errors::AppError::Forbidden(_))
+    ));
+    let current = sharing::policy(&f.state.db, &agent).await.unwrap();
+    assert!(!current.enabled);
+    assert_eq!(current.version, 1);
+    assert_eq!(
+        sharing::audience(&f.state.db, &f.admin, &agent.id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // The first-party human/REST lane explicitly supplies approval.
+    let applied = sharing::update(
+        &f.state.db,
+        &f.admin,
+        &agent.id,
+        sharing::SharingUpdate {
+            expected_version: 1,
+            enabled: true,
+            audience: vec![sharing::Audience {
+                subject_kind: ShareSubject::Person,
+                subject_id: f.outsider.clone(),
+                role: ShareRole::User,
+            }],
+            shared_access: BTreeMap::new(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(applied.enabled);
+    assert_eq!(applied.version, 2);
+    f.state.db.drop().await.unwrap();
+}
+
 async fn publish(f: &Fixture, manager: bool) -> crate::models::assistant_agent::AssistantAgent {
     sharing::ensure_indexes(&f.state.db).await.unwrap();
     flags::set_platform_override(
@@ -165,6 +307,7 @@ async fn publish(f: &Fixture, manager: bool) -> crate::models::assistant_agent::
                 },
             ],
         },
+        true,
     )
     .await
     .unwrap();
@@ -272,6 +415,7 @@ async fn shared_agent_sharing_noop_save_has_no_side_effects() {
             audience,
             shared_access: current.shared_access.clone(),
         },
+        true,
     )
     .await
     .unwrap();
@@ -326,6 +470,7 @@ async fn shared_agent_add_only_save_preserves_existing_consent_and_turn() {
             audience,
             shared_access: BTreeMap::new(),
         },
+        true,
     )
     .await
     .unwrap();
@@ -379,6 +524,7 @@ async fn shared_agent_add_only_save_rejects_stale_write_version() {
             audience: add_alice,
             shared_access: BTreeMap::new(),
         },
+        true,
     )
     .await
     .unwrap();
@@ -397,6 +543,7 @@ async fn shared_agent_add_only_save_rejects_stale_write_version() {
             audience: base,
             shared_access: BTreeMap::new(),
         },
+        true,
     )
     .await;
     assert!(matches!(stale, Err(crate::errors::AppError::Conflict(_))));
@@ -433,6 +580,7 @@ async fn shared_agent_narrowing_save_revokes_consent_and_stops_turn() {
             audience,
             shared_access: BTreeMap::new(),
         },
+        true,
     )
     .await
     .unwrap();
@@ -669,6 +817,7 @@ async fn shared_agent_snapshots_batch_queries_and_leave_owner_paths_unchanged() 
                     role: ShareRole::User,
                 }],
             },
+            true,
         )
         .await
         .unwrap();
@@ -801,6 +950,7 @@ async fn shared_agent_private_threads_notes_and_retained_history() {
             audience: Vec::new(),
             shared_access: BTreeMap::new(),
         },
+        true,
     )
     .await
     .unwrap();
@@ -983,6 +1133,7 @@ async fn shared_agent_grant_removal_does_not_restore_policy() {
             ],
             shared_access: BTreeMap::from([(service.clone(), GuestAccess::Read)]),
         },
+        true,
     )
     .await
     .unwrap();
@@ -1354,6 +1505,7 @@ async fn shared_agent_http_policy_and_final_egress_revoke_owner_connection() {
             ],
             shared_access: BTreeMap::from([(service.clone(), GuestAccess::Read)]),
         },
+        true,
     )
     .await
     .unwrap();
@@ -1455,6 +1607,7 @@ async fn shared_agent_http_policy_and_final_egress_revoke_owner_connection() {
             audience: Vec::new(),
             shared_access: BTreeMap::new(),
         },
+        true,
     )
     .await
     .unwrap();
@@ -1536,6 +1689,7 @@ async fn shared_agent_rest_and_mcp_dispatch_reads_and_refuse_without_provider_ef
             ],
             shared_access: BTreeMap::from([(service.clone(), GuestAccess::Read)]),
         },
+        true,
     )
     .await
     .unwrap();
@@ -1623,6 +1777,7 @@ async fn shared_agent_rest_and_mcp_dispatch_reads_and_refuse_without_provider_ef
             audience: Vec::new(),
             shared_access: BTreeMap::new(),
         },
+        true,
     )
     .await
     .unwrap();
@@ -1710,6 +1865,7 @@ async fn shared_agent_catalog_connections_exclude_internal_and_preserve_account_
             ],
             shared_access: BTreeMap::from([(catalog.clone(), GuestAccess::Read)]),
         },
+        true,
     )
     .await
     .unwrap();

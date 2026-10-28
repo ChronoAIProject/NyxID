@@ -130,6 +130,7 @@ async fn sharing_agent(f: &Fixture) -> (String, String, String) {
             audience: Vec::new(),
             shared_access: Default::default(),
         },
+        true,
     )
     .await
     .unwrap();
@@ -286,7 +287,7 @@ async fn sharing_widening_cards_bind_policy_while_full_access_narrowing_stays_au
         card["summary"]
             .as_str()
             .unwrap()
-            .contains("shared-calendar (all)")
+            .contains("shared-calendar [new, level=all]")
     );
     let current_agent = team::agent(&f.state.db, &f.owner, &agent).await.unwrap();
     assert_eq!(
@@ -365,6 +366,7 @@ async fn sharing_widening_cards_bind_policy_while_full_access_narrowing_stays_au
             ],
             shared_access: [(service.clone(), GuestAccess::All)].into_iter().collect(),
         },
+        true,
     )
     .await
     .unwrap();
