@@ -1604,8 +1604,21 @@ SHA-256 over the operation
 ID, ordered normalized file metadata and decoded bytes is the immutable source
 identity; Sandbox status `version` is diagnostic only. A changed verified digest
 for the same operation fails closed. A content modification requires a new
-Sandbox execution, new identity and distinct attachment IDs. Its local revision
-starts at 1; a failed later operation never relabels earlier attachments.
+Sandbox execution, new identity and distinct attachment IDs. Content revisions
+belong to a server-owned same-path series scoped by owner, conversation and
+immutable trusted producer catalog ID. The full lexical canonical source path
+is hashed before display truncation, resolving dot/parent components while
+preserving absolute versus relative roots; paths never enter API metadata or
+logs. That digest also binds the immutable operation result, so a changed path
+under one operation cannot silently reuse its saved manifest. A transaction
+allocates revision 1 for verified successful content and increments it only when
+that series' content digest changes. Unchanged content and idempotent replay keep
+the same revision; a new operation still has distinct attachment IDs. A failed
+or rejected modification cannot change the prior series label or retained bytes.
+Verified files returned by an execution declared unsuccessful remain unversioned,
+with their own immutable attachment identity. Sandbox lifecycle `version` is
+never a content revision. Older complete saved manifests remain readable without
+backfilling or inventing a series for their retained bytes.
 
 NyxBot must distinguish submitted, source-completed, verified/retained,
 materialized and currently readable. It must never send an owner to machine

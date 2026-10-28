@@ -4,6 +4,25 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "async_service_operation_artifacts";
 pub const DELIVERIES: &str = "assistant_artifact_deliveries";
+pub const SERIES: &str = "generated_artifact_content_series";
+
+/// Metadata-only same-path content lineage; never authorizes source or byte reads.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ContentSeries {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    pub conversation_id: String,
+    pub catalog_service_id: String,
+    pub source_path_sha256: String,
+    pub sha256: String,
+    pub revision: i64,
+}
+impl std::fmt::Debug for ContentSeries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GeneratedArtifactContentSeries([REDACTED])")
+    }
+}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Metadata {
@@ -60,6 +79,10 @@ pub struct AcceptedFile {
     pub pending_id: String,
     pub attachment_id: String,
     pub filename: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_revision: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ResultManifest {
@@ -76,7 +99,8 @@ pub struct ResultManifest {
     pub rejected: Vec<RejectedFile>,
     pub source_result_identity: String,
     pub source_status_version: Option<String>,
-    pub content_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_revision: Option<String>,
     pub count: usize,
     pub delivery_reason: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -96,12 +120,15 @@ pub struct PendingArtifact {
     pub artifact_index: usize,
     pub filename: String,
     pub source_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path_sha256: Option<String>,
     pub content_type: String,
     pub size: i64,
     pub sha256: String,
     pub preview_kind: String,
     pub source_status_version: Option<String>,
-    pub content_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_revision: Option<String>,
     pub state: String,
     pub assistant_attachment_id: String,
     #[serde(default, with = "super::bson_bytes::optional")]

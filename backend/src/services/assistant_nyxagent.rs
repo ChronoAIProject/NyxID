@@ -5339,6 +5339,7 @@ pub async fn delete(
                         crate::models::async_service_operation::COLLECTION_NAME,
                         crate::models::generated_artifact::COLLECTION_NAME,
                         crate::models::generated_artifact::DELIVERIES,
+                        crate::models::generated_artifact::SERIES,
                         crate::models::assistant_voice::REQUESTS,
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,

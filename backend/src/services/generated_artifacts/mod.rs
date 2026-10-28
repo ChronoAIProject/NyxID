@@ -13,8 +13,8 @@ use crate::{
             AsyncServiceOperation, COLLECTION_NAME as WATCHES, DeliveryBinding,
         },
         generated_artifact::{
-            COLLECTION_NAME as ARTIFACTS, DELIVERIES, Delivery, Metadata, PendingArtifact,
-            ResultManifest,
+            COLLECTION_NAME as ARTIFACTS, ContentSeries, DELIVERIES, Delivery, Metadata,
+            PendingArtifact, ResultManifest, SERIES,
         },
     },
 };
@@ -172,6 +172,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             .create_index(IndexModel::builder().keys(keys).build())
             .await?;
     }
+    db.collection::<Document>(SERIES).create_index(
+        IndexModel::builder()
+            .keys(doc! {"user_id":1,"conversation_id":1,"catalog_service_id":1,"source_path_sha256":1})
+            .options(IndexOptions::builder().unique(true).build()).build()
+    ).await?;
     db.collection::<Document>(DELIVERIES)
         .create_index(
             IndexModel::builder()
@@ -240,12 +245,13 @@ pub async fn persist(
             artifact_index: file.index,
             filename: file.filename.clone(),
             source_path: file.source_path.clone(),
+            source_path_sha256: Some(file.source_path_sha256.clone()),
             content_type: file.content_type.into(),
             size: file.bytes.len() as i64,
             sha256: file.sha256.clone(),
             preview_kind: file.preview.into(),
             source_status_version: status.version.clone(),
-            content_revision: "1".into(),
+            content_revision: None,
             state: "pending".into(),
             assistant_attachment_id: Uuid::new_v4().to_string(),
             data_encrypted: None,
@@ -276,12 +282,14 @@ pub async fn persist(
                 pending_id: row.id.clone(),
                 attachment_id: row.assistant_attachment_id.clone(),
                 filename: row.filename.clone(),
+                source_path_sha256: row.source_path_sha256.clone(),
+                content_revision: None,
             })
             .collect(),
         rejected: result.rejected.clone(),
         source_result_identity: result.identity.clone(),
         source_status_version: status.version.clone(),
-        content_revision: "1".into(),
+        content_revision: None,
         count: rows.len(),
         delivery_reason: "delivery_pending".into(),
         expires_at,
@@ -301,6 +309,7 @@ pub async fn persist(
     let watch = w.clone();
     // The retry callback needs only this owned flag, not the decoded result borrow.
     let success = result.success;
+    let series_ids: Vec<String> = rows.iter().map(|_| Uuid::new_v4().to_string()).collect();
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<()> = Box::pin(async {
@@ -311,21 +320,82 @@ pub async fn persist(
             if manifest.expires_at <= Utc::now() {return Err(AppError::AssistantAttachmentExpired);}
             // Conversation write conflicts with owner deletion and cancellation.
             if database.collection::<Document>(CONVERSATIONS).update_one(doc!{"_id":&watch.conversation_id,"user_id":&watch.user_id},doc!{"$inc":{"async_operation_generation":1}}).session(&mut *session).await?.matched_count != 1 {return Err(missing());}
-            let committed_manifest = current.artifact_result.as_ref().unwrap_or(&manifest);
+            let mut committed_manifest = current.artifact_result.clone().unwrap_or_else(|| manifest.clone());
             if current.artifact_result.is_some() {
-                let existing = pending_rows_in_session(&database, session, &current, committed_manifest, false).await?;
+                let existing = pending_rows_in_session(&database, session, &current, &committed_manifest, false).await?;
                 if existing.len() != committed_manifest.count { return Err(invalid()) }
-            }
-            for row in rows.iter().filter(|_| current.artifact_result.is_none()) {
-                database.collection::<Document>(ARTIFACTS).update_one(doc!{"watch_id":&row.watch_id,"source_result_identity":&row.source_result_identity,"artifact_index":row.artifact_index as i64},doc!{"$setOnInsert":bson::to_document(row).map_err(|_|invalid())?}).upsert(true).session(&mut *session).await?;
+            } else {
+                // IDs/encrypted payloads are prepared once. Revision allocation
+                // and publication share this retried, conversation-fenced transaction.
+                let catalog = current.artifact_catalog_service_id.as_deref().ok_or_else(invalid)?;
+                for (row, series_id) in rows.iter().zip(&series_ids) {
+                    let mut row = row.clone();
+                    if success {
+                        row.content_revision = Some(allocate_revision(&database, session, &row, catalog, series_id).await?);
+                    }
+                    let descriptor = committed_manifest.files.iter_mut()
+                        .find(|f| f.pending_id == row.id).ok_or_else(invalid)?;
+                    descriptor.content_revision = row.content_revision.clone();
+                    database.collection::<Document>(ARTIFACTS).insert_one(
+                        bson::to_document(&row).map_err(|_|invalid())?).session(&mut *session).await?;
+                }
             }
             database.collection::<Document>(WATCHES).update_one(doc!{"_id":&watch.id,"state":&watch.state,"lease_id":&watch.lease_id},doc!{"$set":{
-                "artifact_result":bson::to_bson(committed_manifest).map_err(|_|invalid())?,"result_encrypted":bson::to_bson(&Some(&encrypted)).map_err(|_|invalid())?,"secret_context_versions":bson::to_bson(&versions).map_err(|_|invalid())?,
+                "artifact_result":bson::to_bson(&committed_manifest).map_err(|_|invalid())?,"result_encrypted":bson::to_bson(&Some(&encrypted)).map_err(|_|invalid())?,"secret_context_versions":bson::to_bson(&versions).map_err(|_|invalid())?,
                 "state":"ready","reason":if success {"completed"}else{"operation_failed"},"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}}).session(&mut *session).await?;
             Ok(())
         }).await; transactions::transaction_result(operation)
     }).await.map_err(transactions::map_transaction_error)
 }
+async fn allocate_revision(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &PendingArtifact,
+    catalog: &str,
+    series_id: &str,
+) -> AppResult<String> {
+    let path = row.source_path_sha256.as_deref().ok_or_else(invalid)?;
+    let collection = db.collection::<ContentSeries>(SERIES);
+    let key = doc! {"user_id":&row.user_id,"conversation_id":&row.conversation_id,
+    "catalog_service_id":catalog,"source_path_sha256":path};
+    if let Some(head) = collection.find_one(key).session(&mut *session).await? {
+        if head.revision < 1 {
+            return Err(invalid());
+        }
+        if head.sha256 == row.sha256 {
+            return Ok(head.revision.to_string());
+        }
+        let revision = head.revision.checked_add(1).ok_or_else(invalid)?;
+        if db
+            .collection::<Document>(SERIES)
+            .update_one(
+                doc! {"_id":&head.id,"revision":head.revision,"sha256":&head.sha256},
+                doc! {"$set":{"revision":revision,"sha256":&row.sha256}},
+            )
+            .session(&mut *session)
+            .await?
+            .matched_count
+            != 1
+        {
+            return Err(invalid());
+        }
+        return Ok(revision.to_string());
+    }
+    collection
+        .insert_one(ContentSeries {
+            id: series_id.into(),
+            user_id: row.user_id.clone(),
+            conversation_id: row.conversation_id.clone(),
+            catalog_service_id: catalog.into(),
+            source_path_sha256: path.into(),
+            sha256: row.sha256.clone(),
+            revision: 1,
+        })
+        .session(&mut *session)
+        .await?;
+    Ok("1".into())
+}
+
 fn metadata(row: &PendingArtifact, expires: DateTime<Utc>) -> Metadata {
     Metadata {
         filename: Some(row.filename.clone()),
@@ -335,7 +405,7 @@ fn metadata(row: &PendingArtifact, expires: DateTime<Utc>) -> Metadata {
         source_operation_id: Some(row.operation_id.clone()),
         source_result_identity: Some(row.source_result_identity.clone()),
         source_status_version: row.source_status_version.clone(),
-        content_revision: Some(row.content_revision.clone()),
+        content_revision: row.content_revision.clone(),
         preview_kind: Some(row.preview_kind.clone()),
         expires_at: Some(expires),
     }
@@ -396,6 +466,9 @@ async fn pending_rows_in_session(
                         && f.index == r.artifact_index
                         && f.attachment_id == r.assistant_attachment_id
                         && f.filename == r.filename
+                        && (f.source_path_sha256.is_none()
+                            || (f.source_path_sha256 == r.source_path_sha256
+                                && f.content_revision == r.content_revision))
                 })
             }))
     {
@@ -501,6 +574,7 @@ pub async fn prepare_settlement_in_session(
                 || pending.state != "materialized"
                 || attachment.content_type != pending.content_type
                 || attachment.size != pending.size
+                || attachment.artifact.content_revision != pending.content_revision
                 || attachment.artifact.source_turn_id.as_deref() != Some(w.turn_id.as_str())
                 || attachment.artifact.source_operation_id != w.operation_id
                 || attachment.artifact.source_result_identity.as_deref()
@@ -534,7 +608,9 @@ pub async fn prepare_settlement_in_session(
             ]
             .iter()
             .any(|(key, value)| saved.get_str(key).ok() != Some(*value))
-                || saved.get_i64("size").ok() != Some(attachment.size))
+                || saved.get_i64("size").ok() != Some(attachment.size)
+                || saved.get_str("content_revision").ok()
+                    != attachment.artifact.content_revision.as_deref())
         {
             return Err(invalid());
         }
@@ -557,6 +633,8 @@ pub async fn prepare_settlement_in_session(
                     pending_id: pending.id.clone(),
                     attachment_id: pending.assistant_attachment_id.clone(),
                     filename: pending.filename.clone(),
+                    source_path_sha256: pending.source_path_sha256.clone(),
+                    content_revision: pending.content_revision.clone(),
                 });
             }
             if let Some(file) = manifest
@@ -748,7 +826,8 @@ async fn materialize(
                 ]
                 .iter()
                 .any(|(key, value)| saved.get_str(key).ok() != Some(*value))
-                    || saved.get_i64("size").ok() != Some(row.size))
+                    || saved.get_i64("size").ok() != Some(row.size)
+                    || saved.get_str("content_revision").ok() != row.content_revision.as_deref())
             {
                 return Err(invalid());
             }

@@ -144,6 +144,7 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (m::generated_artifact::DELIVERIES, doc! {"user_id":owner}),
+        (m::generated_artifact::SERIES, doc! {"user_id":owner}),
         (
             m::async_service_operation::QUOTAS_COLLECTION_NAME,
             doc! {"user_id":owner},
@@ -791,6 +792,7 @@ mod artifact_tests {
         let collections = [
             crate::models::generated_artifact::COLLECTION_NAME,
             crate::models::generated_artifact::DELIVERIES,
+            crate::models::generated_artifact::SERIES,
         ];
         for collection in collections {
             for user in [&owner, &foreign] {
@@ -804,7 +806,7 @@ mod artifact_tests {
             .into_iter()
             .filter(|(name, _)| collections.contains(name))
             .collect();
-        assert_eq!(targets.len(), 2);
+        assert_eq!(targets.len(), 3);
         for (collection, filter) in targets {
             assert!(erase_page(&db, &owner, collection, filter).await.unwrap());
             assert_eq!(

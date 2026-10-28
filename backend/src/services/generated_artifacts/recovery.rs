@@ -231,7 +231,8 @@ async fn run(
                         ("source_result_identity", delivery.source_result_identity.as_str()),
                         ("content_type", attachment.content_type.as_str()),
                     ].iter().any(|(key, value)| saved.get_str(key).ok() != Some(*value))
-                        || saved.get_i64("size").ok() != Some(attachment.size)) {
+                        || saved.get_i64("size").ok() != Some(attachment.size)
+                        || saved.get_str("content_revision").ok() != attachment.artifact.content_revision.as_deref()) {
                     return Err(invalid());
                 }
             }

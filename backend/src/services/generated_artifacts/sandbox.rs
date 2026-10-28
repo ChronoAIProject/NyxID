@@ -105,6 +105,7 @@ pub struct File {
     pub index: usize,
     pub filename: String,
     pub source_path: String,
+    pub source_path_sha256: String,
     pub content_type: &'static str,
     pub preview: &'static str,
     pub bytes: Zeroizing<Vec<u8>>,
@@ -186,7 +187,7 @@ pub fn parse(body: &str, operation: &str) -> Checked<ResultFiles> {
     let mut rejected = Vec::new();
     let mut total = 0usize;
     let mut hash = Sha256::new();
-    part(&mut hash, b"nyxid-sandbox-result-v1");
+    part(&mut hash, b"nyxid-sandbox-result-v2");
     part(&mut hash, operation.as_bytes());
     let exit_code = result.output.as_ref().map(|output| output.exit_code);
     if let Some(output) = result.output {
@@ -208,6 +209,7 @@ pub fn parse(body: &str, operation: &str) -> Checked<ResultFiles> {
                     total = total
                         .checked_add(file.bytes.len())
                         .ok_or("artifact_too_large")?;
+                    part(&mut hash, file.source_path_sha256.as_bytes());
                     part(&mut hash, file.filename.as_bytes());
                     part(&mut hash, file.content_type.as_bytes());
                     part(&mut hash, &file.bytes);
@@ -282,11 +284,33 @@ fn decode_file(
         index,
         filename: name,
         source_path: bounded(&entry.path, 512).into(),
+        source_path_sha256: path_identity(&entry.path),
         content_type,
         preview,
         bytes,
         sha256,
     })
+}
+
+/// Lexical canonical path identity, without retaining a full canonical path or
+/// allocating a component stack. Reverse traversal cancels dot-dot components.
+/// Absolute roots clamp parent traversal; relative leading parents remain distinct.
+fn path_identity(path: &str) -> String {
+    let absolute = path.starts_with(['/', '\\']);
+    let mut hash = Sha256::new();
+    part(&mut hash, b"nyxid-generated-source-path-v1");
+    part(&mut hash, if absolute { b"absolute" } else { b"relative" });
+    let mut parents = 0u64;
+    for component in path.rsplit(['/', '\\']) {
+        match component {
+            "" | "." => {}
+            ".." => parents += 1,
+            _ if parents > 0 => parents -= 1,
+            _ => part(&mut hash, component.as_bytes()),
+        }
+    }
+    part(&mut hash, &if absolute { 0 } else { parents }.to_be_bytes());
+    hex::encode(hash.finalize())
 }
 
 fn bounded(text: &str, max: usize) -> &str {

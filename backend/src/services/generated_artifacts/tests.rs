@@ -10,7 +10,7 @@ fn body(name: &str, bytes: &[u8]) -> String {
 fn watch() -> AsyncServiceOperation {
     bson::from_document(doc!{"_id":Uuid::new_v4().to_string(),"user_id":"owner2037","conversation_id":"nyxa-2037","agent_id":"agent2037","turn_id":"original2037","api_key_id":"key2037","service_id":"sandbox2037","submit_endpoint_id":"submit2037",
         "contract":{"status_operation":"get_execution_handler","result_operation":"get_execution_result_handler","id_field":"/operation_id","id_parameter":"operation_id","status_field":"/status","success_states":["succeeded"],"failure_states":["failed"]},
-        "delivery":{"origin":"user","platform_reply":{"kind":"web_only"}},"operation_id":"operation2037","artifact_mode":sandbox::MODE,"state":"waiting","attempts":0,"lease_id":"lease2037","lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(60)),"created_at":bson::DateTime::now(),"deadline":bson::DateTime::from_chrono(Utc::now()+Duration::hours(2)),"poll_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(4))}).unwrap()
+        "delivery":{"origin":"user","platform_reply":{"kind":"web_only"}},"operation_id":"operation2037","artifact_mode":sandbox::MODE,"artifact_catalog_service_id":"00000000-0000-4000-8000-000000002037","state":"waiting","attempts":0,"lease_id":"lease2037","lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(60)),"created_at":bson::DateTime::now(),"deadline":bson::DateTime::from_chrono(Utc::now()+Duration::hours(2)),"poll_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(4))}).unwrap()
 }
 #[test]
 fn generated_artifact_metadata_omits_absent_fields_but_persists_populated_bson() {
@@ -38,6 +38,14 @@ fn generated_artifact_metadata_omits_absent_fields_but_persists_populated_bson()
     );
     let restored: Metadata = bson::from_document(stored.clone()).unwrap();
     assert_eq!(bson::to_document(&restored).unwrap(), stored);
+    let legacy_manifest: ResultManifest = bson::from_document(doc! {
+        "source_result_identity":"legacy","source_status_version":null,
+        "content_revision":"1","count":0_i64,"delivery_reason":"materialized",
+        "expires_at":bson::DateTime::now(),
+    })
+    .unwrap();
+    assert_eq!(legacy_manifest.content_revision.as_deref(), Some("1"));
+    assert!(legacy_manifest.files.is_empty());
     let legacy: Metadata = bson::from_document(doc! {}).unwrap();
     assert!(bson::to_document(&legacy).unwrap().is_empty());
     let legacy = TurnAttachment {
@@ -1259,6 +1267,13 @@ async fn generated_artifact_new_operation_has_new_identity_and_failed_result_pre
         .unwrap();
     session.commit_transaction().await.unwrap();
     let old_id = row.active_turn.as_ref().unwrap().attachments[0].id.clone();
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().attachments[0]
+            .artifact
+            .content_revision
+            .as_deref(),
+        Some("1")
+    );
     let old = db
         .collection::<Document>(ATTACHMENTS)
         .find_one(doc! {"_id":&old_id})
@@ -1296,8 +1311,12 @@ async fn generated_artifact_new_operation_has_new_identity_and_failed_result_pre
             .unwrap(),
         old
     );
-    let verified =
-        sandbox::parse(&body("new.mp4", MP4), next.operation_id.as_deref().unwrap()).unwrap();
+    let changed = include_bytes!("../../../tests/fixtures/generated-artifacts/visual-high.mp4");
+    let verified = sandbox::parse(
+        &body("../../movie.mp4", changed),
+        next.operation_id.as_deref().unwrap(),
+    )
+    .unwrap();
     assert_ne!(
         verified.identity,
         w.artifact_result.as_ref().unwrap().source_result_identity
@@ -1341,6 +1360,13 @@ async fn generated_artifact_new_operation_has_new_identity_and_failed_result_pre
     session.commit_transaction().await.unwrap();
     let new_id = &row.active_turn.as_ref().unwrap().attachments[0].id;
     assert_ne!(*new_id, old_id);
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().attachments[0]
+            .artifact
+            .content_revision
+            .as_deref(),
+        Some("2")
+    );
     let old_after = db
         .collection::<Document>(ATTACHMENTS)
         .find_one(doc! {"_id":&old_id})
@@ -1360,7 +1386,16 @@ async fn generated_artifact_new_operation_has_new_identity_and_failed_result_pre
             .await
             .unwrap()
             .1,
-        MP4
+        changed
+    );
+    check_revision_replay_failure_and_concurrency(&db, &keys, &w, &next).await;
+    assert_eq!(
+        db.collection::<Document>(ATTACHMENTS)
+            .find_one(doc! {"_id":&old_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        old
     );
     db.drop().await.unwrap();
 }
@@ -1375,7 +1410,7 @@ async fn conversation_delete_removes_encrypted_pending_artifacts_and_saved_assoc
         "user_id":&w.user_id,"conversation_id":&row.id})
         .await
         .unwrap();
-    for collection in [ARTIFACTS, DELIVERIES] {
+    for collection in [ARTIFACTS, DELIVERIES, SERIES] {
         db.collection::<Document>(collection)
             .insert_one(doc! {"_id":Uuid::new_v4().to_string(),
             "user_id":"foreign-owner","conversation_id":&row.id})
@@ -1385,7 +1420,7 @@ async fn conversation_delete_removes_encrypted_pending_artifacts_and_saved_assoc
     super::super::assistant_nyxagent::delete(&db, &w.user_id, &row.id)
         .await
         .unwrap();
-    for collection in [WATCHES, ARTIFACTS, DELIVERIES, ATTACHMENTS] {
+    for collection in [WATCHES, ARTIFACTS, DELIVERIES, SERIES, ATTACHMENTS] {
         assert_eq!(
             db.collection::<Document>(collection)
                 .count_documents(doc! {"user_id":&w.user_id,"conversation_id":&row.id})
@@ -1394,7 +1429,7 @@ async fn conversation_delete_removes_encrypted_pending_artifacts_and_saved_assoc
             0
         );
     }
-    for collection in [ARTIFACTS, DELIVERIES] {
+    for collection in [ARTIFACTS, DELIVERIES, SERIES] {
         assert_eq!(
             db.collection::<Document>(collection)
                 .count_documents(doc! {"user_id":"foreign-owner"})
@@ -1471,4 +1506,335 @@ fn generated_file_rejections_preserve_good_peers_and_accepted_budget() {
             5 * 1024 * 1024 + PNG.len()
         );
     }
+}
+
+#[test]
+fn generated_artifacts_full_canonical_path_binds_identity_before_display_truncation() {
+    let parsed = |path: &str| sandbox::parse(&body(path, MP4), "same-operation").unwrap();
+    let canonical = parsed("/tmp/movie.mp4");
+    let equivalent = parsed("/tmp/ignored/.././movie.mp4");
+    assert_eq!(canonical.identity, equivalent.identity);
+    assert_eq!(
+        canonical.files[0].source_path_sha256,
+        equivalent.files[0].source_path_sha256
+    );
+    let elsewhere = parsed("/elsewhere/movie.mp4");
+    assert_eq!(canonical.files[0].filename, elsewhere.files[0].filename);
+    assert_ne!(canonical.identity, elsewhere.identity);
+    let prefix = format!("/{}", "long/".repeat(140));
+    let first = parsed(&format!("{prefix}first/movie.mp4"));
+    let second = parsed(&format!("{prefix}second/movie.mp4"));
+    assert_eq!(first.files[0].source_path, second.files[0].source_path);
+    assert_eq!(first.files[0].source_path.len(), 512);
+    assert_eq!(first.files[0].filename, second.files[0].filename);
+    assert_ne!(
+        first.files[0].source_path_sha256,
+        second.files[0].source_path_sha256
+    );
+    assert_ne!(first.identity, second.identity);
+}
+
+fn revision_watch<'a>(
+    db: &'a Database,
+    original: &'a AsyncServiceOperation,
+) -> futures::future::BoxFuture<'a, AsyncServiceOperation> {
+    Box::pin(async move {
+        let mut next = watch();
+        next.conversation_id = original.conversation_id.clone();
+        next.operation_id = Some(Uuid::new_v4().to_string());
+        db.collection::<AsyncServiceOperation>(WATCHES)
+            .insert_one(&next)
+            .await
+            .unwrap();
+        next
+    })
+}
+fn persist_revision<'a>(
+    db: &'a Database,
+    keys: &'a EncryptionKeys,
+    w: &'a AsyncServiceOperation,
+    result: &'a sandbox::ResultFiles,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(async move {
+        let reservation = byte_budget::reserve(sandbox::RESERVATION).await?;
+        persist(
+            db,
+            keys,
+            w,
+            result,
+            &sandbox::Status {
+                expires_at: None,
+                version: Some("999".into()),
+            },
+            &reservation,
+        )
+        .await
+    })
+}
+fn check_revision_replay_failure_and_concurrency<'a>(
+    db: &'a Database,
+    keys: &'a EncryptionKeys,
+    original: &'a AsyncServiceOperation,
+    changed: &'a AsyncServiceOperation,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        let high = include_bytes!("../../../tests/fixtures/generated-artifacts/visual-high.mp4");
+        let head = db
+            .collection::<ContentSeries>(SERIES)
+            .find_one(doc! {"conversation_id":&original.conversation_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.revision, 2);
+        assert_eq!(
+            head.catalog_service_id,
+            original.artifact_catalog_service_id.as_deref().unwrap()
+        );
+        let unchanged = revision_watch(db, original).await;
+        let result = sandbox::parse(
+            &body("../../movie.mp4", high),
+            unchanged.operation_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        persist_revision(db, keys, &unchanged, &result)
+            .await
+            .unwrap();
+        let committed = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&unchanged.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            committed.artifact_result.as_ref().unwrap().files[0]
+                .content_revision
+                .as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            committed
+                .artifact_result
+                .as_ref()
+                .unwrap()
+                .source_status_version
+                .as_deref(),
+            Some("999")
+        );
+        let pending = db
+            .collection::<Document>(ARTIFACTS)
+            .find_one(doc! {"watch_id":&unchanged.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let series_before = db
+            .collection::<Document>(SERIES)
+            .find_one(doc! {"_id":&head.id})
+            .await
+            .unwrap()
+            .unwrap();
+        // Restore a live lease to exercise a real persist retry with an existing
+        // immutable result, rather than merely calling the same parser twice.
+        db.collection::<Document>(WATCHES)
+            .update_one(
+                doc! {"_id":&unchanged.id},
+                doc! {"$set":{"state":&unchanged.state,"lease_id":&unchanged.lease_id,
+                "lease_until":bson::to_bson(&unchanged.lease_until).unwrap()}},
+            )
+            .await
+            .unwrap();
+        persist_revision(db, keys, &unchanged, &result)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.collection::<Document>(ARTIFACTS)
+                .find_one(doc! {"watch_id":&unchanged.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            pending
+        );
+        assert_eq!(
+            db.collection::<Document>(SERIES)
+                .find_one(doc! {"_id":&head.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            series_before
+        );
+        // Same basename/bytes under a different full path is a changed result
+        // for this operation; it cannot mint another series or replace descriptors.
+        db.collection::<Document>(WATCHES)
+            .update_one(
+                doc! {"_id":&unchanged.id},
+                doc! {"$set":{"state":&unchanged.state,"lease_id":&unchanged.lease_id,
+                "lease_until":bson::to_bson(&unchanged.lease_until).unwrap()}},
+            )
+            .await
+            .unwrap();
+        let moved = sandbox::parse(
+            &body("/different/movie.mp4", high),
+            unchanged.operation_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            persist_revision(db, keys, &unchanged, &moved).await,
+            Err(AppError::Conflict(_))
+        ));
+        let after_refusal = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&unchanged.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bson::to_bson(&after_refusal.artifact_result).unwrap(),
+            bson::to_bson(&committed.artifact_result).unwrap()
+        );
+        assert_eq!(
+            db.collection::<Document>(ARTIFACTS)
+                .find_one(doc! {"watch_id":&unchanged.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            pending
+        );
+        assert_eq!(
+            db.collection::<Document>(SERIES)
+                .count_documents(doc! {"conversation_id":&original.conversation_id})
+                .await
+                .unwrap(),
+            1
+        );
+        for rejected in [false, true] {
+            let failed = revision_watch(db, original).await;
+            let mut output: serde_json::Value =
+                serde_json::from_str(&body("../../movie.mp4", MP4)).unwrap();
+            output["success"] = json!(false);
+            if rejected {
+                output["output"]["files"][0]["error"] = json!("private failure");
+            }
+            let failed_result =
+                sandbox::parse(&output.to_string(), failed.operation_id.as_deref().unwrap())
+                    .unwrap();
+            persist_revision(db, keys, &failed, &failed_result)
+                .await
+                .unwrap();
+            let saved = db
+                .collection::<AsyncServiceOperation>(WATCHES)
+                .find_one(doc! {"_id":&failed.id})
+                .await
+                .unwrap()
+                .unwrap();
+            let manifest = saved.artifact_result.unwrap();
+            assert_eq!(manifest.count, usize::from(!rejected));
+            assert!(manifest.files.iter().all(|f| f.content_revision.is_none()));
+            assert_eq!(
+                db.collection::<Document>(SERIES)
+                    .find_one(doc! {"_id":&head.id})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                series_before
+            );
+        }
+        check_concurrent_revisions(db, keys, original).await;
+        // Catalog identity and conversation are part of the scope. New scopes
+        // start at1 even with the same path and content used by this conversation.
+        let mut other_catalog = revision_watch(db, original).await;
+        other_catalog.artifact_catalog_service_id =
+            Some("00000000-0000-4000-8000-000000002038".into());
+        db.collection::<Document>(WATCHES).update_one(doc! {"_id":&other_catalog.id},
+            doc! {"$set":{"artifact_catalog_service_id":&other_catalog.artifact_catalog_service_id}}).await.unwrap();
+        let result = sandbox::parse(
+            &body("../../movie.mp4", MP4),
+            other_catalog.operation_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        persist_revision(db, keys, &other_catalog, &result)
+            .await
+            .unwrap();
+        let saved = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&other_catalog.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.artifact_result.unwrap().files[0]
+                .content_revision
+                .as_deref(),
+            Some("1")
+        );
+        let (separate, _) = seeded(db, keys).await;
+        assert_eq!(
+            separate.artifact_result.unwrap().files[0]
+                .content_revision
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            db.collection::<AsyncServiceOperation>(WATCHES)
+                .find_one(doc! {"_id":&changed.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .artifact_result
+                .unwrap()
+                .files[0]
+                .content_revision
+                .as_deref(),
+            Some("2")
+        );
+    })
+}
+fn check_concurrent_revisions<'a>(
+    db: &'a Database,
+    keys: &'a EncryptionKeys,
+    original: &'a AsyncServiceOperation,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        let first = revision_watch(db, original).await;
+        let second = revision_watch(db, original).await;
+        let mixed = include_bytes!("../../../tests/fixtures/generated-artifacts/visual-mixed.mp4");
+        let first_result = sandbox::parse(
+            &body("../../movie.mp4", MP4),
+            first.operation_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        let second_result = sandbox::parse(
+            &body("../../movie.mp4", mixed),
+            second.operation_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        let (one, two) = tokio::join!(
+            persist_revision(db, keys, &first, &first_result),
+            persist_revision(db, keys, &second, &second_result)
+        );
+        one.unwrap();
+        two.unwrap();
+        let mut revisions = Vec::new();
+        for w in [&first, &second] {
+            let saved = db
+                .collection::<AsyncServiceOperation>(WATCHES)
+                .find_one(doc! {"_id":&w.id})
+                .await
+                .unwrap()
+                .unwrap();
+            revisions.push(
+                saved.artifact_result.unwrap().files[0]
+                    .content_revision
+                    .clone()
+                    .unwrap(),
+            );
+        }
+        revisions.sort();
+        assert_eq!(revisions, ["3", "4"]);
+        let head = db
+            .collection::<ContentSeries>(SERIES)
+            .find_one(doc! {"conversation_id":&original.conversation_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.revision, 4);
+    })
 }

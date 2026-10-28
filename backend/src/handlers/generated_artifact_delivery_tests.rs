@@ -740,7 +740,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &expired_associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
     let expired_recovery = app
@@ -762,7 +762,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &expired_associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
     a.f.state
@@ -799,7 +799,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
     let foreign = uuid::Uuid::new_v4().to_string();
@@ -845,7 +845,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
 
@@ -882,7 +882,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
 
@@ -913,7 +913,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
 
@@ -975,7 +975,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
             &associations,
             &calls_before_refusals,
             &private_markers,
-            &manifest.content_revision,
+            attachment.artifact.content_revision.as_deref().unwrap(),
         )
         .await;
     }
@@ -1005,7 +1005,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
 
@@ -1031,7 +1031,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
 
@@ -1057,7 +1057,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
 
@@ -1080,7 +1080,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
 
@@ -1106,7 +1106,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
             &associations,
             &calls_before_refusals,
             &private_markers,
-            &manifest.content_revision,
+            attachment.artifact.content_revision.as_deref().unwrap(),
         )
         .await;
     }
@@ -1134,7 +1134,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
-        &manifest.content_revision,
+        attachment.artifact.content_revision.as_deref().unwrap(),
     )
     .await;
     assert_eq!(a.calls.lock().unwrap().len(), calls_before_recovery);
