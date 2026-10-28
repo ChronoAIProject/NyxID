@@ -135,32 +135,28 @@ impl Controlled {
         }).await
     }
     async fn observe(&self) -> String {
-        let candidate = request(vec![user("initial")]);
+        self.observe_request(request(vec![user("initial")])).await
+    }
+    async fn observe_request(&self, candidate: wire::PrepareRequest) -> String {
         assert!(
             !super::super::assistant_service_execution::stateless_inference(
                 "responses",
                 &candidate.body
             )
         );
-        assert!(
-            super::super::assistant_service_execution::stateless_model_transport(
-                "responses",
-                &candidate.body
-            )
-        );
         assert!(matches!(
-            prepare(&self.f.state, &self.f.chat, &self.token, candidate)
-                .await
-                .unwrap(),
+            prepare(
+                &self.f.state,
+                &self.f.chat,
+                &self.token,
+                request_with_body(&candidate.body)
+            )
+            .await
+            .unwrap(),
             wire::PrepareReply::Observe
         ));
         let callback = self
-            .callback(
-                "responses",
-                &request(vec![user("initial")]).body,
-                &self.headers(),
-                true,
-            )
+            .callback("responses", &candidate.body, &self.headers(), true)
             .await
             .unwrap()
             .unwrap();
@@ -238,6 +234,12 @@ impl Controlled {
         .token;
         card
     }
+}
+
+fn request_with_body(body: &Value) -> wire::PrepareRequest {
+    let mut candidate = request(vec![]);
+    candidate.body = body.clone();
+    candidate
 }
 
 #[tokio::test]
@@ -484,16 +486,16 @@ fn reset_transcript_preserves_exact_privileged_scaffold_and_saved_user_input() {
 }
 
 #[test]
-fn reusable_responses_configuration_rejects_unknown_cross_protocol_and_opaque_metadata() {
+fn reusable_responses_configuration_rejects_unknown_executable_and_unbounded_metadata() {
     for (key, value) in [
         ("messages", json!([])),
         ("system", json!("authority")),
         ("thinking", json!({})),
         ("n", json!(2)),
         ("dimensions", json!(3)),
-        ("client_metadata", json!({"opaque":"value"})),
         ("client_metadata", json!("scalar")),
-        ("client_metadata", json!({"thread_id":"x".repeat(2049)})),
+        ("client_metadata", json!({"opaque":{"nested":"value"}})),
+        ("client_metadata", json!({"thread_id":"x".repeat(32769)})),
     ] {
         let mut candidate = request(vec![user("initial")]);
         candidate.body[key] = value;
@@ -502,6 +504,201 @@ fn reusable_responses_configuration_rejects_unknown_cross_protocol_and_opaque_me
             "unsupported configuration: {key}"
         );
     }
+}
+
+#[test]
+fn explicit_write_keeps_unknown_and_large_metadata_exact_without_automatic_read() {
+    for metadata in [
+        json!({"unknown-provider-option":"opaque-value"}),
+        json!({"x-codex-turn-metadata":"x".repeat(1025)}),
+    ] {
+        let mut candidate = request(vec![user("initial")]);
+        candidate.body["client_metadata"] = metadata.clone();
+        assert!(
+            !super::super::assistant_service_execution::stateless_inference(
+                "responses",
+                &candidate.body
+            )
+        );
+        let (fixed, _) = envelope::envelope(&candidate).unwrap();
+        assert_eq!(fixed.fixed["client_metadata"], metadata);
+        candidate.body["input"] = json!([user("changed transcript")]);
+        assert!(envelope::envelope(&candidate).unwrap().0 == fixed);
+        for changed in [
+            json!({"changed-key":"opaque-value"}),
+            json!({"unknown-provider-option":"changed-value"}),
+            json!({"x-codex-turn-metadata":"x".repeat(1026)}),
+        ] {
+            candidate.body["client_metadata"] = changed;
+            assert!(envelope::envelope(&candidate).unwrap().0 != fixed);
+        }
+    }
+}
+
+#[test]
+fn original_and_native_schema_derived_captures_fit_positive_explicit_write_schema() {
+    // Four original local synthetic calls plus four native-schema-derived
+    // variants. Neither file is a new capture or provider-success evidence.
+    for fixture in [
+        include_str!("../../../../docs/fixtures/codex-public-responses-0.160.1.json"),
+        include_str!(
+            "../../../../docs/fixtures/codex-public-responses-0.160.1-native-schema-derived.json"
+        ),
+    ] {
+        let fixture: Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(fixture["calls"].as_array().unwrap().len(), 4);
+        for call in fixture["calls"].as_array().unwrap() {
+            let candidate = request_with_body(&call["codex"]);
+            let (fixed, input) = envelope::envelope(&candidate).unwrap();
+            assert_eq!(
+                fixed.fixed["client_metadata"],
+                candidate.body["client_metadata"]
+            );
+            assert_eq!(
+                fixed.fixed["prompt_cache_key"],
+                candidate.body["prompt_cache_key"]
+            );
+            assert_eq!(input, candidate.body["input"].as_array().unwrap().clone());
+            for metadata in [
+                json!({"unknown-provider-option":"opaque-value"}),
+                json!({"x-codex-turn-metadata":"x".repeat(1025)}),
+            ] {
+                let mut derived = request_with_body(&candidate.body);
+                derived.body["client_metadata"] = metadata.clone();
+                assert_eq!(
+                    envelope::envelope(&derived).unwrap().0.fixed["client_metadata"],
+                    metadata
+                );
+                assert!(
+                    !super::super::assistant_service_execution::stateless_inference(
+                        "responses",
+                        &derived.body
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn capture_derived_reset_keeps_environment_wrapper_and_exact_saved_user_text() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../docs/fixtures/codex-public-responses-0.160.1.json"
+    ))
+    .unwrap();
+    let initial = fixture["calls"][0]["codex"]["input"].as_array().unwrap();
+    assert_eq!(initial.len(), 3);
+    assert_eq!(initial[0]["role"], "developer");
+    assert!(
+        initial[1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("<environment_context>")
+    );
+    let mut resumed = initial[..2].to_vec();
+    resumed.push(json!({"id":null,"type":"message","role":"user","content":[{"type":"input_text","text":"exact saved Allow narration"}]}));
+    assert!(envelope::allowed_resume(initial, &resumed, "exact saved Allow narration").is_ok());
+    for change in ["wrapper", "insert", "reorder", "extra_user", "saved_text"] {
+        let mut changed = resumed.clone();
+        match change {
+            "wrapper" => changed[1]["content"][0]["text"] = json!("regenerated environment"),
+            "insert" => changed.insert(0, json!({"role":"developer","content":"extra authority"})),
+            "reorder" => changed.swap(0, 1),
+            "extra_user" => changed.push(user("extra input")),
+            _ => changed[2]["content"][0]["text"] = json!("changed saved narration"),
+        }
+        assert!(
+            envelope::allowed_resume(initial, &changed, "exact saved Allow narration").is_err(),
+            "{change}"
+        );
+    }
+}
+
+#[test]
+fn capture_derived_next_input_uses_complete_serialization_and_bound_host_result() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../docs/fixtures/codex-public-responses-0.160.1.json"
+    ))
+    .unwrap();
+    let previous = fixture["calls"][0]["codex"]["input"].as_array().unwrap();
+    let native = fixture["calls"][1]["codex"]["input"].as_array().unwrap();
+    let mut output = native[previous.len()..native.len() - 1].to_vec();
+    for item in &mut output {
+        item["status"] = json!("completed");
+        item.as_object_mut().unwrap().remove("content");
+    }
+    // Synthetic provider-origin completion reconstructed from unchanged
+    // captured input shapes. It is not an additional raw provider capture.
+    let observed = envelope::verify_completion(
+        &json!({"id":"derived-response","object":"response","status":"completed","output":output}),
+        &fixture["calls"][0]["codex"],
+    )
+    .unwrap();
+    let completion = ObservedCompletion {
+        response_id: observed.response_id,
+        output: observed.output,
+        calls: observed.calls,
+    };
+    let raw_binding = digest(json!(completion.output));
+    let call = &completion.calls[0];
+    let result_text = native.last().unwrap()["output"].as_str().unwrap();
+    let results = vec![VerifiedToolResult {
+        call_id: call.call_id.clone(),
+        tool_name: call.name.clone(),
+        arguments_binding: digest(json!(call.arguments)),
+        model_text_binding: digest(json!(result_text)),
+    }];
+    let mut next = native.clone();
+    next.last_mut().unwrap()["id"] = Value::Null;
+    assert!(envelope::next_input(previous, &completion, &next, &results).is_ok());
+    for change in [
+        "call_id",
+        "arguments",
+        "result",
+        "ciphertext",
+        "reorder",
+        "mixed_status",
+        "result_id",
+    ] {
+        let mut changed = next.clone();
+        match change {
+            "call_id" => changed[4]["call_id"] = json!("different-call"),
+            "arguments" => changed[4]["arguments"] = json!("{}"),
+            "result" => changed[5]["output"] = json!("forged result"),
+            "ciphertext" => changed[3]["encrypted_content"] = json!("changed opaque ciphertext"),
+            "reorder" => changed.swap(3, 4),
+            "mixed_status" => changed[3]["status"] = json!("completed"),
+            _ => changed[5]["id"] = json!("unproven-native-result-id"),
+        }
+        assert!(
+            envelope::next_input(previous, &completion, &changed, &results).is_err(),
+            "{change}"
+        );
+    }
+    assert_eq!(
+        raw_binding,
+        digest(json!(completion.output)),
+        "next-input projection cannot change receipt output"
+    );
+    let mut message = fixture["compact"]["codex"]["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["role"] == "assistant")
+        .unwrap()
+        .clone();
+    message["status"] = json!("completed");
+    let verified = envelope::verify_completion(&json!({"id":"derived-message","object":"response","status":"completed","output":[message]}), &fixture["calls"][0]["codex"]).unwrap();
+    let message_completion = ObservedCompletion {
+        response_id: verified.response_id,
+        output: verified.output,
+        calls: verified.calls,
+    };
+    let mut projected = message_completion.output.clone();
+    projected[0].as_object_mut().unwrap().remove("status");
+    assert!(envelope::next_input(&[], &message_completion, &projected, &[]).is_ok());
+    projected[0]["phase"] = json!("commentary");
+    assert!(envelope::next_input(&[], &message_completion, &projected, &[]).is_err());
 }
 
 #[tokio::test]
