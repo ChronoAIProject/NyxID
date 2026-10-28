@@ -209,6 +209,31 @@ async fn fixture_with_issuance(
         .await
         .unwrap();
     crate::billing_integration_tests::create_usage_index(&c.f.state.db).await;
+    // Match the production wallet uniqueness fences before the callbacks race
+    // to provision their first wallet; usage transaction uniqueness is separate.
+    c.f.state
+        .db
+        .collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME)
+        .create_indexes([
+            mongodb::IndexModel::builder()
+                .keys(doc! { "owner_id": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+            mongodb::IndexModel::builder()
+                .keys(doc! { "lago_customer_id": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        ])
+        .await
+        .unwrap();
     c.f.state
         .db
         .collection("billing_rate_cache")
@@ -250,6 +275,13 @@ struct CountedLago {
     subscription: String,
     expected: BTreeSet<String>,
     acknowledged: tokio::sync::Mutex<BTreeSet<String>>,
+    reads: tokio::sync::Mutex<Vec<LagoRead>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LagoRead {
+    Usage(String, String),
+    Balance(String),
 }
 
 #[async_trait::async_trait]
@@ -298,7 +330,15 @@ impl LagoApi for CountedLago {
     async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
         assert_eq!(customer, self.customer);
         assert!(subscription.is_empty() || subscription == self.subscription);
-        let count = self.acknowledged.lock().await.len();
+        let count = {
+            let acknowledged = self.acknowledged.lock().await;
+            assert_eq!(*acknowledged, self.expected);
+            acknowledged.len()
+        };
+        self.reads
+            .lock()
+            .await
+            .push(LagoRead::Usage(customer.into(), subscription.into()));
         Ok(LagoUsage {
             customer_id: customer.into(),
             subscription_id: subscription.into(),
@@ -308,12 +348,31 @@ impl LagoApi for CountedLago {
     }
     async fn wallet_balance(&self, customer: &str) -> AppResult<i64> {
         assert_eq!(customer, self.customer);
+        assert_eq!(*self.acknowledged.lock().await, self.expected);
+        self.reads
+            .lock()
+            .await
+            .push(LagoRead::Balance(customer.into()));
         Ok(10_000)
     }
     async fn entitlements(&self, subscription: &str) -> AppResult<Vec<Entitlement>> {
         assert_eq!(subscription, self.subscription);
         Ok(Vec::new())
     }
+}
+
+async fn assert_only_wallet(c: &Controlled, wallet: &BillingWallet) {
+    let wallets: Vec<BillingWallet> =
+        c.f.state
+            .db
+            .collection(crate::models::billing_wallet::COLLECTION_NAME)
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+    assert_eq!(wallets.as_slice(), std::slice::from_ref(wallet));
 }
 
 async fn reconcile_charged_wallet(
@@ -342,7 +401,14 @@ async fn reconcile_charged_wallet(
     })
     .await
     .unwrap();
+    assert_only_wallet(c, &wallet).await;
     assert_eq!(wallet.owner_id, c.f.owner);
+    assert_eq!(wallet.lago_customer_id, c.f.owner);
+    assert_eq!(wallet.lago_wallet_id, Some(format!("{}:wallet", c.f.owner)));
+    assert_eq!(
+        wallet.lago_subscription_id,
+        Some(format!("{}:{}", c.f.owner, c.f.state.config.lago_plan_code))
+    );
     assert_eq!(wallet.balance_credits, Credits::from_whole(10_000));
     assert_eq!(wallet.reserved_credits, Credits::ZERO);
     assert_eq!(
@@ -376,6 +442,7 @@ async fn reconcile_charged_wallet(
         subscription: wallet.lago_subscription_id.clone().unwrap(),
         expected: transactions.clone(),
         acknowledged: tokio::sync::Mutex::new(BTreeSet::new()),
+        reads: tokio::sync::Mutex::new(Vec::new()),
     });
     let mut config = crate::test_utils::test_app_config();
     config.billing_enabled = true;
@@ -391,6 +458,17 @@ async fn reconcile_charged_wallet(
     assert_eq!(stats.retried, 0);
     assert_eq!(stats.dead_lettered, 0);
     assert_eq!(stats.wallet_balance_refreshes, 1);
+    assert_eq!(
+        *lago.reads.lock().await,
+        vec![
+            LagoRead::Usage(wallet.lago_customer_id.clone(), String::new()),
+            LagoRead::Balance(wallet.lago_customer_id.clone()),
+            LagoRead::Usage(
+                wallet.lago_customer_id.clone(),
+                wallet.lago_subscription_id.clone().unwrap(),
+            ),
+        ]
+    );
     assert_eq!(*lago.acknowledged.lock().await, transactions);
     assert_eq!(
         c.f.state
@@ -411,6 +489,7 @@ async fn reconcile_charged_wallet(
             .await
             .unwrap()
             .unwrap();
+    assert_only_wallet(c, &refreshed).await;
     assert_eq!(refreshed.id, wallet.id);
     assert_eq!(
         refreshed.balance_credits,
