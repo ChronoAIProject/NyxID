@@ -37,6 +37,89 @@ async fn mcp(state: &crate::AppState, key: &str, method: &str, params: Value) ->
     serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap()
 }
 
+#[test]
+fn shared_agent_widening_classifier_covers_each_authority_change() {
+    let alice = "11111111-1111-4111-8111-111111111111".to_owned();
+    let bob = "22222222-2222-4222-8222-222222222222".to_owned();
+    let person = |subject_id: &str, role| sharing::Audience {
+        subject_kind: ShareSubject::Person,
+        subject_id: subject_id.to_owned(),
+        role,
+    };
+    let base_audience = vec![person(&alice, ShareRole::User)];
+    let base_access = BTreeMap::from([("calendar".to_owned(), GuestAccess::Read)]);
+    let input = |enabled, audience, shared_access| sharing::SharingUpdate {
+        expected_version: 1,
+        enabled,
+        audience,
+        shared_access,
+    };
+
+    assert!(sharing::sharing_widens(
+        false,
+        &[],
+        &BTreeMap::new(),
+        &input(true, vec![], BTreeMap::new())
+    ));
+    assert!(sharing::sharing_widens(
+        true,
+        &base_audience,
+        &base_access,
+        &input(
+            true,
+            vec![
+                person(&alice, ShareRole::User),
+                person(&bob, ShareRole::User)
+            ],
+            base_access.clone()
+        )
+    ));
+    assert!(sharing::sharing_widens(
+        true,
+        &base_audience,
+        &base_access,
+        &input(
+            true,
+            vec![person(&alice, ShareRole::Manager)],
+            base_access.clone()
+        )
+    ));
+    assert!(sharing::sharing_widens(
+        true,
+        &base_audience,
+        &base_access,
+        &input(
+            true,
+            base_audience.clone(),
+            BTreeMap::from([("drive".into(), GuestAccess::Use)])
+        )
+    ));
+    assert!(sharing::sharing_widens(
+        true,
+        &base_audience,
+        &base_access,
+        &input(
+            true,
+            base_audience.clone(),
+            BTreeMap::from([("calendar".into(), GuestAccess::All)])
+        )
+    ));
+    assert!(!sharing::sharing_widens(
+        true,
+        &base_audience,
+        &base_access,
+        &input(false, vec![], BTreeMap::new())
+    ));
+    // Removing Alice while adding Bob is still a widening and must raise the
+    // owner card before the mixed policy can be applied.
+    assert!(sharing::sharing_widens(
+        true,
+        &base_audience,
+        &base_access,
+        &input(true, vec![person(&bob, ShareRole::User)], BTreeMap::new())
+    ));
+}
+
 async fn publish(f: &Fixture, manager: bool) -> crate::models::assistant_agent::AssistantAgent {
     sharing::ensure_indexes(&f.state.db).await.unwrap();
     flags::set_platform_override(

@@ -2712,6 +2712,7 @@ async fn dispatch_tools_call(
             class,
             read_only: false,
             destructive: class == acks::OwnerActionClass::Destructive,
+            delegation: false,
         };
         let gate = async {
             match acks::confirmation_needed(&state.db, chat, facts, false).await? {
@@ -4069,6 +4070,7 @@ async fn webhook_service_gate(
         class: acks::service_action_class(read_only, destructive),
         read_only,
         destructive,
+        delegation: false,
     };
     let summary = format!(
         "{} {} on {}",

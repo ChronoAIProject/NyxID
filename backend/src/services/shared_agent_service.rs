@@ -554,6 +554,195 @@ pub struct SharingUpdate {
     pub shared_access: BTreeMap<String, GuestAccess>,
 }
 
+fn role_rank(role: ShareRole) -> u8 {
+    match role {
+        ShareRole::User => 0,
+        ShareRole::Manager => 1,
+    }
+}
+
+fn role_name(role: ShareRole) -> &'static str {
+    match role {
+        ShareRole::User => "user",
+        ShareRole::Manager => "manager",
+    }
+}
+
+fn access_rank(level: GuestAccess) -> u8 {
+    match level {
+        GuestAccess::Read => 0,
+        GuestAccess::Use => 1,
+        GuestAccess::All => 2,
+    }
+}
+
+fn access_name(level: GuestAccess) -> &'static str {
+    match level {
+        GuestAccess::Read => "read",
+        GuestAccess::Use => "use",
+        GuestAccess::All => "all",
+    }
+}
+
+/// Whether a proposed policy grants any new sharing authority. This is kept
+/// pure so every owner-card path can test the exact same widening semantics.
+pub fn sharing_widens(
+    enabled: bool,
+    audience: &[Audience],
+    shared_access: &BTreeMap<String, GuestAccess>,
+    input: &SharingUpdate,
+) -> bool {
+    (!enabled && input.enabled)
+        || input.audience.iter().any(|wanted| {
+            audience
+                .iter()
+                .find(|existing| {
+                    existing.subject_kind == wanted.subject_kind
+                        && existing.subject_id == wanted.subject_id
+                })
+                .is_none_or(|existing| role_rank(wanted.role) > role_rank(existing.role))
+        })
+        || input.shared_access.iter().any(|(service, level)| {
+            shared_access
+                .get(service)
+                .is_none_or(|old| access_rank(*level) > access_rank(*old))
+        })
+}
+
+#[derive(Clone, Debug)]
+pub struct SharingPreview {
+    pub widening: bool,
+    pub summary: String,
+}
+
+/// Read the current policy and audience for the owner-card preview. The
+/// proposed `SharingUpdate` is also the card's argument digest, so a later
+/// version change cannot be approved accidentally.
+pub async fn preview_update(
+    db: &Database,
+    actor: &str,
+    agent: &AssistantAgent,
+    input: &SharingUpdate,
+) -> AppResult<SharingPreview> {
+    personal_owner(db, actor, &agent.id).await?;
+    let current = policy(db, agent).await?;
+    let rows: Vec<AgentShare> = db
+        .collection(model::SHARES_COLLECTION_NAME)
+        .find(doc! {"agent_id": &agent.id, "owner_id": actor})
+        .limit(MAX_SHARES as i64)
+        .await?
+        .try_collect()
+        .await?;
+    let current_audience: Vec<Audience> = rows
+        .iter()
+        .map(|row| Audience {
+            subject_kind: row.subject_kind,
+            subject_id: row.subject_id.clone(),
+            role: row.role,
+        })
+        .collect();
+    let widening = sharing_widens(
+        current.enabled,
+        &current_audience,
+        &current.shared_access,
+        input,
+    );
+
+    let subject_gains: Vec<&Audience> = input.audience.iter().filter(|_| widening).collect();
+    let service_gains: Vec<(&String, &GuestAccess)> =
+        input.shared_access.iter().filter(|_| widening).collect();
+
+    let subject_ids: Vec<_> = subject_gains
+        .iter()
+        .map(|subject| subject.subject_id.clone())
+        .collect();
+    let users: Vec<User> = if subject_ids.is_empty() {
+        Vec::new()
+    } else {
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": &subject_ids}})
+            .limit(MAX_SHARES as i64)
+            .await?
+            .try_collect()
+            .await?
+    };
+    let subject_label = |subject: &Audience| {
+        users
+            .iter()
+            .find(|user| user.id == subject.subject_id)
+            .map(|user| {
+                user.display_name
+                    .as_deref()
+                    .or(user.slug.as_deref())
+                    .unwrap_or(&user.email)
+                    .to_owned()
+            })
+            .unwrap_or_else(|| subject.subject_id.clone())
+    };
+    let subjects = subject_gains
+        .iter()
+        .map(|subject| format!("{} ({})", subject_label(subject), role_name(subject.role)))
+        .collect::<Vec<_>>();
+
+    let service_ids: Vec<_> = service_gains
+        .iter()
+        .map(|(service, _)| (*service).clone())
+        .collect();
+    let owner_services: Vec<UserService> = if service_ids.is_empty() {
+        Vec::new()
+    } else {
+        db.collection(crate::models::user_service::COLLECTION_NAME)
+            .find(doc! {"user_id": &agent.user_id, "_id": {"$in": &service_ids}})
+            .await?
+            .try_collect()
+            .await?
+    };
+    let catalogs: Vec<crate::models::downstream_service::DownstreamService> =
+        if service_ids.is_empty() {
+            Vec::new()
+        } else {
+            db.collection(crate::models::downstream_service::COLLECTION_NAME)
+                .find(doc! {"_id": {"$in": &service_ids}})
+                .await?
+                .try_collect()
+                .await?
+        };
+    let service_label = |service: &str| {
+        owner_services
+            .iter()
+            .find(|row| row.id == service || row.catalog_service_id.as_deref() == Some(service))
+            .map(|row| row.slug.clone())
+            .or_else(|| {
+                catalogs
+                    .iter()
+                    .find(|row| row.id == service)
+                    .map(|row| row.name.clone())
+            })
+            .unwrap_or_else(|| service.to_owned())
+    };
+    let access = service_gains
+        .iter()
+        .map(|(service, level)| format!("{} ({})", service_label(service), access_name(**level)))
+        .collect::<Vec<_>>();
+    let agent_label = agent.display_name.as_deref().unwrap_or(&agent.name);
+    let mut details = Vec::new();
+    if !subjects.is_empty() {
+        details.push(format!("people/orgs: {}", subjects.join(", ")));
+    }
+    if !access.is_empty() {
+        details.push(format!("owner services: {}", access.join(", ")));
+    }
+    if !current.enabled && input.enabled {
+        details.push("sharing enabled".into());
+    }
+    let summary = if details.is_empty() {
+        format!("Change sharing for {agent_label}")
+    } else {
+        format!("Delegate {agent_label}: {}", details.join("; "))
+    };
+    Ok(SharingPreview { widening, summary })
+}
+
 pub async fn policy(db: &Database, agent: &AssistantAgent) -> AppResult<AgentSharing> {
     Ok(db
         .collection::<AgentSharing>(model::COLLECTION_NAME)

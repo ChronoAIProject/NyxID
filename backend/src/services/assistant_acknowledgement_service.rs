@@ -497,6 +497,9 @@ pub struct ConfirmationNeed {
     pub webhook: bool,
     /// Another policy floor (machine or saved-login confirmation) asks.
     pub policy: bool,
+    /// Sharing an owner's services or agent access is always an owner decision,
+    /// including Full access. This floor is narrower than general policy floors.
+    pub delegation: bool,
 }
 
 /// Effects of one action as seen by the webhook confirmation policy, which
@@ -506,6 +509,7 @@ pub struct ActionFacts {
     pub class: OwnerActionClass,
     pub read_only: bool,
     pub destructive: bool,
+    pub delegation: bool,
 }
 
 impl ActionFacts {
@@ -514,6 +518,14 @@ impl ActionFacts {
             class,
             read_only: class == OwnerActionClass::Read,
             destructive: class == OwnerActionClass::Destructive,
+            delegation: false,
+        }
+    }
+
+    pub fn delegation(class: OwnerActionClass) -> Self {
+        Self {
+            delegation: true,
+            ..Self::of(class)
         }
     }
 }
@@ -558,13 +570,23 @@ pub async fn confirmation_needed(
     policy_floor: bool,
 ) -> AppResult<Gate> {
     let webhook = webhook_confirmation_required(chat, facts.read_only, facts.destructive);
-    let effective =
-        if chat.guest || (facts.class == OwnerActionClass::Read && !webhook && !policy_floor) {
-            None
-        } else {
-            Some(effective_access_mode(db, chat).await?)
-        };
+    let effective = if chat.guest
+        || (facts.class == OwnerActionClass::Read && !webhook && !policy_floor && !facts.delegation)
+    {
+        None
+    } else {
+        Some(effective_access_mode(db, chat).await?)
+    };
     if effective == Some(crate::models::assistant_settings::AccessMode::Autopilot) {
+        if facts.delegation {
+            return Ok(Gate::Ask(ConfirmationNeed {
+                class: facts.class,
+                mode: effective,
+                webhook,
+                policy: policy_floor,
+                delegation: true,
+            }));
+        }
         let reason = if webhook {
             "webhook"
         } else if policy_floor {
@@ -594,6 +616,7 @@ pub async fn confirmation_needed(
             mode,
             webhook,
             policy: policy_floor,
+            delegation: facts.delegation,
         }));
     }
     Ok(Gate::Proceed)
@@ -778,7 +801,9 @@ pub async fn confirm_action_with(
             crate::models::assistant_acknowledgement::ActionConfirmation {
                 risk: need.class.as_str().into(),
                 access_mode: need.mode,
-                reason: if need.webhook {
+                reason: if need.delegation {
+                    "delegation"
+                } else if need.webhook {
                     "webhook"
                 } else if need.mode.is_some() {
                     "access_mode"

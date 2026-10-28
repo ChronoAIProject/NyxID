@@ -586,9 +586,13 @@ that actor. It never grants owner resources or forwards the owner's memory.
 Add owner-scoped `get_agent_sharing` and `set_agent_sharing` native tools; the
 latter replaces the combined audience and per-service policy at an exact write
 `version` and returns both `version` and authority `revision`. It uses existing
-human confirmation classification. In Full access,
-NyxBot may change who the personal specialist is shared with; this remains an
-owner-scoped policy mutation and does not grant new services. Extend group management
+human confirmation classification. Any widening delegation (enabling sharing,
+adding or upgrading an audience subject, or adding/raising an owner service
+level) always requires a one-use owner action card, even in Full access, because
+it delegates account authority. Narrowing and no-op saves follow the normal
+access mode; Full access may auto-allow them with its receipt. In Full access,
+NyxBot may apply a widening only after the owner approves that card; this remains
+an owner-scoped policy mutation and does not grant new services. Extend group management
 tools with invite/quick-add/remove/leave and per-agent guest settings, calling
 the same services as REST. Personal NyxBot cannot join/follow new multi-person
 groups or receive their transcript as an unsolicited follower. Invite acceptance,

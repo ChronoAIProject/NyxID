@@ -1217,6 +1217,24 @@ async fn execute_authorized_tool_impl(
         // updates, permission decisions) or are specialists' own permission
         // requests; never consume a second digest for them.
         let mut auto_allowed = None;
+        let sharing_preview = if name == "set_agent_sharing" {
+            let target =
+                team::specialist(&state.db, &chat.user_id, text_arg(args, "agent")).await?;
+            let input: crate::services::shared_agent_service::SharingUpdate =
+                serde_json::from_value(args["sharing"].clone())
+                    .map_err(|_| AppError::ValidationError("Invalid sharing policy".into()))?;
+            Some(
+                crate::services::shared_agent_service::preview_update(
+                    &state.db,
+                    &chat.user_id,
+                    &target,
+                    &input,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         if !matches!(
             name,
             "set_agent_operations"
@@ -1229,19 +1247,25 @@ async fn execute_authorized_tool_impl(
                 | "request_agent_operations"
                 | "request_agent_skills"
         ) {
-            let facts = acks::ActionFacts::of(acks::classify_owner_action(tool_name, args));
+            let class = acks::classify_owner_action(tool_name, args);
+            let facts = if sharing_preview
+                .as_ref()
+                .is_some_and(|preview| preview.widening)
+            {
+                acks::ActionFacts::delegation(class)
+            } else {
+                acks::ActionFacts::of(class)
+            };
             let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
             auto_allowed = gate.auto_allowed();
+            let summary = sharing_preview
+                .as_ref()
+                .filter(|preview| preview.widening)
+                .map(|preview| preview.summary.clone())
+                .unwrap_or_else(|| action_summary(name, args));
             if let Some(need) = gate.ask()
-                && let Some(refusal) = acks::confirm_action(
-                    &state.db,
-                    chat,
-                    tool_name,
-                    args,
-                    &need,
-                    &action_summary(name, args),
-                )
-                .await?
+                && let Some(refusal) =
+                    acks::confirm_action(&state.db, chat, tool_name, args, &need, &summary).await?
             {
                 return Ok((refusal, true));
             }
@@ -1326,8 +1350,9 @@ fn dispatch<'a>(
                 false,
             ))
         }),
-        "remember" | "forget" | "spawn_subagent" | "message_subagent" | "wait_for_subagents"
-        | "list_subagents" | "read_subagent" | "grant_subagent" | "revoke_subagent" => {
+        "remember" | "forget" | "get_agent_sharing" | "set_agent_sharing" | "spawn_subagent"
+        | "message_subagent" | "wait_for_subagents" | "list_subagents" | "read_subagent"
+        | "grant_subagent" | "revoke_subagent" => {
             Box::pin(dispatch_specialists(state, chat, name, args))
         }
         "request_agent_operations" | "get_agent_operations" | "set_agent_operations" => {

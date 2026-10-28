@@ -748,7 +748,7 @@ async fn check_inner(
             summary.to_owned()
         };
         let gate = if resource_replay && acknowledgement.is_some() {
-            acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true })
+            acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
         } else { acks::confirmation_needed(db, chat, facts, org && !model_consent).await? };
         if gate.ask().is_some() {
             // Legacy idle calls can retain their existing automatic behavior, but
