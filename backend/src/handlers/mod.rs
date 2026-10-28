@@ -32,6 +32,7 @@ pub mod assistant_actions;
 pub mod assistant_agent_learning;
 pub mod assistant_direct;
 pub mod assistant_readiness;
+pub mod assistant_sharing;
 pub mod auth;
 pub mod auth_agent_key;
 pub mod auth_device;

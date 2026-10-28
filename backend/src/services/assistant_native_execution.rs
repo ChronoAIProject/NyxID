@@ -100,12 +100,7 @@ async fn key_binding(db: &mongodb::Database, chat: &acks::ChatAuthority) -> AppR
     if key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
         return Err(AppError::Forbidden("Assistant credential expired".into()));
     }
-    let access = super::org_agent_service::resolve_key_access(
-        db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-    )
-    .await?;
+    let access = super::org_agent_service::resolve_credential_access(db, &key).await?;
     let allowed =
         super::key_service::effective_allowed_service_ids_with_access(db, &key, access.as_deref())
             .await?;
@@ -362,12 +357,7 @@ pub async fn verify_ssh_node(
         .await?
         .ok_or_else(|| AppError::NotFound("SSH connection unavailable".into()))?;
     let key = super::key_service::get_api_key(&state.db, &live.user_id, &live.api_key_id).await?;
-    let access = super::org_agent_service::resolve_key_access(
-        &state.db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-    )
-    .await?;
+    let access = super::org_agent_service::resolve_credential_access(&state.db, &key).await?;
     let (all, nodes) =
         super::org_agent_service::key_nodes(&state.db, &key, access.as_deref()).await?;
     let mut configured = super::node_routing_service::list_configured_binding_node_ids(

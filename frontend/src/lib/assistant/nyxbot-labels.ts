@@ -333,10 +333,10 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
   >();
   for (const agent of agents) {
     const id =
-      agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
+      agent.share_role ? "shared" : agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
     const section = groups.get(id) ?? {
       id,
-      label: id === "personal" ? "Personal" : (agent.owner_name ?? id),
+      label: id === "personal" ? "Personal" : id === "shared" ? "Shared with me" : (agent.owner_name ?? id),
       agents: [],
     };
     section.agents.push(agent);

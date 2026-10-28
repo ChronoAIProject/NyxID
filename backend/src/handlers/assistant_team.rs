@@ -1115,6 +1115,20 @@ pub(crate) async fn execute_tool(
     if chat.guest {
         return (acks::guest_refusal(), true);
     }
+    if chat
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && !matches!(
+            name,
+            "remember" | "forget" | "get_agent_skills" | "skill_read"
+        )
+    {
+        return refusal(
+            "shared_agent_scope",
+            "Shared agents cannot use account, team, machine or permission management tools. Ask the owner to change the agent's sharing settings.",
+        );
+    }
     if !chat.is_orchestrator() && !assistant_team_tools::is_agent_tool(name) {
         return refusal(
             "orchestrator_only",
@@ -1378,6 +1392,17 @@ async fn dispatch_specialists(
                 ));
             }
 
+            if let Some(shared) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
+                let id = crate::services::shared_agent_service::edit_private_note(
+                    db,
+                    owner,
+                    shared.agent(),
+                    Some(text_arg(args, "text")),
+                    args["replace_id"].as_str(),
+                )
+                .await?;
+                return Ok((json!({"remembered": id, "visibility": "private"}), false));
+            }
             let note = team::remember(
                 db,
                 owner,
@@ -1396,8 +1421,42 @@ async fn dispatch_specialists(
                 ));
             }
 
+            if let Some(shared) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
+                let id = crate::services::shared_agent_service::edit_private_note(
+                    db,
+                    owner,
+                    shared.agent(),
+                    None,
+                    Some(text_arg(args, "note_id")),
+                )
+                .await?;
+                return Ok((json!({"forgotten": id, "visibility": "private"}), false));
+            }
             team::forget(db, owner, target, text_arg(args, "note_id")).await?;
             (json!({"forgotten": text_arg(args, "note_id")}), false)
+        }
+        "get_agent_sharing" | "set_agent_sharing" => {
+            let agent = team::specialist(db, owner, text_arg(args, "agent")).await?;
+            crate::services::shared_agent_service::personal_owner(db, owner, &agent.id).await?;
+            if name == "set_agent_sharing" {
+                let input = serde_json::from_value(args["sharing"].clone())
+                    .map_err(|_| AppError::ValidationError("Invalid sharing policy".into()))?;
+                let result =
+                    crate::services::shared_agent_service::update(db, owner, &agent.id, input)
+                        .await?;
+                (
+                    json!({"version": result.version, "revision": result.revision, "enabled": result.enabled}),
+                    false,
+                )
+            } else {
+                let policy = crate::services::shared_agent_service::policy(db, &agent).await?;
+                let audience =
+                    crate::services::shared_agent_service::audience(db, owner, &agent.id).await?;
+                (
+                    json!({"version": policy.version, "revision": policy.revision, "enabled": policy.enabled, "audience": audience, "shared_access": policy.shared_access}),
+                    false,
+                )
+            }
         }
         "spawn_subagent" => {
             let resource_owner = args["org"].as_str().unwrap_or(owner);
@@ -1483,7 +1542,7 @@ async fn dispatch_specialists(
         }
         "wait_for_subagents" => (wait_for(state, chat, args).await?, false),
         "list_subagents" => {
-            let rows = team::delegation_summaries(
+            let rows = team::tool_delegation_summaries(
                 db,
                 owner,
                 args["include_destroyed"].as_bool().unwrap_or(false),
@@ -1492,21 +1551,23 @@ async fn dispatch_specialists(
             .await?;
             let rows: Vec<_> = rows
                 .into_iter()
-                .filter(|r| args["org"].as_str().is_none_or(|org| org == r.owner_id))
+                .filter(|r| r.can_use && args["org"].as_str().is_none_or(|org| org == r.owner_id))
                 .map(|r| {
                     let qualified_name = r.delegation_name();
-                    let mut row = if r.owner_kind == "org" && !r.can_maintain {
-                        // Use-only discovery excludes maintainer data. The
-                        // full existing shape remains available to maintainers.
-                        json!({"id":r.id,"name":r.name,
+                    let mut row =
+                        if (r.owner_kind == "org" || r.share_role.is_some()) && !r.can_maintain {
+                            // Use-only discovery excludes maintainer data. The
+                            // full existing shape remains available to maintainers.
+                            json!({"id":r.id,"name":r.name,
                             "owner_id":r.owner_id,"owner_kind":r.owner_kind,
+                            "share_role":r.share_role,
                             "owner_name":r.owner_name,"owner_slug":r.owner_slug,
                             "description":r.description,"display_name":r.display_name,
                             "status":r.status,"can_use":r.can_use,"can_maintain":r.can_maintain,
                             "services":r.services})
-                    } else {
-                        json!(r)
-                    };
+                        } else {
+                            json!(r)
+                        };
                     row["qualified_name"] = qualified_name.into();
                     row
                 })
@@ -2717,7 +2778,7 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
     let names = string_list(args, "subagents");
     let mut targets = Vec::new();
     if names.is_empty() {
-        targets = team::delegation_summaries(db, owner, false, 0)
+        targets = team::tool_delegation_summaries(db, owner, false, 0)
             .await?
             .into_iter()
             .map(|summary| summary.id)
@@ -2741,11 +2802,12 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
             None => false,
         };
         if !busy || !requests.is_empty() || stopped || tokio::time::Instant::now() >= deadline {
-            let summaries = team::delegation_summaries(db, owner, true, team::REPLY_EXCERPT_CHARS)
-                .await?
-                .into_iter()
-                .filter(|summary| targets.contains(&summary.id))
-                .collect::<Vec<_>>();
+            let summaries =
+                team::tool_delegation_summaries(db, owner, true, team::REPLY_EXCERPT_CHARS)
+                    .await?
+                    .into_iter()
+                    .filter(|summary| targets.contains(&summary.id))
+                    .collect::<Vec<_>>();
             let settled: Vec<String> = summaries
                 .iter()
                 .filter(|summary| summary.status != "running")
@@ -2791,7 +2853,8 @@ async fn agent_responses(
     include_destroyed: bool,
 ) -> AppResult<Vec<AgentResponse>> {
     let nyxbot = team::ensure_nyxbot(&state.db, owner).await?;
-    let summaries = team::summaries(&state.db, owner, true, include_destroyed, 300).await?;
+    let mut summaries = team::summaries(&state.db, owner, true, include_destroyed, 300).await?;
+    summaries.extend(crate::services::shared_agent_service::summaries(&state.db, owner).await?);
     let channels = super::nyxbot::list(state, owner).await?;
     Ok(summaries
         .into_iter()
@@ -3007,6 +3070,13 @@ pub async fn update_agent(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if body.name.is_some()
+        || body.model.is_some()
+        || body.access_mode_override.is_some()
+        || body.channel_checking_notice.is_some()
+    {
+        team::maintained_agent(&state.db, &owner, &id).await?;
+    }
     if let Some(model) = body.model.as_deref() {
         super::assistant_nyxagent::require_available_model(&state, &auth, model).await?;
     }

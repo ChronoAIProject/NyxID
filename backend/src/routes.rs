@@ -2580,6 +2580,29 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::catalog),
         )
         .route(
+            "/nyxagent/agents/{id}/consents",
+            get(handlers::assistant_sharing::consents),
+        )
+        .route(
+            "/nyxagent/shared-consents/{id}",
+            axum::routing::post(handlers::assistant_sharing::decide_consent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/sharing",
+            get(handlers::assistant_sharing::get).put(handlers::assistant_sharing::update),
+        )
+        .route(
+            "/nyxagent/agents/{id}/private-notes",
+            get(handlers::assistant_sharing::private_notes)
+                .put(handlers::assistant_sharing::update_notes)
+                .delete(handlers::assistant_sharing::delete_notes),
+        )
+        .route(
+            "/nyxagent/agents/{id}/shared-memory",
+            get(handlers::assistant_sharing::memory)
+                .put(handlers::assistant_sharing::update_memory),
+        )
+        .route(
             "/nyxagent/agents/{id}/skills",
             get(handlers::agent_skills::get).put(handlers::agent_skills::set),
         )

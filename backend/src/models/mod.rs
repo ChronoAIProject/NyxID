@@ -8,6 +8,7 @@ pub mod approval_grant;
 pub mod approval_request;
 pub mod assistant_action_receipt;
 pub mod assistant_resource;
+pub mod assistant_sharing;
 pub mod assistant_wire_log;
 pub mod audit_log;
 pub mod auth_device_code;

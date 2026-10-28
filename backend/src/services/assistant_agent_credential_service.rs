@@ -26,6 +26,11 @@ use crate::{
 #[derive(Clone, Debug)]
 pub enum KeyAuthority {
     Orchestrator,
+    Shared(
+        AgentGrants,
+        crate::models::agent_operation_scope::OperationScopes,
+        String,
+    ),
     Subagent(
         AgentGrants,
         crate::models::agent_operation_scope::OperationScopes,
@@ -49,6 +54,15 @@ impl KeyAuthority {
     /// rotated or hand-edited key converges back to its conversation's authority.
     pub fn key_fields(&self) -> bson::Document {
         match self {
+            Self::Shared(grants, scopes, owner) => doc! {
+                "assistant_agent_owner_id": owner,
+                "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
+                "allow_all_services": false, "allow_all_nodes": false,
+                "allowed_node_ids": [], "allow_auto_connected_services": false,
+                "allowed_service_ids": &grants.service_ids,
+                "allowed_platform_service_ids": &grants.platform_service_ids,
+                "scopes": ASSISTANT_SCOPES,
+            },
             Self::Orchestrator => doc! {
                 "assistant_agent_owner_id": bson::Bson::Null,
                 "assistant_operation_scopes": bson::Document::new(),
@@ -134,6 +148,25 @@ pub(crate) async fn authority_with_access(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    let resolved = if snapshot.is_none() {
+        super::org_agent_service::resolve_agent_access(db, &conversation.user_id, &agent).await?
+    } else {
+        None
+    };
+    let snapshot = snapshot.or(resolved.as_ref());
+    if let Some(shared) = snapshot.and_then(|a| a.shared()) {
+        snapshot
+            .expect("shared snapshot")
+            .check_conversation(conversation)?;
+        super::shared_agent_service::fence(db, shared, session).await?;
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &conversation.id, "user_id": &conversation.user_id},
+                doc! {"$set": {"shared_agent_thread": true}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
     if agent.user_id != conversation.user_id && conversation.group_id.is_some() {
         let access = match snapshot {
             Some(access) if access.matches(&conversation.user_id, &agent.user_id) => access.clone(),
@@ -193,6 +226,19 @@ pub(crate) async fn authority_with_access(
         .session(&mut *session)
         .await?
         .ok_or_else(destroyed)?;
+    if let Some(shared) = snapshot.and_then(|a| a.shared()) {
+        let mut grants = agent.grants.clone();
+        grants.account_read = false;
+        grants.service_ids.retain(|id| shared.level(id).is_some());
+        grants
+            .platform_service_ids
+            .retain(|id| shared.level(id).is_some());
+        return Ok(KeyAuthority::Shared(
+            grants,
+            shared.operation_scopes(),
+            agent.user_id.clone(),
+        ));
+    }
     Ok(KeyAuthority::for_agent(&agent))
 }
 

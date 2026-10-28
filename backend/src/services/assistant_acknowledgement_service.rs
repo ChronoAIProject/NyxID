@@ -240,6 +240,15 @@ pub async fn effective_access_mode(
     db: &Database,
     chat: &ChatAuthority,
 ) -> AppResult<crate::models::assistant_settings::AccessMode> {
+    if chat
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+    {
+        return Ok(super::assistant_settings_service::get(db, &chat.user_id)
+            .await?
+            .access_mode);
+    }
     effective_mode_for_agent(db, &chat.user_id, &chat.agent_id).await
 }
 
@@ -435,7 +444,8 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
         Destructive
     } else if matches!(
         name,
-        "grant_subagent"
+        "set_agent_sharing"
+            | "grant_subagent"
             | "set_guest_access"
             | "set_agent_operations"
             | "set_agent_skills"
@@ -1411,6 +1421,12 @@ pub async fn for_key_with_access(
             super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
         (conversation, agent)
     };
+    let resolved = if access.is_none() && agent.user_id != user {
+        super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
+    } else {
+        None
+    };
+    let access = access.or(resolved.as_ref());
     if agent.destroyed_at.is_some() {
         return Err(not_found());
     }
@@ -1431,6 +1447,7 @@ pub async fn for_key_with_access(
     let live = super::assistant_nyxagent::live_turn(&conversation, Utc::now())
         .filter(|turn| !turn.stop_requested);
     let turn_live = live.is_some();
+    let shared = access.is_some_and(|a| a.shared().is_some());
     let (report_to, with_nyxbot) = live
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
@@ -1458,8 +1475,16 @@ pub async fn for_key_with_access(
         turn_live,
         report_to,
         with_nyxbot,
-        machine_node_ids: agent.machine_node_ids.clone(),
-        saved_login_ids: agent.saved_login_ids.clone(),
+        machine_node_ids: if shared {
+            Vec::new()
+        } else {
+            agent.machine_node_ids.clone()
+        },
+        saved_login_ids: if shared {
+            Vec::new()
+        } else {
+            agent.saved_login_ids.clone()
+        },
         user_id: user.into(),
         api_key_id: key.into(),
         conversation_id: conversation_id.into(),
@@ -2590,13 +2615,14 @@ pub async fn service_gate(
     } else {
         // This authority check already needed live access. Retain a newly
         // resolved snapshot for the ungranted path and its card transaction.
-        access = super::org_agent_service::key_access_with_snapshot(
-            db,
-            &chat.user_id,
-            key.assistant_agent_owner_id.as_deref(),
-            access.as_ref(),
-        )
-        .await?;
+        access = if let Some(snapshot) = access {
+            Some(snapshot)
+        } else {
+            // A personal shared-agent key carries the owner and agent binding,
+            // so resolve it from the exact credential rather than the
+            // owner-only key lookup (which has no conversation key to load).
+            super::org_agent_service::resolve_credential_access(db, &key).await?
+        };
         key_service::effective_allowed_service_ids_with_access(db, &key, access.as_deref())
             .await?
             .iter()

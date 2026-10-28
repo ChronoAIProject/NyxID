@@ -1,4 +1,5 @@
 import { useConnectionDown } from "@/hooks/use-connection-down";
+import { SharedConsentCards } from "./shared-agent-controls";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { PreparedMicrophone } from "@/lib/microphone-capture";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
@@ -550,7 +551,7 @@ export function NyxAgentAssistantChatPage() {
 }
 
 function NyxAgentThreadPage() {
-  const voiceEnabled = useFeature("assistant:voice");
+  const voiceFlagEnabled = useFeature("assistant:voice");
   const nyxBotSettings = useNyxBotSettings();
   const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
   const [voiceBinding, setVoiceBinding] = useState<{
@@ -713,6 +714,7 @@ function NyxAgentThreadPage() {
   // The open thread's agent, else the agent in the URL, else NyxBot.
   const threadAgent = nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
   const selectedAgent = selectedAgentOf(agents.data?.agents, threadAgent?.id, search.agent);
+  const voiceEnabled = voiceFlagEnabled && !selectedAgent?.share_role;
   // Names the exact linked agent even when it is not in the list.
   const linkedDetails = Boolean(search.details || search.proposal);
   const openDetailsAgentId =
@@ -1206,6 +1208,7 @@ function NyxAgentThreadPage() {
             docked
             message={connectionDown && dockedError?.startsWith("Connection interrupted") ? undefined : dockedError}
           />
+          {selectedAgent?.share_role && selectedId ? <div className="mx-auto max-h-64 max-w-3xl overflow-y-auto px-4"><SharedConsentCards agentId={selectedAgent.id} conversationId={selectedId} /></div> : null}
           <NyxAgentComposer
             onVoiceSettings={voiceEnabled && !destroyed && !channelPlatform ? () => setVoiceSettingsOpen(true) : undefined}
             onVoicePrepare={() => {

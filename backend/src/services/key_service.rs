@@ -733,12 +733,7 @@ pub async fn effective_allowed_service_ids(
     key: &ApiKey,
 ) -> AppResult<Vec<String>> {
     require_ordinary_purpose(key.purpose)?;
-    let access = super::org_agent_service::resolve_key_access(
-        db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-    )
-    .await?;
+    let access = super::org_agent_service::resolve_credential_access(db, key).await?;
     effective_allowed_service_ids_with_access(db, key, access.as_deref()).await
 }
 
@@ -1279,7 +1274,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     successor.scopes = fields.get_str("scopes").unwrap_or("proxy").to_owned();
                     successor.allow_all_services =
                         fields.get_bool("allow_all_services").unwrap_or(false);
-                    successor.allow_all_nodes = true;
+                    successor.allow_all_nodes = fields.get_bool("allow_all_nodes").unwrap_or(false);
                     successor.allow_auto_connected_services = fields
                         .get_bool("allow_auto_connected_services")
                         .unwrap_or(false);
@@ -1288,7 +1283,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                             grants,
                             scopes,
                             owner,
-                        ) => {
+                        ) | super::assistant_agent_credential_service::KeyAuthority::Shared(grants, scopes, owner) => {
                             successor.assistant_agent_owner_id = Some(owner.clone());
                             successor.assistant_operation_scopes = scopes.clone();
                             successor.allowed_service_ids = grants.service_ids.clone();

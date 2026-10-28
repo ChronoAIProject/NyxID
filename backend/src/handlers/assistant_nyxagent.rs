@@ -305,13 +305,15 @@ impl ConversationResponse {
             Some(id) => agents.iter().find(|agent| agent.id == id),
             None => agents.iter().find(|agent| agent.is_nyxbot()),
         };
-        self.agent = agent.map(|agent| AgentRefResponse {
-            id: agent.id.clone(),
-            kind: agent.kind,
-            name: agent.name.clone(),
-            display_name: agent.display_name.clone(),
-            destroyed: agent.destroyed_at.is_some(),
-        });
+        self.agent = agent
+            .map(|agent| AgentRefResponse {
+                id: agent.id.clone(),
+                kind: agent.kind,
+                name: agent.name.clone(),
+                display_name: agent.display_name.clone(),
+                destroyed: agent.destroyed_at.is_some(),
+            })
+            .or(self.agent);
         self
     }
     /// Fill in a channel thread's bot and chat.
@@ -391,7 +393,13 @@ impl From<AssistantConversation> for ConversationResponse {
             context_reset_at: row.context_reset_at,
             context_reset_reason: row.context_reset_reason,
             role: row.role,
-            agent: None,
+            agent: row.shared_agent_thread.then(|| AgentRefResponse {
+                id: row.agent_id.clone().unwrap_or_default(),
+                kind: crate::models::assistant_agent::AgentKind::Specialist,
+                name: "Shared agent".into(),
+                display_name: None,
+                destroyed: false,
+            }),
             pending_events: row.pending_events.len(),
             channel: row.channel.map(|channel| ChannelOriginResponse {
                 parent_chat_id: None,
@@ -719,23 +727,23 @@ pub async fn list(
     let limit = limit(query.limit)?;
     crate::services::assistant_team_service::ensure_nyxbot(&state.db, &user_id).await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
-    let agent = match query.agent_id.as_deref() {
-        Some(id) => Some(
-            agents
-                .iter()
-                .find(|agent| agent.id == id)
-                .ok_or_else(|| AppError::NotFound("Agent not found".into()))?,
-        ),
-        None => None,
+    let agent = query
+        .agent_id
+        .as_deref()
+        .and_then(|id| agents.iter().find(|agent| agent.id == id));
+    let mut rows = if let Some(id) = query.agent_id.as_deref().filter(|_| agent.is_none()) {
+        engine::list_shared_history(&state.db, &user_id, id, limit + 1, query.cursor.as_deref())
+            .await?
+    } else {
+        engine::list(
+            &state.db,
+            &user_id,
+            limit + 1,
+            query.cursor.as_deref(),
+            agent,
+        )
+        .await?
     };
-    let mut rows = engine::list(
-        &state.db,
-        &user_id,
-        limit + 1,
-        query.cursor.as_deref(),
-        agent,
-    )
-    .await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let next_cursor = more.then(|| engine::index_cursor(rows.last().expect("nonempty page")));

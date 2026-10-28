@@ -48,6 +48,8 @@ pub struct McpCatalogDiagnostics {
 
 #[derive(Debug, Serialize)]
 pub struct McpServiceConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_connection: Option<serde_json::Value>,
     pub service_id: String,
     pub service_name: String,
     pub service_slug: String,
@@ -150,7 +152,12 @@ pub async fn get_mcp_config(
         &auth_user.assistant_operation_scopes,
         &mut catalog.services,
     );
-    let mcp_services = config_services(&catalog.services);
+    let mut mcp_services = config_services(&catalog.services);
+    if let Some(shared) = auth_user.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        for service in &mut mcp_services {
+            service.shared_connection = shared.discovery_metadata(&service.service_id);
+        }
+    }
 
     let total_endpoints: usize = mcp_services.iter().map(|s| s.endpoints.len()).sum();
     let total_services = mcp_services.len();
@@ -229,6 +236,7 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
                 .collect();
 
             McpServiceConfig {
+                shared_connection: None,
                 service_id: svc.service_id.clone(),
                 service_name: svc.service_name.clone(),
                 service_slug: svc.service_slug.clone(),
@@ -273,6 +281,7 @@ mod tests {
 
     fn service_with_schema(schema: serde_json::Value) -> McpServiceConfig {
         McpServiceConfig {
+            shared_connection: None,
             recommended_skill_refs: None,
             skills_revision: None,
             service_id: "service-1".to_string(),

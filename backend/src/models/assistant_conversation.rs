@@ -538,6 +538,9 @@ pub struct AssistantConversation {
     /// Stable agent owner binding; the conversation itself belongs to the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner_id: Option<String>,
+    /// Actor-owned private history survives withdrawal of personal-agent sharing.
+    #[serde(default)]
+    pub shared_agent_thread: bool,
     /// L1 enrollment cohort. Missing or zero-valued legacy rows are not
     /// eligible evidence; new rows set this only when learning is enabled and
     /// the owner/member has opted in.

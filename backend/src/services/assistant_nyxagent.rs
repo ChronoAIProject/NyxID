@@ -434,7 +434,9 @@ pub fn base_prompt(
     } else {
         if let Some(agent) = agent {
             if agent.user_id != row.user_id {
-                if row.group_request_id.is_some() {
+                if row.shared_agent_thread {
+                    prompt.push_str("\n\nThis is a private chat with a shared personal specialist. You act for the person chatting, who pays for NyxID usage. Your context includes explicitly published team memory and this person's private notes only. Remember/forget edits only their private notes; never publish private content to team memory. The agent owner's memory, other chats, roster, machines, saved logins and approvals are unavailable. Use only explicitly shared services or the person's own same-service connection after their consent; never silently switch accounts.");
+                } else if row.group_request_id.is_some() {
                     prompt.push_str("\n\nThis is a shared organization group. Never read or disclose a member's private threads. Shared agent memory must never contain a member's private content.");
                 } else {
                     prompt.push_str("\n\nThis specialist belongs to an organization. Its memory notes are shared organization data, visible to maintainers. NEVER store a member's private messages, personal content or secrets in shared memory. This thread is private to the acting member; never read or disclose another member's thread.");
@@ -1523,6 +1525,9 @@ pub(crate) async fn authorize_thread_read(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<Option<std::sync::Arc<super::org_agent_service::RequestAccess>>> {
+    if row.shared_agent_thread && row.group_id.is_none() {
+        return Ok(None);
+    }
     let user_id = row.user_id.as_str();
     if let Some(owner) = row.agent_owner_id.as_deref() {
         let access = Box::pin(super::org_agent_service::resolve_key_access(
@@ -1588,6 +1593,7 @@ pub async fn list(
     let mut access = std::collections::HashMap::new();
     for row in &rows {
         if let Some(owner) = row.agent_owner_id.as_deref()
+            && !row.shared_agent_thread
             && !access.contains_key(owner)
         {
             let allowed = super::org_agent_service::can_use(
@@ -1597,12 +1603,73 @@ pub async fn list(
         }
     }
     rows.retain(|row| {
-        row.agent_owner_id
-            .as_ref()
-            .is_none_or(|owner| access.get(owner).copied().unwrap_or(false))
+        row.shared_agent_thread
+            || row
+                .agent_owner_id
+                .as_ref()
+                .is_none_or(|owner| access.get(owner).copied().unwrap_or(false))
     });
     Ok(rows)
 }
+/// Read only the acting person's retained shared-agent history. This grants no execution.
+pub async fn list_shared_history(
+    db: &Database,
+    user_id: &str,
+    agent: &str,
+    limit: i64,
+    cursor: Option<&str>,
+) -> AppResult<Vec<AssistantConversation>> {
+    if Uuid::parse_str(agent).is_err() {
+        return Err(AppError::NotFound("Agent not found".into()));
+    }
+    let mut filter = doc! {"user_id": user_id, "agent_id": agent, "shared_agent_thread": true,
+    "group_id": null, "voice_parent_conversation_id": null};
+    if let Some(cursor) = cursor {
+        let (ms, id) = cursor
+            .split_once(':')
+            .ok_or_else(|| AppError::BadRequest("Invalid cursor".into()))?;
+        let time = ms
+            .parse::<i64>()
+            .ok()
+            .and_then(DateTime::from_timestamp_millis)
+            .filter(|_| valid_id(id))
+            .ok_or_else(|| AppError::BadRequest("Invalid cursor".into()))?;
+        let page = bson::bson!([
+            {"updated_at": {"$lt": bson::DateTime::from_chrono(time)}},
+            {"updated_at": bson::DateTime::from_chrono(time), "_id": {"$lt": id}},
+        ]);
+        filter = doc! {"$and": [filter, {"$or": page}]};
+    }
+    let rows: Vec<AssistantConversation> = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find(filter)
+        .sort(doc! {"updated_at": -1, "_id": -1})
+        .limit(limit)
+        .await?
+        .try_collect()
+        .await?;
+    if rows.is_empty() {
+        let retained = db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .find_one(
+                doc! {"user_id": user_id, "agent_id": agent, "shared_agent_thread": true,
+                "group_id": null, "voice_parent_conversation_id": null},
+            )
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some();
+        if !retained
+            && !super::shared_agent_service::load(db, user_id, Some(&[agent.to_owned()]))
+                .await?
+                .agents
+                .contains_key(agent)
+        {
+            return Err(AppError::NotFound("Agent not found".into()));
+        }
+    }
+    Ok(rows)
+}
+
 /// Steering is part of its original turn, never a previous-message anchor.
 pub async fn previous_user_message(
     db: &Database,
@@ -2051,6 +2118,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             platform_cleanup_id: None,
             automation_thread: false,
             voice_parent_conversation_id: None,
+            shared_agent_thread: false,
             agent_owner_id: (agent.user_id != user_id).then(|| agent.user_id.clone()),
             id: id.clone(),
             user_id: user_id.into(),
@@ -2157,6 +2225,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         start.org_access.as_ref(),
     )
     .await?;
+    row.shared_agent_thread = matches!(
+        authority,
+        super::assistant_agent_credential_service::KeyAuthority::Shared(..)
+    );
+
     if live_turn(&row, now).is_some() {
         return Err(AppError::AssistantTurnActive);
     }
@@ -5286,6 +5359,11 @@ pub async fn delete(
                 let mut children = Vec::new();
                 for row in &rows {
                     let id = row.id.as_str();
+                    if row.shared_agent_thread {
+                        db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME)
+                            .delete_many(doc! {"conversation_id": id, "actor_user_id": user_id})
+                            .session(&mut *session).await?;
+                    }
                     super::assistant_invocation_service::deleted_in_session(
                         db, session, user_id, id,
                     )

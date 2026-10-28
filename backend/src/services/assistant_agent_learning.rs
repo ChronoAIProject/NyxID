@@ -383,6 +383,9 @@ pub async fn enrollment_epoch(
     agent: &AssistantAgent,
     snapshot: Option<&super::org_agent_service::RequestAccess>,
 ) -> AppResult<Option<i64>> {
+    if snapshot.is_some_and(|a| a.shared().is_some()) {
+        return Ok(None);
+    }
     let pilot = feature_flag_service::flag_enabled_people(db, FLAG_KEY).await?;
     if pilot
         .as_ref()

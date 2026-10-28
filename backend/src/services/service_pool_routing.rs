@@ -94,6 +94,16 @@ pub async fn select_slug_metadata(
     slug: &str,
     org_agent_access: Option<&crate::services::org_agent_service::RequestAccess>,
 ) -> AppResult<SlugMetadataRoute> {
+    if let Some(shared) = org_agent_access.and_then(|access| access.shared()) {
+        if shared.actor() != actor_user_id {
+            return Err(super::shared_agent_service::missing());
+        }
+        // Resolve within the authorized snapshot. A legacy/pool/personal
+        // cascade must not silently replace the selected person's account.
+        return Ok(SlugMetadataRoute::Service(
+            shared.connection_for_slug(slug)?.id.clone(),
+        ));
+    }
     // Organization-bound keys prefer the granted connection owned by the bound
     // organization. Reuse the request snapshot so membership is not resolved
     // a second time during routing; credential availability is checked later

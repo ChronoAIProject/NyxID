@@ -870,12 +870,8 @@ pub(crate) async fn api_key_auth_user(
     if !user.is_some_and(|user| user.is_active) {
         return Err(AppError::Unauthorized("User account is inactive".into()));
     }
-    let org_agent_access = crate::services::org_agent_service::resolve_key_access(
-        db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-    )
-    .await?;
+    let org_agent_access =
+        crate::services::org_agent_service::resolve_credential_access(db, key).await?;
     crate::services::org_group_service::validate_key(db, key, org_agent_access.as_ref()).await?;
     let (allow_all_nodes, allowed_node_ids) =
         crate::services::org_agent_service::key_nodes(db, key, org_agent_access.as_deref()).await?;
@@ -896,6 +892,15 @@ pub(crate) async fn api_key_auth_user(
     } else {
         None
     };
+    if org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && assistant_chat
+            .as_ref()
+            .is_none_or(|c| !c.turn_live || c.turn_stopped)
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     Ok(AuthUser {
         mfa_assured: false,
         mfa_enabled: None,
@@ -917,10 +922,16 @@ pub(crate) async fn api_key_auth_user(
                 org_agent_access.as_deref(),
             )
             .await?,
-        org_agent_access,
+        org_agent_access: org_agent_access.clone(),
         assistant_group_id: key.assistant_group_id.clone(),
         assistant_agent_owner_id: key.assistant_agent_owner_id.clone(),
-        assistant_operation_scopes: key.assistant_operation_scopes.clone(),
+        assistant_operation_scopes: org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .map_or_else(
+                || key.assistant_operation_scopes.clone(),
+                |a| a.operation_scopes(),
+            ),
         assistant_turn_fence: assistant_chat
             .as_ref()
             .map(|chat| Box::new(chat.turn_fence())),

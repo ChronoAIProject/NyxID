@@ -23,6 +23,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "grant_subagent",
     "revoke_subagent",
     "set_guest_access",
+    "get_agent_sharing",
+    "set_agent_sharing",
     "set_agent_operations",
     "set_agent_skills",
     "search_agent_skills",
@@ -166,6 +168,7 @@ pub fn read_only(name: &str) -> bool {
     matches!(
         name,
         "task_status"
+            | "get_agent_sharing"
             | "list_schedules"
             | "wait_for_subagents"
             | "list_subagents"
@@ -358,6 +361,17 @@ pub fn schema(name: &str) -> Value {
             },"required":["expected_revision"],"additionalProperties":false},
             "acknowledgement_id":string(64)}),
             vec!["subagent", "service_id", "selection"],
+        ),
+        "get_agent_sharing" => (json!({"agent": subagent}), vec!["agent"]),
+        "set_agent_sharing" => (
+            json!({"agent": subagent, "sharing": {"type":"object", "properties": {
+            "expected_version": {"type":"integer", "minimum":0}, "enabled":{"type":"boolean"},
+            "audience":{"type":"array","maxItems":500,"items":{"type":"object","properties":{
+                "subject_kind":{"type":"string","enum":["person","org"]},"subject_id":string(64),"role":{"type":"string","enum":["user","manager"]}
+            },"required":["subject_kind","subject_id","role"],"additionalProperties":false}},
+            "shared_access":{"type":"object","additionalProperties":{"type":"string","enum":["read","use","all"]}}
+        },"required":["expected_version","enabled","audience","shared_access"],"additionalProperties":false}}),
+            vec!["agent", "sharing"],
         ),
         "set_guest_access" => (
             json!({"subagent": subagent,
@@ -637,6 +651,12 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Wait up to timeout_secs (max 120) for specialists to finish; returns their latest \
             replies, who is still running, and pending permission requests. You can also end \
             your turn instead; NyxID wakes you with an event."
+        }
+        "get_agent_sharing" => {
+            "Read your personal specialist's sharing policy, write version and authority revision. No private recipient chats or notes are included."
+        }
+        "set_agent_sharing" => {
+            "Replace your personal specialist's sharing policy at the exact write version. The write version changes on every non-no-op save; the authority revision changes only when existing authority changes or sharing is enabled. Managers edit profile/persona and published team memory only. Omit a service from shared_access to withhold your connection. This does not grant new services. Full access lets NyxBot change who the agent is shared with. Personal NyxBot and organization agents cannot be shared."
         }
         "list_subagents" => {
             "List your specialists with status, grants, what guests may do with each service \

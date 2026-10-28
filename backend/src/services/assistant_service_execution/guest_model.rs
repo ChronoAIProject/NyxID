@@ -5,6 +5,18 @@ use crate::models::{
     assistant_conversation::AssistantConversation,
 };
 
+/// Shared recipients run their own model lane. They are deliberately neither
+/// owner-route guests nor owners whose callbacks may establish a route.
+pub(crate) fn is_shared_chat(chat: &acks::ChatAuthority) -> bool {
+    chat.org_agent_access
+        .as_ref()
+        .is_some_and(|access| access.shared().is_some())
+}
+
+pub(crate) fn owner_model_route_allowed(chat: &acks::ChatAuthority) -> bool {
+    !chat.guest && !is_shared_chat(chat)
+}
+
 async fn conversation(
     db: &Database,
     chat: &acks::ChatAuthority,
@@ -89,6 +101,9 @@ pub(super) async fn require(
     target: &crate::services::proxy_service::ProxyTarget,
     operation: &mut Value,
 ) -> AppResult<()> {
+    if is_shared_chat(chat) {
+        return Err(AppError::GuestModelRouteRequired);
+    }
     let row = conversation(db, chat).await?;
     let admitted = input(db, chat)
         .await?
@@ -134,7 +149,11 @@ pub(super) async fn remember_owner(
     target: &crate::services::proxy_service::ProxyTarget,
     operation: &Value,
 ) -> AppResult<()> {
-    if chat.guest || !chat.turn_live || chat.turn_stopped || input(db, chat).await?.is_none() {
+    if !owner_model_route_allowed(chat)
+        || !chat.turn_live
+        || chat.turn_stopped
+        || input(db, chat).await?.is_none()
+    {
         return Ok(());
     }
     // Ordinary raw inference and tool calls outside the engine's model attempt
