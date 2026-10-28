@@ -111,91 +111,97 @@ pub(crate) async fn issue(
             .forget();
     }
     let mut session = state.db.client().start_session().await?;
-    let token = session.start_transaction().and_run2(async |session| {
-        let result = async {
-            let (live, _, _) = acks::fence(&state.db, chat, session).await?;
-            super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
-            let mut cursor=roots.find(filter.clone()).limit(2).session(&mut *session).await?;
-            let current:Vec<ModelControlRoot>=cursor.stream(&mut *session).try_collect().await?;
-            if current.len()>1 {return Err(conflict());}
-            let (mut row, mut private, new) = if let Some(expected) = current.first() {
-                let (row, private) = persistence::load(state, &expected.id, Some(&mut *session)).await?;
-                (row, private, false)
-            } else {
-                // An unrelated old card never upgrades into reusable consent.
-                if input.continuation_of.is_some() || input.retry_of.is_some() { return Ok(None); }
-                (ModelControlRoot {
-                    id:uuid::Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),
-                    conversation_id:chat.conversation_id.clone(),api_key_id:chat.api_key_id.clone(),
-                    turn_ids:vec![turn_id.into()],runtime_catalog_id:runtime_catalog_id.into(),
-                    phase:"unactivated".into(),acknowledgement_id:None,card_arguments:None,
-                    revision:0,control_hashes:vec![],private_ciphertext:vec![],created_at:now,
-                    expires_at:now+Duration::minutes(35),
-                },RootPrivate {controls:vec![],envelope:None,initial_input:vec![],
-                    connection_id:None,connection_binding:None,owner_id:None,catalog_id:None,
-                    card_arguments:None,effective_headers_binding:None,steps:vec![],preconsent:read_observation::State::default(),initial_operation:StepOperation::Generation,initial_request_binding:None},true)
-            };
-            if row.user_id != chat.user_id || row.conversation_id != chat.conversation_id
-                || row.api_key_id != chat.api_key_id
-                || row.expires_at <= Utc::now() || row.runtime_catalog_id != runtime_catalog_id
-                || matches!(row.phase.as_str(),"denied"|"revoked")
-            { return Err(invalid()); }
-            // A serving-revision change never adopts an old root/token. Drain
-            // it under the old writer first; Deny retirement remains available.
-            if private.controls.iter().any(|c| c.claims.protocol != wire::PROTOCOL) {
-                return Err(invalid());
-            }
-            if new && (!read_observation::covered_in_session(state,chat,session).await?
-                || state.db.collection::<Document>(super::super::assistant_service_execution::COLLECTION)
-                .find_one(read_observation::marker_scope(chat)?).session(&mut *session).await?.is_some()) {
-                private.preconsent.disable();
-            }
-            if let Some(bound) = private.controls.iter().find(|c|
-                c.claims.active_turn_id == turn_id && c.claims.outer_request_binding == binding)
-            { return Ok(Some(bound.token.clone())); }
-            if private.controls.len() >= MAX_STEPS { return Err(unsupported()); }
-            let origin = if let Some(ack) = input.continuation_of.as_deref() {
-                let card = state.db.collection::<AssistantAcknowledgement>("assistant_acknowledgements")
-                    .find_one(doc! {"_id":ack,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
-                        "api_key_id":&chat.api_key_id,"tool_name":"nyxid.model_control_v1"})
-                    .session(&mut *session).await?.ok_or_else(invalid)?;
-                if row.acknowledgement_id.as_deref() != Some(ack) || row.phase != "allowed"
-                    || !matches!(card.status.as_str(),"allowed"|"used") || card.decider != "user"
-                    || card.decided_by.as_deref() != Some("user") || card.expires_at <= now
-                { return Err(invalid()); }
-                let first = private.controls.first().ok_or_else(invalid)?;
-                let wire::ControlOrigin::Initial {input_id,creating_turn_id} = &first.claims.origin else { return Err(invalid()); };
-                wire::ControlOrigin::AllowedContinuation {acknowledgement_id:ack.into(),
-                    saved_continuation_id:input.id.clone(),original_input_id:input_id.clone(),original_turn_id:creating_turn_id.clone()}
-            } else if let Some(old) = &input.retry_of {
-                if !row.turn_ids.contains(old) { return Err(invalid()); }
-                wire::ControlOrigin::Retry {original_turn_id:old.clone(),saved_continuation_id:input.id.clone()}
-            } else {
-                wire::ControlOrigin::Initial {input_id:input.id.clone(),creating_turn_id:turn_id.into()}
-            };
-            let claims = wire::ControlClaims {iss:state.config.jwt_issuer.clone(),aud:AUDIENCE.into(),
-                token_type:TOKEN_TYPE.into(),protocol:wire::PROTOCOL.into(),jti:uuid::Uuid::new_v4().to_string(),
-                iat:now.timestamp() as u64,exp:row.expires_at.timestamp() as u64,
-                user_id:row.user_id.clone(),conversation_id:row.conversation_id.clone(),api_key_id:row.api_key_id.clone(),
-                root_id:row.id.clone(),active_turn_id:turn_id.into(),origin,runtime_catalog_id:runtime_catalog_id.into(),
-                outer_request_binding:binding.clone()};
-            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-            header.kid = Some(state.jwt_keys.kid.clone());
-            let token = wire::SecretToken::parse(jsonwebtoken::encode(&header,&claims,&state.jwt_keys.encoding)
-                .map_err(|_| invalid())?).map_err(|_| invalid())?;
-            row.control_hashes.push(token_hash(token.expose()));
-            if !row.turn_ids.iter().any(|id| id == turn_id) { row.turn_ids.push(turn_id.into()); }
-            private.controls.push(BoundControl {claims,token:token.clone(),resumed_input:resumed_input.clone()});
-            if new {
-                row.private_ciphertext = persistence::seal(state,&row,&private).await?;
-                roots.insert_one(&row).session(&mut *session).await?;
-            } else {
-                persistence::save(state,&mut row,&private,session).await?;
-            }
-            Ok(Some(token))
-        }.await;
-        super::super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::super::api_key_mutation_service::map_transaction_error)?;
+    let token = session.start_transaction().and_run(
+            (state, chat, &roots, &filter, &input, turn_id, runtime_catalog_id, now, &binding, &resumed_input),
+            |session, context| {
+                let (state, chat, roots, filter, input, turn_id, runtime_catalog_id, now, binding, resumed_input) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (live, _, _) = acks::fence(&state.db, chat, session).await?;
+                        super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
+                        let mut cursor=roots.find(filter.clone()).limit(2).session(&mut *session).await?;
+                        let current:Vec<ModelControlRoot>=cursor.stream(&mut *session).try_collect().await?;
+                        if current.len()>1 {return Err(conflict());}
+                        let (mut row, mut private, new) = if let Some(expected) = current.first() {
+                            let (row, private) = persistence::load(state, &expected.id, Some(&mut *session)).await?;
+                            (row, private, false)
+                        } else {
+                            // An unrelated old card never upgrades into reusable consent.
+                            if input.continuation_of.is_some() || input.retry_of.is_some() { return Ok(None); }
+                            (ModelControlRoot {
+                                id:uuid::Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),
+                                conversation_id:chat.conversation_id.clone(),api_key_id:chat.api_key_id.clone(),
+                                turn_ids:vec![turn_id.into()],runtime_catalog_id:runtime_catalog_id.into(),
+                                phase:"unactivated".into(),acknowledgement_id:None,card_arguments:None,
+                                revision:0,control_hashes:vec![],private_ciphertext:vec![],created_at:now,
+                                expires_at:now+Duration::minutes(35),
+                            },RootPrivate {controls:vec![],envelope:None,initial_input:vec![],
+                                connection_id:None,connection_binding:None,owner_id:None,catalog_id:None,
+                                card_arguments:None,effective_headers_binding:None,steps:vec![],preconsent:read_observation::State::default(),initial_operation:StepOperation::Generation,initial_request_binding:None},true)
+                        };
+                        if row.user_id != chat.user_id || row.conversation_id != chat.conversation_id
+                            || row.api_key_id != chat.api_key_id
+                            || row.expires_at <= Utc::now() || row.runtime_catalog_id != runtime_catalog_id
+                            || matches!(row.phase.as_str(),"denied"|"revoked")
+                        { return Err(invalid()); }
+                        // A serving-revision change never adopts an old root/token. Drain
+                        // it under the old writer first; Deny retirement remains available.
+                        if private.controls.iter().any(|c| c.claims.protocol != wire::PROTOCOL) {
+                            return Err(invalid());
+                        }
+                        if new && (!read_observation::covered_in_session(state,chat,session).await?
+                            || state.db.collection::<Document>(super::super::assistant_service_execution::COLLECTION)
+                            .find_one(read_observation::marker_scope(chat)?).session(&mut *session).await?.is_some()) {
+                            private.preconsent.disable();
+                        }
+                        if let Some(bound) = private.controls.iter().find(|c|
+                            c.claims.active_turn_id == turn_id && &c.claims.outer_request_binding == binding)
+                        { return Ok(Some(bound.token.clone())); }
+                        if private.controls.len() >= MAX_STEPS { return Err(unsupported()); }
+                        let origin = if let Some(ack) = input.continuation_of.as_deref() {
+                            let card = state.db.collection::<AssistantAcknowledgement>("assistant_acknowledgements")
+                                .find_one(doc! {"_id":ack,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+                                    "api_key_id":&chat.api_key_id,"tool_name":"nyxid.model_control_v1"})
+                                .session(&mut *session).await?.ok_or_else(invalid)?;
+                            if row.acknowledgement_id.as_deref() != Some(ack) || row.phase != "allowed"
+                                || !matches!(card.status.as_str(),"allowed"|"used") || card.decider != "user"
+                                || card.decided_by.as_deref() != Some("user") || card.expires_at <= now
+                            { return Err(invalid()); }
+                            let first = private.controls.first().ok_or_else(invalid)?;
+                            let wire::ControlOrigin::Initial {input_id,creating_turn_id} = &first.claims.origin else { return Err(invalid()); };
+                            wire::ControlOrigin::AllowedContinuation {acknowledgement_id:ack.into(),
+                                saved_continuation_id:input.id.clone(),original_input_id:input_id.clone(),original_turn_id:creating_turn_id.clone()}
+                        } else if let Some(old) = &input.retry_of {
+                            if !row.turn_ids.contains(old) { return Err(invalid()); }
+                            wire::ControlOrigin::Retry {original_turn_id:old.clone(),saved_continuation_id:input.id.clone()}
+                        } else {
+                            wire::ControlOrigin::Initial {input_id:input.id.clone(),creating_turn_id:turn_id.into()}
+                        };
+                        let claims = wire::ControlClaims {iss:state.config.jwt_issuer.clone(),aud:AUDIENCE.into(),
+                            token_type:TOKEN_TYPE.into(),protocol:wire::PROTOCOL.into(),jti:uuid::Uuid::new_v4().to_string(),
+                            iat:now.timestamp() as u64,exp:row.expires_at.timestamp() as u64,
+                            user_id:row.user_id.clone(),conversation_id:row.conversation_id.clone(),api_key_id:row.api_key_id.clone(),
+                            root_id:row.id.clone(),active_turn_id:turn_id.into(),origin,runtime_catalog_id:runtime_catalog_id.into(),
+                            outer_request_binding:binding.clone()};
+                        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+                        header.kid = Some(state.jwt_keys.kid.clone());
+                        let token = wire::SecretToken::parse(jsonwebtoken::encode(&header,&claims,&state.jwt_keys.encoding)
+                            .map_err(|_| invalid())?).map_err(|_| invalid())?;
+                        row.control_hashes.push(token_hash(token.expose()));
+                        if !row.turn_ids.iter().any(|id| id == turn_id) { row.turn_ids.push(turn_id.into()); }
+                        private.controls.push(BoundControl {claims,token:token.clone(),resumed_input:resumed_input.clone()});
+                        if new {
+                            row.private_ciphertext = persistence::seal(state,&row,&private).await?;
+                            roots.insert_one(&row).session(&mut *session).await?;
+                        } else {
+                            persistence::save(state,&mut row,&private,session).await?;
+                        }
+                        Ok(Some(token))
+                    }.await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        ).await.map_err(super::super::api_key_mutation_service::map_transaction_error)?;
     Ok(token.map(|token| TargetedControl {
         token,
         runtime_catalog_id: runtime_catalog_id.into(),

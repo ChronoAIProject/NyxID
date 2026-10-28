@@ -193,70 +193,78 @@ pub(crate) async fn unobserved_http(
     let mut session = state.db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (live, _, _) = acks::fence(&state.db, chat, session).await?;
-                super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
-                let roots = state.db.collection::<ModelControlRoot>(COLLECTION_NAME);
-                let mut cursor = roots
-                    .find(root_scope.clone())
-                    .limit(MAX_STEPS as i64 + 1)
-                    .session(&mut *session)
-                    .await?;
-                let rows: Vec<ModelControlRoot> =
-                    cursor.stream(&mut *session).try_collect().await?;
-                if rows.len() > MAX_STEPS {
-                    return Err(conflict());
-                }
-                let mut saved = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let private = persistence::open(state, &row).await?;
-                    saved.push((row, private));
-                }
-                if target.service.inference.is_none()
-                    && !saved
-                        .iter()
-                        .any(|(_, private)| related(private, connection, &target.service.id))
-                {
-                    return Ok(());
-                }
-                // A card/activation can win after the caller's earlier lineage
-                // check. Read every phase under this same fence before permitting
-                // an unobserved send; never ignore a newly saved consent family.
-                if saved.iter().any(|(row, private)| {
-                    row.phase != "unactivated"
-                        && (target.service.inference.is_some()
-                            || related(private, connection, &target.service.id))
-                }) {
-                    return Err(conflict());
-                }
-                let scope = marker_scope(chat)?;
-                // No TTL: a long-lived turn cannot become pristine when a marker
-                // expires. Existing conversation/owner erasure removes the row.
-                state
-                    .db
-                    .collection::<Document>(super::super::assistant_service_execution::COLLECTION)
-                    .update_one(
-                        scope,
-                        doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string()}},
-                    )
-                    .upsert(true)
-                    .session(&mut *session)
-                    .await?;
-                for (row, private) in &mut saved {
-                    if !private.preconsent.ineligible
-                        && (target.service.inference.is_some()
-                            || related(private, connection, &target.service.id))
-                    {
-                        private.preconsent.disable();
-                        persistence::save(state, row, private, session).await?;
+        .and_run(
+            (state, chat, connection, target, &root_scope),
+            |session, context| {
+                let (state, chat, connection, target, root_scope) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (live, _, _) = acks::fence(&state.db, chat, session).await?;
+                        super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
+                        let roots = state.db.collection::<ModelControlRoot>(COLLECTION_NAME);
+                        let mut cursor = roots
+                            .find(root_scope.clone())
+                            .limit(MAX_STEPS as i64 + 1)
+                            .session(&mut *session)
+                            .await?;
+                        let rows: Vec<ModelControlRoot> =
+                            cursor.stream(&mut *session).try_collect().await?;
+                        if rows.len() > MAX_STEPS {
+                            return Err(conflict());
+                        }
+                        let mut saved = Vec::with_capacity(rows.len());
+                        for row in rows {
+                            let private = persistence::open(state, &row).await?;
+                            saved.push((row, private));
+                        }
+                        if target.service.inference.is_none()
+                            && !saved.iter().any(|(_, private)| {
+                                related(private, connection, &target.service.id)
+                            })
+                        {
+                            return Ok(());
+                        }
+                        // A card/activation can win after the caller's earlier lineage
+                        // check. Read every phase under this same fence before permitting
+                        // an unobserved send; never ignore a newly saved consent family.
+                        if saved.iter().any(|(row, private)| {
+                            row.phase != "unactivated"
+                                && (target.service.inference.is_some()
+                                    || related(private, connection, &target.service.id))
+                        }) {
+                            return Err(conflict());
+                        }
+                        let scope = marker_scope(chat)?;
+                        // No TTL: a long-lived turn cannot become pristine when a marker
+                        // expires. Existing conversation/owner erasure removes the row.
+                        state
+                            .db
+                            .collection::<Document>(
+                                super::super::assistant_service_execution::COLLECTION,
+                            )
+                            .update_one(
+                                scope,
+                                doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string()}},
+                            )
+                            .upsert(true)
+                            .session(&mut *session)
+                            .await?;
+                        for (row, private) in &mut saved {
+                            if !private.preconsent.ineligible
+                                && (target.service.inference.is_some()
+                                    || related(private, connection, &target.service.id))
+                            {
+                                private.preconsent.disable();
+                                persistence::save(state, row, private, session).await?;
+                            }
+                        }
+                        Ok(())
                     }
-                }
-                Ok(())
-            }
-            .await;
-            super::super::api_key_mutation_service::transaction_result(result)
-        })
+                    .await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(super::super::api_key_mutation_service::map_transaction_error)
 }
@@ -271,22 +279,25 @@ pub(super) async fn disable(
     let mut session = state.db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (mut row, mut private) =
-                    persistence::load(state, root, Some(&mut *session)).await?;
-                persistence::require_row(&row, chat)?;
-                if row.phase != "unactivated" {
-                    return Err(conflict());
+        .and_run((state, chat, root), |session, context| {
+            let (state, chat, root) = *context;
+            Box::pin(async move {
+                let result = async {
+                    let (mut row, mut private) =
+                        persistence::load(state, root, Some(&mut *session)).await?;
+                    persistence::require_row(&row, chat)?;
+                    if row.phase != "unactivated" {
+                        return Err(conflict());
+                    }
+                    if !private.preconsent.ineligible {
+                        private.preconsent.disable();
+                        persistence::save(state, &mut row, &private, session).await?;
+                    }
+                    Ok(())
                 }
-                if !private.preconsent.ineligible {
-                    private.preconsent.disable();
-                    persistence::save(state, &mut row, &private, session).await?;
-                }
-                Ok(())
-            }
-            .await;
-            super::super::api_key_mutation_service::transaction_result(result)
+                .await;
+                super::super::api_key_mutation_service::transaction_result(result)
+            })
         })
         .await
         .map_err(super::super::api_key_mutation_service::map_transaction_error)
@@ -330,67 +341,75 @@ pub(super) async fn prepare(
     let mut session = state.db.client().start_session().await?;
     let record = session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (live, _, _) = acks::fence(&state.db, chat, session).await?;
-                super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
-                let (mut row, mut private) =
-                    persistence::load(state, &root.id, Some(&mut *session)).await?;
-                persistence::require_row(&row, chat)?;
-                if row.phase != "unactivated" {
-                    return Err(conflict());
-                }
-                if private.preconsent.ineligible {
-                    return Ok(None);
-                }
-                let valid = parsed.as_ref().ok().filter(|(envelope, input)| {
-                    private.preconsent.reads.last().is_none_or(|read| {
-                        &read.envelope == envelope
-                            && read.authority == authority
-                            && read.control_hash == token_hash(token.expose())
-                            && continuation(read, input).is_ok()
-                    })
-                });
-                let Some((envelope, input)) = valid else {
-                    private.preconsent.disable();
-                    persistence::save(state, &mut row, &private, session).await?;
-                    return Ok(None);
-                };
-                if private.preconsent.reads.len() >= MAX_STEPS {
-                    private.preconsent.disable();
-                    persistence::save(state, &mut row, &private, session).await?;
-                    return Ok(None);
-                }
-                let record = Step {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    ordinal: private.preconsent.reads.len() as u32,
-                    request_binding: envelope::request_binding(candidate),
-                    input: input.clone(),
-                    capability_hash: String::new(),
-                    capability_ciphertext: vec![],
-                    phase: StepPhase::Prepared,
-                    operation: StepOperation::Generation,
-                    tools: vec![],
-                };
-                private.preconsent.seen = true;
-                private.preconsent.compact = None;
-                private.preconsent.reads.push(Read {
-                    envelope: envelope.clone(),
-                    authority: authority.clone(),
-                    control_hash: token_hash(token.expose()),
-                    record: record.clone(),
-                });
-                if serde_json::to_vec(&private).map_err(|_| invalid())?.len() > MAX_PRIVATE_BYTES {
-                    private.preconsent.disable();
-                    persistence::save(state, &mut row, &private, session).await?;
-                    return Ok(None);
-                }
-                persistence::save(state, &mut row, &private, session).await?;
-                Ok(Some(record))
-            }
-            .await;
-            super::super::api_key_mutation_service::transaction_result(result)
-        })
+        .and_run(
+            (state, chat, token, root, candidate, &authority, &parsed),
+            |session, context| {
+                let (state, chat, token, root, candidate, authority, parsed) = *context;
+                Box::pin(async move {
+                    let result = async {
+                        let (live, _, _) = acks::fence(&state.db, chat, session).await?;
+                        super::super::assistant_access_policy::require_same_live_turn(chat, &live)?;
+                        let (mut row, mut private) =
+                            persistence::load(state, &root.id, Some(&mut *session)).await?;
+                        persistence::require_row(&row, chat)?;
+                        if row.phase != "unactivated" {
+                            return Err(conflict());
+                        }
+                        if private.preconsent.ineligible {
+                            return Ok(None);
+                        }
+                        let valid = parsed.as_ref().ok().filter(|(envelope, input)| {
+                            private.preconsent.reads.last().is_none_or(|read| {
+                                &read.envelope == envelope
+                                    && &read.authority == authority
+                                    && read.control_hash == token_hash(token.expose())
+                                    && continuation(read, input).is_ok()
+                            })
+                        });
+                        let Some((envelope, input)) = valid else {
+                            private.preconsent.disable();
+                            persistence::save(state, &mut row, &private, session).await?;
+                            return Ok(None);
+                        };
+                        if private.preconsent.reads.len() >= MAX_STEPS {
+                            private.preconsent.disable();
+                            persistence::save(state, &mut row, &private, session).await?;
+                            return Ok(None);
+                        }
+                        let record = Step {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            ordinal: private.preconsent.reads.len() as u32,
+                            request_binding: envelope::request_binding(candidate),
+                            input: input.clone(),
+                            capability_hash: String::new(),
+                            capability_ciphertext: vec![],
+                            phase: StepPhase::Prepared,
+                            operation: StepOperation::Generation,
+                            tools: vec![],
+                        };
+                        private.preconsent.seen = true;
+                        private.preconsent.compact = None;
+                        private.preconsent.reads.push(Read {
+                            envelope: envelope.clone(),
+                            authority: authority.clone(),
+                            control_hash: token_hash(token.expose()),
+                            record: record.clone(),
+                        });
+                        if serde_json::to_vec(&private).map_err(|_| invalid())?.len()
+                            > MAX_PRIVATE_BYTES
+                        {
+                            private.preconsent.disable();
+                            persistence::save(state, &mut row, &private, session).await?;
+                            return Ok(None);
+                        }
+                        persistence::save(state, &mut row, &private, session).await?;
+                        Ok(Some(record))
+                    }
+                    .await;
+                    super::super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(super::super::api_key_mutation_service::map_transaction_error)?;
     Ok(record.map(|record| PreparedDispatch {
@@ -425,64 +444,67 @@ pub(super) async fn claim(
     let mut session = state.db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run2(async |session| {
-            let result = async {
-                let (live, _, _) = acks::fence(&state.db, &prepared.chat, session).await?;
-                super::super::assistant_access_policy::require_same_live_turn(
-                    &prepared.chat,
-                    &live,
-                )?;
-                let (mut row, mut private) =
-                    persistence::load(state, &prepared.root_id, Some(&mut *session)).await?;
-                persistence::require_row(&row, &prepared.chat)?;
-                if row.phase != "unactivated" {
-                    return Err(conflict());
-                }
-                let control = private
-                    .controls
-                    .iter()
-                    .find(|control| token_hash(control.token.expose()) == prepared.control_hash)
-                    .ok_or_else(invalid)?;
-                if control.claims.protocol != wire::PROTOCOL
-                    || control.claims.exp <= Utc::now().timestamp() as u64
-                    || Some(control.claims.active_turn_id.as_str())
-                        != prepared.chat.turn_id.as_deref()
-                {
-                    return Err(invalid());
-                }
-                let binding = super::super::assistant_service_execution::connection_binding(
-                    &state.db,
-                    &prepared.connection_id,
-                    &prepared.chat.api_key_id,
-                )
-                .await?;
-                if binding != prepared.connection_binding {
-                    return Err(conflict());
-                }
-                // A concurrent callback may have durably disabled observation.
-                // That is not a new denial of an otherwise admitted ordinary Read.
-                if !private.preconsent.ineligible {
-                    let read = private
-                        .preconsent
-                        .reads
-                        .iter_mut()
-                        .find(|r| r.record.id == prepared.step_id)
-                        .ok_or_else(conflict)?;
-                    if read.control_hash != prepared.control_hash
-                        || read.record.request_binding != prepared.request_binding
-                        || !matches!(read.record.phase, StepPhase::Prepared)
-                    {
+        .and_run((state, prepared, &dispatch_id), |session, context| {
+            let (state, prepared, dispatch_id) = *context;
+            Box::pin(async move {
+                let result = async {
+                    let (live, _, _) = acks::fence(&state.db, &prepared.chat, session).await?;
+                    super::super::assistant_access_policy::require_same_live_turn(
+                        &prepared.chat,
+                        &live,
+                    )?;
+                    let (mut row, mut private) =
+                        persistence::load(state, &prepared.root_id, Some(&mut *session)).await?;
+                    persistence::require_row(&row, &prepared.chat)?;
+                    if row.phase != "unactivated" {
                         return Err(conflict());
                     }
-                    read.record.phase = StepPhase::Dispatched {
-                        dispatch_id: dispatch_id.clone(),
-                    };
-                    persistence::save(state, &mut row, &private, session).await?;
+                    let control = private
+                        .controls
+                        .iter()
+                        .find(|control| token_hash(control.token.expose()) == prepared.control_hash)
+                        .ok_or_else(invalid)?;
+                    if control.claims.protocol != wire::PROTOCOL
+                        || control.claims.exp <= Utc::now().timestamp() as u64
+                        || Some(control.claims.active_turn_id.as_str())
+                            != prepared.chat.turn_id.as_deref()
+                    {
+                        return Err(invalid());
+                    }
+                    let binding = super::super::assistant_service_execution::connection_binding(
+                        &state.db,
+                        &prepared.connection_id,
+                        &prepared.chat.api_key_id,
+                    )
+                    .await?;
+                    if binding != prepared.connection_binding {
+                        return Err(conflict());
+                    }
+                    // A concurrent callback may have durably disabled observation.
+                    // That is not a new denial of an otherwise admitted ordinary Read.
+                    if !private.preconsent.ineligible {
+                        let read = private
+                            .preconsent
+                            .reads
+                            .iter_mut()
+                            .find(|r| r.record.id == prepared.step_id)
+                            .ok_or_else(conflict)?;
+                        if read.control_hash != prepared.control_hash
+                            || read.record.request_binding != prepared.request_binding
+                            || !matches!(read.record.phase, StepPhase::Prepared)
+                        {
+                            return Err(conflict());
+                        }
+                        read.record.phase = StepPhase::Dispatched {
+                            dispatch_id: dispatch_id.clone(),
+                        };
+                        persistence::save(state, &mut row, &private, session).await?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            .await;
-            super::super::api_key_mutation_service::transaction_result(result)
+                .await;
+                super::super::api_key_mutation_service::transaction_result(result)
+            })
         })
         .await
         .map_err(super::super::api_key_mutation_service::map_transaction_error)?;

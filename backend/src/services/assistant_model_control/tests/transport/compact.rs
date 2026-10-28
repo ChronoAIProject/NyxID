@@ -388,7 +388,10 @@ async fn real_one_allow_generation_tool_compact_json_eof_and_full_replacement_ke
     assert!(callback(&c, &next_body, Some(&next_step)).await.is_err());
     assert_eq!(peer.calls.load(Ordering::SeqCst), 3);
     let bodies = peer.bodies.lock().await;
-    assert_eq!(bodies[1], ("responses/compact".into(), candidate.body));
+    assert_eq!(
+        bodies[1],
+        ("responses/compact".into(), candidate.body.clone())
+    );
     assert_eq!(bodies[2].1["input"], canonical["output"]);
     assert_eq!(bodies[0].1["tools"], bodies[2].1["tools"]);
     assert_eq!(
