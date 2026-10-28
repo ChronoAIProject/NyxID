@@ -23,17 +23,22 @@ struct TransactionStatement {
     request_id: i32,
     update_id: i64,
     transaction: i64,
+    session: usize,
     command: &'static str,
     collection: &'static str,
     statement: &'static str,
     code: Option<i32>,
     transient: bool,
+    unknown_commit: bool,
+    succeeded: bool,
 }
 
 #[derive(Default)]
 struct TransactionTrace {
     pending: HashMap<i32, TransactionStatement>,
-    failures: Vec<TransactionStatement>,
+    outcomes: Vec<TransactionStatement>,
+    // Session BSON stays private; diagnostics use only a fixture-local ordinal.
+    sessions: Vec<bson::Document>,
     overflowed: bool,
 }
 
@@ -44,7 +49,9 @@ fn transaction_observer(
     EventHandler::callback(move |event| {
         let mut trace = trace.lock().unwrap();
         match event {
-            CommandEvent::Started(event) if event.command_name == "update" => {
+            CommandEvent::Started(event)
+                if matches!(event.command_name.as_str(), "update" | "commitTransaction") =>
+            {
                 let Ok(update_id) = WEBHOOK_UPDATE.try_with(|id| *id) else {
                     return;
                 };
@@ -54,11 +61,28 @@ fn transaction_observer(
                 let Ok(transaction) = event.command.get_i64("txnNumber") else {
                     return;
                 };
+                let Ok(session_id) = event.command.get_document("lsid") else {
+                    trace.overflowed = true;
+                    return;
+                };
+                let session = match trace.sessions.iter().position(|id| id == session_id) {
+                    Some(index) => index,
+                    None if trace.sessions.len() < 8 => {
+                        trace.sessions.push(session_id.clone());
+                        trace.sessions.len() - 1
+                    }
+                    None => {
+                        trace.overflowed = true;
+                        return;
+                    }
+                };
+                let commit = event.command_name == "commitTransaction";
                 let collection = match event.command.get_str("update").unwrap_or_default() {
                     crate::models::user::COLLECTION_NAME => "users",
                     crate::models::org_membership::COLLECTION_NAME => "org_memberships",
                     CREDENTIALS => "platform_credentials",
                     REQUESTS => "telegram_bot_requests",
+                    _ if commit => "transaction",
                     _ => "other",
                 };
                 let update = event
@@ -71,7 +95,9 @@ fn transaction_observer(
                 let increments = update
                     .and_then(|u| u.get_document("u").ok())
                     .and_then(|u| u.get_document("$inc").ok());
-                let statement = if increments
+                let statement = if commit {
+                    "commit"
+                } else if increments
                     .is_some_and(|u| u.contains_key("membership_authority_revision"))
                 {
                     if query.and_then(|q| q.get_str("user_type").ok()) == Some("org") {
@@ -96,31 +122,74 @@ fn transaction_observer(
                         request_id: event.request_id,
                         update_id,
                         transaction,
-                        command: "update",
+                        session,
+                        command: if commit {
+                            "commitTransaction"
+                        } else {
+                            "update"
+                        },
                         collection,
                         statement,
                         code: None,
                         transient: false,
+                        unknown_commit: false,
+                        succeeded: false,
                     },
                 );
             }
             CommandEvent::Succeeded(event) => {
-                trace.pending.remove(&event.request_id);
+                if let Some(mut statement) = trace.pending.remove(&event.request_id) {
+                    // Mongo can report a write error in an otherwise successful
+                    // command. Record exact codes/labels, never infer an abort
+                    // from a mere successful reply or retain reply/error prose.
+                    let write_errors = event.reply.get_array("writeErrors").ok();
+                    let write_concern = event.reply.get_document("writeConcernError").ok();
+                    statement.succeeded = (!event.reply.contains_key("writeErrors")
+                        || write_errors.is_some_and(Vec::is_empty))
+                        && !event.reply.contains_key("writeConcernError");
+                    statement.code = write_errors
+                        .filter(|errors| errors.len() == 1 && write_concern.is_none())
+                        .and_then(|errors| errors[0].as_document())
+                        .or(write_concern)
+                        .and_then(|error| error.get_i32("code").ok());
+                    let labels = event.reply.get_array("errorLabels").ok();
+                    statement.transient = labels.is_some_and(|labels| {
+                        labels
+                            .iter()
+                            .any(|label| label.as_str() == Some("TransientTransactionError"))
+                    });
+                    statement.unknown_commit = labels.is_some_and(|labels| {
+                        labels
+                            .iter()
+                            .any(|label| label.as_str() == Some("UnknownTransactionCommitResult"))
+                    });
+                    if trace.outcomes.len() >= 32 {
+                        trace.overflowed = true;
+                    } else {
+                        trace.outcomes.push(statement);
+                    }
+                }
             }
             CommandEvent::Failed(event) => {
                 if let Some(mut statement) = trace.pending.remove(&event.request_id) {
+                    use mongodb::error::{ErrorKind, WriteFailure};
                     statement.code = match event.failure.kind.as_ref() {
-                        mongodb::error::ErrorKind::Command(error) => Some(error.code),
+                        ErrorKind::Command(error) => Some(error.code),
+                        ErrorKind::Write(WriteFailure::WriteError(error)) => Some(error.code),
+                        ErrorKind::Write(WriteFailure::WriteConcernError(error)) => {
+                            Some(error.code)
+                        }
                         _ => None,
                     };
                     statement.transient = event.failure.contains_label("TransientTransactionError");
-                    if trace.failures.len() >= 16 {
+                    statement.unknown_commit = event
+                        .failure
+                        .contains_label("UnknownTransactionCommitResult");
+                    if trace.outcomes.len() >= 32 {
                         trace.overflowed = true;
-                        return;
+                    } else {
+                        trace.outcomes.push(statement);
                     }
-                    // Retain fixed categories/numbers only, never command BSON,
-                    // provider bodies, private text, tokens or Mongo error prose.
-                    trace.failures.push(statement);
                 }
             }
             _ => {}
@@ -574,6 +643,15 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
         StatusCode::OK
     );
 
+    let pending = manager.get(&actor, request_id).await.unwrap();
+    let pending_snapshot = bson::to_document(&pending).unwrap();
+    let child_filter = doc! {"$or": [{"_id": request_id}, {"platform": {"$in": ["telegram", "telegram-new"]}, "platform_bot_id": "900"}]};
+    let events = state
+        .db
+        .collection::<bson::Document>(crate::models::telegram_bot_request::MANAGED_BOTS);
+    let event_filter = doc! {"manager_bot_id": pending.manager_bot_id, "telegram_bot_id": 900_i64};
+    let mut management_event = None;
+
     for (index, chat, sender, kind) in [
         (11, 700, 700, "private"),
         (12, 701, 701, "private"),
@@ -609,77 +687,207 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
                     .status(),
                 StatusCode::OK
             );
+            management_event = events.find_one(event_filter.clone()).await.unwrap();
         }
     }
+    // No additional awaited work between chat13 and creation15: keep the
+    // original overlap with asynchronous ordinary-message admission.
+    let mut expected_event = management_event.expect("management update14 must be recorded");
     let mut created = message(json!({"managed_bot_created": {"bot": bot()}}));
     created["update_id"] = json!(15);
+    expected_event.insert("created_by", 700_i64);
+    expected_event.insert("bot_username", bot()["username"].as_str().unwrap());
+    expected_event.insert("observation_id", &pending.observation_id);
+    expected_event.insert(
+        "created_at",
+        bson::DateTime::from_millis(created["message"]["date"].as_i64().unwrap() * 1_000),
+    );
+    // Reuse these exact bytes/date/update15 on redelivery and duplicate; never
+    // replace the fixture, original request, creation proof or provider identity.
+    let created_body = serde_json::to_vec(&created).unwrap();
+    let mut definite_aborts = 0;
+    // Ordinary chat admission writes the same owner user document as creation
+    // authority fences. Either ownership type may definitely abort under overlap.
     for attempt in 0..3 {
-        trace.lock().unwrap().failures.clear();
+        trace.lock().unwrap().outcomes.clear();
         let response = state
             .http_client
             .post(&inbound)
             .headers(headers(&state).await)
-            .json(&created)
+            .header("content-type", "application/json")
+            .body(created_body.clone())
             .send()
             .await
             .unwrap();
         let status = response.status();
+        let (outcomes, overflowed, pending_commands) = {
+            let observations = trace.lock().unwrap();
+            (
+                observations.outcomes.clone(),
+                observations.overflowed,
+                observations.pending.len(),
+            )
+        };
+        // Emit allowlisted operation AND commit evidence before any response
+        // assertion/body decoding, including unexpected statuses and failures.
+        eprintln!(
+            "telegram_manager_creation_response attempt={attempt} org_owned={org_owned} update=15 status={status} overflowed={overflowed} pending={pending_commands} mongo={outcomes:?}"
+        );
+        assert!(!overflowed);
+        assert_eq!(pending_commands, 0);
+        assert!(!outcomes.iter().any(|outcome| outcome.unknown_commit));
         if status == StatusCode::OK {
+            assert!(outcomes.iter().all(|outcome| outcome.succeeded));
+            assert!(
+                outcomes
+                    .iter()
+                    .any(|outcome| outcome.command == "commitTransaction")
+            );
             break;
         }
         let envelope: Value = response.json().await.unwrap();
-        // The envelope classifies retryability; a correlated Mongo failure is
-        // additionally required to establish the originating statement/cause.
         assert_eq!(status, StatusCode::CONFLICT, "{envelope}");
-        assert!(org_owned, "personal creation must not conflict: {envelope}");
         assert_eq!(envelope["error_code"], 1004, "{envelope}");
         assert_eq!(envelope["error"], "conflict", "{envelope}");
         assert_eq!(
             envelope["message"], "Conflict: Security state changed; restart the operation",
             "{envelope}"
         );
-        {
-            let observations = trace.lock().unwrap();
-            assert!(!observations.overflowed);
-            let failure = observations
-                .failures
-                .last()
-                .expect("transient HTTP conflict requires a correlated Mongo failure");
-            assert_eq!(failure.update_id, 15);
-            assert_eq!(failure.command, "update");
-            assert_eq!(failure.collection, "users");
-            assert_eq!(failure.statement, "owner_org_fence");
-            assert_eq!(failure.code, Some(112));
-            assert!(failure.transient);
-            assert!(failure.request_id > 0 && failure.transaction > 0);
-            eprintln!("telegram_manager_creation_retry envelope={envelope} mongo={failure:?}");
-        }
+        let failures: Vec<_> = outcomes
+            .iter()
+            .filter(|outcome| !outcome.succeeded)
+            .collect();
+        assert_eq!(
+            failures.len(),
+            1,
+            "conflict requires one correlated definite abort"
+        );
+        let failure = failures[0];
+        assert_eq!(failure.update_id, 15);
+        assert_eq!(failure.code, Some(112));
+        assert!(failure.transient);
+        assert!(failure.request_id > 0 && failure.transaction >= 0);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.session == failure.session
+                    && outcome.transaction == failure.transaction)
+        );
+        assert!(
+            match (failure.command, failure.collection, failure.statement) {
+                ("update", "users", "actor_person_fence")
+                | ("update", "platform_credentials", "telegram_creation_fence")
+                | ("update", "telegram_bot_requests", "request_mutation") => true,
+                ("update", "users", "owner_org_fence")
+                | ("update", "org_memberships", "telegram_creation_fence") => org_owned,
+                ("commitTransaction", "transaction", "commit") =>
+                    outcomes.iter().any(|outcome| outcome.command == "update"
+                        && outcome.statement == "request_mutation"
+                        && outcome.succeeded),
+                _ => false,
+            },
+            "unclassified creation conflict"
+        );
+        // Definite abort must leave the whole request (including revision,
+        // context, expiry, actor/owner and start boundary) unchanged.
+        let unchanged = manager.get(&actor, request_id).await.unwrap();
+        assert!(
+            bson::to_document(&unchanged).unwrap() == pending_snapshot,
+            "aborted creation mutated the original request"
+        );
+        assert!(
+            events
+                .find_one(event_filter.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                == expected_event,
+            "creation provenance changed across abort/redelivery"
+        );
+        assert_eq!(
+            events.count_documents(event_filter.clone()).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .count_documents(child_filter.clone())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(!server.received_requests().await.unwrap().iter().any(
+            |request| request.url.path() == format!("/bot{MANAGER}/getManagedBotToken")
+                || request.url.path() == format!("/bot{CHILD}/setWebhook")
+        ));
+        definite_aborts += 1;
+        eprintln!(
+            "telegram_manager_creation_definite_abort attempt={attempt} org_owned={org_owned} update=15 code=112 transient=true unknown_commit=false unchanged_request=true no_child_effect=true"
+        );
         assert!(
             attempt < 2,
             "fresh creation did not settle after bounded redelivery"
         );
+        // Preserve initial chat/creation overlap. Only after a proven abort,
+        // await the already-issued callbacks' completion before redelivery.
         wait_for_callbacks(&state, &channel, 3).await;
     }
 
     let consumed = manager.get(&actor, request_id).await.unwrap();
     assert_eq!(consumed.status, Status::Ready);
     assert_eq!(consumed.telegram_bot_id, Some(900));
+    let mut expected_request = pending_snapshot;
+    expected_request.insert("status", "ready");
+    expected_request.insert("telegram_bot_id", 900_i64);
+    expected_request.insert("bot_username", bot()["username"].as_str().unwrap());
+    expected_request.insert("manager_revision", 1_i64);
+    expected_request.insert("revision", pending.revision + 1);
+    assert!(
+        bson::to_document(&consumed).unwrap() == expected_request,
+        "creation must consume the same request exactly once"
+    );
+    assert!(
+        events
+            .find_one(event_filter.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            == expected_event,
+        "creation must preserve its original management provenance"
+    );
+    assert_eq!(
+        events.count_documents(event_filter.clone()).await.unwrap(),
+        1
+    );
     assert_eq!(
         state
             .http_client
             .post(&inbound)
             .headers(headers(&state).await)
-            .json(&created)
+            .header("content-type", "application/json")
+            .body(created_body)
             .send()
             .await
             .unwrap()
             .status(),
         StatusCode::OK,
     );
-    assert_eq!(
-        manager.get(&actor, request_id).await.unwrap().revision,
-        consumed.revision
+    assert!(
+        bson::to_document(&manager.get(&actor, request_id).await.unwrap()).unwrap()
+            == expected_request,
+        "duplicate creation changed the consumed request"
     );
+    assert!(
+        events
+            .find_one(event_filter.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            == expected_event,
+        "duplicate creation changed immutable provenance"
+    );
+    assert_eq!(events.count_documents(event_filter).await.unwrap(), 1);
     provider_connection(&server, request_id, 200).await;
     manager.complete_pending_creations().await.unwrap();
     manager.complete_pending_creations().await.unwrap();
@@ -708,7 +916,7 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
         state
             .db
             .collection::<ChannelBot>(BOTS)
-            .count_documents(doc! {"_id": request_id})
+            .count_documents(child_filter.clone())
             .await
             .unwrap(),
         1
@@ -786,6 +994,9 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
             .filter(|r| r.url.path() == format!("/bot{CHILD}/setWebhook"))
             .count(),
         1
+    );
+    eprintln!(
+        "telegram_manager_creation_complete org_owned={org_owned} update=15 definite_aborts={definite_aborts} same_event_ready=true duplicate_stable=true child_count=1 token_calls=1 webhook_calls=1"
     );
     let replies: Vec<_> = sent
         .iter()
