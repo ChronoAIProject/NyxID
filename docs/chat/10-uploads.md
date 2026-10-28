@@ -442,16 +442,32 @@ that typed metadata and the server-owned delivery state; older free-form
 generated summaries are withheld. Unmarked legacy watches retain the existing
 bounded text-result path.
 
+Admission binds the resolved catalog ID in `artifact_catalog_service_id`; the
+live catalog must match the compiled Sandbox registry and exact operation/target
+contract before acquisition. Instance names, endpoint names and URLs alone are
+not identity proof. Missing or changed snapshots on admitted pending watches
+settle as source-verification failure without repeated fetches; no name-based
+backfill is allowed. Already-materialized owner reads retain their existing
+authorization and retention semantics.
+
 | Bound | Generated-result contract |
 | --- | --- |
 | Status / legacy text | 16 KiB |
 | Exact Sandbox result JSON | 13 MiB |
 | Files per result | 8, bounded during deserialization |
-| Decoded total | 9 MiB |
+| Accepted decoded total | 9 MiB; rejected files do not consume this allowance |
 | One raster image | 5 MiB, existing signature validation |
 | One video or download-only file | 8 MiB |
 | Result worker | One per process |
 | Result memory reservation | 22 MiB payload, weighted twice by the shared 192 MiB budget |
+
+Within a valid envelope, each parsed invalid, oversized or unavailable file gets
+an indexed, sanitized "generated but not delivered" reason; valid peers remain
+deliverable. Saved outcomes survive watch cleanup. Missing settlement files are
+omitted without blocking valid peers, while contradictory lineage is refused.
+Malformed, over-13-MiB or over-eight-entry envelopes produce an explicit whole
+result refusal, with no silent truncation or claim to process unseen files.
+The actual Sandbox producer shape and these bounds still require live acceptance.
 
 The single result reservation begins before HTTP body reading and spans JSON,
 base64 decode, validation, hashing, encryption and pending persistence. Cancellation
@@ -459,6 +475,15 @@ releases it. Materialization also reserves through pending ciphertext loading,
 decryption and attachment encryption. Authenticated egress reserves the exact
 stored size; its permit follows the actual byte buffer, including HTTP-buffered
 clones and range slices, until released.
+
+Only admitted artifact RESULT calls use strict owned UTF-8 decoding. Typed
+oversized/malformed-body refusals preserve downstream HTTP status and observed
+byte accounting without replacement-text expansion; settlement and audits run
+before returning the decode refusal. Explicit HTTP 410 means source expiry, then
+size refusal takes precedence over malformed UTF-8, including a split multibyte
+prefix at the limit. Known
+malformed bodies settle terminally; otherwise valid 5xx retains ordinary retry
+behavior. Ordinary text and resource callers keep their existing decoding.
 
 The status snapshots before and after result retrieval must name the exact
 operation and have equal lifecycle version tokens, including equal token
@@ -476,12 +501,25 @@ fixture proves the allowed maximum fits. Contextual envelope encryption binds
 owner, conversation, original turn, watch, operation and source identity; durable
 attachment context additionally binds the completion turn. The bounded operator
 verification/rewrap registry includes this collection. Pending rows expire at
-`min(source expiry when supplied, watch expiry)`. Materialized attachments store
-`min(source expiry, watch expiry, normal retention deadline at materialization)`.
-Current retention can shorten availability and never extends the stored limit.
+`min(source expiry when supplied, watch expiry)`. Once materialized, attachments
+store their ordinary retention deadline from attachment creation, independently
+of that acquisition deadline. Current per-file policy, deletion and erasure may
+shorten availability but never extend the stored limit. Shared watch lineage is
+retained through the maximum saved attachment expiry without extending source
+acquisition or worker deadlines. Source-summary expiry remains bounded; normal
+settlement clears its encrypted summary immediately.
 Cancellation and expiry clear pending ciphertext; conversation deletion and owner
-purge remove both pending rows and recovery associations. Materialized files use
-the existing retention sweep.
+purge remove pending rows, recovery associations and content-series metadata.
+Materialized files use the existing retention sweep.
+
+`generated_artifact_content_series` is metadata-only, with a unique index on owner,
+conversation, trusted catalog ID and full canonical-path digest (before display
+truncation). In the fenced persistence transaction, verified bytes from a
+successful execution start at Revision 1 and changed content advances the series;
+unchanged bytes and replay retain the label. Failed/rejected modifications never
+advance the series or relabel prior files; verified output from an unsuccessful
+execution has no numeric revision. Lifecycle version tokens are separate. Legacy
+saved files retain their existing labels and access without a series backfill.
 
 The owner route remains
 `GET /api/v1/assistant/nyxagent/conversations/{id}/attachments/{attachment_id}`.
@@ -499,10 +537,13 @@ without a matching validator also receives the complete response.
 
 MP4 validation walks bounded ISO-BMFF boxes and checks a real visual track,
 dimensions, visual sample entries/configuration, sample counts/chunk mappings,
-complete media extents and self-contained references. Preview is currently
-allowlisted for the tested AVC Baseline/four-byte-NAL configuration. Other
-accepted visual codecs remain download-only. Browser decode failure removes
-playback and preserves download. MP4 markers without that structure are rejected.
+complete media extents and self-contained references. Preview accepts verified
+AVC Baseline and eight-bit 4:2:0 High with four-byte NAL lengths and matching
+configuration/SPS metadata. Fragmented MP4, including mixed initial samples and
+fragments, validates both sample layouts and remains download-only; other accepted
+visual codecs also remain download-only. These cards fetch bytes only on explicit
+owner download. Browser decode failure removes playback and preserves download.
+MP4 markers without that structure are rejected.
 
 `POST /api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery`
 requires an **empty body**, a first-party human owner and an idle conversation.
@@ -511,10 +552,13 @@ exact event/watch/operation/source/attachment lineage, and retries only saved
 materialization. Unique message and watch/event identities plus conflict-safe
 readback make duplicate settlement/recovery idempotent. A live owner Web turn
 may invoke the no-argument internal action described in [09](09-nyxbot-orchestrator.md#verified-sandbox-files-and-recovery).
-Once file IDs exist, the saved delivery association expires at the minimum
-persisted attachment deadline. Recovery rechecks the current retention policy
-and attachment/tombstone state in its transaction; history applies live retention
-as well, so policy shortening cannot leave an expired file advertised as recoverable.
+Once file IDs exist, the saved delivery association uses the maximum persisted
+attachment deadline. Recovery rechecks each file's current retention policy and
+attachment/tombstone state in its transaction, reuses retained peers and never
+extends or recreates expired bytes. It returns 410 when no retained peers remain,
+including after terminal watch TTL cleanup; it never substitutes an older result.
+History applies live retention as well, so policy shortening cannot leave an
+expired file advertised as recoverable.
 Capacity exhaustion retains pending bytes until source/watch expiry; unavailable
 slots never trigger regeneration. Expired, cancelled, missing, unauthorized and
 failed-delivery states have separate UI copy.
@@ -527,20 +571,29 @@ actor attribution and audit-chain handling remain in the audit service.
 
 ### Generated-artifact rollout and rollback
 
-1. Keep `assistant:generated-artifacts` disabled (its registered default).
-2. Deploy parser, optional metadata, recovery handlers and collection/index
-   creation to **every API and async worker**.
-3. Drain/remove old workers and writers; verify no old binary can claim watches.
-4. Verify the new artifact-capable build on every relevant replica and the unique
-   pending/delivery indexes. Existing security readiness requires the instance
-   roster and drained acknowledgement before enabling this flag.
+1. Keep `assistant:generated-artifacts` disabled globally and in personal overrides.
+2. Ship the generic attachment reader in an **earlier compatible frontend release**
+   and verify delivered client builds, including stale-client refresh behavior.
+   Unknown MIME/origin values must survive history and active-turn parsing and
+   render the authenticated generic download fallback before new data is admitted.
+3. Upgrade **every API, async worker and artifact writer**, including parser,
+   metadata, recovery and pending/delivery/content-series index creation. Drain
+   incompatible writers and verify that no old binary can claim new watches.
+4. Verify replica/build identities and indexes, including the scoped unique series
+   index; old writers hardcode Revision 1. Inventory legacy admitted pending watches
+   missing a trusted catalog snapshot for explicit terminal disposition, without
+   inferred backfill or a delivered claim. Existing security readiness requires
+   the instance roster and drained acknowledgement before enabling this flag.
 5. Enable only the intended Web audience, inspect bounded pending/materialized/
    terminal counts and cleanup, then broaden deliberately.
 
-Rollback disables new admission first. Keep upgraded workers and cleanup running
-until artifact-enabled watches are terminal/materialized or source-expired and
-pending ciphertext is cleared. Do not restart an old binary while such watches
-remain pending, delete collections, or rewrite existing attachment bytes. Flag-off
-legacy watches remain readable; admitted artifact watches drain while disabled.
+Rollback disables new admission first and retains upgraded drain/recovery/cleanup
+paths. Disabling the flag does not make old writers safe for newly admitted watches
+or series state. Distinguish executable pending work from terminal lineage retained
+for saved-file recovery; do not require all watch metadata to disappear. Keep the
+compatible frontend reader floor while generated metadata remains in history,
+even after byte expiry. Do not delete collections, relabel files or rewrite bytes
+to enable an old-binary rollback. Legacy watches remain readable; admitted artifact
+watches drain while disabled under the saved authority checks.
 Live source-to-originating-Web acceptance remains a release gate separate from
 fixture/browser tests.
