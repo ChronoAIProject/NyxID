@@ -64,7 +64,7 @@ pub(crate) async fn tool_prepare(
                 let (mut row, mut private) =
                     persistence::load(state, &root.id, Some(&mut *session)).await?;
                 persistence::require_row(&row, chat)?;
-                if row.phase != "allowed" {
+                if !matches!(row.phase.as_str(), "allowed" | "unactivated") || (row.phase == "unactivated" && private.preconsent.ineligible) {
                     return Err(conflict());
                 }
                 let control_hash = token_hash(token.expose());
@@ -80,7 +80,7 @@ pub(crate) async fn tool_prepare(
                 if let Some((_,evidence))=source.as_ref() {
                     require_refusal_reuse(&private,evidence,&control_hash,request.result_char_limit,&request.name,&request.arguments)?;
                 }
-                let step = private.steps.last_mut().ok_or_else(conflict)?;
+                let step = private.active_tool_step_mut(&row.phase, &token_hash(token.expose()))?;
                 let call = declaration(
                     step,
                     request.call_id.as_deref(),
@@ -164,12 +164,13 @@ pub(crate) async fn tool_status(
         return Err(invalid());
     }
     let (row, private, _) = persistence::authenticated(state, chat, token, None).await?;
-    if row.id != request.tool.root_id || row.phase != "allowed" {
+    if row.id != request.tool.root_id || !matches!(row.phase.as_str(), "allowed" | "unactivated")
+        || (row.phase == "unactivated" && private.preconsent.ineligible) {
         return Err(invalid());
     }
     let tool = private
-        .steps
-        .iter()
+        .tool_steps()
+        .filter(|step| (row.phase=="allowed")==private.steps.iter().any(|written|written.id==step.id))
         .find(|s| s.id == request.tool.step_id)
         .and_then(|s| {
             s.tools.iter().find(|t| {
@@ -206,10 +207,10 @@ pub(crate) async fn tool_claim(
                 let (mut row, mut private) =
                     persistence::load(state, &root.id, Some(&mut *session)).await?;
                 persistence::require_row(&row, chat)?;
-                if row.phase != "allowed" {
+                if !matches!(row.phase.as_str(), "allowed" | "unactivated") || (row.phase == "unactivated" && private.preconsent.ineligible) {
                     return Err(conflict());
                 }
-                let step = private.steps.last_mut().ok_or_else(conflict)?;
+                let step = private.active_tool_step_mut(&row.phase, &token_hash(token.expose()))?;
                 let call_id = step
                     .tools
                     .iter()
@@ -264,7 +265,7 @@ pub(crate) async fn tool_complete(
     session.start_transaction().and_run2(async |session| {
         let result=async {
             let (mut row,mut private)=persistence::load(state,&dispatch.root_id,Some(&mut *session)).await?;
-            let step=private.steps.iter_mut().find(|s| s.id==dispatch.step_id).ok_or_else(conflict)?;
+            let step=private.tool_step_mut(&dispatch.step_id)?;
             let StepPhase::Completed {completion,..}=&step.phase else {return Err(conflict());};
             let call=completion.calls.iter().find(|c| c.call_id==dispatch.call_id).ok_or_else(conflict)?;
             let tool=step.tools.iter_mut().find(|t| t.call_id==dispatch.call_id).ok_or_else(conflict)?;
@@ -323,7 +324,7 @@ fn refusal_source(
     control_hash: &str,
     limit: usize,
 ) -> AppResult<(wire::ToolResultReceipt, RefusalEvidence)> {
-    for step in &private.steps {
+    for step in private.tool_steps() {
         for tool in &step.tools {
             if tool.control_hash.as_deref() != Some(control_hash) || tool.result_char_limit != limit
             {
@@ -367,7 +368,7 @@ fn require_refusal_reuse(
         // Local Invalid(A), Invalid(B), repeat A returns the latest B text.
         // Prove A's previous *actual* invalid attempt independently; B remains
         // the canonical source of text/activity. Reuse alone cannot invent A.
-        let proved=private.steps.iter().flat_map(|s|s.tools.iter()).any(|tool|
+        let proved=private.tool_steps().flat_map(|s|s.tools.iter()).any(|tool|
             tool.control_hash.as_deref()==Some(control_hash) && tool.result_char_limit==limit
             && matches!(&tool.phase,HostToolPhase::Completed{receipt} if receipt.evidence==wire::ToolResultEvidence::Executed)
             && tool.refusal_evidence.as_ref().is_some_and(|old|old.kind==wire::RefusalKind::Invalid
@@ -458,6 +459,9 @@ mod reuse_tests {
             catalog_id: None,
             card_arguments: None,
             effective_headers_binding: None,
+            preconsent: read_observation::State::default(),
+            initial_operation: StepOperation::Generation,
+            initial_request_binding: None,
             steps: vec![
                 completed_invalid("call-a", "A"),
                 completed_invalid("call-b", "B"),

@@ -6,12 +6,13 @@ use zeroize::Zeroizing;
 // This exact revision is advertised/negotiated on both peers. Earlier peers
 // cannot prove the canonical compact family, projected/refusal results or the
 // required character limit. Never migrate active roots or imply compatibility.
-pub const PROTOCOL: &str = "nyxid-owner-model-control-v1-canonical-compact-1";
+pub const PROTOCOL: &str = "nyxid-owner-model-control-v1-initial-compact-1";
 /// Retirement only; this revision is never advertised or accepted for dispatch.
 pub const RETIRED_PROTOCOL: &str = "nyxid-owner-model-control-v1";
 pub const RETIRED_TOOL_PROTOCOL: &str = "nyxid-owner-model-control-v1-tool-projection-1";
+pub const RETIRED_COMPACT_PROTOCOL: &str = "nyxid-owner-model-control-v1-canonical-compact-1";
 pub fn is_retired(protocol: &str) -> bool {
-    matches!(protocol, RETIRED_PROTOCOL | RETIRED_TOOL_PROTOCOL)
+    matches!(protocol, RETIRED_PROTOCOL | RETIRED_TOOL_PROTOCOL | RETIRED_COMPACT_PROTOCOL)
 }
 pub const CONTROL_HEADER: &str = "x-nyxid-runtime-model-control";
 pub const STEP_HEADER: &str = "x-nyxid-runtime-model-step";
@@ -22,6 +23,9 @@ pub const MAX_ITEM_BYTES: usize = 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_STREAM_EVENTS: usize = 16384;
+/// Retain uncertain passive sends without eviction for the root's lifetime.
+/// At capacity a new passive send is refused before egress.
+pub const MAX_UNCERTAIN_READS: usize = 2048;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -207,6 +211,10 @@ pub struct PrepareRequest {
     pub query: Option<String>,
     pub semantic_headers: Vec<(String, String)>,
     pub body: Value,
+    /// Prospective fixed generation configuration requested before an INITIAL
+    /// compact card. This is never evidence of launch, output or tool activity.
+    #[serde(default)]
+    pub generation_proposal: Option<Value>,
     pub preceding_receipt: Option<SecretToken>,
     /// Receipts come from real server MCP execution AFTER provider completion.
     /// The provider cannot mint them by returning function_call_output text.
@@ -228,6 +236,11 @@ pub struct PreparedStep {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PrepareReply {
     AutomaticRead,
+    ReadCompleted { receipt: CompletionReceipt },
+    ReadInProgress,
+    ReadIneligible,
+    /// Only endpoint schema selection; no dispatch or replay capability.
+    InitialCompact,
     /// The first eligible fallback must reach the real resolved callback gate
     /// to observe its connection and create its card. This grants no send.
     Observe,
@@ -363,6 +376,10 @@ pub struct BridgeJournal {
     pub root_id: String,
     pub outer_request_binding: String,
     pub phase: BridgePhase,
+    /// Exact control/request digests, independent of the current phase. A new
+    /// ordinary Read or process restart cannot erase an earlier uncertain send.
+    #[serde(default)]
+    pub uncertain_reads: Vec<String>,
     #[serde(default)]
     pub tool_results: Vec<ToolResultReceipt>,
 }
@@ -370,6 +387,11 @@ pub struct BridgeJournal {
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BridgePhase {
     Unactivated,
+    /// Passive Read has no recoverable provider-send token. Only actual server
+    /// observation can complete it; status uncertainty never authorizes replay.
+    ReadForwarding { request_binding: String },
+    ReadCompleted { receipt: CompletionReceipt },
+    ReadIneligible { request_binding: Option<String> },
     AwaitingDecision { acknowledgement_id: String },
     Prepared { step: PreparedStep },
     Forwarding { step: PreparedStep },

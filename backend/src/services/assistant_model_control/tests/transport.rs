@@ -23,6 +23,7 @@ use std::sync::{
 };
 
 mod compact;
+mod initial_compact;
 
 struct Provider {
     calls: AtomicUsize,
@@ -48,7 +49,7 @@ async fn provider(
     let call = peer.calls.fetch_add(1, Ordering::SeqCst);
     peer.headers.lock().await.push(headers);
     peer.bodies.lock().await.push(("responses".into(), body));
-    if peer.mode == "redirect" {
+    if peer.mode == "redirect" || (peer.mode == "redirect_back" && call == 0) {
         return (
             StatusCode::TEMPORARY_REDIRECT,
             [("location", "/second-send")],
@@ -90,7 +91,10 @@ async fn provider(
         .into_response()
 }
 async fn fixture(mode: &'static str) -> (Controlled, Arc<Provider>, tokio::task::JoinHandle<()>) {
-    let mut c = Controlled::new("p2_real_transport").await;
+    fixture_with_issuance(mode,true).await
+}
+async fn fixture_with_issuance(mode:&'static str,issuance:bool)->(Controlled,Arc<Provider>,tokio::task::JoinHandle<()>) {
+    let mut c = Controlled::configured("p2_real_transport",issuance).await;
     let peer = Arc::new(Provider {
         calls: AtomicUsize::new(0),
         headers: tokio::sync::Mutex::new(vec![]),
@@ -105,6 +109,9 @@ async fn fixture(mode: &'static str) -> (Controlled, Arc<Provider>, tokio::task:
     let second = peer.clone();
     let app = Router::new()
         .route("/responses", post(provider))
+        .route("/chat/completions", post(provider))
+        .route("/messages", post(provider))
+        .route("/embeddings", post(provider))
         .route("/responses/compact", post(compact::provider))
         .route(
             "/tool-output",
@@ -117,7 +124,11 @@ async fn fixture(mode: &'static str) -> (Controlled, Arc<Provider>, tokio::task:
             "/second-send",
             post(move || {
                 second.calls.fetch_add(1, Ordering::SeqCst);
-                async { "unexpected redirect" }
+                let back=second.mode=="redirect_back";
+                async move {
+                    if back {(StatusCode::TEMPORARY_REDIRECT,[("location","/responses")]).into_response()}
+                    else {"unexpected redirect".into_response()}
+                }
             }),
         )
         .with_state(peer.clone());

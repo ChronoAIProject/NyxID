@@ -2937,6 +2937,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         db, session, &row, start, &text,
     ))
     .await?;
+    Box::pin(super::assistant_model_control::admit_recorder_in_session(
+        db, &row, start, session,
+    ))
+    .await?;
     if voice_request.is_none() || hidden_voice {
         row.message_count += 1;
     }

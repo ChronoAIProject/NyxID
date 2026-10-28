@@ -701,12 +701,15 @@ async fn retired_saved_card_deny_has_one_deterministic_notice_but_unknown_malfor
     for case in [
         "retired",
         "retired_tool",
+        "retired_compact",
         "unknown",
         "malformed",
         "bad_digest",
     ] {
         let protocol = if case == "unknown" {
             "unknown-future-model-control"
+        } else if case == "retired_compact" {
+            wire::RETIRED_COMPACT_PROTOCOL
         } else if case == "retired_tool" {
             wire::RETIRED_TOOL_PROTOCOL
         } else {
@@ -730,6 +733,12 @@ async fn retired_saved_card_deny_has_one_deterministic_notice_but_unknown_malfor
         } else {
             json!(protocol)
         };
+        if wire::is_retired(protocol) {
+            // Exact prior saved-card format (c38a48b callback::observe), not
+            // live old-peer execution or a current card labelled compatible.
+            args.as_object_mut().unwrap().remove("initial_operation");
+            args.as_object_mut().unwrap().remove("initial_request");
+        }
         root.card_arguments = Some(args.clone());
         private.card_arguments = Some(args.clone());
         root.private_ciphertext = persistence::seal(&c.f.state, &root, &private)
@@ -753,7 +762,7 @@ async fn retired_saved_card_deny_has_one_deterministic_notice_but_unknown_malfor
                 .await
                 .is_err()
         );
-        if !matches!(case, "retired" | "retired_tool") {
+        if !matches!(case, "retired" | "retired_tool" | "retired_compact") {
             assert!(
                 acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &card, false)
                     .await

@@ -335,97 +335,143 @@ including `client_metadata`, is unchanged.
 ### Negotiated owner model approval
 
 `ASSISTANT_MODEL_CONTROL_V1_ENABLED` defaults to `false`. This private paired
-protocol is separate from automatic Read and the `assistant:model-controls` UI
-flag. Initial strict Read keeps its existing zero-card path without a reusable
-dispatch step. An eligible non-strict callback creates a Write card without
-sending; only its saved human Allow and server-bound continuation can prepare
-the resumed request. Existing exact-body cards never upgrade into reusable
-authority. Both ordinary authenticated owner and captured personal-platform
-owner turns are eligible; guest/public and direct-provider profiles are not.
+protocol is separate from automatic Read and the `assistant:model-controls` UI flag.
+Initial strict Read keeps its existing zero-card path without a reusable dispatch
+step. Optional passive facts are separate from model Write steps and capabilities;
+they never authorize a send or change ordinary tool policy. An eligible non-strict
+callback creates a Write card without sending; only its saved human Allow and
+server-bound continuation can prepare the resumed request. Existing exact-body cards
+never upgrade into reusable authority. Both ordinary authenticated owner and
+captured personal-platform owner turns are eligible; guest/public and
+direct-provider profiles are not.
 
-The reusable subset is bounded standard `POST responses`, no query,
-`store=false`, no background/provider-hosted effects or resource URLs, closed
-text input/configuration and declared host function tools. Selected connection,
-catalog, owner/key/credential epochs, model, approved endpoint family, semantic headers, instructions,
-tools and metadata remain fixed. Fully fixed bounded opaque string maps may
-contain unknown keys or strings over 1,024 bytes under explicit Write consent;
-this never widens automatic Read. Provider options are pinned opaque values,
-not permission to add executable configuration. First Allow replaces only the final user item with the exact saved continuation
-text while preserving every preceding item exactly, including any captured
-user environment wrapper. Regenerated privileged scaffold, wrappers and paths
-remain outside the proven native reset contract. Later steps require exact server-observed provider output
-and subsequent actual MCP tool results. A provider call declaration is not a
-tool-result receipt. Current native events bind the observed call ID to the
-current thread/turn; events without that ID require unique name/arguments.
-The exact `nyxid-owner-model-control-v1-canonical-compact-1` revision requires a
-1,024–65,536-character result limit fixed at first tool prepare. The full controlled MCP ingress is bounded at 2 MiB including JSON-RPC envelope
-overhead; supported parsed handler results use the existing deterministic Unicode
-truncation and refusal guidance. Receipts bind that exact model-facing text, success flag, originating
-step and genuine activity; raw results are not retained in the root. Local
-blocked-refusal reuse records its actual origin and never claims a new handler
-execution. Invalid(A), Invalid(B), fresh A requires independent actual A evidence
-while retaining B's latest text/activity. Exact prior call-ID redelivery retains
-its own original text/receipt, revalidates status, and cannot repeat an effect or
-spend another budget slot. The bounded reply cache is scoped to the control and
-observed completion step, including locally blocked declarations. Missing activity,
-ambiguous identity, changed limits or unsupported projections cannot advance.
+The reusable subset is bounded standard `POST responses`, no query, `store=false`,
+no background/provider-hosted effects or resource URLs, closed text
+input/configuration and declared host function tools. Selected connection, catalog,
+owner/key/credential epochs, model, approved endpoint family, semantic headers,
+instructions, tools and metadata remain fixed. Fully fixed bounded opaque string
+maps may contain unknown keys or strings over 1,024 bytes under explicit Write
+consent; this never widens automatic Read. Provider options are pinned opaque
+values, not permission to add executable configuration. Generation-first Allow replaces only the final user item with the exact saved continuation text while preserving every
+preceding item exactly, including any captured user environment wrapper. Regenerated
+privileged scaffold, wrappers and paths remain outside the proven native reset
+contract. Later steps require exact server-observed provider output and subsequent
+actual MCP tool results. A provider call declaration is not a tool-result receipt.
+Current native events bind the observed call ID to the current thread/turn; events
+without that ID require unique name/arguments. The exact
+`nyxid-owner-model-control-v1-initial-compact-1` receipt schema requires a
+1,024–65,536-character result limit fixed at first tool prepare. Valid ordinary
+policies with a larger limit keep their ordinary projection/budget without a private
+receipt, provided bounded local retention fits; activated Write refuses unsupported
+receipt limits. The full controlled MCP ingress is bounded at 2 MiB including
+JSON-RPC envelope overhead; supported parsed handler results use the existing
+deterministic Unicode truncation and refusal guidance. Receipts bind that exact
+model-facing text, success flag, originating step and genuine activity; raw results
+are not retained in the root. Local blocked-refusal reuse records its actual origin
+and never claims a new handler execution. Invalid(A), Invalid(B), fresh A requires
+independent actual A evidence while retaining B's latest text/activity. Exact prior
+call-ID redelivery retains its own original text/receipt, revalidates status, and
+cannot repeat an effect or spend another budget slot. The bounded reply cache
+retains native IDs within the exact root, active turn and control, including locally
+blocked declarations. Optional observation loss or a new model request cannot turn a
+retained ID into a new executable call. Ordinary cached replies require current live
+verification and carry no receipt; prepared results require their exact current tool
+status. Ambiguous same-ID reuse remains conservative rather than rerunning an
+effect. Missing activity, ambiguous identity, changed limits or unsupported
+projections cannot advance.
 
-New consent explicitly includes standalone `POST responses/compact` after an
-approved generation. Generation configuration, declared tools and opaque
-metadata are sealed before Allow. Compact has a separate closed schema: the
-same model and exact optional instructions, with no query, tools, metadata or
-generation-only store/stream options. Before compact, the complete observed
-generation output and every actual host-tool result must be accounted for.
-A successful `response.compaction` JSON body must reach real upstream EOF;
-an SSE `response.completed` frame cannot certify compact. The encrypted root
-retains the full response and raw-body digest. The whole returned output becomes
-the exact next generation input, without pruning, reordering, additions or
-native serialization projections. Returned privileged/tool history must match
-the actual sent history; retained calls declare no new executable tools and
-mint no tool receipts. Closed nonprivileged provider summaries and opaque
-compaction items are accepted as canonical output without inspecting ciphertext.
-This follows the [standalone compact contract](https://developers.openai.com/api/docs/guides/compaction).
+New consent explicitly includes the generation and standalone
+`POST responses/compact` family. Generation configuration, declared tools and opaque
+metadata are sealed before Allow. Generation-first consent seals actual initial
+generation configuration/history as before. Truly first compact instead requires complete caller-supplied prospective
+generation options after the trusted selected-model binding and before tool/store
+filtering. The final callback C and exact compact input/body, control and selected
+connection are bound before the card. Initial compact Allow preserves that exact
+sealed compact body. The bridge never invents future tools/options from a profile.
+Unknown options reach the closed validator and
+reject rather than disappearing. Initial history requests authority; its historical
+calls never certify past execution. Compact has a separate closed schema: the same
+model and exact optional instructions, with no query, tools, metadata or
+generation-only store/stream options. After known automatic Read, initial compact
+consent reconciles the complete actual provider output and every genuine host-tool
+result. A prospective C proposal cannot relabel known history: denied or unexecuted
+call X cannot become an invented successful function_call_output. The passive
+observer saves intent before send, then binds actual output plus EOF and genuine
+handler/activity receipts. Missing, dropped, oversized, redirected, failed or
+concurrent facts make lineage ineligible without widening automatic Read or granting
+a tool. Unsupported observation preserves ordinary routing and host-tool policy when
+ineligibility is durable; a live authority/persistence failure before that fence
+rejects before send. A claimed uncertain Read is never replayed for a receipt. A
+successful `response.compaction` JSON body must reach real upstream EOF; an SSE
+`response.completed` frame cannot certify compact. The encrypted root retains the
+full response and raw-body digest. The whole returned output becomes the exact next
+generation input, without pruning, reordering, additions or native serialization
+projections. Returned privileged/tool history must match the actual sent history;
+retained calls declare no new executable tools and mint no tool receipts. Closed
+nonprivileged provider summaries and opaque compaction items are accepted as
+canonical output without inspecting ciphertext. This follows the [standalone compact
+contract](https://developers.openai.com/api/docs/guides/compaction).
 
-Prepare fixes the complete send digest. Duplicate decisions, continuation
-redelivery and Retry retain the logical root/step; they cannot rearm a claimed
-send. The final transactional claim follows billing admission; a losing callback
-releases its unused reservation. Authenticated recovery returns the same
-Prepared capability without extending expiry or allocating a new step.
-Cancellation or an uncertain outcome after claim never permits replay;
-known-completed lost output is refused rather than resent. Consent expires no
-later than the saved Allow deadline. This is not an external exactly-once promise.
+Prepare fixes the complete send digest. Duplicate decisions, continuation redelivery
+and Retry retain the logical root/step; they cannot rearm a claimed send. The final
+transactional claim follows billing admission; a losing callback releases its unused
+reservation. Authenticated recovery returns the same Prepared capability without
+extending expiry or allocating a new step. Cancellation or an uncertain outcome
+after claim never permits replay; known-completed lost output is refused rather than
+resent. Consent expires no later than the saved Allow deadline. This is not an
+external exactly-once promise.
 
-Scalar/non-string or over-budget metadata maps, unproven native opaque
-correlation changes, compact-first Allow without presealed generation authority,
-native compact filtering/reinjection, external image/file inputs and
-unsupported tool projections remain outside this contract. Compact is not classified as
-inherently stateful. Before activation, unsupported shapes/transports retain
-their legacy exact-only behavior; translated senders, node routes, pools,
-overrides and catalog-only selections cannot activate reusable authority.
-After activation, missing controls, changed authority or unsupported transitions
-fail closed, even if a later body looks like strict Read.
+Scalar/non-string or over-budget metadata maps, unproven native opaque correlation
+changes, compact without a preconsent generation proposal or needed known-history
+receipts, native compact filtering/reinjection, external image/file inputs and
+unsupported tool projections remain outside this contract. Compact is not classified
+as inherently stateful. Before activation, unsupported shapes/transports retain
+their legacy exact-only behavior; translated senders, node routes, pools, overrides
+and catalog-only selections cannot activate reusable authority. After activation,
+missing controls, changed authority or unsupported transitions fail closed, even if
+a later body looks like strict Read.
 
-Model Deny, including a digest-bound compact-first legacy exact card, uses a durable deterministic notice and exact saved destination for
-app and supported modern captured-platform replies, with no model call or new
-card. Legacy one-shot Nyxbot additional-reply delivery remains unsupported;
-expired/unproven destinations or full saved-source snapshot drift are refusals,
-not successful explanations. Proven HTTP/SSH effect-Deny explanations retain
-their existing path.
+Recorder coverage is atomically written only at a genuinely new initial owner turn,
+including ordinary/platform/invocation admissions, when the exact
+`assistant:model-control-initial-compact-recorder-v1` roster is ready. Recording
+operates while issuance is off. A readiness miss permits the ordinary turn but omits
+coverage; later flags/readiness cannot backfill it. Missing coverage or a negative
+unobserved marker prevents initial compact reuse. Both marker types have no TTL and
+follow existing conversation/owner erasure. Omitted controls, catalog-only
+selection, pools, overrides, recognized unsupported model paths and node senders
+durably exclude reusable history before ordinary send. Card creation and unobserved
+admission share the live-turn fence; a saved family cannot be ignored by a later
+unobserved admission.
+
+The companion journal retains up to 2,048 uncertain control/request bindings
+independently of its latest phase. Only the matching authoritative completion
+removes one; a changed request or restart never evicts another. Capacity refuses
+further passive sends. This bound counts retained uncertainty, not all ordinary
+requests. Full replacement canonical compact and native compact projection are
+separate transitions; the latter still requires source/build/launch provenance.
+
+Model Deny, including a digest-bound compact-first legacy exact card, uses a durable
+deterministic notice and exact saved destination for app and supported modern
+captured-platform replies, with no model call or new card. Legacy one-shot Nyxbot
+additional-reply delivery remains unsupported; expired/unproven destinations or full
+saved-source snapshot drift are refusals, not successful explanations. Proven
+HTTP/SSH effect-Deny explanations retain their existing path.
 
 Deploy both sides and configure the matching existing NyxID model-source profile;
-verify `assistant:model-control-protocol-v1` against the full serving roster and
-drained old writers, then enable the paired flags. Issuance still requires actual
-exact revision negotiation. The original `nyxid-owner-model-control-v1` and
-`nyxid-owner-model-control-v1-tool-projection-1` revisions must drain under
+verify `assistant:model-control-initial-compact-recorder-v1` against the full
+serving roster and drained old writers, then enable the paired flags. Issuance still
+requires actual exact revision negotiation. The original
+`nyxid-owner-model-control-v1`, `nyxid-owner-model-control-v1-tool-projection-1` and
+`nyxid-owner-model-control-v1-canonical-compact-1` revisions must drain under
 matching writers before replacement. Envelopes without the sealed compact family
-cannot gain it by continuation. New peers do not migrate
-old tokens, permit old-root Allow or dispatch, or claim mixed-revision tool
-compatibility. Digest-proven retired cards retain Deny and supported deterministic
-notice settlement. Disabling cannot reset active roots or restore legacy execution.
-Drain/settle affected work before
-rollback; preserve dispatch/uncertainty tombstones and key revocations, and keep
-old writers away from activated roots. See [environment configuration](../ENV.md#engine-and-diagnostics)
-and [security readiness](../SECURITY_ROLLOUT_READINESS.md).
+cannot gain it by continuation. New peers do not migrate old tokens, permit old-root
+Allow or dispatch, or claim mixed-revision tool compatibility. Digest-proven retired
+cards retain Deny and supported deterministic notice settlement. Disabling cannot
+reset active roots or restore legacy execution. Drain/settle affected work before
+rollback; preserve dispatch/uncertainty tombstones and key revocations, and keep old
+writers away from activated roots. See [environment
+configuration](../ENV.md#engine-and-diagnostics) and [security
+readiness](../SECURITY_ROLLOUT_READINESS.md).
 
 New channel threads inherit their linked agent's configured profile. Existing
 threads retain their model, including legacy channels created with the global

@@ -29,6 +29,9 @@ pub(super) fn within_family(
     saved: &Envelope,
     candidate: &wire::PrepareRequest,
 ) -> AppResult<(StepOperation, Vec<Value>)> {
+    if candidate.generation_proposal.as_ref().is_some_and(|proposal| proposal != &saved.fixed) {
+        return Err(unsupported());
+    }
     if candidate.relative_path == "responses/compact" {
         let input = compact::input(saved.compact.as_ref().ok_or_else(unsupported)?, candidate)?;
         let mut headers = candidate.semantic_headers.clone();

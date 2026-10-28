@@ -7,6 +7,7 @@ pub(crate) struct Callback {
     pub(super) private: RootPrivate,
     pub(super) candidate: wire::PrepareRequest,
     pub(super) prepared: Option<PreparedDispatch>,
+    pub(crate) read_observation: bool,
 }
 impl Callback {
     pub(crate) fn operation(&self) -> Value {
@@ -175,16 +176,26 @@ pub(crate) async fn callback(
         )
         || method != "POST"
         || !matches!(path, "responses" | "responses/compact")
-        || (path == "responses/compact" && row.phase == "unactivated")
+        || (path == "responses/compact" && row.phase == "unactivated" && private.preconsent.compact.is_none())
     {
+        if row.phase == "unactivated" {
+            // Share the admission marker's positive model-path/related-target
+            // scope. Unsupported model sends cannot look like pristine history;
+            // unrelated effects keep their ordinary contract.
+            read_observation::unobserved_http(state,chat,Some(connection),target,path).await?;
+        }
         return exact_only_before_activation(&row);
     }
     if body.len() > wire::MAX_PREPARE_BYTES {
+        if row.phase == "unactivated" { read_observation::disable(state, chat, &row.id).await?; }
         return exact_only_before_activation(&row);
     }
     let body = match serde_json::from_slice::<Value>(body) {
         Ok(body) => body,
-        Err(_) => return exact_only_before_activation(&row),
+        Err(_) => {
+            if row.phase == "unactivated" { read_observation::disable(state, chat, &row.id).await?; }
+            return exact_only_before_activation(&row);
+        }
     };
     let candidate = wire::PrepareRequest {
         protocol: wire::PROTOCOL.into(),
@@ -195,6 +206,7 @@ pub(crate) async fn callback(
             &[],
         ),
         body,
+        generation_proposal: None,
         preceding_receipt: None,
         tool_results: vec![],
     };
@@ -204,9 +216,23 @@ pub(crate) async fn callback(
             &candidate.body,
         )
     {
+        let binding = super::super::assistant_service_execution::connection_binding(&state.db, connection, &chat.api_key_id).await?;
+        let prepared = read_observation::prepare(state, chat, &token, &row, &candidate,
+            read_observation::Authority { connection:connection.into(), binding,
+                owner:owner.into(), catalog:target.service.id.clone(), headers:effective_header_binding(semantic_headers) }).await?;
+        return Ok(prepared.map(|prepared| Callback { root:row, private, candidate, prepared:Some(prepared), read_observation:true }));
+    }
+    if row.phase == "unactivated" && path == "responses" && private.preconsent.seen {
+        // A new generation card cannot erase known prior Read/tool history.
+        // Preserve its legacy exact approval rather than invent a fresh root.
+        read_observation::disable(state, chat, &row.id).await?;
         return Ok(None);
     }
-    let parsed = match private
+    let parsed = if row.phase == "unactivated" && path == "responses/compact" {
+        let saved = private.preconsent.compact.as_ref().ok_or_else(conflict)?;
+        envelope::within_family(&saved.envelope, &candidate)
+            .map(|(operation,input)| (saved.envelope.clone(),input,operation))
+    } else { match private
         .envelope
         .as_ref()
         .filter(|_| row.phase != "unactivated")
@@ -215,10 +241,13 @@ pub(crate) async fn callback(
             .map(|(operation, input)| (saved.clone(), input, operation)),
         None => envelope::envelope(&candidate)
             .map(|(envelope, input)| (envelope, input, StepOperation::Generation)),
-    };
+    }};
     let (envelope, input, operation) = match parsed {
         Ok(candidate) => candidate,
-        Err(_) if row.phase == "unactivated" => return Ok(None),
+        Err(_) if row.phase == "unactivated" && path != "responses/compact" => {
+            read_observation::disable(state, chat, &row.id).await?;
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
     if matches!(row.phase.as_str(), "denied" | "revoked") {
@@ -230,12 +259,20 @@ pub(crate) async fn callback(
         &chat.api_key_id,
     )
     .await?;
+    if row.phase == "unactivated" && path == "responses/compact" {
+        initial_compact::callback(&private, &token, &candidate, &read_observation::Authority {
+            connection:connection.into(),binding:binding.clone(),owner:owner.into(),catalog:target.service.id.clone(),
+            headers:effective_header_binding(semantic_headers.clone()),
+        })?;
+    }
     let prepared = if row.phase == "unactivated" {
         if step_header.is_some() {
             return Err(invalid());
         }
         private.envelope = Some(envelope);
         private.initial_input = input;
+        private.initial_operation = operation;
+        private.initial_request_binding = Some(envelope::request_binding(&candidate));
         private.connection_id = Some(connection.into());
         private.connection_binding = Some(binding);
         private.owner_id = Some(owner.into());
@@ -259,6 +296,7 @@ pub(crate) async fn callback(
                 private,
                 candidate,
                 prepared: None,
+                read_observation: false,
             }));
         }
         let raw = step_header.ok_or_else(invalid)?;
@@ -283,6 +321,7 @@ pub(crate) async fn callback(
             connection_id: connection.into(),
             connection_binding: binding,
             operation,
+            read_observation: false,
         })
     };
     Ok(Some(Callback {
@@ -290,6 +329,7 @@ pub(crate) async fn callback(
         private,
         candidate,
         prepared,
+        read_observation: false,
     }))
 }
 
@@ -316,9 +356,11 @@ pub(crate) async fn observe(
         let result = async {
             let (mut row, mut private) = persistence::load(state, &callback.root.id, Some(&mut *session)).await?;
             persistence::require_row(&row, chat)?;
-            if row.phase != "unactivated" { return Err(conflict()); }
+            if row.phase != "unactivated" || row.revision != callback.root.revision { return Err(conflict()); }
             private.envelope = callback.private.envelope.clone();
             private.initial_input = callback.private.initial_input.clone();
+            private.initial_operation = callback.private.initial_operation;
+            private.initial_request_binding = callback.private.initial_request_binding.clone();
             private.connection_id = callback.private.connection_id.clone();
             private.connection_binding = callback.private.connection_binding.clone();
             private.owner_id = callback.private.owner_id.clone();
@@ -326,15 +368,19 @@ pub(crate) async fn observe(
             private.effective_headers_binding = callback.private.effective_headers_binding.clone();
             let args = json!({"protocol":wire::PROTOCOL,"root_id":row.id,
                 "connection_id":private.connection_id,"catalog_id":private.catalog_id,"binding":private.connection_binding,
-                "envelope":digest(serde_json::to_value(&private.envelope).map_err(|_| invalid())?)});
+                "envelope":digest(serde_json::to_value(&private.envelope).map_err(|_| invalid())?),
+                "initial_operation":private.initial_operation,"initial_request":private.initial_request_binding});
             let connection=state.db.collection::<crate::models::user_service::UserService>("user_services")
                 .find_one(doc!{"_id":&private.connection_id,"user_id":&private.owner_id})
                 .session(&mut *session).await?.ok_or_else(invalid)?;
             let label=super::super::assistant_nyxagent::identifier(&connection.slug);
             let model=super::super::assistant_nyxagent::identifier(callback.candidate.body["model"].as_str().ok_or_else(invalid)?);
-            let cause=super::super::assistant_service_execution::inference_fallback_reason("responses",&callback.candidate.body)
+            let cause=super::super::assistant_service_execution::inference_fallback_reason(&callback.candidate.relative_path,&callback.candidate.body)
                 .ok_or_else(invalid)?;
-            let summary=format!("Connection {label} ({}), model {model}. {} Approval covers this Responses generation and standalone compact family: exact generation configuration and declared host tools stay fixed; compact sends the same model and exact instructions, with no generation-only options or tools. Approval includes the same exact opaque generation metadata options; they are not treated as automatic Read. Only saved Allow narration and server-observed output/host-tool results may advance the transcript. Complete observed compact output must replace the entire next input without pruning. Changed configuration, metadata or unsealed compact-first/native transitions require separate review.",connection.id,cause.reusable_message());
+            let initial=if private.initial_operation==StepOperation::Compact {
+                "This initial consent binds the complete proposed generation configuration and this exact compact input before either authorized operation. Any known earlier Read output and host-tool results have been reconciled; caller-supplied initial history does not prove past tool execution."
+            } else {"The first authorized generation preserves all exact preceding input items and replaces only the final user item with saved Allow narration."};
+            let summary=format!("Connection {label} ({}), model {model}. {} Approval covers this Responses generation and standalone compact family: exact generation configuration and declared host tools stay fixed; compact sends the same model and exact instructions, with no generation-only options or tools. {initial} Approval includes the same exact opaque generation metadata options; they are not treated as automatic Read. Only server-observed output and genuine host-tool results may advance subsequent history. Complete observed compact output must replace the entire next input without pruning. Changed configuration, metadata or regenerated native context requires separate review.",connection.id,cause.reusable_message());
             let mut card = acks::request_in_session(&state.db, chat, acks::Request {
                 kind:"action",service:Some((&connection.id,&label,&label)),tool:Some("nyxid.model_control_v1"),arguments:Some(&args),
                 summary:&summary,platform:false,
