@@ -371,7 +371,10 @@ pub(crate) async fn decision_in_session(
     }).session(&mut *session).await?.ok_or_else(invalid)?;
     let saved = root.card_arguments.as_ref().ok_or_else(invalid)?;
     if saved["root_id"] != root.id
-        || saved["protocol"] != wire::PROTOCOL
+        // Pending cards from the retired wire revision may still be Denied.
+        // Allow cannot migrate their saved consent into the new protocol.
+        || !(saved["protocol"] == wire::PROTOCOL
+            || (row.status == "denied" && saved["protocol"] == wire::RETIRED_PROTOCOL))
         || row.arguments_digest.as_deref() != Some(acks::arguments_digest(saved).as_str())
     {
         return Err(invalid());

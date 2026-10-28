@@ -111,6 +111,11 @@ pub(crate) async fn issue(
                 || row.expires_at <= Utc::now() || row.runtime_catalog_id != runtime_catalog_id
                 || matches!(row.phase.as_str(),"denied"|"revoked")
             { return Err(invalid()); }
+            // A serving-revision change never adopts an old root/token. Drain
+            // it under the old writer first; Deny retirement remains available.
+            if private.controls.iter().any(|c| c.claims.protocol != wire::PROTOCOL) {
+                return Err(invalid());
+            }
             if let Some(bound) = private.controls.iter().find(|c|
                 c.claims.active_turn_id == turn_id && c.claims.outer_request_binding == binding)
             { return Ok(Some(bound.token.clone())); }

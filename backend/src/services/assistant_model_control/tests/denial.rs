@@ -640,3 +640,144 @@ async fn saved_ssh_effect_denials_keep_existing_explanation_only_for_known_bound
         c.f.state.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn retired_saved_card_deny_has_one_deterministic_notice_but_unknown_malformed_digest_and_allow_refuse()
+ {
+    for case in ["retired", "unknown", "malformed", "bad_digest"] {
+        let protocol = if case == "unknown" {
+            "unknown-future-model-control"
+        } else {
+            wire::RETIRED_PROTOCOL
+        };
+        let c = Controlled::new("p2_retired_deny_notice").await;
+        let card = c.observe().await;
+        let roots = c.f.state.db.collection::<ModelControlRoot>(COLLECTION_NAME);
+        let mut root = roots
+            .find_one(doc! {"acknowledgement_id":&card})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut private = persistence::open(&c.f.state, &root).await.unwrap();
+        for control in &mut private.controls {
+            control.claims.protocol = protocol.into();
+        }
+        let mut args = root.card_arguments.clone().unwrap();
+        args["protocol"] = if case == "malformed" {
+            json!(42)
+        } else {
+            json!(protocol)
+        };
+        root.card_arguments = Some(args.clone());
+        private.card_arguments = Some(args.clone());
+        root.private_ciphertext = persistence::seal(&c.f.state, &root, &private)
+            .await
+            .unwrap();
+        roots
+            .replace_one(doc! {"_id":&root.id}, &root)
+            .await
+            .unwrap();
+        c.f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .update_one(
+                doc! {"_id":&card},
+                doc! {"$set":{"arguments_digest":if case=="bad_digest" {"sha256:invalid".into()}else{acks::arguments_digest(&args)}}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &card, true)
+                .await
+                .is_err()
+        );
+        if case != "retired" {
+            assert!(
+                acks::decide(&c.f.state.db, &c.f.owner, &c.f.row.id, &card, false)
+                    .await
+                    .is_err()
+            );
+            let retained = roots
+                .find_one(doc! {"_id":&root.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.phase, root.phase);
+            let retained_card =
+                c.f.state
+                    .db
+                    .collection::<Document>("assistant_acknowledgements")
+                    .find_one(doc! {"_id":&card})
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(retained_card.get_str("status").unwrap(), "pending");
+            assert_eq!(
+                c.f.state
+                    .db
+                    .collection::<Document>("assistant_model_denial_notices")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        } else {
+            let card = deny_card(&c, card).await;
+            let row = begin_notice(&c).await;
+            let egress = NoModel(AtomicUsize::new(0));
+            let result = execute(&c, &row, &egress).await.unwrap();
+            assert!(result.error.is_none());
+            assert!(result.text.contains("You denied this model request"));
+            assert_eq!(egress.0.load(Ordering::SeqCst), 0);
+            let reply = uuid::Uuid::new_v4().to_string();
+            settle(&c, &row, &result, &reply).await;
+            settle(&c, &row, &result, &reply).await;
+            notice::recover(&c.f.state.db).await.unwrap();
+            assert_eq!(
+                c.f.state
+                    .db
+                    .collection::<Document>("assistant_model_denial_notices")
+                    .count_documents(doc! {"_id":&card,"state":"settled","reply_id":&reply})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                c.f.state
+                    .db
+                    .collection::<Document>("assistant_model_denial_notices")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert!(
+                engine::get(&c.f.state.db, &c.f.owner, &c.f.row.id)
+                    .await
+                    .unwrap()
+                    .pending_events
+                    .is_empty()
+            );
+        }
+        assert!(
+            prepare(
+                &c.f.state,
+                &c.f.chat,
+                &c.token,
+                request(vec![user("initial")])
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            c.f.state
+                .db
+                .collection::<Document>("assistant_acknowledgements")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        c.f.state.db.drop().await.unwrap();
+    }
+}

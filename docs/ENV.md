@@ -202,7 +202,7 @@ introduce no environment variables; permissions are stored per conversation.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ASSISTANT_MODEL_CONTROL_V1_ENABLED` | `false` | Exact `true` permits issuance of private owner model controls after paired v1 negotiation and security readiness. Separate from the `assistant:model-controls` UI flag; does not change automatic Read classification. |
+| `ASSISTANT_MODEL_CONTROL_V1_ENABLED` | `false` | Exact `true` permits issuance of private owner model controls after exact paired `nyxid-owner-model-control-v1-tool-projection-1` negotiation and security readiness. Separate from the `assistant:model-controls` UI flag; does not change automatic Read classification. |
 
 Before enabling, upgrade both NyxID and NxyAgent and drain all old serving
 replicas and participating writers. Declare the complete `INSTANCE_NAME` roster
@@ -210,7 +210,11 @@ in `SECURITY_ROLLOUT_REPLICAS`, acknowledge `SECURITY_ROLLOUT_DRAINED=true`, and
 verify readiness for `assistant:model-control-protocol-v1`. The paired runtime
 must enable `NYXAGENT_MODEL_CONTROL_V1_ENABLED`, trust the exact NyxID
 `JWT_ISSUER` through `NYXID_ISSUER`, and use the matching existing NyxID model-source
-profile. Runtime negotiation does not replace roster/drain readiness.
+profile. Runtime negotiation does not replace roster/drain readiness. The original
+`nyxid-owner-model-control-v1` revision is incompatible: drain its roots under
+matching writers before switching; new peers never migrate old tokens or allow
+old-root dispatch. Digest-proven old cards can still be Denied and settled via
+the supported deterministic notice path.
 
 Disabling stops issuance; active roots cannot downgrade to legacy execution if
 control or negotiation is lost. Drain and settle affected work before rollback;

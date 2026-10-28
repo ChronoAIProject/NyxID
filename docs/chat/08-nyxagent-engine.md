@@ -347,14 +347,28 @@ The reusable subset is bounded standard `POST responses`, no query,
 `store=false`, no background/provider-hosted effects or resource URLs, closed
 text input/configuration and declared host function tools. Selected connection,
 catalog, owner/key/credential epochs, model, path, semantic headers, instructions,
-tools and metadata remain fixed. For example, fixed partial-known
-`client_metadata: {"thread_id":"fixed"}` can require Write approval while
-satisfying this subset. First Allow permits only the saved continuation text
-with the exact original prefix, or the supported reset with identical leading
-system/developer items. Later steps require exact server-observed provider output
+tools and metadata remain fixed. Fully fixed bounded opaque string maps may
+contain unknown keys or strings over 1,024 bytes under explicit Write consent;
+this never widens automatic Read. Provider options are pinned opaque values,
+not permission to add executable configuration. First Allow replaces only the final user item with the exact saved continuation
+text while preserving every preceding item exactly, including any captured
+user environment wrapper. Regenerated privileged scaffold, wrappers and paths
+remain outside the proven native reset contract. Later steps require exact server-observed provider output
 and subsequent actual MCP tool results. A provider call declaration is not a
-tool-result receipt; ambiguous declarations or transformed, truncated or refused
-results cannot authorize another step.
+tool-result receipt. Current native events bind the observed call ID to the
+current thread/turn; events without that ID require unique name/arguments.
+The exact `nyxid-owner-model-control-v1-tool-projection-1` revision requires a
+1,024–65,536-character result limit fixed at first tool prepare. The full controlled MCP ingress is bounded at 2 MiB including JSON-RPC envelope
+overhead; supported parsed handler results use the existing deterministic Unicode
+truncation and refusal guidance. Receipts bind that exact model-facing text, success flag, originating
+step and genuine activity; raw results are not retained in the root. Local
+blocked-refusal reuse records its actual origin and never claims a new handler
+execution. Invalid(A), Invalid(B), fresh A requires independent actual A evidence
+while retaining B's latest text/activity. Exact prior call-ID redelivery retains
+its own original text/receipt, revalidates status, and cannot repeat an effect or
+spend another budget slot. The bounded reply cache is scoped to the control and
+observed completion step, including locally blocked declarations. Missing activity,
+ambiguous identity, changed limits or unsupported projections cannot advance.
 
 Prepare fixes the complete send digest. Duplicate decisions, continuation
 redelivery and Retry retain the logical root/step; they cannot rearm a claimed
@@ -365,9 +379,9 @@ Cancellation or an uncertain outcome after claim never permits replay;
 known-completed lost output is refused rather than resent. Consent expires no
 later than the saved Allow deadline. This is not an external exactly-once promise.
 
-Unknown/scalar or oversized metadata, unproven native opaque correlation
-changes, reusable `responses/compact`, external image/file inputs and unsupported
-tool projections remain outside this contract. Compact is not classified as
+Scalar/non-string or over-budget metadata maps, unproven native opaque
+correlation changes, reusable `responses/compact`, external image/file inputs and
+unsupported tool projections remain outside this contract. Compact is not classified as
 inherently stateful. Before activation, unsupported shapes/transports retain
 their legacy exact-only behavior; translated senders, node routes, pools,
 overrides and catalog-only selections cannot activate reusable authority.
@@ -384,7 +398,11 @@ their existing path.
 Deploy both sides and configure the matching existing NyxID model-source profile;
 verify `assistant:model-control-protocol-v1` against the full serving roster and
 drained old writers, then enable the paired flags. Issuance still requires actual
-v1 negotiation. Disabling cannot reset active roots or restore legacy execution.
+exact revision negotiation. The original `nyxid-owner-model-control-v1` revision
+must drain under matching writers before replacement. New peers do not migrate
+old tokens, permit old-root Allow or dispatch, or claim mixed-revision tool
+compatibility. Digest-proven retired cards retain Deny and supported deterministic
+notice settlement. Disabling cannot reset active roots or restore legacy execution.
 Drain/settle affected work before
 rollback; preserve dispatch/uncertainty tombstones and key revocations, and keep
 old writers away from activated roots. See [environment configuration](../ENV.md#engine-and-diagnostics)
