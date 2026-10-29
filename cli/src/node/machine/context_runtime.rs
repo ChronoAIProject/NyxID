@@ -924,13 +924,23 @@ mod tests {
             .open(root.path())
             .unwrap();
         let descriptor: OwnedFd = descriptor.into();
-        let _ = own(
+        let own_result = own(
             &descriptor,
             unsafe { libc::geteuid() },
             unsafe { libc::getegid() },
             0o700,
         );
-        let _ = readable_as_supervisor(&descriptor);
+        if unsafe { libc::geteuid() } == 0 {
+            assert!(own_result.is_ok());
+        } else {
+            assert!(own_result.is_err());
+        }
+        let readable_result = readable_as_supervisor(&descriptor);
+        if unsafe { libc::geteuid() } == 0 {
+            assert!(readable_result.is_ok());
+        } else {
+            assert!(readable_result.is_err());
+        }
 
         assert!(occupied(0));
         assert!(!occupied(u32::MAX));
