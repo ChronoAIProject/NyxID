@@ -263,6 +263,7 @@ fn gateway_create_refused(response: &GatewayResponse) -> bool {
 
 #[derive(Serialize)]
 pub struct ChannelAgentResponse {
+    guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway_source: Option<crate::models::nyxbot_channel::GatewaySource>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,6 +301,7 @@ pub struct ChannelAgentResponse {
 impl From<&NyxbotChannel> for ChannelAgentResponse {
     fn from(row: &NyxbotChannel) -> Self {
         Self {
+            guest_readiness: None,
             gateway_source: row.gateway_source.clone(),
             gateway_native_phase: row.gateway_native_phase.clone(),
             gateway_native_activation: row.gateway_native_activation.clone(),
@@ -475,7 +477,9 @@ pub async fn connect(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
-    connect_inner(state, owner, source_conversation_id, bot_id, agent, true).await
+    connect_inner(state, owner, source_conversation_id, bot_id, agent, true)
+        .await
+        .map_err(present_gateway_error)
 }
 
 async fn connect_inner(
@@ -886,9 +890,12 @@ async fn connect_inner(
                     (operator step). Telegram bots cannot use NyxBot until it is."
                         .into()
                 }
-                "gateway_not_authenticated" => "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator.".into(),
-                "gateway_permission_required" => "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration.".into(),
-                "gateway_unavailable" => "The channel gateway is temporarily unavailable. Try again shortly.".into(),
+                // Keep bounded codes through tool/watch callers. Their presentation
+                // layer supplies guidance without parsing an error's prose.
+                "gateway_not_authenticated"
+                | "gateway_permission_required"
+                | "gateway_configuration_required"
+                | "gateway_unavailable" => code.into(),
                 other => format!("Could not connect this bot. Try again. ({other})"),
             }))
         }
@@ -1349,7 +1356,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     };
     let base = gateway_base(state)
         .await
-        .map_err(|_| "gateway_unavailable")?;
+        .map_err(|error| crate::services::nyxbot_gateway_service::availability_code(&error))?;
     let creator = creator_bearer(state, &row.user_id).map_err(|_| "creator_unavailable")?;
     let owner = row.user_id.as_str();
     let key_owner = bot_owner(row);
@@ -1662,7 +1669,9 @@ pub(crate) async fn connect_tool(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(Value, bool)> {
-    connect_tool_inner(state, owner, source_conversation_id, bot_id, agent, true).await
+    connect_tool_inner(state, owner, source_conversation_id, bot_id, agent, true)
+        .await
+        .map_err(present_gateway_error)
 }
 
 async fn connect_tool_inner(
@@ -2273,7 +2282,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
         Ok((agent, value)) if value["channel_agent"]["owner_linked"] == true => format!(
             "The {} channel bot {} the user just created is now linked to {}, and their \
             account there is already verified. Tell them to open the bot and press Start (or \
-            send a message): it answers there. Only if they chat from a different account, \
+            send a message) to check the first reply. A reply has not been verified yet. Only if they chat from a different account, \
             give them this verification step: {}",
             identifier(&bot.platform),
             identifier(&bot.label),
@@ -2289,11 +2298,12 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
             value["link"]
         ),
         Err(error) => format!(
-            "The {} channel bot {} was created but could not be linked ({}). Try \
+            "The {} channel bot {} was created but could not be linked ({}). {} Try \
             nyxid__connect_channel_bot with bot_id {}.",
             identifier(&bot.platform),
             identifier(&bot.label),
             error_code(error),
+            gateway_error_guidance(error_code(error)),
             bot.id
         ),
     };
@@ -2348,12 +2358,46 @@ async fn connect_link_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<
     Ok(())
 }
 
+/// Human-facing HTTP/tool boundaries retain the stable diagnostic code and add
+/// bounded guidance. Internal watch/row paths continue to classify bare codes.
+fn present_gateway_error(error: AppError) -> AppError {
+    let code = error_code(&error);
+    let guidance = gateway_error_guidance(code);
+    if guidance.is_empty() {
+        error
+    } else {
+        AppError::ValidationError(format!("{code}: {guidance}"))
+    }
+}
+
+fn gateway_error_guidance(code: &str) -> &'static str {
+    match code {
+        "gateway_configuration_required" => {
+            "Ask an administrator to check the active cmaeg service and its URL."
+        }
+        "gateway_not_authenticated" => {
+            "The gateway could not authenticate NyxBot; reconnect and ask an administrator if this persists."
+        }
+        "gateway_permission_required" => {
+            "Ask an administrator to verify the actual gateway confidential client's cmaeg introspection association."
+        }
+        "gateway_unavailable" => "The gateway is temporarily unavailable; retry shortly.",
+        _ => "",
+    }
+}
+
 /// Stable code for an error, never its prose.
 fn error_code(error: &AppError) -> &'static str {
     match error {
         AppError::NotFound(_) => "not_found",
         AppError::Conflict(_) => "conflict",
-        AppError::ValidationError(_) => "invalid",
+        AppError::ValidationError(code) => match code.as_str() {
+            "gateway_configuration_required" => "gateway_configuration_required",
+            "gateway_not_authenticated" => "gateway_not_authenticated",
+            "gateway_permission_required" => "gateway_permission_required",
+            "gateway_unavailable" => "gateway_unavailable",
+            _ => "invalid",
+        },
         _ => "unavailable",
     }
 }
@@ -2398,12 +2442,61 @@ pub async fn link(
 }
 
 pub(crate) async fn list_tool(state: &AppState, owner: &str) -> AppResult<Value> {
+    channel_listing(state, owner, true).await
+}
+
+async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) -> AppResult<Value> {
     let rows = list(state, owner).await?;
+    let mut open_chats = std::collections::HashSet::new();
+    let mut nyxbot_id = None;
+    if with_readiness && !rows.is_empty() {
+        let ids: Vec<_> = rows.iter().map(|r| &r.id).collect();
+        open_chats = state
+            .db
+            .collection::<bson::Document>(THREADS)
+            .distinct(
+                "channel_id",
+                doc! {"user_id":owner,"channel_id":{"$in":ids},"kind":{"$ne":"private"},
+                "$or":[{"members":"everyone"},{"members":null,"owner_seen":true}]},
+            )
+            .await?
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        if rows.iter().any(|r| r.agent_id.is_none()) {
+            nyxbot_id = state
+                .db
+                .collection::<bson::Document>("assistant_agents")
+                .find_one(doc! {"user_id":owner,"kind":"nyxbot"})
+                .projection(doc! {"_id":1})
+                .await?
+                .and_then(|r| r.get_str("_id").ok().map(str::to_owned));
+        }
+    }
+    let mut readiness_by_agent = std::collections::HashMap::new();
     let on = thread_follow::enabled(state, owner).await?;
     let mut channel_agents = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
             .map_err(|error| AppError::Internal(error.to_string()))?;
+        if with_readiness
+            && (row.private_chats.as_deref() == Some("everyone") || open_chats.contains(&row.id))
+        {
+            let agent = row.agent_id.as_deref().or(nyxbot_id.as_deref());
+            if let std::collections::hash_map::Entry::Vacant(slot) = readiness_by_agent.entry(agent)
+            {
+                let readiness = crate::services::assistant_service_execution::guest_readiness(
+                    &state.db,
+                    &state.encryption_keys,
+                    owner,
+                    agent,
+                    None,
+                )
+                .await?;
+                slot.insert(readiness);
+            }
+            value["guest_readiness"] = json!(readiness_by_agent.get(&agent));
+        }
         value["follow_readiness"] = json!(if thread_controls::capabilities(state, row, on, true)
             .thread_follow
         {
@@ -2450,7 +2543,7 @@ pub async fn list_channels(
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    Ok(Json(list_tool(&state, &owner).await?))
+    Ok(Json(channel_listing(&state, &owner, false).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -3362,34 +3455,40 @@ async fn repeated_question(
     Ok(None)
 }
 
-/// Wait for the turn and return its final reply, or `None` on failure.
-async fn final_reply(mut receiver: broadcast::Receiver<Value>) -> Result<String, String> {
+/// Preserve the settled diagnostic when delivering a failed channel turn.
+async fn final_reply(
+    mut receiver: broadcast::Receiver<Value>,
+) -> Result<String, Box<engine::TurnError>> {
     let mut text = String::new();
     loop {
         match receiver.recv().await {
-            Ok(event) => match event["event"].as_str() {
-                Some("block.completed") => {
-                    text = event["block"]["text"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned();
-                }
-                Some("turn.completed") => {
-                    return if event["status"] == "completed" {
-                        Ok(text)
-                    } else if !text.trim().is_empty() {
-                        Ok(late_delivery::answer(&text, true))
-                    } else {
-                        Err(event["error"]["code"]
+            Ok(event) => {
+                match event["event"].as_str() {
+                    Some("block.completed") => {
+                        text = event["block"]["text"]
                             .as_str()
-                            .unwrap_or("assistant_unavailable")
-                            .to_owned())
-                    };
+                            .unwrap_or_default()
+                            .to_owned();
+                    }
+                    Some("turn.completed") => {
+                        return if event["status"] == "completed" {
+                            Ok(text)
+                        } else if !text.trim().is_empty() {
+                            Ok(late_delivery::answer(&text, true))
+                        } else {
+                            Err(Box::new(engine::TurnError::new(event["error"]["code"]
+                            .as_str()
+                            .unwrap_or("assistant_unavailable"))
+                            .with_model_route_reason(event["turn_metadata"]["failure_reason"]["model_route"]["reason"].as_str())))
+                        };
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => return Err("turn_lost".into()),
+            Err(broadcast::error::RecvError::Closed) => {
+                return Err(Box::new(engine::TurnError::new("turn_lost")));
+            }
         }
     }
 }
@@ -5736,3 +5835,6 @@ fn native_callback(state: &AppState, row: &NyxbotChannel, relay: String) -> Stri
         relay
     }
 }
+
+#[path = "guest_model_notices.rs"]
+pub(crate) mod guest_model_notices;

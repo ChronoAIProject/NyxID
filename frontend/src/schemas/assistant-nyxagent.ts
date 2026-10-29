@@ -147,6 +147,7 @@ export const nyxAgentRecoverySchema = z.object({
 });
 export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
 const nyxAgentFailureReasonSchema = z.object({
+  model_route: z.object({ reason: z.string(), unknown_fields: z.array(z.string()) }).nullish(),
   source: z.string(),
   stage: z.string(),
   code: z.string(),
@@ -444,7 +445,20 @@ export type AssistantAgentRequest = z.infer<typeof assistantAgentRequestSchema>;
 export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
+export const guestReadinessSchema = z.object({
+  status: z.enum(["ready", "not_ready"]),
+  reason: z.string().nullish(),
+  fix: z.string().nullish(),
+});
+export type GuestReadiness = z.infer<typeof guestReadinessSchema>;
+export const guestReadinessSettingsSchema = guestReadinessSchema.extend({
+  conversation_overrides: z.array(z.string()).default([]),
+  conversation_overrides_truncated: z.boolean().default(false),
+});
+
+
 export const assistantAgentSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
   share_role: z.enum(["manager", "user"]).nullable().optional(),
   owner_id: z.string().optional(),
   owner_name: z.string().nullable().optional(),
@@ -658,6 +672,7 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
   follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
   id: z.string(),
   channel_bot_id: z.string(),
@@ -708,6 +723,7 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
   parent_chat_id: z.string().nullable().optional(),
   has_thread_history: z.boolean().optional(),
   threads: z.enum(["follow", "off"]).catch("off").optional(),

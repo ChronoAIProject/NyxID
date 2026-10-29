@@ -487,7 +487,14 @@ pub struct TurnMetadataResponse {
 }
 
 #[derive(Serialize)]
+pub struct ModelRouteDiagnosticResponse {
+    reason: String,
+    unknown_fields: Vec<String>,
+}
+
+#[derive(Serialize)]
 pub struct TurnFailureReasonResponse {
+    model_route: Option<ModelRouteDiagnosticResponse>,
     source: String,
     stage: String,
     code: String,
@@ -560,6 +567,10 @@ impl From<AssistantMessage> for MessageResponse {
             error_detail: row.error_detail.map(ErrorDetailResponse::from),
             turn_metadata: row.turn_metadata.map(|data| TurnMetadataResponse {
                 failure_reason: data.failure_reason.map(|reason| TurnFailureReasonResponse {
+                    model_route: reason.model_route.map(|d| ModelRouteDiagnosticResponse {
+                        reason: d.reason,
+                        unknown_fields: d.unknown_fields,
+                    }),
                     source: reason.source,
                     stage: reason.stage,
                     code: reason.code,

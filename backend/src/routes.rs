@@ -2580,6 +2580,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::catalog),
         )
         .route(
+            "/nyxagent/agents/{id}/guest-readiness",
+            get(handlers::assistant_team::guest_readiness),
+        )
+        .route(
             "/nyxagent/agents/{id}/consents",
             get(handlers::assistant_sharing::consents),
         )
@@ -3149,6 +3153,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/channel-bots/telegram-new/requests/{id}/launch",
             post(handlers::telegram_new::launch),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}/creation-link",
+            post(handlers::telegram_new::creation_link),
         )
         .route(
             "/channel-bots/telegram-new/requests/{id}/connect",

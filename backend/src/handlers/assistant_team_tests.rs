@@ -4139,3 +4139,92 @@ async fn personal_channel_targets_retain_owner_confirmation() {
     }
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn readiness_2092_settings_read_is_human_owner_and_conversation_scoped() {
+    let (state, _, server) = setup("guest_readiness_owner").await;
+    let (_, chat) = orchestrator(&state).await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name":"visitor-helper","description":"Answers visitors"}),
+    )
+    .await;
+    let agent = team::specialist(&state.db, OWNER, "visitor-helper")
+        .await
+        .unwrap();
+    let home = specialist_home(&state, "visitor-helper").await;
+    let read = |auth, conversation_id| {
+        guest_readiness(
+            State(state.clone()),
+            auth,
+            Path(agent.id.clone()),
+            Query(GuestReadinessQuery { conversation_id }),
+        )
+    };
+    let Json(value) = read(test_auth_user(OWNER), None).await.unwrap();
+    let value = serde_json::to_value(value).unwrap();
+    assert_eq!(value["status"], "not_ready");
+    assert_eq!(value["conversation_overrides"], json!([]));
+    assert!(
+        read(test_auth_user(OWNER), Some(home.id.clone()))
+            .await
+            .is_ok()
+    );
+    for id in [Uuid::new_v4().to_string(), chat.conversation_id.clone()] {
+        assert!(matches!(
+            read(test_auth_user(OWNER), Some(id)).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+    let other = Uuid::new_v4().to_string();
+    assert!(matches!(
+        read(test_auth_user(&other), None).await,
+        Err(AppError::NotFound(_))
+    ));
+    for key_id in [Uuid::new_v4().to_string(), chat.api_key_id.clone()] {
+        let mut auth = test_auth_user(OWNER);
+        auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        auth.api_key_id = Some(key_id);
+        assert!(matches!(
+            read(auth, None).await,
+            Err(AppError::ForbiddenWithGuidance { .. })
+        ));
+    }
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&home.id},
+            doc! {"$set":{"model":"nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+    let Json(value) = read(test_auth_user(OWNER), None).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(value).unwrap()["conversation_overrides"],
+        json!([home.id])
+    );
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    crate::services::assistant_service_execution::readiness::READS
+        .scope(reads.clone(), async {
+            let Json(agents) = list_agents(
+                State(state.clone()),
+                test_auth_user(OWNER),
+                Query(AgentsQuery::default()),
+            )
+            .await
+            .unwrap();
+            assert!(
+                agents["agents"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["guest_readiness"].is_null())
+            );
+        })
+        .await;
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    server.abort();
+    state.db.drop().await.unwrap();
+}

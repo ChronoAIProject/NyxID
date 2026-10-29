@@ -757,6 +757,7 @@ async fn server_main() {
     // Use connect_timeout (not global timeout) so SSE streaming responses
     // from LLM services are not killed after 30 seconds.
     let http_client = reqwest::Client::builder()
+        .redirect(services::telegram_new_api::app_redirect_policy())
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build()

@@ -2896,6 +2896,7 @@ pub struct ChannelLinkResponse {
 
 #[derive(Serialize)]
 pub struct AgentResponse {
+    guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     #[serde(flatten)]
     summary: team::AgentSummary,
     pending_acknowledgements: usize,
@@ -2911,28 +2912,28 @@ async fn agent_responses(
     let mut summaries = team::summaries(&state.db, owner, true, include_destroyed, 300).await?;
     summaries.extend(crate::services::shared_agent_service::summaries(&state.db, owner).await?);
     let channels = super::nyxbot::list(state, owner).await?;
-    Ok(summaries
-        .into_iter()
-        .map(|summary| {
-            let linked = channels
-                .iter()
-                .filter(|channel| {
-                    channel.agent_id.as_deref().unwrap_or(nyxbot.id.as_str()) == summary.id
-                })
-                .map(|channel| ChannelLinkResponse {
-                    id: channel.id.clone(),
-                    platform: channel.platform.clone(),
-                    bot_label: channel.bot_label.clone(),
-                    status: channel.status.clone(),
-                })
-                .collect();
-            AgentResponse {
-                pending_acknowledgements: summary.pending_requests.len(),
-                channels: linked,
-                summary,
-            }
-        })
-        .collect())
+    let mut responses = Vec::new();
+    for summary in summaries {
+        let linked = channels
+            .iter()
+            .filter(|channel| {
+                channel.agent_id.as_deref().unwrap_or(nyxbot.id.as_str()) == summary.id
+            })
+            .map(|channel| ChannelLinkResponse {
+                id: channel.id.clone(),
+                platform: channel.platform.clone(),
+                bot_label: channel.bot_label.clone(),
+                status: channel.status.clone(),
+            })
+            .collect();
+        responses.push(AgentResponse {
+            guest_readiness: None,
+            pending_acknowledgements: summary.pending_requests.len(),
+            channels: linked,
+            summary,
+        });
+    }
+    Ok(responses)
 }
 
 #[derive(Default, Deserialize)]
@@ -3044,6 +3045,34 @@ pub struct MemoryNoteResponse {
     text: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestReadinessQuery {
+    conversation_id: Option<String>,
+}
+
+/// Settings-only owner read; never part of the sidebar/list projection.
+pub async fn guest_readiness(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(query): Query<GuestReadinessQuery>,
+) -> AppResult<Json<crate::services::assistant_service_execution::GuestReadinessSettings>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    Ok(Json(
+        crate::services::assistant_service_execution::guest_readiness_settings(
+            &state.db,
+            &state.encryption_keys,
+            &owner,
+            &id,
+            query.conversation_id.as_deref(),
+        )
+        .await?,
+    ))
 }
 
 /// One agent with its memory, threads and pending requests.
@@ -3610,6 +3639,12 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if super::nyxbot::guest_model_notices::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Guest model setup notices deferred");
+            }
             if crate::services::lark_base_writes::sweep(&state.db)
                 .await
                 .is_err()

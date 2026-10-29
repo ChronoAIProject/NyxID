@@ -114,7 +114,7 @@ function path(id: string): string {
   return `${ROOT}/conversations/${id}`;
 }
 
-export function storedError(code: string | null, capacityWaitMs?: number | null): string {
+export function storedError(code: string | null, capacityWaitMs?: number | null, modelRouteReason?: string): string {
   const billing = billingError(code);
   if (billing) return billing.message;
   if (code === "tool_budget_exhausted" || code === "turn_timeout") return "This task reached its automatic continuation limit. Its context is saved; resume to continue, or adjust the limit in NyxBot settings.";
@@ -140,7 +140,14 @@ export function storedError(code: string | null, capacityWaitMs?: number | null)
   if (code === "first_byte_timeout") return "The assistant did not start responding in time. Try again.";
   if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
   if (code === "output_too_large") return "The assistant reached its response limit.";
-  if (code === "guest_model_route_required") return "This assistant isn't available to guests yet.";
+  if (code === "guest_model_route_required") {
+    const setup = ["request_shape", "unknown_field", "tool_shape", "agent_unavailable", "profile_unknown",
+      "connection_not_platform", "connection_override", "catalog_inactive_or_not_master", "target_mismatch",
+      "header_mismatch", "route_mismatch"].includes(modelRouteReason ?? "");
+    return setup
+      ? "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."
+      : "This assistant can't answer right now. Please try again later.";
+  }
   if (code === "nyxid_error") return "NyxID could not authorize the assistant operation.";
   if (code === "stale_response") return "The assistant context changed. Start a new turn.";
   if (code === "context_unavailable") return "The assistant context could not be restored. Try a new turn.";
@@ -613,7 +620,7 @@ export class NyxAgentTransport {
         timestamp: Date.parse(message.created_at),
         turnId: message.turn_id,
         status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : "complete",
-        error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms) : undefined,
+        error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms, message.turn_metadata?.failure_reason?.model_route?.reason) : undefined,
         channelDelivery: message.turn_metadata?.channel_delivery,
         turnMetadata: message.turn_metadata ? { attempts: message.turn_metadata.attempts, capacityWaitMs: message.turn_metadata.capacity_wait_ms } : undefined,
         errorDetail: message.error_detail ? { failureReason: message.turn_metadata?.failure_reason, attempts: message.error_detail.attempts, capacityWaitMs: message.error_detail.capacity_wait_ms, upstreamCode: message.upstream_error_code, stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,

@@ -171,6 +171,8 @@ pub struct TurnMetadata {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnFailureReason {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route: Option<Box<super::assistant_conversation::ModelRouteDiagnostic>>,
     pub source: String,
     pub stage: String,
     pub code: String,

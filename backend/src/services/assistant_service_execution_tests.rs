@@ -785,8 +785,8 @@ fn guest_1995_codex_correlation_metadata_is_stateless_but_provider_handles_are_n
             "x-codex-turn-metadata":"{\"thread_id\":\"client-correlation\"}","x-codex-window-id":"window"}});
     assert!(stateless_model_transport("v1/responses", &body));
     assert!(
-        !stateless_inference("v1/responses", &body),
-        "owner classification stays legacy"
+        stateless_inference("v1/responses", &body),
+        "owner model transport is stateless too"
     );
     let unchanged = body.clone();
     assert!(stateless_model_transport("v1/responses", &body));

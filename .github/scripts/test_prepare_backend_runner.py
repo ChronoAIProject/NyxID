@@ -6,7 +6,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("prepare-backend-runner.sh").resolve()
-RESERVE_KIB = 32 * 1024**2
+RESERVE_KIB = 40 * 1024**2
 
 
 class BackendReserveTests(unittest.TestCase):
