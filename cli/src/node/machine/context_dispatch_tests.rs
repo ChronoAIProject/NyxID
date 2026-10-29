@@ -100,6 +100,27 @@ fn context_support_failures_keep_custody_distinct_from_capability() {
     assert_eq!(support_failure_stage(None), "capability");
 }
 
+#[test]
+fn context_roots_retain_protected_exclusions() {
+    let workspace = tempfile::tempdir().unwrap();
+    let excluded = workspace.path().join("private");
+    fs::create_dir(&excluded).unwrap();
+
+    let roots = context_roots(
+        &[workspace.path().to_path_buf()],
+        std::slice::from_ref(&excluded),
+    )
+    .unwrap();
+
+    assert_eq!(roots.paths(), &[workspace.path().canonicalize().unwrap()]);
+    assert_eq!(roots.exclusions(), &[excluded.canonicalize().unwrap()]);
+    assert!(
+        roots
+            .restricted(&[excluded.to_string_lossy().into_owned()])
+            .is_err()
+    );
+}
+
 fn evidence() -> Evidence {
     Evidence {
         version: 4,

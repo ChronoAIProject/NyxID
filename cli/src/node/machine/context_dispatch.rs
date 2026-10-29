@@ -131,6 +131,13 @@ fn preparation_error(
     ))
 }
 
+fn context_roots(
+    roots: &[std::path::PathBuf],
+    exclusions: &[std::path::PathBuf],
+) -> Result<files::Roots> {
+    files::Roots::new(roots, exclusions)
+}
+
 #[derive(Default)]
 pub(super) struct Contexts {
     pub(super) store: Option<Store>,
@@ -500,7 +507,7 @@ impl Runtime {
         target.dev_identity = Some(context.dev);
         let stage_started = Instant::now();
         target.roots = annotate(
-            files::Roots::new(&config.roots, self.roots.exclusions()),
+            context_roots(&config.roots, self.roots.exclusions()),
             "context_runtime",
             stage_started,
             authority,
