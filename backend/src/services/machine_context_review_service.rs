@@ -614,10 +614,14 @@ mod tests {
             assert_eq!(policy.assignments[&node.id].saved_login_ids, Some(logins));
             assert_eq!(policy.assignments[&node.id].mode, "shared_legacy");
             assert_eq!(
-                access::revocation_status(&f.state.db, &f.chat.agent_id, &[node.id.clone()])
-                    .await
-                    .unwrap()
-                    .len(),
+                access::revocation_status(
+                    &f.state.db,
+                    &f.chat.agent_id,
+                    std::slice::from_ref(&node.id),
+                )
+                .await
+                .unwrap()
+                .len(),
                 1
             );
             let replay = commit(&f.state.db, &f.owner, &f.chat.agent_id, &node.id, &row.id)
@@ -927,10 +931,14 @@ mod tests {
                     managed.configuration.separation_choice = choice;
                     f.state.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME).update_one(doc!{"_id":&node.id},doc!{"$set":{"configuration.separation_choice":bson::to_bson(&choice).unwrap()}}).await.unwrap();
                     f.state.db.collection::<Document>(node::COLLECTION_NAME).update_one(doc!{"_id":&node.id},doc!{"$set":{"machine.separation_choice":bson::to_bson(&choice).unwrap()}}).await.unwrap();
-                    let rows =
-                        access::new_assignments(&f.state.db, &f.owner, &[node.id.clone()], 4)
-                            .await
-                            .unwrap();
+                    let rows = access::new_assignments(
+                        &f.state.db,
+                        &f.owner,
+                        std::slice::from_ref(&node.id),
+                        4,
+                    )
+                    .await
+                    .unwrap();
                     assert_eq!(
                         rows[&node.id].capabilities,
                         Capabilities::default(),

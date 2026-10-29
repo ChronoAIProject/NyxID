@@ -138,8 +138,8 @@ pub async fn options(
             }) {
                 Some("machine_lifecycle_not_ready")
             } else if hosted.get(&node.id).is_some_and(|machine| {
-                !crate::services::remote_machine_runtime::effective_execution_cutoff(machine)
-                    .is_some_and(|deadline| deadline > chrono::Utc::now())
+                crate::services::remote_machine_runtime::effective_execution_cutoff(machine)
+                    .is_none_or(|deadline| deadline <= chrono::Utc::now())
             }) {
                 Some("machine_runtime_unavailable")
             } else if assignment.mode == "separated" && !separated.available {

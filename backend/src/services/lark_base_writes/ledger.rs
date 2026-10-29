@@ -69,8 +69,13 @@ pub(super) async fn claim(
                     // Commit the uncertainty before returning its refusal.
                     return Ok(Claim::Active(Box::new(LarkBaseWrite { state: WriteState::Uncertain, ..row.clone() })));
                 }
-                if !matches!(row.state, WriteState::FailedPreDispatch | WriteState::FailedDefinite)
-                    && !(row.state == WriteState::Uploading && row.deadline_at <= Utc::now() && same_authority) {
+                if !(matches!(
+                    row.state,
+                    WriteState::FailedPreDispatch | WriteState::FailedDefinite
+                ) || (row.state == WriteState::Uploading
+                    && row.deadline_at <= Utc::now()
+                    && same_authority))
+                {
                     return Err(conflict(row));
                 }
                 next.id = row.id.clone();

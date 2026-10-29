@@ -1081,7 +1081,19 @@ pub async fn create_specialist_for_with_machine_assignment(
     request: CreateRequest,
     intent: Option<crate::models::machine_access::AssignmentIntent>,
 ) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
-    create_specialist_inner(db, keys, actor, owner, request, None, None, intent).await
+    create_specialist_inner(
+        db,
+        keys,
+        actor,
+        owner,
+        request,
+        SpecialistCreationOptions {
+            authority: None,
+            claimed_step: None,
+            intent,
+        },
+    )
+    .await
 }
 
 pub(crate) async fn create_approved_specialist(
@@ -1114,11 +1126,19 @@ pub(crate) async fn create_approved_specialist(
         &authority.owner_user_id,
         &authority.owner_user_id,
         request,
-        Some(authority),
-        Some(job),
-        None,
+        SpecialistCreationOptions {
+            authority: Some(authority),
+            claimed_step: Some(job),
+            intent: None,
+        },
     )
     .await
+}
+
+struct SpecialistCreationOptions<'a> {
+    authority: Option<&'a crate::models::platform_installation::SetupStepAuthority>,
+    claimed_step: Option<&'a crate::models::platform_installation::SetupStepJob>,
+    intent: Option<crate::models::machine_access::AssignmentIntent>,
 }
 
 async fn create_specialist_inner(
@@ -1127,10 +1147,13 @@ async fn create_specialist_inner(
     actor: &str,
     owner: &str,
     request: CreateRequest,
-    authority: Option<&crate::models::platform_installation::SetupStepAuthority>,
-    claimed_step: Option<&crate::models::platform_installation::SetupStepJob>,
-    intent: Option<crate::models::machine_access::AssignmentIntent>,
+    options: SpecialistCreationOptions<'_>,
 ) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
+    let SpecialistCreationOptions {
+        authority,
+        claimed_step,
+        intent,
+    } = options;
     if actor != owner {
         super::org_agent_service::require_creation_enabled(db, actor).await?;
     }

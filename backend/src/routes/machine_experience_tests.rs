@@ -344,7 +344,7 @@ async fn remote_machine_presentation_unknown_binding_and_current_generation_are_
         },
     );
     machines
-        .replace_one(doc! {"_id":&id}, &bson::to_document(&machine).unwrap())
+        .replace_one(doc! {"_id":&id}, bson::to_document(&machine).unwrap())
         .await
         .unwrap();
     nodes.update_one(doc! {"_id":&id},doc! {"$unset":{"machine_confirm":"","allow_single_user_saved_logins":""},
