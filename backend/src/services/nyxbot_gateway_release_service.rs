@@ -54,6 +54,7 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
     for keys in [
         doc! {"state":1,"next_attempt_at":1,"lease_until":1,"_id":1},
         doc! {"state":1,"provisional_expires_at":1,"_id":1},
+        doc! {"state":1,"native_checked_at":1},
         doc! {"channel_id":1,"state":1},
         doc! {"channel_bot_id":1,"state":1},
         doc! {"agent_api_key_id":1,"binding_id":1},
@@ -133,6 +134,7 @@ async fn new_release(
     }
     let now = Utc::now();
     Ok(Release {
+        gateway_source: row.gateway_source.clone(),
         id: record_id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -182,6 +184,7 @@ pub(crate) async fn reserve(
     let mut release = new_release(state, row, Some(record.to_string())).await?;
     release.binding_id = format!("bnd_{}", record.simple());
     let db = state.db.clone();
+    let native_discord = row.platform == "discord" && row.gateway_source.is_some();
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let work:AppResult<_>=Box::pin(async {
@@ -189,6 +192,24 @@ pub(crate) async fn reserve(
             if db.collection::<Document>(CHANNELS).update_one(fence,doc! {"$set":{"gateway_setup_release_id":&release.id,"binding_id":&release.binding_id}})
                 .session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             db.collection::<Release>(RELEASES).insert_one(&release).session(&mut *session).await?;
+            if native_discord {
+                // Old ingress readers also block on this known unresolved
+                // release state. Old cleanup workers never claim review rows.
+                let mut guard = release.clone();
+                guard.id = Uuid::new_v4().to_string();
+                guard.record_id = None;
+                guard.gateway_channel_id = None;
+                guard.state = ReleaseState::ReviewRequired;
+                guard.provisional_expires_at = None;
+                guard.agent_api_key_id.clear();
+                guard.route_api_key_id.clear();
+                guard.binding_id.clear();
+                guard.last_error = Some("native_discord_draining".into());
+                let mut guard = bson::to_document(&guard).map_err(|_|conflict())?;
+                guard.insert("native_drain_for", &release.id);
+                guard.insert("native_binding_id", &release.binding_id);
+                db.collection::<Document>(RELEASES).insert_one(guard).session(&mut *session).await?;
+            }
             Ok(release.clone())
         }).await; transactions::transaction_result(work)
     }).await.map_err(transactions::map_transaction_error)
@@ -543,7 +564,7 @@ pub(crate) async fn retire_attempt(
                 if row.gateway_setup_release_id.as_deref()==Some(&id) {
                     let mut set=doc! {"gateway_no_progress":false,"updated_at":bson::DateTime::now()};
                     let mut unset=doc! {"gateway_setup_release_id":"","pending_agent_api_key_id":"","pending_route_api_key_id":"",
-                        "binding_id":""};
+                        "binding_id":"","gateway_source":"","gateway_native_phase":""};
                     if row.status=="pending" {
                         set.insert("status","failed");set.insert("last_error","setup_interrupted");
                         unset.insert("agent_key_ciphertext","");
@@ -755,14 +776,21 @@ fn remote_identity(release: &Release, body: &Value) -> Observation {
     }
     let definition = &body["definition"];
     let sources = definition["sources"].as_array();
-    let source_matches = sources.is_some_and(|sources| {
-        sources.iter().any(|source| {
-            source["type"] == "nyxid_relay"
-                && source["issuer"] == release.creator_issuer
-                && source["key_id"] == release.route_api_key_id
-                && source["platform"] == release.platform
+    let source_matches = if let Some(native) = &release.gateway_source {
+        sources.is_some_and(|sources| {
+            sources.len() == 1
+                && super::nyxbot_gateway_source::matches_identity(native, &sources[0])
         })
-    });
+    } else {
+        sources.is_some_and(|sources| {
+            sources.iter().any(|source| {
+                source["type"] == "nyxid_relay"
+                    && source["issuer"] == release.creator_issuer
+                    && source["key_id"] == release.route_api_key_id
+                    && source["platform"] == release.platform
+            })
+        })
+    };
     let owner = &definition["owner"]["subject"];
     if release
         .record_id
@@ -837,7 +865,18 @@ pub(crate) async fn observe(state: &AppState, release: &Release) -> AppResult<Ob
     };
     match response.status {
         404 => Ok(Observation::Missing),
-        200 => Ok(remote_identity(release, &response.body)),
+        200 => {
+            let mut retained = release.clone();
+            // An older replica may have authored the retirement. Recover only
+            // the immutable source identity retained before native activation.
+            if retained.gateway_source.is_none()
+                && let Some(guard)=state.db.collection::<Release>(RELEASES).find_one(doc! {
+                    "native_drain_for":&retained.id,"native_binding_id":&retained.binding_id,
+                    "owner_user_id":&retained.owner_user_id,"channel_bot_id":&retained.channel_bot_id,
+                    "gateway_service_id":&retained.gateway_service_id,"gateway_base_url":&retained.gateway_base_url,
+                }).await? {retained.gateway_source=guard.gateway_source;}
+            Ok(remote_identity(&retained, &response.body))
+        }
         401 | 403 => Err(AppError::Forbidden("gateway_authority_refused".into())),
         _ => Err(AppError::OAuthAuthorityUnavailable),
     }
@@ -1116,7 +1155,72 @@ async fn retired_proof(
     Ok(RetiredAcknowledgement::NotApplicable)
 }
 
+/// Remote DELETE does not synchronously join CMA's socket worker. Wait beyond
+/// its 30s lease, 15s renewal timeout and worker shutdown budget. An unresolved
+/// delete has no deadline and continues blocking every replica's IDENTIFY.
+pub(crate) async fn settle_native_drains(db: &Database) -> AppResult<()> {
+    let guards: Vec<Document> = db
+        .collection(RELEASES)
+        .find(doc! {"state":"review_required","native_drain_for":{"$type":"string"}})
+        .sort(doc! {"native_checked_at":1})
+        .limit(32)
+        .await?
+        .try_collect()
+        .await?;
+    for guard in guards {
+        db.collection::<Document>(RELEASES)
+            .update_one(
+                doc! {"_id":guard.get("_id").cloned().ok_or_else(conflict)?},
+                doc! {"$set":{"native_checked_at":bson::DateTime::now()}},
+            )
+            .await?;
+        let release = guard.get_str("native_drain_for").map_err(|_| conflict())?;
+        let Some(done) = db.collection::<Release>(RELEASES).find_one(doc! {"_id":release,"state":"settled",
+            "resolution":{"$in":["released","missing","cancelled","not_created","confirmed_missing"]}}).await? else { continue; };
+        if done.settled_at.is_none() {
+            continue;
+        }
+        let fence = doc! {"_id":guard.get_str("_id").map_err(|_|conflict())?,"state":"review_required","native_drain_for":release};
+        // Server time, persisted once: clock skew or a restarted observer cannot
+        // shorten the post-delete drain. Old writers need not know this field.
+        db.collection::<Document>(RELEASES).update_one(fence.clone(),vec![doc! {"$set":{
+            "native_not_before":{"$ifNull":["$native_not_before",{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":90}}]},
+        }}]).await?;
+        let mut due = fence;
+        due.insert("$expr", doc! {"$lte":["$native_not_before","$$NOW"]});
+        let db = db.clone();
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().and_run2(async move |session| {
+            let work:AppResult<()> = async {
+                if db.collection::<Document>(RELEASES).update_one(due.clone(),vec![doc! {"$set":{
+                    "state":"settled","resolution":"released","settled_at":"$$NOW",
+                }}]).session(&mut *session).await?.modified_count != 1 {return Ok(());}
+                let released=super::discord_gateway::transport::gateway_released_in_session(
+                    &db,guard.get_str("channel_bot_id").map_err(|_|conflict())?,session).await?;
+                // A pre-native writer can swap to direct without clearing
+                // fields it does not know. The same transaction that releases
+                // ingress clears that captured source, so a crash cannot leave
+                // the relay's async/media paths using stale native metadata.
+                db.collection::<Document>(CHANNELS).update_one(doc! {
+                    "_id":guard.get_str("channel_id").map_err(|_|conflict())?,"transport":"direct",
+                    "pending_agent_api_key_id":bson::Bson::Null,"pending_route_api_key_id":bson::Bson::Null,
+                    "gateway_setup_release_id":bson::Bson::Null,
+                    "$or":[
+                        {"gateway_source":guard.get("gateway_source").cloned().ok_or_else(conflict)?},
+                        {"gateway_source":bson::Bson::Null,"gateway_native_activation":"relay_draining"},
+                    ],
+                },doc! {"$set":{"gateway_native_activation":if released {"relay_ready"} else {"relay_draining"}},
+                    "$unset":{"gateway_source":"","gateway_native_phase":""}}).session(&mut *session).await?;
+                Ok(())
+            }.await;
+            transactions::transaction_result(work)
+        }).await.map_err(transactions::map_transaction_error)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
+    settle_native_drains(&state.db).await?;
     let stale: Vec<Release> = state
         .db
         .collection(RELEASES)
@@ -1278,7 +1382,7 @@ pub(crate) async fn fallback(
             super::channel_routing_service::fence_route_key(&db,&next_key,session).await?;
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id,"status":"pending"},doc! {
                 "$set":{"transport":"direct","route_api_key_id":&next_key,"gateway_no_progress":false,"gateway_fallback_at":bson::DateTime::now()},
-                "$unset":{"gateway_setup_release_id":"","agent_api_key_id":"","agent_key_ciphertext":"","gateway_channel_id":"","gateway_record_id":"","gateway_version":"","binding_id":"","gateway_bot_id":""}})
+                "$unset":{"gateway_setup_release_id":"","agent_api_key_id":"","agent_key_ciphertext":"","gateway_channel_id":"","gateway_record_id":"","gateway_version":"","binding_id":"","gateway_bot_id":"","gateway_source":"","gateway_native_phase":""}})
                 .session(&mut *session).await?;
             Ok(ids)
         }).await;transactions::transaction_result(work)
@@ -1310,7 +1414,7 @@ pub(crate) async fn list(
     states: Vec<ReleaseState>,
     limit: i64,
 ) -> AppResult<Vec<Release>> {
-    Ok(db.collection(RELEASES).find(doc! {"_id":{"$gt":after.unwrap_or("")},"state":{"$in":bson::to_bson(&states).map_err(|_| conflict())?}})
+    Ok(db.collection(RELEASES).find(doc! {"_id":{"$gt":after.unwrap_or("")},"native_drain_for":{"$exists":false},"state":{"$in":bson::to_bson(&states).map_err(|_| conflict())?}})
         .sort(doc! {"_id":1}).limit(limit.clamp(1,100)).await?.try_collect().await?)
 }
 

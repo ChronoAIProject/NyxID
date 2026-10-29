@@ -187,7 +187,11 @@ These attributes are part of the testing contract. They can move with equivalent
 ## Message composition
 
 Each canonical `ChatMessage` renders one identity row. User content is a compact
-bubble. An assistant row composes, in order:
+bubble with three 18px corners and a tighter 4px bottom-right corner. Its
+background and text use the dedicated `chat-bubble` and
+`chat-bubble-foreground` theme colors, editable per theme in Settings → Display
+with a live chat preview and a 4.5:1 text contrast check. Light mode defaults to
+a stronger neutral gray fill. An assistant row composes, in order:
 
 - a collapsible thinking/reasoning disclosure;
 - a collapsible step and tool-call activity disclosure;

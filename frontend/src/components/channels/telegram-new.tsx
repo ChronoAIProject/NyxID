@@ -4,6 +4,7 @@ import { useTelegramNew } from "@/hooks/use-telegram-new";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
+import { TelegramPromptStatus } from "./telegram-prompt-status";
 import { ErrorBanner } from "@/components/shared/error-banner";
 
 export function TelegramNew({
@@ -25,7 +26,7 @@ export function TelegramNew({
   readonly onCancelled?: () => void | Promise<void>;
   readonly onConnected: (id: string, username?: string | null) => void;
 }) {
-  const { configuration, begin, launch, cancel, connect } =
+  const { configuration, begin, launch, creationLink, cancel, connect, getCurrentRequest } =
     useTelegramNew(requestId);
   const link = useChannelConnectLinkContext();
   const actor = useAuthStore((state) => state.user?.id);
@@ -38,12 +39,24 @@ export function TelegramNew({
     url: string;
   } | null>(null);
   const request = configuration.data?.request;
+  const requestExpiresAt = request?.expires_at;
+  const canOpenCreationForm = request?.can_open_creation_form;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const expiry = requestExpiresAt ? Date.parse(requestExpiresAt) : NaN;
+    if (!canOpenCreationForm || !Number.isFinite(expiry)) return;
+    const timer = window.setTimeout(() => setNow(Date.now()), Math.min(2_147_483_647, Math.max(0, expiry - Date.now() + 1)));
+    return () => window.clearTimeout(timer);
+  }, [requestExpiresAt, canOpenCreationForm]);
+  const recoveryUnexpired = Boolean(request && Date.parse(request.expires_at) > now);
+  const [recovery, setRecovery] = useState<{ actor: string; id: string; revision: number; url: string } | null>(null);
   const terminal = Boolean(
     request && ["cancelled", "expired", "suspended"].includes(request.status),
   );
   const preparing = begin.isPending || launch.isPending;
-  const pending = preparing || cancel.isPending || connect.isPending;
+  const pending = preparing || creationLink.isPending || cancel.isPending || connect.isPending;
   const error =
+    creationLink.error ??
     begin.error ??
     launch.error ??
     cancel.error ??
@@ -84,6 +97,8 @@ export function TelegramNew({
     // Opening the tab in the click preserves browser popup permission across the API call.
     const tab = window.open("about:blank", "_blank");
     if (tab) tab.opener = null;
+    creationLink.reset();
+    setRecovery(null);
     begin.reset();
     launch.reset();
     cancel.reset();
@@ -108,6 +123,31 @@ export function TelegramNew({
         return;
       }
       if (tab && !tab.closed) tab.location.replace(result.launch_url);
+    } catch {
+      tab?.close();
+    }
+  }
+
+  async function openCreationForm() {
+    if (!request?.can_open_creation_form || !actor || Date.parse(request.expires_at) <= Date.now()) return;
+    const captured = request;
+    const tab = window.open("about:blank", "_blank");
+    if (tab) tab.opener = null;
+    creationLink.reset();
+    setRecovery(null);
+    try {
+      const result = await creationLink.mutateAsync(captured.id);
+      const latest = getCurrentRequest();
+      if (!active.current || currentActor.current !== actor || latest?.id !== captured.id
+        || latest.revision !== captured.revision || latest.status !== "waiting_bot"
+        || !latest.can_open_creation_form || Date.parse(latest.expires_at) <= Date.now()
+        || Date.parse(result.request.expires_at) <= Date.now() || result.request.id !== captured.id
+        || result.request.revision !== captured.revision || result.request.status !== "waiting_bot") {
+        tab?.close();
+        return;
+      }
+      setRecovery({ actor, id: captured.id, revision: captured.revision, url: result.creation_url });
+      if (tab && !tab.closed) tab.location.replace(result.creation_url);
     } catch {
       tab?.close();
     }
@@ -214,10 +254,10 @@ export function TelegramNew({
               <a className="ph-no-capture underline" href={launchUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Open Telegram</a>
             </p>
           )}
-          {creating && (
+          {connecting && (
             <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
-              {connecting ? `Connecting @${request?.bot_username}…` : "Waiting for you to create your bot in Telegram…"}
+              {`Connecting @${request?.bot_username}…`}
             </p>
           )}
           {connecting && request?.connection_error && (
@@ -289,18 +329,10 @@ export function TelegramNew({
               You can stay in Telegram. This page updates automatically when the
               connection is complete.
             </p>
-            {creating && (
+            {connecting && (
               <p role="status" className="flex items-center gap-2 text-sm">
-                {connected ? (
-                  <Check className="size-3 text-success" />
-                ) : (
-                  <Loader2 className="size-3 animate-spin" />
-                )}
-                {connected
-                  ? `@${request?.bot_username} is connected.`
-                  : connecting
-                    ? `Connecting @${request?.bot_username}…`
-                    : "Waiting for you to create your bot in Telegram…"}
+                <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+                {`Connecting @${request?.bot_username}…`}
               </p>
             )}
             {connecting && request?.connection_error && (
@@ -311,6 +343,11 @@ export function TelegramNew({
           </div>
         </li>
       </ol>}
+      {request && ["waiting_telegram", "waiting_bot"].includes(request.status) && (
+        <TelegramPromptStatus request={request} recoveryUnexpired={recoveryUnexpired} pending={pending} recovering={creationLink.isPending}
+          onRecover={() => void openCreationForm()}
+          recoveryUrl={recovery && recovery.actor === actor && recovery.id === request.id && recovery.revision === request.revision && request.can_open_creation_form && recoveryUnexpired ? recovery.url : undefined} />
+      )}
       {request && !request.auto_connect && !terminal && (
         <div className="space-y-2 rounded-lg border border-border p-3 text-xs">
           <p>

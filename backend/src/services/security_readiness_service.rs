@@ -38,6 +38,7 @@ use crate::{
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
+    "assistant:shared-agents",
     "assistant:operation-scopes",
     "assistant:guest-operation-scopes",
     "assistant:machine-capabilities",
@@ -48,6 +49,7 @@ pub const CAPABILITIES: &[&str] = &[
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
+    super::nyxbot_gateway_source::READINESS,
 ];
 const MAX_AGE_SECS: i64 = 45;
 

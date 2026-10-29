@@ -239,6 +239,8 @@ pub mod service_account_service;
 pub mod service_endpoint_service;
 pub mod service_pool_health_service;
 pub mod service_pool_service;
+pub mod shared_agent_consent;
+pub mod shared_agent_service;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;
 pub mod sse_parser;
@@ -524,3 +526,8 @@ pub(crate) mod nyxbot_gateway_release_service;
 
 pub mod discord_gateway;
 pub mod domain_alias_service;
+#[cfg(test)]
+mod shared_agent_tests;
+
+pub(crate) mod nyxbot_gateway_source;
+pub(crate) mod nyxbot_response_recovery;

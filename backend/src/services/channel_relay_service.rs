@@ -421,6 +421,34 @@ pub struct CallbackDelivery {
     pub result: AppResult<()>,
 }
 
+/// Whether `route_api_key_id` routes an organization's bot to the NyxBot of
+/// the admin who linked it. Such a callback carries no `X-NyxID-User-Token`:
+/// that token names the bot's owner (the organization), while the Agent Event
+/// Gateway binds it to the channel's owner (the linking admin) and refuses the
+/// whole delivery on a mismatch (HTTP 401 `relay_user_mismatch`). No NyxBot
+/// receiver reads the token, and personal bots keep it unchanged.
+pub(crate) async fn is_linked_org_nyxbot_route(
+    db: &mongodb::Database,
+    bot_id: &str,
+    route_api_key_id: &str,
+) -> AppResult<bool> {
+    use crate::models::nyxbot_channel::COLLECTION_NAME as CHANNELS;
+    Ok(db
+        .collection::<mongodb::bson::Document>(CHANNELS)
+        .find_one(doc! {
+            "channel_bot_id": bot_id,
+            "bot_owner_id": {"$type": "string"},
+            // A transport move builds the next route beside the current one.
+            "$or": [
+                {"route_api_key_id": route_api_key_id},
+                {"pending_route_api_key_id": route_api_key_id},
+            ],
+        })
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some())
+}
+
 /// Forward an inbound message to the agent's callback URL.
 ///
 /// Emits an RS256 callback JWT in `X-NyxID-Callback-Token` whose

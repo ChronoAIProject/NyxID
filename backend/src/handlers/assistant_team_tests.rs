@@ -1442,7 +1442,11 @@ async fn loop_guards_and_direct_chats_never_wake_nyxbot() {
         &state.db,
         OWNER,
         &orchestrator.id,
-        vec![team::event("message", "note".into(), None)],
+        vec![team::event(
+            "message",
+            "note\n- a quoted bullet\ncontinuation".into(),
+            None,
+        )],
     )
     .await
     .unwrap();
@@ -1461,6 +1465,8 @@ async fn loop_guards_and_direct_chats_never_wake_nyxbot() {
     let calls = calls.lock().await;
     let instructions = calls[2].body["input"].as_str().unwrap();
     assert!(instructions.contains("NyxID events since your previous turn"));
+    assert!(instructions.contains("continuation lines are indented"));
+    assert!(instructions.contains("\n- note\n  - a quoted bullet\n  continuation"));
     assert!(instructions.contains("to helper"));
     server.abort();
 }

@@ -1,6 +1,12 @@
+import { ServiceIcon } from "./ServiceIcon";
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
+import {
+  TOUCH_TARGET,
+  radius,
+  spacing,
+  typeScale,
+} from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
@@ -8,6 +14,8 @@ import type { ApprovalItem } from "../lib/api/types";
 
 type GrantCardProps = {
   grant: ApprovalItem;
+  iconSlug?: string;
+  iconUrl?: string | null;
   onRevoke?: () => void;
   isMutating?: boolean;
 };
@@ -18,7 +26,9 @@ function formatDate(dateStr: string): string {
 }
 
 function daysUntilExpiry(expiresAt: string): number {
-  return Math.round((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  return Math.round(
+    (new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000),
+  );
 }
 
 function formatExpiry(expiresAt: string): string {
@@ -29,7 +39,13 @@ function formatExpiry(expiresAt: string): string {
   return `${days}d left`;
 }
 
-export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProps) {
+export function GrantCard({
+  grant,
+  iconSlug,
+  iconUrl,
+  onRevoke,
+  isMutating = false,
+}: GrantCardProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -45,7 +61,12 @@ export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProp
   return (
     <View style={styles.card}>
       <View style={styles.header}>
-        <Text style={styles.title} numberOfLines={1}>
+        <ServiceIcon
+          slug={iconSlug ?? grant.service_id}
+          iconUrl={iconUrl}
+          size="sm"
+        />
+        <Text style={styles.title} numberOfLines={2}>
           {grant.service_name}
         </Text>
         <Pressable
@@ -65,7 +86,9 @@ export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProp
         {grant.requester_type} · {requesterLabel}
       </Text>
       <View style={styles.expiryRow}>
-        <Text style={styles.meta}>{grantedLabel} · {expiresLabel}</Text>
+        <Text style={styles.meta}>
+          {grantedLabel} · {expiresLabel}
+        </Text>
         <StatusBadge variant={expiryVariant} label={expiryLabel} />
       </View>
     </View>
@@ -95,8 +118,7 @@ const createStyles = (c: ThemeColors) =>
     },
     title: {
       flex: 1,
-      // DESIGN.md mobile-card primary text: text-[13px] font-semibold.
-      ...typeScale.bodyStrong,
+      ...typeScale.title,
       color: c.textPrimary,
     },
     secondary: {

@@ -62,6 +62,12 @@ async fn telegram_manager_public_start_welcomes_chat_without_hiding_creation() {
             .starts_with("<b>Create your Telegram bot</b>")
     );
 
+    assert!(
+        creation_only["text"]
+            .as_str()
+            .unwrap()
+            .contains("update Telegram to the latest version")
+    );
     register_manager_channel(&state, &actor, &server).await;
     for start in ["/start", "/start@NyxSetupBot", " /start@nyxsetupbot "] {
         let before = sent_messages(&server).await.len();
@@ -79,7 +85,7 @@ async fn telegram_manager_public_start_welcomes_chat_without_hiding_creation() {
         assert!(text.starts_with("<b>Welcome</b>"), "{text}");
         assert!(text.contains("Send a message here to chat"));
         assert!(text.contains("/recover @YourBotUsername"));
-        assert!(text.contains("latest Telegram app"));
+        assert!(text.contains("If no Create bot button appears, update Telegram to the latest version, then send /start to try again."));
         let keyboard = &messages[before + 1];
         assert_eq!(keyboard["chat_id"], 700);
         assert!(keyboard["reply_markup"]["keyboard"][0][0]["request_managed_bot"].is_object());

@@ -56,13 +56,44 @@ function readProfile(env, prefix) {
   };
 }
 
+function readProductionProfile(env) {
+  const prod = readProfile(env, "PROD");
+  const flag = (env.PROD_USE_NEW_DOMAINS || "false").trim().toLowerCase();
+  if (flag !== "true" && flag !== "false") {
+    fatal("PROD_USE_NEW_DOMAINS must be true or false.");
+  }
+  prod.useNewDomains = flag === "true";
+  if (flag === "false") return prod;
+
+  const urls = [
+    ["apiBaseUrl", "PROD_NEW_API_BASE_URL"],
+    ["frontendUrl", "PROD_NEW_FRONTEND_URL"],
+    ["legalBaseUrl", "PROD_NEW_LEGAL_BASE_URL"],
+  ];
+  for (const [field, variable] of urls) {
+    const value = (env[variable] || "").trim();
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      fatal(`${variable} must be an absolute HTTPS URL when PROD_USE_NEW_DOMAINS=true.`);
+    }
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+      fatal(`${variable} must be an HTTPS URL without credentials, a query, or a fragment.`);
+    }
+    prod[field] = value;
+  }
+
+  return prod;
+}
+
 function resolveProfile(appEnv, env, options = {}) {
   if (appEnv !== "dev" && appEnv !== "prod") {
     fatal(`APP_ENV must be "dev" or "prod"; got "${appEnv}"`);
   }
 
   const dev = readProfile(env, "DEV");
-  const prod = readProfile(env, "PROD");
+  const prod = readProductionProfile(env);
 
   if (!dev.apiBaseUrl && !prod.apiBaseUrl) {
     fatal(
@@ -89,6 +120,9 @@ function resolveProfile(appEnv, env, options = {}) {
   const resolved = {
     apiBaseUrl: pick("apiBaseUrl"),
     frontendUrl: explicitFrontendUrl || legalBaseUrl,
+    legacyFrontendUrl: appEnv === "prod" && prod.useNewDomains
+      ? (env.PROD_FRONTEND_URL || "").trim()
+      : "",
     iosBundleId: pick("iosBundleId"),
     androidPackage: pick("androidPackage"),
     appleAscAppId: pick("appleAscAppId"),
@@ -141,7 +175,7 @@ function appIdentity(env) {
     name: env.APP_NAME || "NyxID Mobile",
     slug: env.APP_SLUG || "nyxid-mobile",
     scheme: env.APP_SCHEME || "nyxid",
-    version: env.APP_VERSION || "1.0.1",
+    version: env.APP_VERSION || "1.0.4",
   };
 }
 

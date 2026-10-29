@@ -760,7 +760,7 @@ async fn server_main() {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .pool_idle_timeout(std::time::Duration::from_secs(90)),
-        reqwest::redirect::Policy::default(),
+        services::telegram_new_api::app_redirect_policy(),
     )
     .expect("Failed to create HTTP client");
 

@@ -250,12 +250,27 @@ pub async fn agent(db: &Database, owner: &str, id: &str) -> AppResult<AssistantA
         .find_one(doc! {"_id": id})
         .await?
         .ok_or_else(not_found)?;
-    if !super::org_agent_service::access(db, owner, &agent.user_id)
-        .await?
-        .can_read()
-        || (owner != agent.user_id && agent.is_nyxbot())
-    {
-        return Err(not_found());
+    if owner != agent.user_id {
+        if agent.is_nyxbot() {
+            return Err(not_found());
+        }
+        let acl = super::org_agent_service::access(db, owner, &agent.user_id).await?;
+        if !acl.can_read() {
+            // Organization agents are visible only through the organization's
+            // live read ACL.  Do not run the personal sharing evaluator for an
+            // organization owner: besides doing unnecessary sharing reads, it
+            // changes the established not-found contract for outsiders to the
+            // personal "Shared agent not found" error.
+            let owner_is_org = db
+                .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id": &agent.user_id, "user_type": "org"})
+                .await?
+                .is_some();
+            if owner_is_org {
+                return Err(not_found());
+            }
+            super::shared_agent_service::require(db, owner, &agent).await?;
+        }
     }
     Ok(agent)
 }
@@ -319,8 +334,11 @@ pub async fn delegable_specialist(
     match specialist(db, actor, selector).await {
         Ok(agent) => {
             if agent.user_id != actor {
-                super::org_agent_service::require_creation_enabled(db, actor).await?;
-                super::org_agent_service::require_use(db, actor, &agent).await?;
+                let access =
+                    super::org_agent_service::resolve_agent_access(db, actor, &agent).await?;
+                if access.as_ref().is_none_or(|a| a.shared().is_none()) {
+                    super::org_agent_service::require_creation_enabled(db, actor).await?;
+                }
             }
             return Ok(agent);
         }
@@ -330,6 +348,17 @@ pub async fn delegable_specialist(
 
     let mut usable =
         admitted_organization_specialists(db, actor, selector, OrgAgentAdmission::Use).await?;
+    let shared = super::shared_agent_service::load(db, actor, None).await?;
+    usable.extend(
+        shared
+            .agents
+            .into_values()
+            .filter(|a| {
+                selector == a.agent().name
+                    || selector == format!("{}/{}", a.owner(), a.agent().name)
+            })
+            .map(|a| a.agent().clone()),
+    );
     match usable.len() {
         0 => Err(not_found()),
         1 => Ok(usable.pop().expect("one candidate")),
@@ -498,8 +527,26 @@ pub async fn agent_for_conversation(
 ) -> AppResult<AssistantAgent> {
     match row.agent_id.as_deref() {
         Some(id) => {
-            let agent = agent(db, &row.user_id, id).await?;
-            super::org_agent_service::require_use(db, &row.user_id, &agent).await?;
+            let mut agent = agent(db, &row.user_id, id).await?;
+            let access =
+                super::org_agent_service::resolve_agent_access(db, &row.user_id, &agent).await?;
+            if let Some(shared) = access.as_ref().and_then(|a| a.shared()) {
+                if row.group_id.is_some() || row.automation_thread || row.platform_thread.is_some()
+                {
+                    return Err(super::shared_agent_service::missing());
+                }
+                agent.memory = shared.team_memory().to_vec();
+                agent.memory.extend(
+                    super::shared_agent_service::private_notes(db, &row.user_id, id).await?,
+                );
+                agent.machine_node_ids.clear();
+                agent.machine_access = None;
+                agent.saved_login_ids.clear();
+                agent.guest_access.clear();
+                agent.grants.account_read = false;
+                agent.home_conversation_id = None;
+                agent.access_mode_override = None;
+            }
             if agent.user_id != row.user_id && (row.guest_turn || row.channel.is_some()) {
                 return Err(AppError::Forbidden(
                     "Organization agents require a private member thread".into(),
@@ -685,6 +732,7 @@ async fn create_thread_with_kind(
         agent_id: Some(agent.id.clone()),
         automation_thread,
         voice_parent_conversation_id: None,
+        shared_agent_thread: false,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
         report_to: None,
@@ -704,6 +752,8 @@ async fn create_thread_with_kind(
         db, &row, session, snapshot,
     ))
     .await?;
+    row.shared_agent_thread = matches!(authority, KeyAuthority::Shared(..));
+
     let credential = credentials::load_or_provision_in_session(
         db,
         keys,
@@ -717,7 +767,7 @@ async fn create_thread_with_kind(
     collection
         .update_one(
             doc! {"_id": &row.id},
-            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id}},
+            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id, "shared_agent_thread": row.shared_agent_thread}},
         )
         .session(&mut *session)
         .await?;
@@ -1346,7 +1396,21 @@ pub async fn update_agent(
     description: Option<&str>,
     style: AgentStyle<'_>,
 ) -> AppResult<AssistantAgent> {
-    let current = maintained_agent(db, owner, id).await?;
+    let current = agent(db, owner, id).await?;
+    let manager = if super::org_agent_service::require_maintain(db, owner, &current)
+        .await
+        .is_err()
+    {
+        let access = super::shared_agent_service::require(db, owner, &current).await?;
+        if access.role() != crate::models::assistant_sharing::ShareRole::Manager || name.is_some() {
+            return Err(AppError::Forbidden(
+                "Only the owner can change this agent setting".into(),
+            ));
+        }
+        Some(access)
+    } else {
+        None
+    };
     let actor = owner;
     let owner = current.user_id.as_str();
     if current.destroyed_at.is_some() {
@@ -1415,13 +1479,35 @@ pub async fn update_agent(
     if !unset.is_empty() {
         update.insert("$unset", unset);
     }
-    let updated = db
-        .collection::<AssistantAgent>(AGENTS)
-        .find_one_and_update(doc! {"_id": id, "user_id": owner}, update)
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(not_found)?;
-    super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    let shared_manager = manager.is_some();
+    let updated = if let Some(manager) = manager {
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().await?;
+        super::shared_agent_service::fence(db, &manager, &mut session).await?;
+        let updated = db
+            .collection::<AssistantAgent>(AGENTS)
+            .find_one_and_update(
+                doc! {"_id": id, "user_id": owner, "destroyed_at": null,
+                "updated_at": bson::DateTime::from_chrono(current.updated_at)},
+                update,
+            )
+            .return_document(ReturnDocument::After)
+            .session(&mut session)
+            .await?
+            .ok_or_else(not_found)?;
+        session.commit_transaction().await?;
+        super::shared_agent_service::audit(db, actor, &updated, "profile").await;
+        updated
+    } else {
+        db.collection::<AssistantAgent>(AGENTS)
+            .find_one_and_update(doc! {"_id": id, "user_id": owner}, update)
+            .return_document(ReturnDocument::After)
+            .await?
+            .ok_or_else(not_found)?
+    };
+    if !shared_manager {
+        super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    }
     Ok(updated)
 }
 
@@ -1677,8 +1763,28 @@ pub(crate) async fn sync_thread_authority(
     rows: &[AssistantConversation],
     session: &mut ClientSession,
 ) -> AppResult<()> {
-    let authority = KeyAuthority::for_agent(agent);
+    let policy = super::shared_agent_service::policy(db, agent).await?;
     for row in rows {
+        let authority = if row.shared_agent_thread {
+            let grants = crate::models::assistant_agent::AgentGrants {
+                service_ids: agent
+                    .grants
+                    .service_ids
+                    .iter()
+                    .filter(|id| policy.shared_access.contains_key(*id))
+                    .cloned()
+                    .collect(),
+                platform_service_ids: Vec::new(),
+                account_read: false,
+            };
+            KeyAuthority::Shared(
+                grants,
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            )
+        } else {
+            KeyAuthority::for_agent(agent)
+        };
         for key in thread_key_ids(db, &row.user_id, std::slice::from_ref(row), session).await? {
             match credentials::apply_authority(db, &row.user_id, &key, &authority, session).await {
                 Ok(()) | Err(AppError::NotFound(_)) => {}
@@ -1763,6 +1869,7 @@ pub async fn apply_grants_in_session(
         .cloned()
         .collect();
     let lost_account = agent.grants.account_read && !grants.account_read;
+    super::shared_agent_service::remove_grants_in_session(db, &agent.id, &removed, session).await?;
     agent.grants = grants;
     agent.guest_access = guest_access;
     if let GrantChange::GuestOperations { selections, .. } = change {
@@ -2041,7 +2148,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
     Ok(agent)
 }
 
-/// Permanently delete a destroyed specialist and all of its threads.
+/// Delete a destroyed specialist while preserving recipients' private history.
 pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> {
     let agent = maintained_agent(db, owner, agent_id).await?;
     if agent.destroyed_at.is_none() {
@@ -2059,7 +2166,7 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     }
     let rows: Vec<AssistantConversation> = db
         .collection(CONVERSATIONS)
-        .find(doc! {"agent_id": &agent.id})
+        .find(doc! {"agent_id": &agent.id, "shared_agent_thread": {"$ne": true}})
         .await?
         .try_collect()
         .await?;
@@ -2076,6 +2183,19 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     )
     .delete_many(doc! {"agent_id": &agent.id})
     .await?;
+    // Recipients retain their own transcripts and private notes. Publication
+    // policy and unusable connection consents are owned by the deleted agent.
+    for collection in [
+        crate::models::assistant_sharing::SHARES_COLLECTION_NAME,
+        crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME,
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(doc! {"agent_id": &agent.id})
+            .await?;
+    }
+    db.collection::<bson::Document>(crate::models::assistant_sharing::COLLECTION_NAME)
+        .delete_one(doc! {"_id": &agent.id})
+        .await?;
     db.collection::<AssistantAgent>(AGENTS)
         .delete_one(doc! {"_id": &agent.id, "user_id": &agent.user_id})
         .await?;
@@ -2255,6 +2375,7 @@ pub struct ReplySummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentSummary {
+    pub share_role: Option<crate::models::assistant_sharing::ShareRole>,
     pub owner_id: String,
     pub owner_name: Option<String>,
     pub owner_slug: Option<String>,
@@ -2295,7 +2416,7 @@ pub struct AgentSummary {
 
 impl AgentSummary {
     pub fn delegation_name(&self) -> String {
-        if self.owner_kind == "org" {
+        if self.owner_kind == "org" || self.share_role.is_some() {
             format!(
                 "{}/{}",
                 self.owner_slug.as_deref().unwrap_or(&self.owner_id),
@@ -2545,6 +2666,7 @@ pub async fn summaries(
             (chars, Some(home)) => last_reply(db, owner, home, chars).await?,
         };
         out.push(AgentSummary {
+            share_role: None,
             owner_id: agent.user_id.clone(),
             owner_name,
             owner_slug,
@@ -2800,6 +2922,29 @@ pub async fn delegation_summaries(
         .into_iter()
         .filter(|row| row.can_use && (row.owner_kind != "org" || org_enabled))
         .collect())
+}
+
+/// Explicit discovery/wait tools include shared specialists. Keep this out of
+/// ordinary turn roster construction so unshared turn paths add no reads.
+pub async fn tool_delegation_summaries(
+    db: &Database,
+    actor: &str,
+    include_destroyed: bool,
+    reply_chars: usize,
+) -> AppResult<Vec<AgentSummary>> {
+    let mut rows = delegation_summaries(db, actor, include_destroyed, reply_chars).await?;
+    for mut shared in super::shared_agent_service::summaries(db, actor).await? {
+        if !shared.can_use {
+            continue;
+        }
+        if reply_chars > 0
+            && let Some(home) = shared.home_conversation_id.as_deref()
+        {
+            shared.last_reply = last_reply(db, actor, home, reply_chars).await?;
+        }
+        rows.push(shared);
+    }
+    Ok(rows)
 }
 
 /// Remove settled-report events for the given agents from a NyxBot thread's

@@ -1,13 +1,19 @@
 # NyxID Mobile
 
-The mobile authenticator companion for the [NyxID](../) auth/SSO platform. Receives push notifications when a sign-in or sensitive action needs your approval, lets you approve or deny it with one tap, and persists the granted permissions for any policies you've opted into.
+The native workspace for the [NyxID](../) auth/SSO platform, built around persisted assistant conversations, service connections, agents, and approvals. It uses the existing NyxID backend and retains the mobile QR login, push notification, and secure session flows.
 
-Think Duo Mobile, Microsoft Authenticator, or Authy — but bound to your own self-hosted NyxID backend.
+The first Web-to-RN increment and remaining migration work are documented in [RN Web parity scope](docs/RN_WEB_PARITY.md).
 
 ## What it does
 
-- **Approves auth challenges.** When a service requests access (login, OAuth grant, MFA step-up, admin action), the backend pushes a notification to this app. You see the request details — who, what, when, where — and tap approve or deny.
-- **Manages granted permissions.** View every grant you've issued (per-service, per-scope), and revoke any of them.
+- **Chats with NyxBot and specialists.** Open saved conversations, receive streaming responses, review scoped confirmations, stop work, and recover history after a connection interruption.
+- **Connects services.** Browse the catalog, connect supported API-key, token-exchange, OAuth, or platform-key services, and manage existing connections under the server's permissions.
+- **Manages agents.** Create personal specialists, edit authorized profiles and grants, manage memory, and open agent conversations.
+- **Reviews approvals.** Receive push notifications, scan login QR codes, inspect the server's tool arguments and expiry, approve or deny requests, and revoke granted permissions.
+- **Customizes chat appearance.** Settings → Display offers Gray, Lavender, and Graphite light-mode bubbles with a live preview. The choice is saved on the device and applies to individual, specialist, and group chats, including messages being sent. User bubbles share three 18pt corners and a 4pt bottom-right corner.
+- **Manages account security.** Edit profile information, revoke sessions, set up TOTP, and sign in with a password and authenticator code.
+- **Stays signed in securely.** Tokens persist in OS-secure storage through `expo-secure-store`; refresh and account changes fence stale responses and queued credential writes.
+
 - **Preserves MFA assurance.**
 
   - Password MFA always requires a TOTP or single-use recovery code. Server social challenges last five minutes and stay in memory until verification.
@@ -15,9 +21,6 @@ Think Duo Mobile, Microsoft Authenticator, or Authy — but bound to your own se
   - Legacy and mobile-exempt sessions keep working until expiry; enabling the flag preserves existing exemptions.
   - Device/app identity and Agent Key approvals, and login-code minting, require verified authority. Error 2003 preserves the session.
   - With the flag enabled in `/users/me.capabilities.enabled_features`, the app offers authenticator/recovery step-up and retries after verification. Otherwise it directs the user to the NyxID website to verify and approve or create a login code. Missing old-backend capabilities means off. No automatic approvals.
-- **Stays signed in securely.** Tokens persist in the OS secure enclave (iOS Keychain via `expo-secure-store`, Android EncryptedSharedPreferences).
-
-For end users this is a companion app to whatever website / service uses NyxID as its identity provider. For NyxID operators this is what your tenants install.
 
 ## Tech stack
 
@@ -64,6 +67,7 @@ Each field falls back to the other profile if its primary is empty. Both empty f
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `*_API_BASE_URL` | yes (one of dev/prod) | Backend URL — canonical "profile populated" signal |
+| `*_FRONTEND_URL` | for web QR login / waitlist | Trusted frontend origin that creates login QR codes |
 | `*_IOS_BUNDLE_ID` | yes (one of dev/prod) | iOS bundle identifier (reverse-DNS) |
 | `*_ANDROID_PACKAGE` | yes (one of dev/prod) | Android application id |
 | `*_APPLE_ASC_APP_ID` | only for submit | Numeric ASC App ID |
@@ -75,6 +79,16 @@ Each field falls back to the other profile if its primary is empty. Both empty f
 | `*_ALLOWED_EMAILS` | optional | Comma-separated allowlist; empty = allow all signed-in users |
 | `*_TELEMETRY_DSN` / `*_TELEMETRY_HOST` / `*_SHARE_ANALYTICS` | optional | PostHog |
 
+### Production domain migration
+
+`PROD_USE_NEW_DOMAINS=false` (the default when unset) uses the existing `PROD_API_BASE_URL`, `PROD_FRONTEND_URL`, and `PROD_LEGAL_BASE_URL`. Set the flag to `true` to select `PROD_NEW_API_BASE_URL`, `PROD_NEW_FRONTEND_URL`, and `PROD_NEW_LEGAL_BASE_URL` together. All three new URLs must be configured as HTTPS URLs; an incomplete selection aborts the build.
+
+The API's iOS association follows the selected API host. The existing `PROD_UNIVERSAL_LINK_HOST` and `PROD_UNIVERSAL_LINK_PATH_PREFIX` stay in use in both modes, preserving OneLink routing without claiming ordinary frontend web pages. New-mode production QR scanning also trusts the configured legacy `PROD_FRONTEND_URL` so it works before the backend changes its QR origin. App identifiers, signing, and version numbers continue to use the existing variables. Production domain selection happens before the existing DEV↔PROD fallback, so explicit dev URLs keep their values and missing dev fields fall back to the selected production values.
+
+This is a **build-time flag**. Persist it in `.env.prod` for releases; changing it requires rebuilding and distributing the app. See [Domain migration](docs/DOMAIN_MIGRATION.md) for configuration preview, rollout ordering, checks, and rollback steps.
+
+The runtime API URL is resolved once in `src/lib/api/baseUrl.ts`. HTTP requests, token refresh, and social login use its `buildApiUrl(path)` helper; QR trust and app linking receive the same normalized base through `src/lib/env.ts`. The resolver trims surrounding whitespace and trailing slashes and supports the legacy `/mobile` suffix. Missing configuration raises an error before an API request. API callers pass endpoint paths, so each feature uses the backend selected by the build configuration.
+
 ### App identity (single value, defaults if unset)
 
 | Variable | Default | |
@@ -82,7 +96,7 @@ Each field falls back to the other profile if its primary is empty. Both empty f
 | `APP_NAME` | `NyxID Mobile` | Home-screen display name |
 | `APP_SLUG` | `nyxid-mobile` | Expo project slug |
 | `APP_SCHEME` | `nyxid` | Custom URL scheme for deep links |
-| `APP_VERSION` | `1.0.1` | Marketing version (`CFBundleShortVersionString`) |
+| `APP_VERSION` | `1.0.4` | Marketing version (`CFBundleShortVersionString`) |
 
 ### Apple submit credentials (account-wide)
 
@@ -204,7 +218,7 @@ pnpm bump:android    # PROD_ANDROID_VERSION_CODE → N+1
 pnpm bump:both       # both
 ```
 
-For NyxID's existing TestFlight history on `fun.chrono-ai.nyxid`, the last accepted iOS build was **34**. The first build under this pipeline should be `PROD_IOS_BUILD_NUMBER=35`.
+The repository matches NyxID's current TestFlight build on `fun.chrono-ai.nyxid`: **1.0.4 (36)**. For a new upload, keep `APP_VERSION=1.0.4` and set a higher `PROD_IOS_BUILD_NUMBER` in your local `.env.prod`; `pnpm bump:ios` advances an existing build number of 36 to 37. Later uploads must continue to increase the build number.
 
 ## Troubleshooting / cleaning
 
@@ -273,11 +287,14 @@ mobile/
 │  ├─ app/                        # Navigator, root, deep-link routing
 │  ├─ features/
 │  │  ├─ auth/                    # Login, auth session context, MFA verify
-│  │  ├─ activity/                # Challenge list + detail (the main "what to approve" screen)
+│  │  ├─ assistant/               # Persisted chats, native SSE, scoped confirmations
+│  │  ├─ services/                # Catalog and service connections
+│  │  ├─ agents/                  # Specialist profiles, grants, memory, lifecycle
+│  │  ├─ activity/                # Challenge list + detail
 │  │  ├─ approvals/               # Granted permissions, revoke flow
-│  │  ├─ account/                 # Profile, settings, account deletion
+│  │  ├─ account/                 # Profile, sessions, TOTP, settings, account deletion
 │  │  └─ legal/                   # Privacy, terms
-│  ├─ components/                 # Reusable UI primitives
+│  ├─ components/                 # Reusable UI primitives and workspace drawer
 │  ├─ hooks/                      # useNetworkStatus, useNyxChat, etc.
 │  ├─ lib/
 │  │  ├─ api/                     # HTTP client (mobileApi.ts, http.ts), error mapping
@@ -293,7 +310,7 @@ mobile/
 
 ## Backend endpoints this app talks to
 
-All under `/api/v1` on the configured `*_API_BASE_URL`:
+All under `/api/v1` on the configured `*_API_BASE_URL`. The workspace API families and supported operations are listed in [RN Web parity scope](docs/RN_WEB_PARITY.md); the retained mobile auth and approval paths include:
 
 | Endpoint | Used by |
 | --- | --- |
@@ -318,17 +335,19 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 - The QR scanner accepts HTTPS or `nyxid://` login URLs but extracts only `user_code`; API calls always use `*_API_BASE_URL`
 - Supported push payload fields: `deeplink`, `url`, `challenge_id`, `challengeId`
 - Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. The host of `*_API_BASE_URL` is also auto-added to iOS `associatedDomains` so backend-issued links open in the app.
+- React Navigation accepts the configured app scheme and selected API/frontend/link origins. New-domain production builds preserve the existing universal-link settings as described in [Domain migration](docs/DOMAIN_MIGRATION.md).
 
 ## Session
 
 - Access + refresh tokens persist in `SecureStore` (iOS Keychain / Android EncryptedSharedPreferences).
-- Cold start restores the session and routes to `Dashboard` if valid, `Auth` otherwise.
+- Cold start restores the session and routes to `Assistant` if valid, `Auth` otherwise.
 - 401 after refresh failure triggers a full sign-out (state + storage + push deregistration).
 
 ## Key source files
 
 - `app.config.ts` — Expo config; per-field DEV↔PROD fallback resolved via `scripts/lib/load-env.js`
-- `src/lib/api/http.ts` + `src/lib/api/mobileApi.ts` — HTTP client; reads `EXPO_PUBLIC_API_BASE_URL`
+- `src/lib/api/baseUrl.ts` — single runtime API base resolver and endpoint URL builder; reads `EXPO_PUBLIC_API_BASE_URL` once
+- `src/lib/api/http.ts` + `src/lib/api/mobileApi.ts` — HTTP client and API operations; use the shared URL builder
 - `src/features/auth/AuthSessionContext.tsx` — auth state, token refresh, telemetry init
 - `src/lib/auth/sessionStore.ts` — SecureStore wrapper
 - `src/app/linking.ts` — deep link → screen routing
@@ -357,3 +376,43 @@ assurance and upgraded replicas treat them as existing devices. Rolling back
 to v0.73.0 removes social MFA enforcement. Only environments that ran unreleased
 #1970 builds have rejecting replicas to drain. Deploy the web step-up UI only
 after all API replicas support the route.
+
+### Native drawer and chat display
+
+Signed-in management uses one retained pull-up drawer over the current chat.
+Nested routes have Back and Close; dirty drafts and critical writes guard Close,
+backdrop, drag, accessibility Escape and Android Back. The handle is separate
+from page scrolling. Reduced motion avoids sliding/spring travel. The full
+[route inventory](docs/NATIVE_WORKSPACE_ROUTES.md) includes Services, agent
+creation/details/skills, shared legal/device/auth entries and cold-link fallbacks.
+
+Settings → Display applies device-local chat layout across personal, specialist,
+contextual and group chats. Composer maximum defaults to 120pt and adapts above
+the keyboard; it does not add blank space. Wide windows expose chat column width
+(default maximum 758pt). Phones omit that ineffective control. Reset affects chat
+layout only. Measured transcript, composer and horizontal-strip fades indicate
+remaining content without intercepting taps or replacing scroll-follow logic.
+
+Native validation includes mobile tests, TypeScript, native dependency sync and
+iOS/Android JavaScript exports. Simulator/emulator execution covers development
+runtimes; physical-device and release-build verification remains separate.
+RN-web, native transcript rail and machines remain outside the supported native
+capabilities.
+
+The chat toolbar offers Camera, Photos and Files under "+" through the native
+pickers. Images convert to JPEG when needed; shared upload limits and lifecycle
+checks apply. Eligible private/specialist/NyxBot chats use server dictation,
+matching web: discover dictation options, automatically choose the available
+default, stream PCM24k to the private conversation's dictation WebSocket, then
+review and explicitly Insert text or Discard. Capture is ephemeral and never
+sends a message. Microphone denial offers Settings. Tap starts/stops; holding
+the microphone records until release. Native has no OS recognizer fallback or
+source selector. Crew dictation is unsupported, matching web; the keyboard's
+own microphone remains available.
+
+A separate waveform action opens conversational voice for eligible private chats
+when the server enables `assistant:voice`. It automatically selects the available
+server default and uses the existing voice session/stream/control contract.
+Real GPT transcription and spoken responses require an authenticated real NyxID
+backend with provider access, flags and credits. Synthetic fixture transcripts
+and contract tests establish lifecycle behavior only.

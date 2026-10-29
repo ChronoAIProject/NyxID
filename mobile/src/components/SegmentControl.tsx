@@ -12,10 +12,16 @@ type Segment = {
 type SegmentControlProps = {
   segments: Segment[];
   activeIndex: number;
+  disabled?: boolean;
   onPress: (index: number) => void;
 };
 
-export function SegmentControl({ segments, activeIndex, onPress }: SegmentControlProps) {
+export function SegmentControl({
+  segments,
+  activeIndex,
+  disabled = false,
+  onPress,
+}: SegmentControlProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -53,6 +59,10 @@ export function SegmentControl({ segments, activeIndex, onPress }: SegmentContro
         return (
           <Pressable
             key={seg.label}
+            accessibilityRole="tab"
+            accessibilityLabel={seg.label}
+            accessibilityState={{ selected: isActive, disabled }}
+            disabled={disabled}
             style={styles.item}
             onPress={() => onPress(i)}
           >

@@ -241,6 +241,7 @@ function AssistantWorkspacePage({
   return (
     <AssistantShell
       title={title}
+      contentTitle
       sidebar={sidebar}
       headerActions={<AssistantHeaderActions activeConversationId={null} />}
     >
@@ -261,6 +262,7 @@ function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
   return (
     <AssistantShell
       title={workspaceTitles[view]}
+      contentTitle
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
