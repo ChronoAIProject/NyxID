@@ -342,7 +342,8 @@ mod tests {
             .await
             .is_err()
         );
-        probe(State(state), auth, Path(id)).await.unwrap();
+        let checked = probe(State(state), auth, Path(id.clone())).await.unwrap().0;
+        assert_eq!(checked.service.id, id);
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
         assert!(

@@ -324,14 +324,13 @@ impl Client {
         let mut result: ProbeResult = self
             .request(Method::GET, "status", None::<&()>, None)
             .await?;
-        if result.snapshot_present {
-            if let Some(readiness) = result
+        if result.snapshot_present
+            && let Some(readiness) = result
                 .readiness
                 .as_mut()
                 .filter(|check| check.configured == Some(false))
-            {
-                readiness.status = CheckStatus::NotConfigured;
-            }
+        {
+            readiness.status = CheckStatus::NotConfigured;
         }
         self.checked_result(result)
     }
