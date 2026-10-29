@@ -298,8 +298,7 @@ async fn check_http_projected_inner(
     let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
     let generation = !method_override
         && super::request_identity::legacy_model_generation(target, method, path, body);
-    // Separate route identity from admission: Codex metadata remains legacy for
-    // owners, including approval, exact selection and fallback classification.
+    // Model transport uses the same closed shape for owner admission and guest binding.
     let model_route = (generation && pool.is_none())
         .then(|| super::request_identity::model_route_operation(target, method, path, query, body))
         .flatten()
@@ -311,14 +310,42 @@ async fn check_http_projected_inner(
     bind_headers(&mut operation, &projection.headers(target, headers));
     let stateless = operation["kind"] == "inference";
     let guest_inference = chat.guest && target.service.inference.is_some();
+    let shape_failure = if method_override {
+        Some(super::model_diagnostic::Reason::MethodOverride.into())
+    } else if pool.is_some() {
+        Some(super::model_diagnostic::Reason::Pool.into())
+    } else if !generation {
+        Some(super::model_diagnostic::Reason::RequestShape.into())
+    } else {
+        super::request_identity::model_shape(
+            path,
+            &serde_json::from_slice(body).unwrap_or(Value::Null),
+        )
+        .err()
+    };
     if guest_inference {
         if !chat.turn_live {
-            return Err(AppError::GuestModelRouteRequired);
+            return super::model_diagnostic::refuse(
+                &state.db,
+                chat,
+                super::model_diagnostic::Reason::NoAdmission,
+            )
+            .await;
+        }
+        if let Some(reason) = shape_failure {
+            return super::model_diagnostic::refuse(&state.db, chat, reason).await;
         }
         operation = model_route
             .clone()
             .ok_or(AppError::GuestModelRouteRequired)?;
         super::guest_model::require(&state.db, chat, id, target, &mut operation).await?;
+    } else if chat.turn_live && target.service.inference.is_some() && !stateless {
+        super::model_diagnostic::record(
+            &state.db,
+            chat,
+            shape_failure.unwrap_or_else(|| super::model_diagnostic::Reason::RequestShape.into()),
+        )
+        .await?;
     }
     let Some(id) = id else {
         if !chat.guest

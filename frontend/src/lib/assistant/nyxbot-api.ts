@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
+  guestReadinessSettingsSchema,
   nyxAgentChannelThreadListSchema,
   nyxAgentChannelThreadStoppedSchema,
   assistantAgentCreatedSchema,
@@ -42,6 +43,10 @@ export const nyxBotApi = {
   },
   async agent(id: string) {
     return assistantAgentDetailSchema.parse(await assistantJson(agentPath(id)));
+  },
+  async guestReadiness(id: string, conversationId?: string) {
+    const query = conversationId ? `?${new URLSearchParams({ conversation_id: conversationId })}` : "";
+    return guestReadinessSettingsSchema.parse(await assistantJson(`${agentPath(id)}/guest-readiness${query}`));
   },
   /** Blank display name and persona are left out (the agent has none). */
   async createAgent({ display_name, persona, ...body }: AssistantAgentCreate) {

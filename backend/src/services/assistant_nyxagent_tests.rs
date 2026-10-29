@@ -401,6 +401,62 @@ fn guest_1995_failure_reason_requires_recent_unambiguous_evidence() {
 }
 
 #[test]
+fn readiness_2092_route_diagnostic_requires_matching_recent_attempt() {
+    use crate::models::assistant_conversation::ModelRouteDiagnostic;
+    use crate::services::assistant_model_observer::failure_reason;
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.model_attempt_id = Some("current".into());
+    turn.model_route_diagnostic = Some(ModelRouteDiagnostic {
+        reason: "unknown_field".into(),
+        unknown_fields: vec!["new_option".into()],
+        attempt_id: Some("current".into()),
+        at: now,
+    });
+    let upstream = TurnError::new("turn_failed");
+    let reason = failure_reason(&upstream, turn, now).unwrap();
+    assert_eq!(
+        reason.model_route.as_ref().unwrap().unknown_fields,
+        ["new_option"]
+    );
+    for at in [
+        now - chrono::Duration::seconds(1),
+        now + chrono::Duration::seconds(121),
+    ] {
+        assert!(
+            failure_reason(&upstream, turn, at)
+                .unwrap()
+                .model_route
+                .is_none()
+        );
+    }
+    turn.model_attribution_uncertain = true;
+    assert!(
+        failure_reason(&upstream, turn, now)
+            .unwrap()
+            .model_route
+            .is_none()
+    );
+    turn.model_attribution_uncertain = false;
+    turn.model_attempt_id = Some("next".into());
+    assert!(
+        failure_reason(&upstream, turn, now)
+            .unwrap()
+            .model_route
+            .is_none()
+    );
+    turn.model_attempt_id = None;
+    turn.model_route_diagnostic.as_mut().unwrap().attempt_id = None;
+    assert!(
+        failure_reason(&upstream, turn, now)
+            .unwrap()
+            .model_route
+            .is_none()
+    );
+}
+
+#[test]
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
@@ -1208,6 +1264,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             model_requests_active: 0,
             model_attribution_uncertain: false,
             model_refusal: None,
+            model_route_diagnostic: None,
             model_stream_fault: None,
             model_stream_cancellation: None,
             waiting_for_capacity: false,
@@ -7312,7 +7369,7 @@ fn guest_1995_route_refusal_copy_requires_current_exact_failure_evidence() {
     assert_eq!(mapped.code, "guest_model_route_required");
     assert_eq!(
         mapped.message,
-        "This assistant isn't available to guests yet."
+        "This assistant can't answer right now. Please try again later."
     );
     assert_eq!(mapped.upstream_code.as_deref(), Some("turn_failed"));
     assert_eq!(
@@ -7330,4 +7387,71 @@ fn guest_1995_route_refusal_copy_requires_current_exact_failure_evidence() {
     turn.model_refusal.as_mut().unwrap().http_status = Some(403);
     turn.model_refusal.as_mut().unwrap().error_code = Some(0);
     assert_eq!(attribute(&error, turn, now).code, error.code);
+}
+
+#[test]
+fn readiness_2092_visitor_copy_only_claims_notice_for_current_setup_reasons() {
+    use crate::models::assistant_conversation::{ModelRefusal, ModelRouteDiagnostic};
+    use crate::services::assistant_model_observer::attribute;
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.model_attempt_id = Some("current".into());
+    turn.model_refusal = Some(ModelRefusal {
+        code: "guest_model_route_required".into(),
+        attempt_id: "current".into(),
+        at: now,
+        http_status: Some(403),
+        error_code: Some(9000),
+    });
+    for (reason, setup) in [
+        ("request_shape", true),
+        ("unknown_field", true),
+        ("tool_shape", true),
+        ("agent_unavailable", true),
+        ("profile_unknown", true),
+        ("connection_not_platform", true),
+        ("connection_override", true),
+        ("catalog_inactive_or_not_master", true),
+        ("target_mismatch", true),
+        ("header_mismatch", true),
+        ("route_mismatch", true),
+        ("no_admission", false),
+        ("shared_chat", false),
+        ("method_override", false),
+        ("pool", false),
+        ("handle_present", false),
+        ("future_reason", false),
+    ] {
+        turn.model_route_diagnostic = Some(ModelRouteDiagnostic {
+            reason: reason.into(),
+            unknown_fields: vec![],
+            attempt_id: Some("current".into()),
+            at: now,
+        });
+        let result = attribute(&TurnError::new("turn_failed"), turn, now);
+        assert_eq!(
+            result.message.contains("has been notified"),
+            setup,
+            "{reason}"
+        );
+        assert!(!result.message.contains(reason));
+    }
+    for (attempt, at) in [
+        (Some("old"), now),
+        (Some("current"), now - chrono::Duration::seconds(121)),
+        (None, now),
+    ] {
+        turn.model_route_diagnostic = Some(ModelRouteDiagnostic {
+            reason: "route_mismatch".into(),
+            unknown_fields: vec![],
+            attempt_id: attempt.map(str::to_owned),
+            at,
+        });
+        assert!(
+            !attribute(&TurnError::new("turn_failed"), turn, now)
+                .message
+                .contains("notified")
+        );
+    }
 }

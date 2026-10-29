@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_1995_codex_metadata_preserves_owner_approval_verbs() {
+    fn readiness_2004_codex_metadata_is_read_for_owners_and_guests() {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.inference = Some(
             serde_json::from_value(serde_json::json!({"wire_protocol":"openai_responses"}))
@@ -462,7 +462,8 @@ mod tests {
         .unwrap();
         for llm in [false, true] {
             for (guest, method_override, expected) in [
-                (false, false, ApprovalVerb::Write),
+                (false, false, ApprovalVerb::Read),
+                (false, true, ApprovalVerb::Write),
                 (true, false, ApprovalVerb::Read),
                 (true, true, ApprovalVerb::Write),
             ] {

@@ -25,7 +25,7 @@ const afterReset = "2026-09-17T00:00:02Z";
 
 it.each([
   ["turn_lost", "interrupted"], ["assistant_unavailable", "could not complete"],
-  ["guest_model_route_required", "isn't available to guests yet"],
+  ["guest_model_route_required", "can't answer right now"],
   ["internal_error", "NyxBot hit an internal error on this turn. Check which actions completed before retrying."],
   ["first_byte_timeout", "did not start"], ["invalid_stream", "ended unexpectedly"],
   ["output_too_large", "response limit"], ["nyxid_error", "authorize"],
@@ -2499,4 +2499,11 @@ it.each([
   const reloaded = new NyxAgentTransport();
   await reloaded.history(id);
   expect(reloaded.session(id).messages[1]?.errorDetail?.failureReason).toEqual(failure);
+});
+
+it.each([undefined, "no_admission", "shared_chat", "method_override", "pool", "handle_present", "future_reason"])("does not invent an owner notice for %s", (reason) => {
+  expect(storedError("guest_model_route_required", undefined, reason)).toBe("This assistant can't answer right now. Please try again later.");
+});
+it("renders setup wording only with a recorded setup diagnostic", () => {
+  expect(storedError("guest_model_route_required", undefined, "connection_not_platform")).toContain("has been notified");
 });

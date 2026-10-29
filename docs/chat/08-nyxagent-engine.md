@@ -295,24 +295,66 @@ with durable credential identity/epoch. Prompts, input-admission tokens,
 process-local fingerprints, refreshed token bytes and thread keys are not route
 identity. A changed route still requires a new owner admission.
 
-For guest route validation and recording an already-admitted owner route,
-Codex's bounded `client_metadata` correlation object is recognized on stateless
-Responses generation: `root_turn_id`, `session_id`, `thread_id`, `turn_id`,
-`x-codex-installation-id`, `x-codex-turn-metadata`, and `x-codex-window-id`, with
-string values of at most 8 KiB. These are client telemetry, not provider-side
-thread handles. NyxAgent's normal bridge forwards this object; its public bridge
-uses a different projection. Previously it made the normal generation classify
-as stateful: owners succeeded through legacy transport without recording a
-route, while guests were refused even with matching profiles. Unknown/nested
-metadata remains refused, and actual provider handles anywhere in executable
-input remain disallowed. Correlation values do not enter route identity. The extended classification is
-not used for owner admission: owner callbacks with `client_metadata` retain
-`legacy_inference`, their exact body identity, approval verb, connection selection
-and fallback behavior. Their route is recorded separately after assistant
-admission, without creating model consent. Ordinary callbacks without this
-extension retain their existing raw-inference behavior. Classification inspects
-a cloned JSON value; the forwarded request body, including `client_metadata`,
-is unchanged.
+Owner and guest model callbacks share the closed stateless generation classifier.
+Codex's bounded `client_metadata` correlation object is recognized on Responses:
+`root_turn_id`, `session_id`, `thread_id`, `turn_id`, `x-codex-installation-id`,
+`x-codex-turn-metadata`, and `x-codex-window-id`, with string values at most 8 KiB.
+It contains telemetry, not provider resource handles. Classification removes it
+only from the executable-handle projection; forwarding preserves the entire
+request. Unknown fields, nested metadata, stateful handles, background/storage
+and hosted effect tools still fail closed. Provider web search is permitted by
+the existing read-only contract; chat and research profiles enable it.
+
+The old owner-only metadata exclusion classified these model rounds as HTTP
+changes. Under Ask every time, each evolving body got another action card,
+including the continuation after Allow (#2004). Admitted live model rounds now
+use the existing raw-inference selection, model consent and server-recorded
+input admission path. Read-only model generation raises no access-mode action
+card. Explicit service/org approval policy and Deny still apply; billing,
+concurrency and exact selected-connection authority remain live. This does not
+grant tool permissions or let guests establish model consent.
+
+Captured synthetic requests from actual Codex 0.164.0 and 0.165.0 app servers,
+including all three profiles and the bridge's semantic headers, live in
+`backend/specs/assistant/codex/`. NyxAgent's checked-in runtime channel is
+`latest`, not a deployment-version attestation. These bodies already pass the
+guest shape gate; a failure must be diagnosed at the specific route gate,
+not inferred from `guest_model_route_required` alone.
+
+Model refusals add `failure_reason.model_route` with a closed `reason` and at
+most eight safe top-level unknown field names (`[a-z0-9_-]{1,64}`). No values,
+request text, headers, prompts, credentials or provider error prose are stored
+or logged. One structured `nyxid::assistant_model_route` diagnostic also covers
+an owner's generation callback falling back to HTTP. Attempt/turn fences and
+the existing attribution window prevent a late or parallel callback from
+explaining the wrong failure.
+
+The human-only, engine-gated `GET /assistant/nyxagent/agents/{id}/guest-readiness`
+computes `status` (`ready` / `not_ready`), `reason`, and `fix` for an owned agent.
+Optional `conversation_id` must belong to that same owner and agent. The default
+read also projects conversation IDs whose profile or recorded route differs;
+this list is capped at 512 with an explicit truncation flag (then visible chats
+conservatively request their own result). Agent Grants and open channel Chats
+settings share one agent query, requesting a chat-specific result only when
+needed. Sidebar/agent, REST channel and chat lists do no readiness work; their
+optional fields remain absent/null. Audience-setting write responses retain one
+readiness computation. NyxBot's channel-list tool computes at most once per
+distinct agent, and only for channels open to visitors in private chats or groups.
+Readiness is a model setup check, not permission to use services, and is never
+stored or evaluated on unrelated turn paths. Execution rechecks live authority.
+At settlement, only a current, attributable setup diagnostic tells a visitor
+the owner has not finished setup and has been notified. Other, missing or unknown
+reasons say only that the assistant cannot answer right now and to try again
+later. Neither reply names owner services or diagnostic reasons. A metadata-only notice is queued atomically once per
+agent/reason in 24 hours, with 48-hour TTL. The 15-second assistant sweep appends
+a fixed notice to the agent's home and attempts the owner's verified private
+chat on bots linked to that same agent through existing channel delivery. A
+missing channel agent binding means the owner's NyxBot, never the affected
+specialist. The notice names the assistant and a
+one-step remedy and links to `AssistantPage::AgentDetails`; it contains no
+visitor text and never needs the failing model. Private sends use a durable
+at-most-once barrier; uncertain sends are not retried. The app notice remains
+available when private posting is disabled or a linked platform is unavailable.
 
 New channel threads inherit their linked agent's configured profile. Existing
 threads retain their model, including legacy channels created with the global
@@ -362,9 +404,11 @@ revalidate the route at egress.
 
 An absent, changed or mismatched route returns HTTP 403 / `9000`,
 `guest_model_route_required`. When the exact recent model refusal explains the
-upstream failure, guests receive only “This assistant isn't available to guests
-yet.” in native relay and gateway chat delivery. Phone/SMS adapters deliver
-this same closed local refusal through their normal output; the persisted turn
+upstream failure, a setup diagnostic gives guests “The owner hasn't finished
+setting this assistant up for visitors and has been notified. Please try again
+later.” Other, missing or unknown diagnostic reasons give “This assistant can't
+answer right now. Please try again later.” Native relay, gateway, and phone/SMS
+adapters deliver this fixed local refusal through their normal output; the persisted turn
 remains failed for owner diagnostics. They do not turn arbitrary upstream errors
 into successful replies. Owner history retains the
 sanitized `failure_reason`; Details advises sending an owner message using the

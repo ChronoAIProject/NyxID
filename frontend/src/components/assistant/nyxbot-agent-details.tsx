@@ -1,3 +1,4 @@
+import { GuestReadiness } from "./guest-readiness";
 import { ShareAgentDialog, SharedAgentMemory, SharedAgentProfile, SharedConsentCards } from "./shared-agent-controls";
 import { AgentSkills } from "./agent-skills";
 import { AgentConnections } from "./agent-connections";
@@ -62,6 +63,7 @@ import {
   useForgetNyxBotMemory,
   useRememberNyxBotMemory,
   useNyxBotAgent,
+  useGuestReadiness,
   useNyxBotSettings,
   useSetNyxBotAgentGrants,
   useUpdateNyxBotAgent,
@@ -605,6 +607,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
 }
 
 function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
+  const readiness = useGuestReadiness(agent.id, agent.owner_kind !== "org" && !agent.share_role && agent.can_maintain !== false);
   const grants = useSetNyxBotAgentGrants();
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentGrants>({
@@ -682,6 +685,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               )}
             />
           ))}
+          <GuestReadiness readiness={readiness.data} />
           {services.length && agent.owner_kind !== "org" ? (
             <FormField
               control={form.control}

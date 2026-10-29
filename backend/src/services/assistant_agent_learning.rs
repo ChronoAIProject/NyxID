@@ -1549,6 +1549,7 @@ mod tests {
             created_by: "learning-test-owner".into(),
             model: "test".into(),
             owner_model_route: None,
+            guest_model_notices: Default::default(),
             access_mode_override: None,
             home_conversation_id: None,
             memory: Vec::new(),

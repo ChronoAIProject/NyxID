@@ -2580,6 +2580,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::catalog),
         )
         .route(
+            "/nyxagent/agents/{id}/guest-readiness",
+            get(handlers::assistant_team::guest_readiness),
+        )
+        .route(
             "/nyxagent/agents/{id}/consents",
             get(handlers::assistant_sharing::consents),
         )

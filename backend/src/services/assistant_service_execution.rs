@@ -40,6 +40,12 @@ mod authority;
 pub use authority::connection_binding;
 mod availability;
 mod guest_model;
+pub(crate) mod model_diagnostic;
+pub(crate) mod readiness;
+pub(crate) mod readiness_notice;
+pub use readiness::{
+    GuestReadiness, GuestReadinessSettings, guest_readiness, guest_readiness_settings,
+};
 mod guest_model_defaults;
 mod http;
 mod receipts;

@@ -1,3 +1,4 @@
+use super::model_diagnostic::{Diagnostic, Reason};
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -61,15 +62,16 @@ pub fn http_operation(
 /// provider extensions retain exact action consent. Function tools describe
 /// callbacks to NyxAgent; provider-hosted tools can execute effects themselves.
 pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
-    // Preserve the existing owner admission/approval/fallback classification.
-    // Recognizing Codex telemetry must not migrate legacy owner callbacks into
-    // raw-inference consent or make their accounts interchangeable.
-    body.get("client_metadata").is_none() && stateless_model_transport(path, body)
+    stateless_model_transport(path, body)
 }
 
-/// Closed generation contract used only for guest model transport and recording
-/// an already-admitted owner route. It never selects an owner's admission path.
+/// Shared closed generation contract. Correlation metadata is non-executable;
+/// the actual upstream payload is never modified by this projection.
 pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {
+    model_shape(path, body).is_ok()
+}
+
+pub(super) fn model_shape(path: &str, body: &Value) -> Result<(), Diagnostic> {
     let path = path
         .trim_matches('/')
         .strip_prefix("v1/")
@@ -78,20 +80,20 @@ pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {
         path,
         "chat/completions" | "responses" | "messages" | "embeddings"
     ) {
-        return false;
+        return Err(Reason::RequestShape.into());
     }
     let Some(object) = body.as_object() else {
-        return false;
+        return Err(Reason::RequestShape.into());
     };
     if object
         .get("model")
         .and_then(Value::as_str)
         .is_none_or(|model| model.trim().is_empty())
     {
-        return false;
+        return Err(Reason::RequestShape.into());
     }
     if path == "responses" && object.get("store") != Some(&Value::Bool(false)) {
-        return false;
+        return Err(Reason::RequestShape.into());
     }
     const FIELDS: &[&str] = &[
         "model",
@@ -139,15 +141,19 @@ pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {
         "prompt_cache_retention",
         "client_metadata",
     ];
-    if object.keys().any(|key| !FIELDS.contains(&key.as_str()))
-        || object
-            .get("store")
-            .is_some_and(|value| value != &Value::Bool(false))
+    if object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+        return Err(Diagnostic::unknown(
+            object.keys().filter(|key| !FIELDS.contains(&key.as_str())),
+        ));
+    }
+    if object
+        .get("store")
+        .is_some_and(|value| value != &Value::Bool(false))
         || object
             .get("background")
             .is_some_and(|value| value != &Value::Bool(false))
     {
-        return false;
+        return Err(Reason::RequestShape.into());
     }
     // Codex correlation fields are client telemetry, not stored provider
     // resource handles. NyxAgent forwards this object on ordinary model calls.
@@ -171,7 +177,7 @@ pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {
                     })
             })
         {
-            return false;
+            return Err(Reason::RequestShape.into());
         }
     }
     fn handles(value: &Value) -> bool {
@@ -207,11 +213,11 @@ pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {
         .expect("model request")
         .remove("client_metadata");
     if handles(&executable) {
-        return false;
+        return Err(Reason::HandlePresent.into());
     }
     if let Some(tools) = object.get("tools") {
         let Some(tools) = tools.as_array() else {
-            return false;
+            return Err(Reason::ToolShape.into());
         };
         if tools.iter().any(|tool| {
             !tool.is_object()
@@ -229,10 +235,10 @@ pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {
                     )
                 }
         }) {
-            return false;
+            return Err(Reason::ToolShape.into());
         }
     }
-    true
+    Ok(())
 }
 
 pub(super) fn model_route_operation(
