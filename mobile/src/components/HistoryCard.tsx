@@ -97,14 +97,14 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
         ) : null}
       </View>
       <Text style={styles.title} numberOfLines={2}>{item.title}</Text>
-      <Text style={styles.secondary} numberOfLines={1}>
+      <Text style={styles.secondary}>
         {summary}
-        {channel ? ` · via ${channel}` : ""}
       </Text>
       {requester ? (
         <Text style={styles.meta}>Requested by {requester}</Text>
       ) : null}
       <Text style={styles.meta}>
+        {channel ? `via ${channel} · ` : ""}
         {decidedAt
           ? `Decided ${decidedAt}`
           : requestedAt

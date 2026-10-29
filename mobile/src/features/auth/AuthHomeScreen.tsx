@@ -26,7 +26,6 @@ import { MfaChallengeError } from "../../lib/auth/mfaChallenge";
 import { ApiError } from "../../lib/api/ApiError";
 import { authSessionGeneration } from "../../lib/auth/sessionStore";
 import { mobileApi } from "../../lib/api/mobileApi";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useAuthSession } from "./AuthSessionContext";
 import { getPublicAuthConfig } from "../../lib/api/publicAuthApi";

@@ -6,6 +6,9 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 
 import { ApiError } from "./ApiError";
+import { createSessionRefresh } from "../auth/sessionRefresh";
+import { executeAuthenticatedRequest } from "./authenticatedTransport";
+import { guardedJsonTransport } from "./guardedTransport";
 
 type ApiUrlModule = typeof import("./baseUrl");
 type HttpModule = typeof import("./http");
@@ -67,14 +70,30 @@ test("endpoint inputs cannot select a different host or scheme", () => {
 });
 
 function loadApiConsumers(api: ApiUrlModule, fetch: typeof globalThis.fetch) {
+  let session = { accessToken: "access-before-refresh", refreshToken: "refresh-test", sessionGeneration: 1 };
   const dependencies: Record<string, unknown> = {
+    "./connectionState": { assistantConnection: { observe: (send: () => Promise<unknown>) => send() } },
+    "../auth/sessionRefresh": { createSessionRefresh },
+    "expo/fetch": { fetch },
+    "./authenticatedTransport": { executeAuthenticatedRequest },
+    "./approvalAdapter": {},
+    "../auth/authEpoch": { getAuthEpoch: () => 0 },
+    "./readBoundedBytes": {},
+    "./guardedTransport": { guardedJsonTransport },
+    "../analyticsConsentState": { analyticsDeviceHeaders: () => ({}) },
+    "../auth/jwt": {},
+    "../auth/mfaChallenge": {},
     "./ApiError": { ApiError },
     "./baseUrl": api,
     "expo-constants": { default: { expoConfig: { version: "test" } } },
     "../accountDeletionPolicy": { ACCOUNT_DELETION_POLICY_VERSION: "test" },
     "../auth/sessionStore": {
-      loadStoredAuthSession: async () => ({ accessToken: "access-before-refresh", refreshToken: "refresh-test" }),
-      persistAuthSession: async () => {},
+      loadStoredAuthSession: async () => session,
+      authSessionGeneration: () => 1,
+      commitRefreshedAuthSession: async (_expected: unknown, next: typeof session) => {
+        session = { ...next, sessionGeneration: 1 };
+        return true;
+      },
       clearStoredAuthSession: async () => {},
     },
     "./authDeviceApi": {},
@@ -115,5 +134,8 @@ for (const base of ["https://nyx-api.chrono-ai.fun/api/v1", "https://api.nyxid.a
       `${base}/users/me`, `${base}/auth/refresh`, `${base}/users/me`,
     ]);
     assert.equal(requests[2]?.authorization, "Bearer access-after-refresh");
+    await http.requestAuthenticatedResponse("/assistant/nyxagent/conversations");
+    assert.equal(requests[3]?.url, `${base}/assistant/nyxagent/conversations`);
+    assert.equal(requests[3]?.authorization, "Bearer access-after-refresh");
   });
 }

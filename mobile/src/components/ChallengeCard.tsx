@@ -108,7 +108,7 @@ export function ChallengeCard({
         <StatusBadge variant="modeChip" label={modeLabel} />
       </View>
       <Text style={styles.title} numberOfLines={2}>{challenge.title}</Text>
-      <Text style={styles.resource} numberOfLines={1}>{summary}</Text>
+      <Text style={styles.resource}>{summary}</Text>
       {showRequester ? (
         <Text style={styles.meta}>Requested by {requester}</Text>
       ) : null}

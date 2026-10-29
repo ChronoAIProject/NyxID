@@ -72,7 +72,7 @@ The build logs show the selected API, frontend, and legal URLs. The normal build
 
 Email/password login uses `POST /auth/login` through the shared API resolver with `client: "mobile"`. Social login opens `/auth/social/{provider}?client=mobile&redirect_uri=...` on the same selected API base. The provider returns to the backend, which completes login and redirects into the app at `nyxid://auth/social/callback`. This app return link keeps using the existing `nyxid` scheme.
 
-The backend builds provider callbacks from its own `BASE_URL`; the mobile feature flag does not change that server setting. When `BASE_URL=https://api.nyxid.ai`, configure the providers to allow these callbacks:
+The backend builds provider callbacks from `BASE_URL` or a matching explicitly configured `BASE_URL_ALIASES` origin selected by the server. The mobile feature flag does not change those server settings. Register both the existing callbacks and these new callbacks before routing mobile login through `api.nyxid.ai`:
 
 | Provider | Backend callback |
 | --- | --- |
@@ -80,11 +80,11 @@ The backend builds provider callbacks from its own `BASE_URL`; the mobile featur
 | GitHub | `https://api.nyxid.ai/api/v1/auth/social/github/callback` |
 | Apple | `https://api.nyxid.ai/api/v1/auth/social/apple/callback` |
 
-Keep the callback configuration compatible with the backend's active `BASE_URL` throughout the rollout. If `COOKIE_DOMAIN` is explicitly configured, it must also be valid for the API host serving the browser login flow; a cookie domain under `chrono-ai.fun` cannot be used by `api.nyxid.ai`.
+Keep both callback sets reachable throughout the rollout, including in-flight logins. If `COOKIE_DOMAIN` is explicitly configured, it must be valid for the serving API host; configure `COOKIE_DOMAIN_ALIASES` for the other controlled domain as described in the [backend domain migration runbook](../../docs/DOMAIN_MIGRATION.md). Browser cookies do not transfer between unrelated sites.
 
-Mobile stores access and refresh tokens in SecureStore and restores them after an app update. Refresh and authenticated retries use the selected API base. However, **retaining the stored tokens does not guarantee that the backend will accept them after its configuration changes**. The current backend verifies both access and refresh tokens against `JWT_ISSUER` and an audience equal to `BASE_URL`. `JWT_ISSUER` also defaults to `BASE_URL` when unset. Changing `BASE_URL` therefore rejects tokens issued with the old audience even when the database, signing keys, and explicit issuer stay the same. Keeping the old API hostname available does not fix this if both hostnames reach that changed validator.
+Mobile stores access and refresh tokens in SecureStore and restores them after an app update. Refresh and authenticated retries use the selected API base. The backend now supports verification overlap through `BASE_URL_ALIASES` and an explicit `JWT_AUDIENCE`. Follow the [backend runbook](../../docs/DOMAIN_MIGRATION.md): deploy the alias-capable server to every replica, pin the actual existing `JWT_ISSUER` and `JWT_AUDIENCE`, configure both controlled API origins, and retain the same signing keys, database, and session/refresh records. Native sessions can then continue across the domain switch without a forced sign-in.
 
-With the current backend, plan for users to sign in again when its `BASE_URL` changes. Seamless session continuity requires a separate backend migration that temporarily accepts the explicitly configured legacy token claims while issuing new tokens with the new claims, using the same signing keys and session/refresh-token records. The mobile domain flag does not implement that compatibility window. A protected request that remains unauthorized after refresh triggers the app's existing sign-out flow.
+For the standard existing issuer/audience, a new-canonical backend uses `BASE_URL=https://api.nyxid.ai`, `BASE_URL_ALIASES=https://nyx-api.chrono-ai.fun`, and keeps `JWT_ISSUER` and `JWT_AUDIENCE` pinned to `https://nyx-api.chrono-ai.fun`. Use the actual previously deployed claims if customized. Later issuer/audience migration requires the overlap and external-client coordination in the backend runbook. Changing the base without pinning claims or configuring overlap can still reject existing tokens; a protected request that remains unauthorized after refresh triggers the app's existing sign-out flow. This mobile PR changes no backend deployment configuration.
 
 QR login approval continues to use the selected API for previews and decisions, regardless of the scanned frontend origin. The old and new API domains must reach the same login-request records for a QR created through one domain to be approved through the other.
 
