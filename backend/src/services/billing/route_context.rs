@@ -510,6 +510,7 @@ mod tests {
     fn shared_recipient_never_uses_guest_owner_payer_override() {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let chat = ChatAuthority {
+            trigger_run_id: None,
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,
