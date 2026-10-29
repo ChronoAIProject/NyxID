@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+#[cfg(test)]
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -425,6 +427,7 @@ pub fn find_flag(key: &str) -> Option<&'static FeatureFlagDef> {
 /// A resolved definition. Built-in definitions have no runtime creator.
 #[derive(Clone, Debug)]
 pub struct FlagDefinition {
+    pub created_at: Option<chrono::DateTime<Utc>>,
     pub id: Option<String>,
     pub key: String,
     pub description: String,
@@ -435,6 +438,7 @@ pub struct FlagDefinition {
 impl From<&FeatureFlagDef> for FlagDefinition {
     fn from(def: &FeatureFlagDef) -> Self {
         Self {
+            created_at: None,
             id: None,
             key: def.key.to_owned(),
             description: def.description.to_owned(),
@@ -447,6 +451,7 @@ impl From<&FeatureFlagDef> for FlagDefinition {
 impl From<FeatureFlagDefinition> for FlagDefinition {
     fn from(def: FeatureFlagDefinition) -> Self {
         Self {
+            created_at: Some(def.created_at),
             id: Some(def.id),
             key: def.flag_key,
             description: def.description,
@@ -497,6 +502,7 @@ pub fn validate_flag_key(key: &str) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn create_definition(
     db: &mongodb::Database,
     key: &str,
@@ -552,6 +558,7 @@ pub enum FlagTarget {
 }
 
 impl FlagTarget {
+    #[cfg(test)]
     pub fn kind(&self) -> FlagTargetKind {
         match self {
             Self::Global => FlagTargetKind::Global,
@@ -563,6 +570,7 @@ impl FlagTarget {
 
     /// Storage key: `None` for global/org scope, role string for role scope,
     /// user id for user scope.
+    #[cfg(test)]
     pub fn key(&self) -> Option<String> {
         match self {
             Self::Global | Self::Org => None,
@@ -1240,6 +1248,7 @@ pub async fn search_rollout_targets(
 
 /// The org-row upsert behind [`set_platform_org_override`]. Gates live on the
 /// caller.
+#[cfg(test)]
 async fn upsert_override_row(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1299,6 +1308,7 @@ async fn upsert_override_row(
 /// Upsert a platform-level override (staff-controlled). Only `Global` and
 /// personal `User` targets are valid — org/role scopes require an org, and are
 /// rejected here.
+#[cfg(test)]
 pub async fn set_platform_override(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1379,6 +1389,7 @@ pub async fn set_platform_override(
 }
 
 /// Clear a platform-level override. Returns the removed row when present.
+#[cfg(test)]
 pub async fn clear_platform_override(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1405,6 +1416,7 @@ pub async fn clear_platform_override(
 /// Upsert an org-wide override on behalf of platform staff — rollout targeting
 /// for one org cohort. The target must be an existing org account (404
 /// otherwise).
+#[cfg(test)]
 pub async fn set_platform_org_override(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1435,6 +1447,7 @@ pub async fn set_platform_org_override(
 
 /// Clear an org-wide override on behalf of platform staff. Returns the removed
 /// row when present (idempotent otherwise).
+#[cfg(test)]
 pub async fn clear_platform_org_override(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1454,7 +1467,7 @@ pub async fn clear_platform_org_override(
     Ok(row)
 }
 
-async fn ensure_org_exists(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
+pub(crate) async fn ensure_org_exists(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     let is_org = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": org_user_id })
@@ -1540,6 +1553,14 @@ pub async fn fetch_override_org_display(
 // Metadata (admin-authored documentation)
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub(crate) fn has_metadata(row: &FeatureFlagMetadata) -> bool {
+    row.description.is_some()
+        || row.owner.is_some()
+        || row.group.is_some()
+        || !row.tags.is_empty()
+        || row.sunset
+}
+
 /// Upper bound on an admin-written flag description.
 pub const MAX_FLAG_DESCRIPTION_LEN: usize = 512;
 /// Upper bound on an admin-written flag owner (a person, team, or contact).
@@ -1547,7 +1568,7 @@ pub const MAX_FLAG_OWNER_LEN: usize = 128;
 
 /// Trim a free-text metadata field, treating blank input as "cleared", and
 /// enforce its length budget.
-fn normalize_metadata_field(
+pub(crate) fn normalize_metadata_field(
     value: Option<&str>,
     max_len: usize,
     field: &str,
@@ -1584,7 +1605,7 @@ pub async fn list_metadata(
         .filter(|row| {
             keys.get(&row.flag_key)
                 .is_some_and(|id| id == &row.definition_id)
-                && (row.description.is_some() || row.owner.is_some())
+                && has_metadata(row)
         })
         .map(|row| (row.flag_key.clone(), row))
         .collect())
@@ -1596,6 +1617,7 @@ pub async fn list_metadata(
 /// blank or absent value clears that field. Clearing both fields deletes the
 /// row entirely (the flag falls back to its code-declared description with no
 /// owner) and returns `None`.
+#[cfg(test)]
 pub async fn set_metadata(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1652,6 +1674,7 @@ pub async fn set_metadata(
 
 /// Sparse metadata update. Keep empty rows internally so a concurrent disjoint
 /// write cannot be deleted by cleanup after the update.
+#[cfg(test)]
 pub async fn patch_metadata(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1700,7 +1723,7 @@ pub async fn patch_metadata(
             .return_document(ReturnDocument::After)
             .await?
     };
-    Ok(row.filter(|row| row.description.is_some() || row.owner.is_some()))
+    Ok(row.filter(has_metadata))
 }
 
 /// Cascade helper: drop every override for an org (used when the org is deleted).
@@ -2643,6 +2666,9 @@ mod tests {
         overrides.insert_one(stale).await.unwrap();
         metadata
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 id: Uuid::new_v4().to_string(),
                 flag_key: "example_ui".into(),
                 definition_id: Some(runtime_id.clone()),
@@ -2718,6 +2744,9 @@ mod tests {
             .unwrap();
         metadata
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 id: Uuid::new_v4().to_string(),
                 flag_key: key.into(),
                 definition_id: None,
@@ -3421,6 +3450,9 @@ mod tests {
         // registry must never surface as if the flag still existed.
         db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION)
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 definition_id: None,
                 id: Uuid::new_v4().to_string(),
                 flag_key: "retired_flag".to_string(),

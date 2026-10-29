@@ -715,6 +715,10 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     }
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");
+    audit.create_index(IndexModel::builder()
+        .keys(doc! { "event_data.flag_key": 1, "event_data.definition_id": 1, "created_at": -1, "_id": -1 })
+        .options(mongodb::options::IndexOptions::builder().name("flag_history".to_string()).partial_filter_expression(doc! {"event_data.flag_key":{"$exists":true}}).build())
+        .build()).await?;
     audit
         .create_index(
             IndexModel::builder()

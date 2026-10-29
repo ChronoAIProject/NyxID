@@ -117,6 +117,7 @@ pub(crate) mod erasure_admission;
 pub mod event_dedup_cache;
 pub mod exact_service_approval_service;
 pub mod execution_authority;
+pub mod feature_flag_admin_service;
 pub mod feature_flag_service;
 pub mod gcp_sa_service;
 pub mod google_workspace;

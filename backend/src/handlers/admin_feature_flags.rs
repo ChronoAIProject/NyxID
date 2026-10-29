@@ -16,7 +16,9 @@ use crate::models::feature_flag_override::{FeatureFlagOverride, FlagTargetKind};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::role_service::{self, FeatureFlagAccess};
-use crate::services::{audit_service, feature_flag_service};
+use crate::services::{
+    audit_service, feature_flag_admin_service as flag_admin, feature_flag_service,
+};
 use feature_flag_service::FlagTarget;
 use mongodb::bson::doc;
 
@@ -96,6 +98,9 @@ pub struct AdminFeatureFlagItem {
     pub custom_description: Option<String>,
     /// Who owns this flag (person, team, or contact). Admin-authored.
     pub owner: Option<String>,
+    pub group: Option<String>,
+    pub tags: Vec<String>,
+    pub sunset: bool,
     pub metadata_updated_at: Option<String>,
     pub metadata_updated_by: Option<String>,
     pub default_enabled: bool,
@@ -236,20 +241,17 @@ pub async fn create_feature_flag(
             "Feature flag creation permission required".into(),
         ));
     }
-    let def = feature_flag_service::create_definition(
+    let result = flag_admin::mutate(
         &state.db,
         &body.key,
-        &body.description,
-        body.default_enabled,
-        &auth.user_id.to_string(),
+        flag_admin::Mutation::Create {
+            description: body.description,
+            default_enabled: body.default_enabled,
+        },
+        &audit_service::AuditActor::from_auth_user(&auth),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "admin_feature_flag_created",
-        Some(serde_json::json!({ "flag_key": def.key, "default_enabled": def.default_enabled })),
-    );
+    let def = result.definition;
     Ok((
         StatusCode::CREATED,
         Json(CreateFeatureFlagResponse {
@@ -373,6 +375,9 @@ pub async fn list_feature_flags(
             code_description: def.description.to_string(),
             custom_description,
             owner: meta.and_then(|row| row.owner.clone()),
+            group: meta.and_then(|row| row.group.clone()),
+            tags: meta.map(|row| row.tags.clone()).unwrap_or_default(),
+            sunset: meta.is_some_and(|row| row.sunset),
             metadata_updated_at: meta.map(|row| row.updated_at.to_rfc3339()),
             metadata_updated_by: meta.map(|row| row.updated_by.clone()),
             default_enabled: def.default_enabled,
@@ -396,42 +401,21 @@ pub async fn set_feature_flag(
     Json(body): Json<SetAdminFeatureFlagRequest>,
 ) -> AppResult<Json<AdminUserFeatureFlagOverrideOrGlobal>> {
     require_flag_write(&state, &auth_user, &flag_key).await?;
-    let actor = auth_user.user_id.to_string();
-    let row = match parse_target(body.target_kind, body.target_key.as_deref())? {
-        AdminTarget::Platform(target) => {
-            feature_flag_service::set_platform_override(
-                &state.db,
-                &flag_key,
-                &target,
-                body.enabled,
-                &actor,
-            )
-            .await?
-        }
-        AdminTarget::OrgWide { org_user_id } => {
-            feature_flag_service::set_platform_org_override(
-                &state.db,
-                &org_user_id,
-                &flag_key,
-                body.enabled,
-                &actor,
-            )
-            .await?
-        }
-    };
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_feature_flag_override_set",
-        Some(serde_json::json!({
-            "flag_key": flag_key,
-            "target_kind": row.target_kind.as_str(),
-            "target_key": row.target_key,
-            "org_user_id": row.org_user_id,
-            "enabled": row.enabled,
-        })),
-    );
+    let (kind, target_id) = admin_override_target(body.target_kind, body.target_key.as_deref())?;
+    let result = flag_admin::mutate(
+        &state.db,
+        &flag_key,
+        flag_admin::Mutation::Override {
+            kind,
+            target_id,
+            enabled: Some(body.enabled),
+        },
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
+    let row = result
+        .override_row
+        .ok_or_else(|| AppError::Internal("Flag override update returned no row".into()))?;
 
     Ok(Json(row.into()))
 }
@@ -479,12 +463,16 @@ pub struct AdminFeatureFlagMetadataResponse {
     pub code_description: String,
     pub custom_description: Option<String>,
     pub owner: Option<String>,
+    pub group: Option<String>,
+    pub tags: Vec<String>,
+    pub sunset: bool,
     pub metadata_updated_at: Option<String>,
     pub metadata_updated_by: Option<String>,
 }
 
 impl AdminFeatureFlagMetadataResponse {
     fn build(def: &feature_flag_service::FlagDefinition, row: Option<FeatureFlagMetadata>) -> Self {
+        let row = row.filter(feature_flag_service::has_metadata);
         let custom_description = row.as_ref().and_then(|meta| meta.description.clone());
         Self {
             key: def.key.to_string(),
@@ -494,6 +482,12 @@ impl AdminFeatureFlagMetadataResponse {
             code_description: def.description.to_string(),
             custom_description,
             owner: row.as_ref().and_then(|meta| meta.owner.clone()),
+            group: row.as_ref().and_then(|meta| meta.group.clone()),
+            tags: row
+                .as_ref()
+                .map(|meta| meta.tags.clone())
+                .unwrap_or_default(),
+            sunset: row.as_ref().is_some_and(|meta| meta.sunset),
             metadata_updated_at: row.as_ref().map(|meta| meta.updated_at.to_rfc3339()),
             metadata_updated_by: row.map(|meta| meta.updated_by),
         }
@@ -503,8 +497,8 @@ impl AdminFeatureFlagMetadataResponse {
 /// PUT /api/v1/admin/feature-flags/{flag_key}/metadata
 ///
 /// Full replace: whichever of `description` / `owner` is blank or absent is
-/// cleared, and clearing both drops the row so the flag falls back to its
-/// code-declared description.
+/// cleared. Organization fields are preserved; empty metadata is presented as
+/// the code default while its internal row remains safe for concurrent writes.
 pub async fn update_feature_flag_metadata(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -512,33 +506,22 @@ pub async fn update_feature_flag_metadata(
     Json(body): Json<UpdateFeatureFlagMetadataRequest>,
 ) -> AppResult<Json<AdminFeatureFlagMetadataResponse>> {
     let def = require_flag_write(&state, &auth_user, &flag_key).await?;
-    let row = feature_flag_service::set_metadata(
+    let row = flag_admin::mutate(
         &state.db,
         &flag_key,
-        body.description.as_deref(),
-        body.owner.as_deref(),
-        &auth_user.user_id.to_string(),
+        flag_admin::Mutation::Metadata(flag_admin::MetadataPatch {
+            description: Some(body.description),
+            owner: Some(body.owner),
+            ..Default::default()
+        }),
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
-    .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_feature_flag_metadata_set",
-        // Metadata is staff-authored documentation, not user data — the values
-        // are safe to record so an owner change is reconstructible.
-        Some(serde_json::json!({
-            "flag_key": flag_key,
-            "description": row.as_ref().and_then(|meta| meta.description.clone()),
-            "owner": row.as_ref().and_then(|meta| meta.owner.clone()),
-            "cleared": row.is_none(),
-        })),
-    );
-
+    .await?
+    .metadata;
     Ok(Json(AdminFeatureFlagMetadataResponse::build(&def, row)))
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PatchFeatureFlagMetadataRequest {
     #[serde(
@@ -551,6 +534,25 @@ pub struct PatchFeatureFlagMetadataRequest {
         deserialize_with = "crate::models::nullable_field::deserialize"
     )]
     pub owner: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub group: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub expected_tags: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub sunset: Option<bool>,
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// PATCH /api/v1/admin/feature-flags/{flag_key}/metadata
@@ -561,27 +563,21 @@ pub async fn patch_feature_flag_metadata(
     Json(body): Json<PatchFeatureFlagMetadataRequest>,
 ) -> AppResult<Json<AdminFeatureFlagMetadataResponse>> {
     let def = require_flag_write(&state, &auth_user, &flag_key).await?;
-    let changed = body.description.is_some() || body.owner.is_some();
-    let row = feature_flag_service::patch_metadata(
+    let row = flag_admin::mutate(
         &state.db,
         &flag_key,
-        body.description.as_ref().map(|v| v.as_deref()),
-        body.owner.as_ref().map(|v| v.as_deref()),
-        &auth_user.user_id.to_string(),
+        flag_admin::Mutation::Metadata(flag_admin::MetadataPatch {
+            description: body.description,
+            owner: body.owner,
+            group: body.group,
+            tags: body.tags,
+            sunset: body.sunset,
+            expected_tags: body.expected_tags,
+        }),
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
-    .await?;
-    if changed {
-        audit_service::log_for_user(
-            state.db.clone(),
-            &auth_user,
-            "admin_feature_flag_metadata_set",
-            Some(
-                serde_json::json!({ "flag_key": flag_key, "changed_fields": {
-                    "description": body.description.is_some(), "owner": body.owner.is_some()
-                }}),
-            ),
-        );
-    }
+    .await?
+    .metadata;
     Ok(Json(AdminFeatureFlagMetadataResponse::build(&def, row)))
 }
 
@@ -593,31 +589,163 @@ pub async fn clear_feature_flag(
     Query(query): Query<ClearAdminFeatureFlagQuery>,
 ) -> AppResult<impl IntoResponse> {
     require_flag_write(&state, &auth_user, &flag_key).await?;
-    let removed = match parse_target(query.target_kind, query.target_key.as_deref())? {
-        AdminTarget::Platform(target) => {
-            feature_flag_service::clear_platform_override(&state.db, &flag_key, &target).await?
-        }
-        AdminTarget::OrgWide { org_user_id } => {
-            feature_flag_service::clear_platform_org_override(&state.db, &org_user_id, &flag_key)
-                .await?
-        }
-    };
+    let (kind, target_id) = admin_override_target(query.target_kind, query.target_key.as_deref())?;
+    flag_admin::mutate(
+        &state.db,
+        &flag_key,
+        flag_admin::Mutation::Override {
+            kind,
+            target_id,
+            enabled: None,
+        },
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
-    if let Some(row) = removed {
+fn admin_override_target(
+    kind: AdminFlagTargetKind,
+    key: Option<&str>,
+) -> AppResult<(FlagTargetKind, Option<String>)> {
+    Ok(match parse_target(kind, key)? {
+        AdminTarget::Platform(FlagTarget::Global) => (FlagTargetKind::Global, None),
+        AdminTarget::Platform(FlagTarget::User(id)) => (FlagTargetKind::User, Some(id)),
+        AdminTarget::OrgWide { org_user_id } => (FlagTargetKind::Org, Some(org_user_id)),
+        _ => return Err(AppError::BadRequest("Unsupported rollout target".into())),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FlagHistoryQuery {
+    pub before: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FlagHistoryEntry {
+    pub id: String,
+    pub actor_id: Option<String>,
+    pub actor_name: Option<String>,
+    pub actor_email: Option<String>,
+    pub target_name: Option<String>,
+    pub event_type: String,
+    pub details: serde_json::Value,
+    pub created_at: String,
+    pub legacy: bool,
+}
+#[derive(Debug, Serialize)]
+pub struct FlagHistoryResponse {
+    pub entries: Vec<FlagHistoryEntry>,
+    pub next_cursor: Option<String>,
+    pub legacy_ambiguous_omitted: bool,
+    pub origin: FlagHistoryOrigin,
+}
+#[derive(Debug, Serialize)]
+pub struct FlagHistoryOrigin {
+    pub created_by: Option<String>,
+    pub creator_name: Option<String>,
+    pub created_at: Option<String>,
+}
+
+pub async fn list_feature_flag_history(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(key): Path<String>,
+    Query(query): Query<FlagHistoryQuery>,
+) -> AppResult<Json<FlagHistoryResponse>> {
+    let access = require_feature_flag_access(&state, &auth).await?;
+    let def = feature_flag_service::get_definition(&state.db, &key).await?;
+    if !access.read_all
+        && !(access.manage_own
+            && def.created_by.as_deref() == Some(auth.user_id.to_string().as_str()))
+    {
+        return Err(AppError::Forbidden(
+            "You may only view history for flags you created".into(),
+        ));
+    }
+    if access.read_all && !access.manage_all {
         audit_service::log_for_user(
             state.db.clone(),
-            &auth_user,
-            "admin_feature_flag_override_cleared",
-            Some(serde_json::json!({
-                "flag_key": flag_key,
-                "target_kind": query.target_kind,
-                "target_key": query.target_key,
-                "org_user_id": row.org_user_id,
-                "enabled": row.enabled,
-            })),
+            &auth,
+            "admin.read.by_operator",
+            Some(serde_json::json!({"endpoint":"admin.feature_flags.history","flag_key":key})),
         );
     }
-    Ok(StatusCode::NO_CONTENT)
+    let history = flag_admin::history(&state.db, &def, query.before.as_deref()).await?;
+    let origin = FlagHistoryOrigin {
+        created_by: def.created_by.clone(),
+        creator_name: def
+            .created_by
+            .as_ref()
+            .and_then(|id| history.actors.get(id))
+            .and_then(|actor| {
+                actor
+                    .display_name
+                    .clone()
+                    .or_else(|| access.read_all.then(|| actor.email.clone()))
+            }),
+        created_at: def.created_at.map(|at| at.to_rfc3339()),
+    };
+    let entries = history
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let actor = entry.user_id.as_ref().and_then(|id| history.actors.get(id));
+            FlagHistoryEntry {
+                id: entry.id,
+                actor_name: actor.and_then(|u| u.display_name.clone()),
+                actor_email: actor.filter(|_| access.read_all).map(|u| u.email.clone()),
+                target_name: entry.event_data.as_ref().and_then(|data| {
+                    data.get("org_user_id")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| data.get("target_key").and_then(serde_json::Value::as_str))
+                        .and_then(|id| history.actors.get(id))
+                        .and_then(|target| {
+                            target
+                                .display_name
+                                .clone()
+                                .or_else(|| target.slug.clone())
+                                .or_else(|| access.read_all.then(|| target.email.clone()))
+                        })
+                }),
+                actor_id: entry.user_id,
+                event_type: entry.event_type,
+                legacy: entry
+                    .event_data
+                    .as_ref()
+                    .is_none_or(|data| data.get("definition_id").is_none()),
+                details: {
+                    let data = entry.event_data.unwrap_or_else(|| serde_json::json!({}));
+                    let mut details = serde_json::Map::new();
+                    for field in [
+                        "description",
+                        "owner",
+                        "cleared",
+                        "changed_fields",
+                        "default_enabled",
+                        "target_kind",
+                        "target_key",
+                        "org_user_id",
+                        "enabled",
+                        "before",
+                        "after",
+                    ] {
+                        if let Some(value) = data.get(field) {
+                            details.insert(field.into(), value.clone());
+                        }
+                    }
+                    serde_json::Value::Object(details)
+                },
+                created_at: entry.created_at.to_rfc3339(),
+            }
+        })
+        .collect();
+    Ok(Json(FlagHistoryResponse {
+        entries,
+        next_cursor: history.next_cursor,
+        legacy_ambiguous_omitted: history.legacy_ambiguous_omitted,
+        origin,
+    }))
 }
 
 #[cfg(test)]
@@ -625,11 +753,15 @@ mod tests {
     use super::*;
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::role_service;
-    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use crate::test_utils::{
+        connect_test_database, init_test_audit_chain_hmac_key, test_app_state, test_auth_user,
+        test_user,
+    };
     use axum::extract::{Path, Query, State};
     use uuid::Uuid;
 
     async fn setup(prefix: &str) -> Option<(AppState, String, String, String)> {
+        init_test_audit_chain_hmac_key();
         let db = connect_test_database(prefix).await?;
         role_service::seed_system_roles(&db).await.ok()?;
         db.collection::<mongodb::bson::Document>(
@@ -789,6 +921,10 @@ mod tests {
                 test_auth_user(&creator),
                 Path("example_ui".into()),
                 Json(PatchFeatureFlagMetadataRequest {
+                    group: None,
+                    tags: None,
+                    expected_tags: None,
+                    sunset: None,
                     description: None,
                     owner: Some(Some(creator.clone())),
                 })
@@ -823,6 +959,10 @@ mod tests {
             test_auth_user(&creator),
             Path("team:owned".into()),
             Json(PatchFeatureFlagMetadataRequest {
+                group: None,
+                tags: None,
+                expected_tags: None,
+                sunset: None,
                 description: Some(None),
                 owner: Some(Some("Someone else".into())),
             }),
@@ -1303,6 +1443,57 @@ mod tests {
         .await
         .expect("admin DELETE should succeed");
     }
+    #[tokio::test]
+    async fn history_is_scoped_to_flag_permissions_and_reports_creation() {
+        let (state, admin, _, creator) = setup("flag_history_access").await.unwrap();
+        assign_flag_role(
+            &state,
+            &creator,
+            crate::models::role::FEATURE_FLAG_OPERATOR_ROLE_SLUG,
+        )
+        .await;
+        create_feature_flag(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Json(CreateFeatureFlagRequest {
+                key: "team:owned-history".into(),
+                description: "Owned flag".into(),
+                default_enabled: false,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(page) = list_feature_flag_history(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Path("team:owned-history".into()),
+            Query(FlagHistoryQuery { before: None }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.origin.created_by.as_deref(), Some(creator.as_str()));
+        assert_eq!(page.entries.len(), 1);
+        assert!(page.entries[0].details.get("definition_id").is_none());
+        assert!(matches!(
+            list_feature_flag_history(
+                State(state.clone()),
+                test_auth_user(&creator),
+                Path("example_ui".into()),
+                Query(FlagHistoryQuery { before: None })
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        let Json(page) = list_feature_flag_history(
+            State(state),
+            test_auth_user(&admin),
+            Path("team:owned-history".into()),
+            Query(FlagHistoryQuery { before: None }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.entries.len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -1320,5 +1511,21 @@ mod sparse_metadata_request_tests {
         assert!(
             serde_json::from_str::<PatchFeatureFlagMetadataRequest>(r#"{"typo":true}"#).is_err()
         );
+    }
+    #[test]
+    fn organization_patch_rejects_null_for_nonnullable_fields() {
+        for body in [
+            serde_json::json!({"tags":null}),
+            serde_json::json!({"sunset":null}),
+            serde_json::json!({"expected_tags":null}),
+        ] {
+            assert!(serde_json::from_value::<PatchFeatureFlagMetadataRequest>(body).is_err());
+        }
+        let patch: PatchFeatureFlagMetadataRequest =
+            serde_json::from_value(serde_json::json!({"group":null,"sunset":false,"tags":[]}))
+                .unwrap();
+        assert_eq!(patch.group, Some(None));
+        assert_eq!(patch.sunset, Some(false));
+        assert_eq!(patch.tags, Some(vec![]));
     }
 }

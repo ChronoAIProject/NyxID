@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type {
+  FeatureFlagHistoryResponse,
   AdminFeatureFlagListResponse,
   CreateFeatureFlagRequest,
   FeatureFlagTarget,
@@ -102,6 +103,9 @@ export function useSetAdminFeatureFlag() {
             ),
           },
       );
+      void queryClient.invalidateQueries({
+        queryKey: ["admin", "feature-flag-history"],
+      });
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       void queryClient.invalidateQueries({ queryKey: ["orgs"] });
       void queryClient.invalidateQueries({ queryKey: ["user"] });
@@ -112,8 +116,7 @@ export function useSetAdminFeatureFlag() {
 }
 
 /**
- * Edit a flag's admin-authored description and owner. Documentation only — it
- * never changes rollout, so it only invalidates the admin list.
+ * Edit documentation, organization and lifecycle without changing rollout.
  */
 export function useUpdateAdminFeatureFlagMetadata() {
   const queryClient = useQueryClient();
@@ -134,6 +137,9 @@ export function useUpdateAdminFeatureFlagMetadata() {
           | "code_description"
           | "custom_description"
           | "owner"
+          | "group"
+          | "tags"
+          | "sunset"
           | "metadata_updated_at"
           | "metadata_updated_by"
         >
@@ -150,7 +156,14 @@ export function useUpdateAdminFeatureFlagMetadata() {
             ),
           },
       );
+      void queryClient.invalidateQueries({
+        queryKey: ["admin", "feature-flag-history"],
+      });
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
+    },
+    onError: async (error) => {
+      if (error instanceof ApiError && error.status === 409)
+        await queryClient.invalidateQueries({ queryKey: QUERY_KEY });
     },
   });
 }
@@ -188,6 +201,9 @@ export function useClearAdminFeatureFlag() {
             ),
           },
       );
+      void queryClient.invalidateQueries({
+        queryKey: ["admin", "feature-flag-history"],
+      });
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       void queryClient.invalidateQueries({ queryKey: ["orgs"] });
       void queryClient.invalidateQueries({ queryKey: ["user"] });
@@ -231,6 +247,21 @@ export function useFeatureFlagTargets(
       );
       return { users, total: users.length };
     },
+    enabled,
+  });
+}
+
+export function useFeatureFlagHistory(
+  flagKey: string,
+  cursor: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["admin", "feature-flag-history", flagKey, cursor],
+    queryFn: () =>
+      api.get<FeatureFlagHistoryResponse>(
+        `/admin/feature-flags/${encodeURIComponent(flagKey)}/history${cursor ? `?before=${encodeURIComponent(cursor)}` : ""}`,
+      ),
     enabled,
   });
 }
