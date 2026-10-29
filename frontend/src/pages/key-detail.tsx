@@ -1,3 +1,4 @@
+import { ServiceMonitoring } from "@/components/dashboard/service-monitoring";
 import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { useOwnershipTransferAuthorization } from "@/hooks/use-ownership-transfers";
 import { ServiceHistory, ServiceAuthorshipFooter } from "@/components/dashboard/service-history";
@@ -2723,6 +2724,9 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
 
       {keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
 
+      {tab === "overview" && keyInfo.service_type === "http" && (source?.type !== "org" || source.allowed) && (
+        <ServiceMonitoring key={`${identity}:${keyInfo.id}`} serviceId={keyInfo.id} />
+      )}
       <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
         <Tabs

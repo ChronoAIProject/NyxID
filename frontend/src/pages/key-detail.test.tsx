@@ -76,6 +76,10 @@ vi.mock("@tanstack/react-router", () => ({
   useSearch: () => useSyncExternalStore(routerState.subscribe, () => routerState.search),
 }));
 
+vi.mock("@/components/dashboard/service-monitoring", () => ({
+  ServiceMonitoring: ({ serviceId }: { serviceId: string }) => <div data-testid="service-monitoring">Monitoring {serviceId}</div>,
+}));
+
 vi.mock("@/hooks/use-keys", () => ({
   useKey: () => hooks.key,
   useUpdateKey: () => ({ mutate: hooks.updateKey, isPending: false }),
@@ -1221,4 +1225,20 @@ it.each([true, false])("offers Advanced to an authorized catalog owner for a pla
   view.rerender(<KeyDetailPage />);
   expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeVisible();
   expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
+});
+
+
+it("shows Monitoring only for usable HTTP service overview", () => {
+  hooks.key.data = makeKey();
+  const view = render(<KeyDetailPage />);
+  expect(screen.getByTestId("service-monitoring")).toHaveTextContent("key-1");
+  act(() => { routerState.search = { tab: "advanced" }; });
+  expect(screen.queryByTestId("service-monitoring")).not.toBeInTheDocument();
+  act(() => { routerState.search = {}; });
+  hooks.key.data = makeKey({ service_type: "ssh" });
+  view.rerender(<KeyDetailPage />);
+  expect(screen.queryByTestId("service-monitoring")).not.toBeInTheDocument();
+  hooks.key.data = makeKey({ credential_source: { type: "org", org_id: "org", org_name: "Org", role: "viewer", allowed: false } });
+  view.rerender(<KeyDetailPage />);
+  expect(screen.queryByTestId("service-monitoring")).not.toBeInTheDocument();
 });

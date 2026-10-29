@@ -219,3 +219,5 @@ pub mod platform_help;
 pub mod telegram_managers;
 
 pub mod nyxbot_gateway_releases;
+
+pub mod monitoring;

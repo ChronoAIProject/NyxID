@@ -3399,6 +3399,11 @@ curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef12
 
 ### Unified Keys (Streamlined Services)
 
+Connected-service health/readiness is exposed through the five fixed
+`/api/v1/keys/{id}/monitoring` routes. See [Service monitoring](SERVICE_MONITORING.md)
+for payloads, caller-token authority, revisions, timeouts and deployment requirements.
+
+
 #### Agent discovery order per service group
 
 `GET /api/v1/service-preferences` returns only `{ "groups": [{ "group":

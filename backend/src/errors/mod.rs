@@ -153,6 +153,9 @@ pub enum AppError {
     VoiceQueueFull,
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
+
+    #[error("Service monitoring is unavailable")]
+    MonitoringUnavailable,
     #[error("Tool operation is not published")]
     ToolOperationNotPublished,
     /// Adds safe startup context while preserving the underlying numeric code/status.
@@ -879,7 +882,9 @@ impl AppError {
             Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::VoiceProviderUnavailable | Self::MonitoringUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
@@ -1109,6 +1114,7 @@ impl AppError {
             Self::VoiceQueueFull => 12500,
             Self::SecurityReadinessUnavailable => 12900,
             Self::VoiceProviderUnavailable => 12501,
+            Self::MonitoringUnavailable => 13300,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
             Self::ErasurePreparing => 12801,
@@ -1389,6 +1395,7 @@ impl AppError {
             Self::VoiceQueueFull => "voice_queue_full",
             Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
+            Self::MonitoringUnavailable => "monitoring_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
