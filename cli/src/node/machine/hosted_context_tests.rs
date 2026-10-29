@@ -32,10 +32,8 @@ fn fixture() -> (tempfile::TempDir, PathBuf, VolumeBinding, String) {
     for ancestor in root.ancestors() {
         let info = fs::metadata(ancestor).unwrap();
         println!(
-            "ancestor={} uid={} gid={} mode={:o}",
+            "ancestor={} mode={:o}",
             ancestor.display(),
-            info.uid(),
-            info.gid(),
             info.mode() & 0o7777
         );
     }
@@ -413,7 +411,7 @@ async fn retained_volume_contract_real_worker_and_sandbox_preserve_isolation() {
             .unwrap()
             .success()
     );
-    println!("recovery_workspace_uid={uid} generation=2 same_workspace=true retained_marker=true");
+    println!("recovery_workspace generation=2 same_workspace=true retained_marker=true");
     println!(
         "supervisor_status={}",
         fs::read_to_string("/proc/self/status")

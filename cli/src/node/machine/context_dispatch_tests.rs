@@ -184,7 +184,7 @@ fn worker_access(uid: u32, groups: &[u32], path: &Path, allowed: bool) {
         .arg(path)
         .status()
         .unwrap();
-    assert!(result.success(), "unexpected access for UID {uid}");
+    assert!(result.success(), "unexpected access for worker identity");
 }
 async fn dispatch(
     runtime: &Arc<Runtime>,
