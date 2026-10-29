@@ -881,8 +881,8 @@ function GroupMessage({
   onOpenAgent?: (id: string) => void;
   onDisclosure: () => void;
 }) {
-  const { mode, lightBubblePalette } = useTheme();
-  const bubble = chatBubbleColors(mode, lightBubblePalette);
+  const { mode, bubblePalette } = useTheme();
+  const bubble = chatBubbleColors(mode, bubblePalette);
   const user = message.role === "user";
   if (message.role === "notice")
     return (

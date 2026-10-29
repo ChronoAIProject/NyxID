@@ -29,12 +29,12 @@ test("bubble preference hydrates before children mount and rapid changes persist
   assert.equal(harness.value(), null);
   stored.resolve("lavender");
   await harness.settle();
-  assert.equal(harness.value().props.value.lightBubblePalette, "lavender");
-  harness.value().props.value.setLightBubblePalette("graphite");
+  assert.equal(harness.value().props.value.bubblePalette, "lavender");
+  harness.value().props.value.setBubblePalette("graphite");
   harness.flush();
-  harness.value().props.value.setLightBubblePalette("gray");
+  harness.value().props.value.setBubblePalette("gray");
   await harness.settle();
-  assert.equal(harness.value().props.value.lightBubblePalette, "gray");
+  assert.equal(harness.value().props.value.bubblePalette, "gray");
   assert.deepEqual(writes, ["graphite"]);
   firstWrite.resolve();
   await harness.settle();
