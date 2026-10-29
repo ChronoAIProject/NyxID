@@ -124,6 +124,7 @@ async fn replay(channel: bool, cancel: bool) {
     mode(&f, AccessMode::AskEveryTime).await;
     compatibility::flag(&f, true).await;
     let destination = ChannelOrigin {
+        native_event_id: None,
         nyxbot_channel_id: "sanitized-lark-channel".into(),
         partition: "sanitized-original-chat".into(),
         platform: "lark".into(),
