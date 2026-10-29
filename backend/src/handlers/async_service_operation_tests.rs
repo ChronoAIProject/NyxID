@@ -734,6 +734,7 @@ async fn async_revocation_and_timeout_wake_with_stable_reason_without_polling() 
 async fn async_delivery_binding_survives_thread_destination_changes() {
     let a = AsyncFixture::new().await;
     let origin = ChannelOrigin {
+        native_event_id: None,
         thread: None,
         nyxbot_channel_id: "source-channel".into(),
         partition: "source-place".into(),
@@ -1120,6 +1121,7 @@ async fn async_ordinary_tool_has_no_watch_database_reads() {
 async fn async_event_keeps_original_reply_place_for_nested_work() {
     let a = AsyncFixture::new().await;
     let origin = ChannelOrigin {
+        native_event_id: None,
         thread: None,
         nyxbot_channel_id: "channel".into(),
         partition: "original-chat".into(),
@@ -1528,6 +1530,7 @@ async fn async_channel_event_validates_original_source_after_newer_message() {
         .await
         .unwrap();
     let original = ChannelOrigin {
+        native_event_id: None,
         nyxbot_channel_id: "link".into(),
         partition: child.partition.clone(),
         platform: "telegram".into(),

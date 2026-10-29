@@ -5,6 +5,10 @@ use super::*;
 pub struct HttpProjection {
     pub apply_agent_override: bool,
     pub replace_headers: bool,
+    /// Server-resolved node/other sender has no model-control final claim.
+    pub(crate) model_control_ineligible: bool,
+    /// Exact value generated at server ingress, never supplied as wire proof.
+    pub(crate) model_control_generated_request_id: Option<String>,
     pub base_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
     pub(crate) machine_git: Option<crate::models::downstream_service::GitHttp>,
@@ -14,6 +18,8 @@ impl Default for HttpProjection {
         Self {
             apply_agent_override: true,
             replace_headers: false,
+            model_control_ineligible: false,
+            model_control_generated_request_id: None,
             base_url: None,
             extra_headers: Vec::new(),
             machine_git: None,
@@ -125,7 +131,8 @@ async fn verify_resolved_projected_inner(
         crate::services::proxy_service::ProxyExecutionContext::new(
             None,
             crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
-        ),
+        )
+        .with_assistant_access(chat.org_agent_access.as_deref()),
     )
     .await?
     .ok_or_else(|| AppError::NotFound("Service connection unavailable".into()))?;
@@ -265,6 +272,16 @@ async fn check_http_projected_inner(
     headers: &axum::http::HeaderMap,
     projection: &HttpProjection,
 ) -> AppResult<Decision> {
+    if auth
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && id.is_none()
+    {
+        return Err(AppError::Forbidden(
+            "Shared execution requires an exact service connection".into(),
+        ));
+    }
     if let Some(chat) = auth.assistant_chat.as_deref()
         && !chat.turn_live
         && let Some(owner) = owner
@@ -287,8 +304,9 @@ async fn check_http_projected_inner(
     let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
     let generation = !method_override
         && super::request_identity::legacy_model_generation(target, method, path, body);
-    // Separate route identity from admission: Codex metadata remains legacy for
-    // owners, including approval, exact selection and fallback classification.
+    // Route recognition uses the broader closed transport shape. Only the
+    // strict metadata subset below gains owner inference consent; other shapes
+    // retain legacy approval, exact selection and fallback classification.
     let model_route = (generation && pool.is_none())
         .then(|| super::request_identity::model_route_operation(target, method, path, query, body))
         .flatten()
@@ -309,6 +327,27 @@ async fn check_http_projected_inner(
             .ok_or(AppError::GuestModelRouteRequired)?;
         super::guest_model::require(&state.db, chat, id, target, &mut operation).await?;
     }
+    let control_lineage = crate::services::assistant_model_control::require_http_control_lineage(
+        state, chat, id, target, path,
+    )
+    .await?;
+    let control_header =
+        headers.contains_key(crate::services::assistant_model_control_protocol::CONTROL_HEADER);
+    let control_transport_eligible = id.is_some() && pool.is_none() && !method_override;
+    if !control_transport_eligible
+        && (control_lineage
+            || control_header
+            || headers.contains_key(crate::services::assistant_model_control_protocol::STEP_HEADER))
+    {
+        crate::services::assistant_model_control::require_unactivated_exact_only(
+            state, chat, headers,
+        )
+        .await?;
+    }
+    if !control_lineage && (!control_transport_eligible || !control_header) {
+        crate::services::assistant_model_control::unobserved_http(state, chat, id, target, path)
+            .await?;
+    }
     let Some(id) = id else {
         if !chat.guest
             && chat.turn_live
@@ -322,6 +361,56 @@ async fn check_http_projected_inner(
             automatic: None,
         });
     };
+    let mut control_headers = headers.clone();
+    if projection
+        .model_control_generated_request_id
+        .as_deref()
+        .is_some_and(|generated| {
+            let mut values = control_headers.get_all("x-request-id").iter();
+            values.next().and_then(|value| value.to_str().ok()) == Some(generated)
+                && values.next().is_none()
+        })
+    {
+        // Keep ordinary approval/forwarding identity unchanged. Only private
+        // model-control identity excludes this request's server correlation.
+        // Resolve effective overrides AFTER removal, so their values stay bound.
+        control_headers.remove("x-request-id");
+    }
+    let mut control = if control_transport_eligible {
+        crate::services::assistant_model_control::callback(
+            state,
+            crate::services::assistant_model_control::CallbackRequest {
+                chat,
+                connection: id,
+                owner: owner.unwrap_or(&chat.user_id),
+                target,
+                method,
+                path,
+                query,
+                body,
+                headers: &control_headers,
+                semantic_headers: projection.headers(target, &control_headers),
+                instrumented_transport: !projection.replace_headers
+                    && !projection.model_control_ineligible,
+            },
+        )
+        .await?
+    } else {
+        None
+    };
+    // Passive Read facts do not replace its ordinary operation, confirmation,
+    // route selection or policy. Attach only after the usual admission gates.
+    let read_observation = if control
+        .as_ref()
+        .is_some_and(|callback| callback.read_observation)
+    {
+        control.take()
+    } else {
+        None
+    };
+    if let Some(control) = &control {
+        operation = control.operation();
+    }
     if pool.is_none() {
         verify_resolved_projected(
             &state.db,
@@ -345,6 +434,18 @@ async fn check_http_projected_inner(
             .ok_or_else(|| AppError::Conflict("Service pool unavailable".into()))?;
         operation["pool_revision"] = json!(row.config_revision);
     }
+    if method_override
+        && chat
+            .org_agent_access
+            .as_ref()
+            .is_some_and(|a| a.shared().is_some())
+    {
+        return Err(AppError::Forbidden(
+            "Shared calls cannot override HTTP methods".into(),
+        ));
+    }
+    // Shared turns run as the acting person. The owner-only guest model route
+    // is deliberately selected only by `guest_inference` above.
     let model_transport = !chat.guest && generation;
     let legacy_inference = model_transport && (!chat.turn_live || !stateless);
     if legacy_inference {
@@ -352,7 +453,8 @@ async fn check_http_projected_inner(
         // neither installs turn consent nor proves cross-account equivalence.
         operation["kind"] = json!("legacy_inference");
     }
-    let raw_inference = chat.turn_live && stateless && !chat.guest && !method_override;
+    let raw_inference =
+        chat.turn_live && stateless && !chat.guest && !method_override && control.is_none();
     let mut model_consent = false;
     let mut consent_binding = None;
     if raw_inference {
@@ -429,7 +531,7 @@ async fn check_http_projected_inner(
     }
     let read = matches!(method, "GET" | "HEAD" | "OPTIONS") && !method_override;
     let destructive = method == "DELETE" || method_override;
-    let summary = if raw_inference {
+    let mut summary = if raw_inference {
         format!(
             "Use {} / {} for this turn",
             crate::services::assistant_nyxagent::identifier(&target.service.slug),
@@ -445,7 +547,30 @@ async fn check_http_projected_inner(
             crate::services::assistant_nyxagent::identifier(&target.service.slug)
         )
     };
-    let decision = check(
+    if legacy_inference
+        && let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && let Some(reason) = super::request_identity::inference_fallback_reason(path, &parsed)
+    {
+        if super::request_identity::record_fallback_reason(
+            &state.db,
+            chat,
+            &operation,
+            reason,
+            control.is_some(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("Assistant model fallback diagnostics deferred");
+        }
+        summary.push_str(". ");
+        summary.push_str(if control.is_some() {
+            reason.reusable_message()
+        } else {
+            reason.message()
+        });
+    }
+    let mut decision = super::check_inner(
         &state.db,
         &state.node_ws_manager,
         chat,
@@ -467,6 +592,10 @@ async fn check_http_projected_inner(
                 .get("content-type")
                 .and_then(|value| value.to_str().ok()),
         )),
+        false,
+        control
+            .as_ref()
+            .map(|callback| super::ModelControlConfirmation { state, callback }),
     )
     .await?;
     if let Some(binding) = consent_binding.as_deref() {
@@ -485,6 +614,15 @@ async fn check_http_projected_inner(
     }
     if let Some(admission) = decision.admission.as_ref() {
         admission.revalidate(&state.db, id, Some(target)).await?;
+    }
+    if let (Some(admission), Some(observation)) = (decision.admission.as_mut(), read_observation)
+        && let Some(prepared) = observation.prepared()
+    {
+        if prepared.matches_read_admission(id, &admission.binding) {
+            admission.model_control = Some(prepared);
+        } else {
+            prepared.disable_observation().await?;
+        }
     }
     if model_transport
         && chat.turn_live

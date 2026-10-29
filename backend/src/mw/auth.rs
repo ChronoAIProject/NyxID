@@ -245,6 +245,14 @@ impl AuthUser {
             || path.contains("/approvals/exact-service/requests/") && path.ends_with("/status")
             || path.contains("/approvals/exact-service/requests/") && path.ends_with("/redeem")
             || path.starts_with("/assistant-attachments/")
+            || matches!(
+                path,
+                "/assistant/model-control/v1/verify"
+                    | "/assistant/model-control/v1/tool-prepare"
+                    | "/assistant/model-control/v1/tool-status"
+                    | "/assistant/model-control/v1/prepare"
+                    | "/assistant/model-control/v1/status"
+            )
             || (path.contains("/assistant/nyxagent/conversations/")
                 || path.contains("/assistant/nyxagent/groups/"))
                 && path.contains("/attachments/");
@@ -558,6 +566,20 @@ pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Resu
 }
 
 fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool {
+    // These private execution POSTs require a live conversation credential and
+    // a separate server capability in their handler. No management authority.
+    if *method == Method::POST
+        && matches!(
+            path.strip_prefix("/api/v1").unwrap_or(path),
+            "/assistant/model-control/v1/verify"
+                | "/assistant/model-control/v1/tool-prepare"
+                | "/assistant/model-control/v1/tool-status"
+                | "/assistant/model-control/v1/prepare"
+                | "/assistant/model-control/v1/status"
+        )
+    {
+        return false;
+    }
     // A restricted login credential can always revoke itself. The handler
     // requires the calling child identity and cannot revoke another credential.
     if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
@@ -695,6 +717,8 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.as_slice(),
         ["channel-relay", "messages", _, "attachments", _]
+            | ["nyxbot", "responses", _]
+            | ["nyxbot", "responses", _, "events"]
             | ["users", "me", "oauth-consent-requests", _]
             | ["api-keys", _, "machine-grant"]
             | ["users", "me", "consents", _, "machine-grant"]
@@ -870,12 +894,8 @@ pub(crate) async fn api_key_auth_user(
     if !user.is_some_and(|user| user.is_active) {
         return Err(AppError::Unauthorized("User account is inactive".into()));
     }
-    let org_agent_access = crate::services::org_agent_service::resolve_key_access(
-        db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-    )
-    .await?;
+    let org_agent_access =
+        crate::services::org_agent_service::resolve_credential_access(db, key).await?;
     crate::services::org_group_service::validate_key(db, key, org_agent_access.as_ref()).await?;
     let (allow_all_nodes, allowed_node_ids) =
         crate::services::org_agent_service::key_nodes(db, key, org_agent_access.as_deref()).await?;
@@ -896,6 +916,15 @@ pub(crate) async fn api_key_auth_user(
     } else {
         None
     };
+    if org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && assistant_chat
+            .as_ref()
+            .is_none_or(|c| !c.turn_live || c.turn_stopped)
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     Ok(AuthUser {
         mfa_assured: false,
         mfa_enabled: None,
@@ -917,10 +946,16 @@ pub(crate) async fn api_key_auth_user(
                 org_agent_access.as_deref(),
             )
             .await?,
-        org_agent_access,
+        org_agent_access: org_agent_access.clone(),
         assistant_group_id: key.assistant_group_id.clone(),
         assistant_agent_owner_id: key.assistant_agent_owner_id.clone(),
-        assistant_operation_scopes: key.assistant_operation_scopes.clone(),
+        assistant_operation_scopes: org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .map_or_else(
+                || key.assistant_operation_scopes.clone(),
+                |a| a.operation_scopes(),
+            ),
         assistant_turn_fence: assistant_chat
             .as_ref()
             .map(|chat| Box::new(chat.turn_fence())),
@@ -2424,6 +2459,7 @@ mod tests {
             "/api/v1/webhooks/telegram",
             "/api/v1/integrations/openclaw/mappings",
             "/api/v1/billing/wallet",
+            "/api/v1/billing/wallet/view",
             "/api/v1/oracle/pools",
             "/api/v1/ownership/service/id/authorization",
             "/api/v1/ownership/service/id/destinations",
@@ -2450,6 +2486,23 @@ mod tests {
                 !delegated_request_allowed(&Method::GET, path, &headers, ACCOUNT_READ_SCOPE),
                 "delegated account read should reject GET {path}"
             );
+        }
+    }
+
+    #[test]
+    fn delegated_account_read_denies_nyxbot_recovery_content() {
+        let headers = HeaderMap::new();
+        for path in [
+            "/api/v1/nyxbot/responses/resp_example",
+            "/api/v1/nyxbot/responses/resp_example/events",
+        ] {
+            assert!(delegated_read_denied_path(path));
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                path,
+                &headers,
+                ACCOUNT_READ_SCOPE,
+            ));
         }
     }
 
@@ -4464,6 +4517,40 @@ mod tests {
             assert!(
                 user.ensure_management_write_scope(&Method::PUT, "/api/v1/api-keys/external/key-1")
                     .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn private_model_control_post_paths_are_execution_only_and_exact() {
+        let user = test_auth_user(AuthMethod::ApiKey, "proxy");
+        for leaf in ["verify", "prepare", "status", "tool-prepare", "tool-status"] {
+            for prefix in ["/api/v1", ""] {
+                let path = format!("{prefix}/assistant/model-control/v1/{leaf}");
+                assert!(
+                    user.ensure_management_write_scope(&Method::POST, &path)
+                        .is_ok()
+                );
+                if !prefix.is_empty() {
+                    for method in [Method::PUT, Method::PATCH, Method::DELETE] {
+                        assert!(user.ensure_management_write_scope(&method, &path).is_err());
+                    }
+                    for invalid in [format!("{path}/extra"), format!("{path}-extra")] {
+                        assert!(
+                            user.ensure_management_write_scope(&Method::POST, &invalid)
+                                .is_err()
+                        );
+                    }
+                }
+            }
+        }
+        for path in [
+            "/api/v1/assistant/model-control/v1/unknown",
+            "/api/v1/assistant/settings",
+        ] {
+            assert!(
+                user.ensure_management_write_scope(&Method::POST, path)
+                    .is_err()
             );
         }
     }

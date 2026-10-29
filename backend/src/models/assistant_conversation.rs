@@ -48,6 +48,11 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Server-derived automation identity; never accepted from client/tool JSON.
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
+    #[serde(default)]
+    pub continuation_protocol_version: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +96,12 @@ pub struct AgentEvent {
 }
 
 impl AgentEvent {
+    pub fn for_trigger(mut self, run_id: Option<&str>) -> Self {
+        self.trigger_run_id = run_id.map(str::to_owned);
+        self.continuation_protocol_version = if run_id.is_some() { 2 } else { 0 };
+        self
+    }
+
     /// Carry the server-proven owner invocation family.
     pub fn for_invocation(mut self, id: Option<&str>) -> Self {
         self.invocation_id = id.map(str::to_owned);
@@ -122,6 +133,9 @@ pub fn carried_report_to(report_to: Option<&str>, provenance: u8) -> Option<Stri
 /// channel bot through the Agent Event Gateway. Identifiers only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelOrigin {
+    /// Original native provider event for asynchronous updates; never a capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_event_id: Option<String>,
     #[serde(default)]
     pub thread: Option<Box<super::channel_thread_follow::ThreadTurnBinding>>,
     /// The NyxBot channel (`nyxbot_channels._id`).
@@ -478,6 +492,10 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Exact live automation runs, maintained transactionally. Avoids any trigger
+    /// reads on ordinary Stop paths and serializes Stop against wake admission.
+    #[serde(default)]
+    pub coordinator_run_ids: Vec<String>,
     /// Invocation conversations always enforce live execution independently of the legacy rollout.
     #[serde(default)]
     pub invocation_controlled: bool,
@@ -541,6 +559,9 @@ pub struct AssistantConversation {
     /// Stable agent owner binding; the conversation itself belongs to the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner_id: Option<String>,
+    /// Actor-owned private history survives withdrawal of personal-agent sharing.
+    #[serde(default)]
+    pub shared_agent_thread: bool,
     /// L1 enrollment cohort. Missing or zero-valued legacy rows are not
     /// eligible evidence; new rows set this only when learning is enabled and
     /// the owner/member has opted in.

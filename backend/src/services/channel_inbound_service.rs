@@ -324,6 +324,8 @@ async fn process_messages(
             || bot.credential_source == "telegram_manager"
             || (bot.platform == "x"
                 && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
+            || channel_relay_service::is_linked_org_nyxbot_route(state.db, &bot.id, &api_key.id)
+                .await?
         {
             None
         } else {

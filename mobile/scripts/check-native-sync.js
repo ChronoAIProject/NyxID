@@ -144,6 +144,30 @@ function main() {
     );
   }
 
+  const supportedOrientations = [
+    "UIInterfaceOrientationPortrait",
+    "UIInterfaceOrientationLandscapeLeft",
+    "UIInterfaceOrientationLandscapeRight",
+  ];
+  for (const [source, value] of [
+    ["app.config.ts", config.ios?.infoPlist?.UISupportedInterfaceOrientations],
+    ["Info.plist", nativeInfoPlist.UISupportedInterfaceOrientations],
+  ]) {
+    if (JSON.stringify(value) !== JSON.stringify(supportedOrientations)) {
+      failures.push(`${source} must allow portrait and both desktop landscape orientations`);
+    }
+  }
+  const orientationPlugin = (config.plugins ?? []).find(
+    (plugin) => Array.isArray(plugin) && plugin[0] === "expo-screen-orientation"
+  );
+  if (
+    config.orientation !== "portrait" ||
+    orientationPlugin?.[1]?.initialOrientation !== "PORTRAIT_UP" ||
+    nativeInfoPlist.EXDefaultScreenOrientationMask !== "UIInterfaceOrientationMaskPortrait"
+  ) {
+    failures.push("app.config.ts and Info.plist must default to upright portrait; only desktop requests landscape at runtime");
+  }
+
   if (failures.length > 0) {
     process.stderr.write(
       `Committed iOS native state is out of sync:\n- ${failures.join("\n- ")}\n`
@@ -153,7 +177,7 @@ function main() {
 
   const nativePackages = [...expectedPods.keys()].sort();
   process.stdout.write(
-    `iOS native sync verified for ${nativePackages.length} direct native dependencies, ${REQUIRED_IOS_PODS.length} required companion pods, and ${permissions.size} declared permissions.\n`
+    `iOS native sync verified for ${nativePackages.length} direct native dependencies, ${REQUIRED_IOS_PODS.length} required companion pods, ${permissions.size} declared permissions, and portrait-default/desktop-landscape orientation.\n`
   );
 }
 

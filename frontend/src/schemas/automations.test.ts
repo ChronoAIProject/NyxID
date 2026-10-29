@@ -4,6 +4,7 @@ import {
   automationFormSchema,
   automationPreferencesSchema,
   automationRequest,
+  runsSchema,
   scheduleSchema,
 } from "./automations";
 
@@ -104,5 +105,37 @@ describe("automation forms", () => {
         automationPreferencesSchema.safeParse({ ...preferences, ...patch })
           .success,
       ).toBe(false);
+  });
+});
+
+describe("automation history compatibility", () => {
+  it("keeps known, future and legacy waits in the same history page", () => {
+    const run = {
+      id: "run",
+      scheduled_at: "2026-10-28T00:00:00Z",
+      started_at: null,
+      finished_at: null,
+      outcome: "waiting",
+      reason: null,
+      thread_id: "thread",
+      duration_ms: null,
+    };
+    const history = runsSchema.parse({
+      runs: [
+        { ...run, wait_kind: "coordinator" },
+        { ...run, id: "future", wait_kind: "specialist_v3" },
+        { ...run, id: "legacy" },
+        { ...run, id: "null", wait_kind: null },
+      ],
+    });
+    expect(history.runs.map((row) => row.wait_kind)).toEqual([
+      "coordinator",
+      "specialist_v3",
+      undefined,
+      null,
+    ]);
+    expect(
+      runsSchema.safeParse({ runs: [{ ...run, wait_kind: 7 }] }).success,
+    ).toBe(false);
   });
 });

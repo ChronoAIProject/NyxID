@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::crypto::jwt;
+use crate::errors::AppError;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
@@ -97,6 +98,9 @@ fn tool_succeeded(response: &Response) -> bool {
 
 #[derive(Clone)]
 struct ToolResultDigest(String);
+
+#[derive(Clone)]
+struct ModelControlActivity(String);
 
 #[derive(Clone, Copy)]
 struct RpcFailureCode(i32);
@@ -953,13 +957,12 @@ async fn authenticate_mcp_or_public(
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
                 let user_id = verify_user_active(state, user_id).await?;
-                let org_agent_access = crate::services::org_agent_service::resolve_key_access(
-                    &state.db,
-                    &user_id,
-                    api_key.assistant_agent_owner_id.as_deref(),
-                )
-                .await
-                .map_err(axum::response::IntoResponse::into_response)?;
+                let org_agent_access =
+                    crate::services::org_agent_service::resolve_credential_access(
+                        &state.db, &api_key,
+                    )
+                    .await
+                    .map_err(axum::response::IntoResponse::into_response)?;
                 crate::services::org_group_service::validate_key(
                     &state.db,
                     &api_key,
@@ -979,6 +982,13 @@ async fn authenticate_mcp_or_public(
                 } else {
                     None
                 };
+                if org_agent_access
+                    .as_ref()
+                    .is_some_and(|a| a.shared().is_some())
+                    && chat.as_ref().is_none_or(|c| !c.turn_live || c.turn_stopped)
+                {
+                    return Err(mcp_401(&state.config.base_url));
+                }
                 // Platform grants are meaningful only for assistant chat keys.
                 let platform_grants = if chat.is_some() {
                     api_key.allowed_platform_service_ids.clone()
@@ -1032,10 +1042,16 @@ async fn authenticate_mcp_or_public(
                         .await
                         .map_err(axum::response::IntoResponse::into_response)?,
                     allowed_platform_service_ids: platform_grants,
-                    org_agent_access,
+                    org_agent_access: org_agent_access.clone(),
                     assistant_group_id: api_key.assistant_group_id.clone(),
                     assistant_agent_owner_id: api_key.assistant_agent_owner_id.clone(),
-                    assistant_operation_scopes: api_key.assistant_operation_scopes.clone(),
+                    assistant_operation_scopes: org_agent_access
+                        .as_ref()
+                        .and_then(|a| a.shared())
+                        .map_or_else(
+                            || api_key.assistant_operation_scopes.clone(),
+                            |a| a.operation_scopes(),
+                        ),
                     allowed_node_ids,
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
@@ -1683,14 +1699,15 @@ pub async fn mcp_post(
                 Err(r) => return r,
             };
             let sse_capable = accepts_sse(&headers);
-            handle_tools_call(
-                &state,
-                &auth,
-                sid.as_deref(),
-                &request,
-                sse_capable,
+            controlled_tools_call(ControlledToolsCall {
+                state: &state,
+                auth: &auth,
+                session_id: sid.as_deref(),
+                request: &request,
+                client_accepts_sse: sse_capable,
+                headers: &headers,
                 billing_egress_permit,
-            )
+            })
             .await
         }
 
@@ -2249,6 +2266,9 @@ async fn handle_tools_list(
                 tool["title"] = annotations["title"].clone();
                 tool["annotations"] = annotations;
             }
+            if let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services) {
+                annotate_shared_connection(auth, service, &mut tool);
+            }
             tool
         })
         .collect();
@@ -2421,6 +2441,130 @@ async fn refuse_retry_duplicate(
 
 /// Chat-key tool calls are recorded on the live turn as metadata-only activity
 /// so the browser can show what the assistant is doing before its reply streams.
+struct ControlledToolsCall<'a> {
+    state: &'a AppState,
+    auth: &'a McpAuthContext,
+    session_id: Option<&'a str>,
+    request: &'a JsonRpcRequest,
+    client_accepts_sse: bool,
+    headers: &'a HeaderMap,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+}
+
+async fn controlled_tools_call(input: ControlledToolsCall<'_>) -> Response {
+    use crate::services::{
+        assistant_model_control as control, assistant_model_control_protocol as wire,
+    };
+    let ControlledToolsCall {
+        state,
+        auth,
+        session_id,
+        request,
+        client_accepts_sse,
+        headers,
+        billing_egress_permit,
+    } = input;
+    let single = |name: &str| -> crate::errors::AppResult<Option<&str>> {
+        let mut values = headers.get_all(name).iter();
+        let value = values
+            .next()
+            .map(|h| {
+                h.to_str()
+                    .map_err(|_| AppError::Forbidden("Invalid private model control".into()))
+            })
+            .transpose()?;
+        if values.next().is_some() {
+            return Err(AppError::Forbidden(
+                "Duplicate private model control".into(),
+            ));
+        }
+        Ok(value)
+    };
+    let claim = async {
+        let token = single(wire::CONTROL_HEADER)?;
+        let capability = single(wire::TOOL_HEADER)?;
+        if token.is_none() && capability.is_none() {
+            if let Some(chat) = &auth.chat
+                && control::require_control_lineage(state, chat).await?
+            {
+                return Err(AppError::Forbidden(
+                    "Active model control cannot be omitted".into(),
+                ));
+            }
+            return Ok(None);
+        }
+        let chat = auth
+            .chat
+            .as_ref()
+            .filter(|c| auth.is_api_key && !c.guest)
+            .ok_or_else(|| {
+                AppError::Forbidden("An owner conversation credential is required".into())
+            })?;
+        let token = wire::SecretToken::parse(
+            token
+                .ok_or_else(|| AppError::Forbidden("Missing model control".into()))?
+                .into(),
+        )
+        .map_err(|_| AppError::Forbidden("Invalid model control".into()))?;
+        let capability = wire::SecretToken::parse(
+            capability
+                .ok_or_else(|| AppError::Forbidden("Missing tool control".into()))?
+                .into(),
+        )
+        .map_err(|_| AppError::Forbidden("Invalid tool control".into()))?;
+        let params = request
+            .params
+            .as_ref()
+            .ok_or_else(|| AppError::BadRequest("Missing tool params".into()))?;
+        let name = params["name"]
+            .as_str()
+            .ok_or_else(|| AppError::BadRequest("Missing tool name".into()))?;
+        control::tool_claim(state, chat, &token, &capability, name, &params["arguments"])
+            .await
+            .map(Some)
+    }
+    .await;
+    let claim = match claim {
+        Ok(claim) => claim,
+        Err(error) => return app_error_to_rpc(request.id.clone(), &error),
+    };
+    let response = Box::pin(handle_tools_call(
+        state,
+        auth,
+        session_id,
+        request,
+        client_accepts_sse && claim.is_none(),
+        billing_egress_permit,
+    ))
+    .await;
+    let Some(claim) = claim else {
+        return response;
+    };
+    let (parts, body) = response.into_parts();
+    let activity = parts
+        .extensions
+        .get::<ModelControlActivity>()
+        .map(|a| a.0.clone());
+    let bytes = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let _ = control::tool_complete(state, claim, activity.as_deref(), None).await;
+            return rpc_error(
+                request.id.clone(),
+                -32603,
+                "Controlled tool result exceeded its supported projection",
+            );
+        }
+    };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+    let result = parsed
+        .as_ref()
+        .filter(|p| p["error"].is_null())
+        .and_then(|p| p.get("result"));
+    let _ = control::tool_complete(state, claim, activity.as_deref(), result).await;
+    Response::from_parts(parts, Body::from(bytes))
+}
+
 async fn handle_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2530,7 +2674,7 @@ async fn handle_tools_call(
     };
     // Keep native dispatch out of the progress-tracking wrapper's frame.
     // Universal calls add another dispatch layer before transactional cards.
-    let response = crate::services::machine_activity_service::ACTIVITY_ID
+    let mut response = crate::services::machine_activity_service::ACTIVITY_ID
         .scope(
             activity.as_ref().map(|(_, id)| id.clone()),
             Box::pin(dispatch_tools_call(
@@ -2571,6 +2715,9 @@ async fn handle_tools_call(
         }
     }
     if let Some((chat, id)) = activity {
+        response
+            .extensions_mut()
+            .insert(ModelControlActivity(id.clone()));
         let failure = tool_failure(&response);
         let _ = crate::services::assistant_nyxagent::activity_finished_for_turn(
             &state.db,
@@ -2708,6 +2855,7 @@ async fn dispatch_tools_call(
             class,
             read_only: false,
             destructive: class == acks::OwnerActionClass::Destructive,
+            delegation: false,
         };
         let gate = async {
             match acks::confirmation_needed(&state.db, chat, facts, false).await? {
@@ -3538,6 +3686,7 @@ async fn authorize_mcp_tool_operation(
         &state.db,
         &auth.effective_approval_owner_user_id(),
         service,
+        auth.org_agent_access.as_deref().and_then(|a| a.shared()),
     )
     .await
     .map_err(|e| {
@@ -3742,6 +3891,34 @@ fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> 
     }
 }
 
+fn annotate_shared_connection(
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    value: &mut serde_json::Value,
+) {
+    if let Some(metadata) = auth
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .and_then(|access| access.discovery_metadata(&service.service_id))
+    {
+        value["shared_connection"] = metadata;
+        value["owner_kind"] = "personal".into();
+    }
+}
+
+fn chat_access_hint(auth: &McpAuthContext) -> &'static str {
+    if auth
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+    {
+        "Shared connections have exact identities. owner_shared uses only the owner's explicitly shared access. actor_personal requires the person's connection consent; call to present their private card and await their decision. Ordinary action confirmations also apply. Never retry against a different account after a refusal, Skip or unavailable credential."
+    } else {
+        CHAT_ACCESS_HINT
+    }
+}
+
 async fn chat_service_gate(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3830,6 +4007,50 @@ async fn guest_service_refusal(
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
     use crate::models::assistant_agent::GuestAccess;
+    if let Some(shared) = auth
+        .chat
+        .as_ref()
+        .and_then(|c| c.org_agent_access.as_ref())
+        .and_then(|a| a.shared())
+    {
+        let service_id = match &service.source {
+            mcp_service::McpToolSource::UserManaged {
+                user_service_id, ..
+            } => user_service_id.as_str(),
+            _ => &service.service_id,
+        };
+        if let Some(connection) = shared.connections().get(service_id) {
+            if connection.user_id == shared.owner() {
+                let effects = mcp_service::operation_effects(
+                    prepared.method(),
+                    service
+                        .durable_endpoint_metadata
+                        .get(&endpoint.endpoint_id)
+                        .copied()
+                        .unwrap_or_default(),
+                );
+                if prepared.carries_method_override()
+                    || !crate::services::shared_agent_service::permits(
+                        shared.level(service_id),
+                        effects,
+                    )
+                {
+                    return Some(tool_result(
+                        request_id,
+                        "The owner's shared access does not permit this operation",
+                        true,
+                    ));
+                }
+            }
+        } else {
+            return Some(tool_result(
+                request_id,
+                "Shared connection unavailable",
+                true,
+            ));
+        }
+        return None;
+    }
     let chat = auth.chat.as_ref().filter(|chat| chat.guest)?;
     let Ok(agent) =
         crate::services::assistant_team_service::agent(&state.db, &chat.user_id, &chat.agent_id)
@@ -4005,6 +4226,7 @@ async fn webhook_service_gate(
         class: acks::service_action_class(read_only, destructive),
         read_only,
         destructive,
+        delegation: false,
     };
     let summary = format!(
         "{} {} on {}",
@@ -5073,6 +5295,7 @@ async fn handle_meta_search(
                 if auth.chat.is_some() {
                     value["chat_access"] = serde_json::json!(chat_access(auth, service));
                 }
+                annotate_shared_connection(auth, service, &mut value);
             } else {
                 value["executable"] = serde_json::json!(true);
                 value["preference_rank"] = serde_json::Value::Null;
@@ -5088,7 +5311,7 @@ async fn handle_meta_search(
             Pass the tool name and arguments as shown in the match results. At equal relevance, connections of the same service follow the owner's agent order in their original slots. preference_rank is relative to that service; executable reports current credential and routing availability.",
     });
     if auth.chat.is_some() {
-        response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+        response_json["chat_access_hint"] = serde_json::json!(chat_access_hint(auth));
     }
 
     let text = if auth.chat.is_some() {
@@ -5195,9 +5418,10 @@ async fn handle_meta_list_connected(
                 .find(|service| row["service_id"] == service.service_id)
             {
                 row["chat_access"] = serde_json::json!(chat_access(auth, service));
+                annotate_shared_connection(auth, service, row);
             }
         }
-        result["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+        result["chat_access_hint"] = serde_json::json!(chat_access_hint(auth));
     }
     let text = serde_json::to_string_pretty(&result).unwrap_or_default();
     tool_result(request_id, &text, false)
@@ -7897,6 +8121,7 @@ mod tests {
             &db,
             &auth.effective_approval_owner_user_id(),
             &svc,
+            None,
         )
         .await
         .unwrap();
@@ -10549,6 +10774,7 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            trigger_run_id: None,
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,

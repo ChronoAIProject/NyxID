@@ -62,6 +62,11 @@ pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantC
 }
 
 pub(crate) fn private_thread(row: &AssistantConversation) -> AppResult<()> {
+    if row.shared_agent_thread {
+        return Err(AppError::Forbidden(
+            "Shared agents support text conversations; voice sessions are unavailable".into(),
+        ));
+    }
     if row.channel.is_some() || row.group_id.is_some() || row.automation_thread || row.guest_turn {
         return Err(AppError::Forbidden(
             "Voice requires a private owner thread".into(),

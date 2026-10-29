@@ -604,3 +604,112 @@ the shared ten-second admission delay; policy constants live in
 `services/assistant_engine_policy.rs`. Exhaustion
 reports the measured wait. A missing wait field on older runs is not a zero-wait
 claim.
+
+
+## Coordinator completion and continuation-v2 operations
+
+With continuation v2 enabled, group work and direct specialist assignments keep
+the run waiting until its exact coordinator consumes the attributable results
+and produces a final reply. Direct assignments carry server-owned parent-run
+identity; they do not turn the specialist into the automation coordinator.
+Registration and completion are fenced, and retries deduplicate the same
+assignment/result. Confirmation waits retain their acknowledgement flow.
+
+History shows “Waiting for coordinator work” and the deadline. The active run
+history query polls every five seconds. Unknown future wait-kind strings remain
+readable and use the generic waiting display; they do not invalidate the page.
+
+Stopping an active automation coordinator cancels its own run. Stopping an
+unrelated active turn on the same NyxBot home thread leaves other waiting
+runs intact. An idle Stop selects the thread's current waiting runs; cleanup
+from an earlier Stop cannot stop a newly admitted replacement turn. The durable
+active-turn Stop is not contingent on successful
+automation cleanup. Terminal cleanup fences late handoffs and continuation
+admission; retryable handoff delivery does not replay completed specialist work.
+
+A new or migrated v2 run snapshots an independent allowance of 32 coordinator
+continuations. The owner's `max_auto_continuations` controls a different engine
+behavior and does not disable a single-wait automation when set to zero. Each
+admitted coordinator continuation also consumes the persisted owner hourly/daily
+trigger budget. Temporary budget exhaustion waits for the applicable UTC reset.
+The coordinator deadline is one hour after dispatch/grace, capped by retention;
+`coordinator_timeout`, `continuation_limit_exceeded`, `thread_deleted` and
+`cancelled` remain terminal reasons rather than successful results.
+
+`AUTOMATION_CONTINUATION_V2_ENABLED` defaults to false. Fresh legacy assistant
+creation, editing, schedules, ordinary webhooks and confirmation continuations
+keep their existing behavior while it is off. Enabling v2 requires the durable
+`trigger_migrations/continuation-v2.completed_at` marker. Persisted v2 work never
+falls back to legacy admission when the flag is disabled or readiness is absent.
+The flag is an operator assertion, not a worker-version registry or maintenance
+switch. The three environment variables are listed in [ENV.md](ENV.md#automation-coordinator-continuations).
+
+The release coordinator assigns an Automation deployment operator. That operator
+owns the following ordering and retains the timestamp, process inventory,
+migration output and acceptance checks in the release record:
+
+1. Before activation, keep the flag off and confirm the candidate preserves
+   legacy create/edit, schedule dispatch and ordinary webhook behavior. Deploy
+   only the reviewed compatible code. Do not enable v2 during a mixed-version
+   rollout.
+2. Pause assistant schedule and webhook admission externally. Drain in-flight
+   work and stop all old API/scheduler/event writers, including earlier v2
+   writers that cannot account for direct-assignment receipts. Keep upgraded
+   background workers and new ingress paused too. Record the UTC time when this drain is
+   complete. Wait at least 60 seconds (two `trigger_schedule::LEASE_SECONDS`
+   intervals) and confirm there are no live `trigger_work` leases. Keeping the
+   flag off alone does not stop legacy admission.
+3. Run the upgraded server once with
+   `AUTOMATION_CONTINUATION_V2_MIGRATE_DRAIN_STARTED_AT=<RFC3339 UTC timestamp>`,
+   the continuation flag off and rollback-check mode unset. This invocation uses
+   the configured database, verifies the drain interval and work leases, runs
+   fenced migration in bounded batches and exits before normal workers start.
+   Clear the migration variable afterward. A partial/failed migration is not
+   readiness: keep ingress/workers paused, resolve the cause and retry migration.
+4. Require a successful exit and inspect the completed marker, `classified`,
+   `triggers`, `ambiguous_count`, bounded `ambiguous` list and stable
+   `continuation-v2:ambiguous:<run_id>` records. Acknowledgement waits remain
+   confirmation waits; an exact matching handoff becomes coordinator work;
+   unclassifiable waits fail as `legacy_wait_unclassified`. Preserve terminal
+   history. Reconcile each ambiguity before resuming its affected workflow.
+5. Start only upgraded processes with `AUTOMATION_CONTINUATION_V2_ENABLED=true`
+   and both one-shot variables unset, then resume ingress. Check one group and
+   one direct-specialist continuation for exact run/thread association, waiting,
+   one resume and one terminal record. Check an unrelated home-thread Stop does
+   not cancel the waiting run, and the run's own Stop prevents late continuation.
+   Monitor waiting duration, continuation counts, terminal reasons and
+   metadata-only `trigger_run_waiting`/scheduler deferral diagnostics.
+
+Rollback is owned by the same operator. Pause new admission and keep upgraded
+readers/writers running long enough to drain or explicitly cancel v2 work.
+Disabling the flag stops coordinator wake; it does not safely downgrade or erase
+persisted v2 work. After the drain, keep admission/workers paused and invoke the
+upgraded binary with `AUTOMATION_CONTINUATION_V2_CHECK_ROLLBACK=true` and migration
+mode unset. Require successful exit proving no nonterminal v2 run, bound event,
+follower or pending direct-assignment receipt remains. Delivered/cancelled
+receipts remain as idempotency tombstones until their retention deadline. Clear
+the one-shot variable afterward.
+Only then may old binaries return. Neither a completed migration marker nor an
+elapsed lease interval proves that an operator stopped old writers. This check
+does not revert rows or recover already-performed external effects.
+
+### Completion scope and open follow-ups
+
+`Completed` records successful orchestration settlement with no remaining
+tracked coordinator work. It does not independently verify a requested business
+outcome such as publication, post IDs or a reply-chain readback. Business-outcome
+verification remains open under #2040; lifecycle tests do not establish it.
+
+The existing group handler can address eligible live members from recognised
+mentions within its handoff budgets. An arbitrary specialist `@reviewer` mention
+is not evidence that review was durably dispatched or completed. General durable
+handoff intent and guaranteed progression through review/publish stages remain
+open scope; this repair must not be presented as completing those requirements.
+The two #2040 reproductions show specialist and queued-update activity but do not
+supply the tool-call trace needed to distinguish direct `message_subagent` from
+group delegation for every handoff.
+
+Automation-generated files currently do not appear as chat attachments.
+Automatic artifact-to-chat delivery from scheduled/triggered runs is an explicit
+follow-up outside #2037's originating-owner-Web delivery contract and this
+Automation lifecycle repair; it is neither implemented nor live-accepted here.

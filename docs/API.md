@@ -8737,6 +8737,7 @@ Routes below are relative to `/api/v1`. Creation routes require an authenticated
 | POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?, auto_connect?}`; the website sends `auto_connect: true` |
 | GET | `/channel-bots/telegram-new/requests/{id}` | Read the saved request |
 | POST | `/channel-bots/telegram-new/requests/{id}/launch` | Issue a fresh Telegram launch link |
+| POST | `/channel-bots/telegram-new/requests/{id}/creation-link` | Human-only, empty body; issue a native creation form URL for the same eligible bound request |
 | DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning begins |
 | POST | `/channel-bots/telegram-new/claims/preview` | Human-only, non-mutating preview of `{code}`; returns `{bot_username, expires_at}` without provider calls |
 | POST | `/channel-bots/telegram-new/claims/redeem` | Human-only `{code, label, target_org_id?}`; atomically save the claim destination and return HTTP 202 with the connection request; worker completes setup |
@@ -8744,6 +8745,8 @@ Routes below are relative to `/api/v1`. Creation routes require an authenticated
 | POST | `/webhooks/channel/telegram-new/manager` | Receive updates authenticated by the configured manager webhook secret |
 
 Request responses expose `auto_connect` (false for legacy requests) and nullable `connection_error` with safe automatic-retry text. Automatic connection continues while the browser is closed; clients poll the saved request rather than POSTing `/connect`.
+
+Creation-link responses contain `{request, creation_url}` with `no-store`/`no-referrer` headers and share the five-per-minute actor mutation limit. The server validates live owner, manager, expiry and exact saved hosted provenance. Legacy requests without explicit origin and platform-installation requests are ineligible. Request responses add optional `prompt_delivery` (safe phase/outcome/timestamps and bounded numeric diagnostics) and advisory `can_open_creation_form`. Accepted delivery does not prove rendering, creation or an agent reply. Recovery retains the request ID and original creation boundary, accepts no user redirect or target, and still requires fresh private creation proof. See [delivery diagnostics and recovery](TELEGRAM_NEW.md#delivery-diagnostics-and-recovery-api).
 
 The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
 

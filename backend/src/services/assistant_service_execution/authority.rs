@@ -70,12 +70,8 @@ pub fn connection_binding<'a>(
         if key.expires_at.is_some_and(|at| at <= Utc::now()) {
             return Err(AppError::Forbidden("Assistant credential expired".into()));
         }
-        let access = crate::services::org_agent_service::resolve_key_access(
-            db,
-            &key.user_id,
-            key.assistant_agent_owner_id.as_deref(),
-        )
-        .await?;
+        let access =
+            crate::services::org_agent_service::resolve_credential_access(db, &key).await?;
         let allowed = crate::services::key_service::effective_allowed_service_ids_with_access(
             db,
             &key,
@@ -90,6 +86,26 @@ pub fn connection_binding<'a>(
             crate::services::assistant_settings_service::get(db, &key.user_id)
                 .await?
                 .access_mode
+        };
+        let shared_policy = if access.as_ref().is_some_and(|a| a.shared().is_some()) {
+            let approval: Vec<Document> = db.collection("service_approval_configs")
+                .find(doc! {"user_id": {"$in": [&service.user_id, &key.user_id]}, "service_id": {"$in": [Some(service.id.as_str()), service.catalog_service_id.as_deref()]}})
+                .sort(doc! {"_id": 1}).await?.try_collect().await?;
+            let notifications: Vec<Document> = db
+                .collection("notification_channels")
+                .find(doc! {"user_id": {"$in": [&service.user_id, &key.user_id]}})
+                .projection(doc! {"_id": 1, "approval_required": 1})
+                .sort(doc! {"_id": 1})
+                .await?
+                .try_collect()
+                .await?;
+            let endpoints: Vec<Document> = db.collection("service_endpoints")
+                .find(doc! {"service_id": service.catalog_service_id.as_deref().unwrap_or(id)})
+                .projection(doc! {"_id": 1, "method": 1, "path": 1, "risk": 1, "destructive": 1, "changes_existing": 1, "operation_generation": 1, "is_active": 1, "publication": 1})
+                .sort(doc! {"_id": 1}).await?.try_collect().await?;
+            json!({"approval": approval, "notifications": notifications, "operations": endpoints})
+        } else {
+            Value::Null
         };
         let authority = json!({"owner":key.user_id,"expires":key.expires_at,"scopes":key.assistant_operation_scopes,
         "allowed":allowed,"all_services":key.allow_all_services,"nodes":nodes,"mode":mode});
@@ -110,10 +126,13 @@ pub fn connection_binding<'a>(
             endpoint.as_object_mut().expect("endpoint").remove(field);
             catalog.remove(field);
         }
-        Ok(digest(
-            json!({"service": service, "endpoint": endpoint, "credential": credential,
+        let mut projection = json!({"service": service, "endpoint": endpoint, "credential": credential,
         "catalog": catalog, "authority":authority, "agent_binding": agent_binding, "override_key": override_key,
-        "configured_nodes": configured_nodes}),
-        ))
+        "configured_nodes": configured_nodes});
+        // Preserve the existing binding byte-for-byte for unrelated lanes.
+        if !shared_policy.is_null() {
+            projection["shared_policy"] = shared_policy;
+        }
+        Ok(digest(projection))
     })
 }

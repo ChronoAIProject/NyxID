@@ -35,6 +35,7 @@ export const FEATURE_FLAG = {
   ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
   ASSISTANT_WORKSPACE_PREVIEW: "assistant:workspace-preview",
   ORG_AGENTS: "assistant:org-agents",
+  SHARED_AGENTS: "assistant:shared-agents",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
   MACHINE_CONTEXTS: "assistant:machine-contexts",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",

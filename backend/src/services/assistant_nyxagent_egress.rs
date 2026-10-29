@@ -316,6 +316,18 @@ impl NyxAgentEgress for Egress {
                 Err(_) => tracing::warn!("NyxAgent transport identity assertion unavailable"),
             }
         }
+        if let Some(control) = &request.model_control {
+            if self.channel.is_some()
+                || request.method != Method::POST
+                || request.relative_path != "v1/responses"
+            {
+                return Err(AppError::AssistantTurnRequired);
+            }
+            identity_headers.push((
+                super::assistant_model_control_protocol::CONTROL_HEADER.into(),
+                control.for_target(&target.service.id)?.expose().into(),
+            ));
+        }
         let metric =
             super::billing::metric_resolution::platform_metric_for_request(&target.service, false);
         // llm-nyx has auth_method=none and no catalog credential. Preserve the
@@ -679,6 +691,7 @@ mod tests {
     use super::*;
     fn request(method: Method, path: &str, body: Option<serde_json::Value>) -> NyxAgentRequest {
         NyxAgentRequest {
+            model_control: None,
             method,
             relative_path: path.into(),
             body,

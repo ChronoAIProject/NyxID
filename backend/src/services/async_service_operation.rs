@@ -483,6 +483,8 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
             let event = AgentEvent {
+                trigger_run_id: None,
+                continuation_protocol_version: 0,
                 media_event_ids: Vec::new(),
                 media_declared: None,
                 media_sent_at: None,
@@ -520,6 +522,51 @@ pub async fn cancel(db: &Database, user: &str, id: &str) -> AppResult<()> {
             db.collection::<bson::Document>(CONVERSATIONS).update_one(doc!{"_id":&id,"user_id":&user},doc!{"$pull":{"pending_events":{"kind":EVENT_KIND}}}).session(&mut *session).await?;
             Ok(())
         }).await;transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)
+}
+
+/// Stop the current turn's watches without cancelling another waiting run in
+/// the same home thread. Idle Stop retains conversation-wide watch semantics.
+pub async fn cancel_for_stop(db: &Database, saved: &AssistantConversation) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let saved = saved.clone();
+    session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<()> = Box::pin(async {
+            let mut thread = doc! {"_id":&saved.id,"user_id":&saved.user_id};
+            let mut filter = doc! {"user_id":&saved.user_id,"conversation_id":&saved.id,
+                "state":{"$in":["submitting","waiting","ready","queued"]}};
+            if let Some(turn) = &saved.active_turn {
+                // Only this stopped turn (or its own run) is in scope. Even if
+                // force-stop already settled it, a new turn has different IDs.
+                let mut scopes = vec![doc! {"turn_id":&turn.turn_id}];
+                if let Some(run) = &turn.trigger_run_id { scopes.push(doc! {"delivery.trigger_run_id":run}); }
+                filter.insert("$or",scopes);
+            } else {
+                thread.insert("active_turn",bson::Bson::Null);
+                if db.collection::<bson::Document>(CONVERSATIONS).update_one(thread,
+                    doc! {"$inc":{"async_operation_generation":1_i64}}).session(&mut *session).await?.matched_count != 1 {
+                    return Ok(());
+                }
+            }
+            let mut cursor = db.collection::<AsyncServiceOperation>(WATCHES).find(filter.clone())
+                .session(&mut *session).await?;
+            let watches: Vec<AsyncServiceOperation> = cursor.stream(&mut *session).try_collect().await?;
+            let ids: Vec<String> = watches.into_iter().map(|watch|watch.id).collect();
+            db.collection::<bson::Document>(WATCHES).update_many(filter,
+                doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"state":"cancelling",
+                    "result_encrypted":null,"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}})
+                .session(&mut *session).await?;
+            super::generated_artifacts::discard_in_session(&db,
+                doc! {"user_id":&saved.user_id,"conversation_id":&saved.id,"watch_id":{"$in":&ids},
+                    "state":{"$in":["pending","materializing"]}},session).await?;
+            db.collection::<bson::Document>(CONVERSATIONS).update_one(
+                doc! {"_id":&saved.id,"user_id":&saved.user_id},
+                doc! {"$pull":{"pending_events":{"kind":EVENT_KIND,"id":{"$in":ids}}}},
+            ).session(session).await?;
+            Ok(())
+        }).await;
+        transactions::transaction_result(result)
     }).await.map_err(transactions::map_transaction_error)
 }
 
@@ -641,7 +688,7 @@ pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec
         && let Some(index) = row
             .pending_events
             .iter()
-            .position(|e| e.invocation_id.is_some())
+            .position(|e| e.invocation_id.is_some() && e.trigger_run_id.is_none())
     {
         // Exactly one async result per turn: its payload/delivery is selected
         // through event_id(), even when several results share an invocation.
@@ -656,21 +703,30 @@ pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec
         return selected;
     }
     if origin == TurnOrigin::Event
-        && let Some(index) = row.pending_events.iter().position(|e| e.kind == EVENT_KIND)
+        && let Some(index) = row
+            .pending_events
+            .iter()
+            .position(|e| e.kind == EVENT_KIND && e.trigger_run_id.is_none())
     {
         return vec![row.pending_events.remove(index)];
     }
     // One accepted source question per event turn. App/channel turns leave
     // these questions queued; system events retain their existing coalescing.
     if origin == TurnOrigin::Event
-        && let Some(index) = row.pending_events.iter().position(channel_question)
+        && let Some(index) = row
+            .pending_events
+            .iter()
+            .position(|e| channel_question(e) && e.trigger_run_id.is_none())
     {
         return vec![row.pending_events.remove(index)];
     }
     let (deferred, ordinary) = std::mem::take(&mut row.pending_events)
         .into_iter()
         .partition(|e: &AgentEvent| {
-            e.kind == EVENT_KIND || e.invocation_id.is_some() || channel_question(e)
+            e.kind == EVENT_KIND
+                || e.invocation_id.is_some()
+                || e.trigger_run_id.is_some()
+                || channel_question(e)
         });
     row.pending_events = deferred;
     ordinary

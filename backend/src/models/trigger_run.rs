@@ -29,8 +29,35 @@ impl RunOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunWaitKind {
+    Confirmation,
+    Coordinator,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CoordinatorWait {
+    pub thread_id: String,
+    pub source: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub deadline_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriggerRun {
+    #[serde(default)]
+    pub wait_kind: Option<RunWaitKind>,
+    #[serde(default)]
+    pub coordinator_wait: Option<CoordinatorWait>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub coordinator_deadline: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub continuation_count: u32,
+    #[serde(default)]
+    pub continuation_limit: u32,
+    #[serde(default)]
+    pub continuation_protocol_version: u32,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub trigger_generation: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

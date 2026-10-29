@@ -320,13 +320,15 @@ impl ConversationResponse {
             Some(id) => agents.iter().find(|agent| agent.id == id),
             None => agents.iter().find(|agent| agent.is_nyxbot()),
         };
-        self.agent = agent.map(|agent| AgentRefResponse {
-            id: agent.id.clone(),
-            kind: agent.kind,
-            name: agent.name.clone(),
-            display_name: agent.display_name.clone(),
-            destroyed: agent.destroyed_at.is_some(),
-        });
+        self.agent = agent
+            .map(|agent| AgentRefResponse {
+                id: agent.id.clone(),
+                kind: agent.kind,
+                name: agent.name.clone(),
+                display_name: agent.display_name.clone(),
+                destroyed: agent.destroyed_at.is_some(),
+            })
+            .or(self.agent);
         self
     }
     /// Fill in a channel thread's bot and chat.
@@ -406,7 +408,13 @@ impl From<AssistantConversation> for ConversationResponse {
             context_reset_at: row.context_reset_at,
             context_reset_reason: row.context_reset_reason,
             role: row.role,
-            agent: None,
+            agent: row.shared_agent_thread.then(|| AgentRefResponse {
+                id: row.agent_id.clone().unwrap_or_default(),
+                kind: crate::models::assistant_agent::AgentKind::Specialist,
+                name: "Shared agent".into(),
+                display_name: None,
+                destroyed: false,
+            }),
             pending_events: row.pending_events.len(),
             channel: row.channel.map(|channel| ChannelOriginResponse {
                 parent_chat_id: None,
@@ -639,6 +647,23 @@ impl From<AssistantMessage> for MessageResponse {
 async fn attach_automations(
     db: &mongodb::Database,
     user_id: &str,
+    conversation_id: &str,
+    messages: &mut [MessageResponse],
+) {
+    if let Err(error) = try_attach_automations(db, user_id, messages).await {
+        tracing::warn!(
+            %error,
+            user_id,
+            conversation_id,
+            message_count = messages.len(),
+            "Could not attach automation names to history"
+        );
+    }
+}
+
+async fn try_attach_automations(
+    db: &mongodb::Database,
+    user_id: &str,
     messages: &mut [MessageResponse],
 ) -> AppResult<()> {
     use futures::TryStreamExt;
@@ -652,13 +677,13 @@ async fn attach_automations(
     if keys.is_empty() {
         return Ok(());
     }
-    // (run id, trigger id, turn id)
-    let runs: Vec<(String, String, Option<String>)> = db
+    // (run id, trigger id, turn id, snapshotted label)
+    let runs: Vec<(String, String, Option<String>, Option<String>)> = db
         .collection::<Document>(crate::models::trigger_run::COLLECTION_NAME)
         .find(doc! {"user_id": user_id, "$or": [
             {"_id": {"$in": &keys}}, {"turn_id": {"$in": &keys}},
         ]})
-        .projection(doc! {"_id": 1, "trigger_id": 1, "turn_id": 1})
+        .projection(doc! {"_id": 1, "trigger_id": 1, "turn_id": 1, "label": 1})
         .await?
         .try_collect::<Vec<_>>()
         .await?
@@ -668,6 +693,10 @@ async fn attach_automations(
                 run.get_str("_id").ok()?.to_owned(),
                 run.get_str("trigger_id").ok()?.to_owned(),
                 run.get_str("turn_id").ok().map(str::to_owned),
+                run.get_str("label")
+                    .ok()
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned),
             ))
         })
         .collect();
@@ -676,30 +705,33 @@ async fn attach_automations(
     }
     let trigger_ids: Vec<&str> = runs
         .iter()
-        .map(|(_, trigger, _)| trigger.as_str())
+        .map(|(_, trigger, _, _)| trigger.as_str())
         .collect();
-    let labels: HashMap<String, String> = db
-        .collection::<Document>(crate::models::trigger::COLLECTION_NAME)
-        .find(doc! {"_id": {"$in": trigger_ids}, "user_id": user_id})
-        .projection(doc! {"_id": 1, "label": 1})
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?
-        .into_iter()
-        .filter_map(|t| {
-            Some((
-                t.get_str("_id").ok()?.to_owned(),
-                t.get_str("label").ok()?.to_owned(),
-            ))
-        })
-        .collect();
+    let labels: HashMap<String, String> = if trigger_ids.is_empty() {
+        HashMap::new()
+    } else {
+        db.collection::<Document>(crate::models::trigger::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": trigger_ids}, "user_id": user_id})
+            .projection(doc! {"_id": 1, "label": 1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .filter_map(|t| {
+                Some((
+                    t.get_str("_id").ok()?.to_owned(),
+                    t.get_str("label").ok()?.to_owned(),
+                ))
+            })
+            .collect()
+    };
     for message in messages.iter_mut().filter(|m| m.origin == trigger_origin) {
-        let Some((run_id, trigger_id, _)) = runs.iter().find(|(run, _, turn)| {
+        let Some((run_id, trigger_id, _, snapshot)) = runs.iter().find(|(run, _, turn, _)| {
             *run == message.turn_id || turn.as_deref() == Some(message.turn_id.as_str())
         }) else {
             continue;
         };
-        let Some(label) = labels.get(trigger_id) else {
+        let Some(label) = labels.get(trigger_id).or(snapshot.as_ref()) else {
             continue;
         };
         message.automation = Some(AutomationRunResponse {
@@ -766,23 +798,23 @@ pub async fn list(
     let limit = limit(query.limit)?;
     crate::services::assistant_team_service::ensure_nyxbot(&state.db, &user_id).await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
-    let agent = match query.agent_id.as_deref() {
-        Some(id) => Some(
-            agents
-                .iter()
-                .find(|agent| agent.id == id)
-                .ok_or_else(|| AppError::NotFound("Agent not found".into()))?,
-        ),
-        None => None,
+    let agent = query
+        .agent_id
+        .as_deref()
+        .and_then(|id| agents.iter().find(|agent| agent.id == id));
+    let mut rows = if let Some(id) = query.agent_id.as_deref().filter(|_| agent.is_none()) {
+        engine::list_shared_history(&state.db, &user_id, id, limit + 1, query.cursor.as_deref())
+            .await?
+    } else {
+        engine::list(
+            &state.db,
+            &user_id,
+            limit + 1,
+            query.cursor.as_deref(),
+            agent,
+        )
+        .await?
     };
-    let mut rows = engine::list(
-        &state.db,
-        &user_id,
-        limit + 1,
-        query.cursor.as_deref(),
-        agent,
-    )
-    .await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let next_cursor = more.then(|| engine::index_cursor(rows.last().expect("nonempty page")));
@@ -1007,7 +1039,7 @@ pub async fn history(
     for message in &mut messages {
         message.recovery = recovery.get(&message.id).cloned().map(Into::into);
     }
-    Box::pin(attach_automations(&state.db, &user_id, &mut messages)).await?;
+    Box::pin(attach_automations(&state.db, &user_id, &id, &mut messages)).await;
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let mut artifact_deliveries =
         crate::services::generated_artifacts::delivery_states(&state.db, &user_id, &id, &ids)
@@ -1436,9 +1468,16 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    engine::request_stop(&state.db, &user_id, &id).await?;
-    super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id).await?;
-    super::machine_cancel::conversation(&state, &user_id, &id).await?;
+    let target = engine::request_stop_target(&state.db, &user_id, &id).await?;
+    let watches =
+        super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id).await;
+    let machines = if let Some(target) = target {
+        crate::services::machine_service::cancel_stopped_turn(&state, &target).await
+    } else {
+        Ok(())
+    };
+    watches?;
+    machines?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1708,6 +1747,7 @@ async fn proxy(
         body,
         turn_id,
         policy,
+        None,
     )
     .await
 }
@@ -1722,6 +1762,7 @@ async fn proxy_raw(
     body: Option<Value>,
     turn_id: Option<&str>,
     policy: Option<BillingRoutePolicy>,
+    model_control: Option<&crate::services::assistant_model_control::TargetedControl>,
 ) -> AppResult<Response> {
     let service =
         assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG).await?;
@@ -1760,6 +1801,15 @@ async fn proxy_raw(
     let mut headers = vec![("authorization".into(), format!("Bearer {}", raw_key))];
     if let Some(turn_id) = turn_id {
         headers.push(("idempotency-key".into(), turn_id.into()));
+    }
+    if let Some(control) = model_control {
+        if method != "POST" || path != "v1/responses" {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        headers.push((
+            crate::services::assistant_model_control_protocol::CONTROL_HEADER.into(),
+            control.for_target(&service.id)?.expose().into(),
+        ));
     }
     super::proxy::execute_admin_proxy(
         state,
@@ -1859,6 +1909,7 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
             request.body,
             (!request.idempotency_key.is_empty()).then_some(request.idempotency_key.as_str()),
             request.billing_policy,
+            request.model_control.as_ref(),
         )
         .await
     }

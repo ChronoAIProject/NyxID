@@ -160,8 +160,9 @@ pub fn apply_operation_effects(
 /// and the same closed, stateless request contract used for assistant consent.
 /// Provider storage, resource handles, hosted effects and unknown extensions
 /// retain method classification. Service names never establish this authority.
-/// Only live guest model transport recognizes Codex correlation metadata here;
-/// owner approval verbs retain their pre-extension behavior.
+/// Owners recognize only the strict seven-field metadata contract. Guest model
+/// transport permits the broader closed telemetry shape after route authority
+/// is proved; that classification supplies no owner consent or connection grant.
 pub fn apply_inference_contract(
     descriptor: &mut OperationDescriptor,
     service: &crate::models::downstream_service::DownstreamService,
@@ -455,30 +456,38 @@ mod tests {
             serde_json::from_value(serde_json::json!({"wire_protocol":"openai_responses"}))
                 .unwrap(),
         );
-        let body = serde_json::to_vec(
-            &serde_json::json!({"model":"m","store":false,"input":"hello",
-            "client_metadata":{"thread_id":"correlation","turn_id":"turn"}}),
-        )
-        .unwrap();
-        for llm in [false, true] {
-            for (guest, method_override, expected) in [
-                (false, false, ApprovalVerb::Write),
-                (true, false, ApprovalVerb::Read),
-                (true, true, ApprovalVerb::Write),
-            ] {
-                let mut descriptor = if llm {
-                    build_llm_descriptor("POST", "responses", Some(&body))
-                } else {
-                    build_http_descriptor("POST", "responses", Some(&body))
-                };
-                apply_inference_contract(
-                    &mut descriptor,
-                    &service,
-                    Some(&body),
-                    method_override,
-                    guest,
-                );
-                assert_eq!(descriptor.verb, expected);
+        let legacy = serde_json::json!({"model":"m","store":false,"input":"hello",
+            "client_metadata":{"thread_id":"correlation","turn_id":"turn"}});
+        let safe: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/permissions-codex-responses.json"))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&safe["client_metadata"]).unwrap().len(),
+            1121
+        );
+        for (request, owner_verb) in [(&legacy, ApprovalVerb::Write), (&safe, ApprovalVerb::Read)] {
+            let body = serde_json::to_vec(request).unwrap();
+            for llm in [false, true] {
+                for (guest, method_override, expected) in [
+                    (false, false, owner_verb.clone()),
+                    (true, false, ApprovalVerb::Read),
+                    (false, true, ApprovalVerb::Write),
+                    (true, true, ApprovalVerb::Write),
+                ] {
+                    let mut descriptor = if llm {
+                        build_llm_descriptor("POST", "responses", Some(&body))
+                    } else {
+                        build_http_descriptor("POST", "responses", Some(&body))
+                    };
+                    apply_inference_contract(
+                        &mut descriptor,
+                        &service,
+                        Some(&body),
+                        method_override,
+                        guest,
+                    );
+                    assert_eq!(descriptor.verb, expected);
+                }
             }
         }
     }

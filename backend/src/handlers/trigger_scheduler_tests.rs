@@ -35,6 +35,20 @@ type Calls = Arc<Mutex<Vec<Call>>>;
 /// A NyxAgent stand-in answering every turn with one completed reply.
 async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database(name).await;
+    setup_with_database(db).await
+}
+
+async fn setup_with_database(
+    db: mongodb::Database,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    db.collection::<Document>(schedules::continuation::MIGRATIONS)
+        .update_one(
+            doc! {"_id": schedules::continuation::MIGRATION_ID},
+            doc! {"$setOnInsert": {"completed_at": schedules::date(Utc::now())}},
+        )
+        .upsert(true)
+        .await
+        .unwrap();
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
         .insert_one(test_user(OWNER, UserType::Person))
@@ -645,6 +659,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        trigger_run_id: None,
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: None,
@@ -676,6 +691,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        trigger_run_id: None,
         invocation_controlled: false,
         invocation_id: None,
         report_to: None,
@@ -1117,7 +1133,16 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, &thread_id, &user_run.id, session).await,
+                schedules::admit_turn(
+                    &db,
+                    OWNER,
+                    &claim,
+                    &thread_id,
+                    &user_run.id,
+                    crate::models::assistant_conversation::TurnOrigin::Trigger,
+                    session,
+                )
+                .await,
             )
         })
         .await
@@ -1507,7 +1532,7 @@ async fn result_transport() -> (
 async fn schedule_result_delivers_to_telegram_and_push_with_live_acl() {
     let (mut state, _, agent_server) = setup("schedule_result_transport").await;
     let (client, requests, transport_server) = result_transport().await;
-    state.http_client = client;
+    state.http_client = crate::services::assistant_model_control::HttpClient::unobserved(client);
     let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
     let trigger = automation(&state, &agent.id, None).await;
     let thread = team::home_thread(&state.db, &state.encryption_keys, &agent)
@@ -1889,7 +1914,16 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", session).await,
+                schedules::admit_turn(
+                    &db,
+                    OWNER,
+                    &claim,
+                    "thread",
+                    "turn",
+                    crate::models::assistant_conversation::TurnOrigin::Trigger,
+                    session,
+                )
+                .await,
             )
         })
         .await;
@@ -2802,6 +2836,79 @@ async fn deferred_runs_wait_for_backoff_or_budget_window() {
         work.get_datetime("at").unwrap().timestamp_millis(),
         run.deadline.timestamp_millis()
     );
+
+    // A coordinator can still be waiting after occurrence grace expires. Its
+    // budget retry must use the UTC reset, capped only by its completion window.
+    run.outcome = RunOutcome::Waiting;
+    run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Coordinator);
+    run.deadline = Utc::now() - Duration::minutes(1);
+    let settings = crate::services::assistant_settings_service::get(&state.db, OWNER)
+        .await
+        .unwrap();
+    for daily in [false, true] {
+        let now = Utc::now();
+        state
+            .db
+            .collection::<Document>(schedules::BUDGETS)
+            .update_one(
+                doc! { "_id": OWNER },
+                doc! { "$set": {
+                    "hour": now.timestamp().div_euclid(3600),
+                    "day": now.timestamp().div_euclid(86400),
+                    "hourly": if daily { 0 } else { settings.trigger_runs_per_hour },
+                    "daily": if daily { settings.trigger_runs_per_day } else { 0 },
+                } },
+            )
+            .await
+            .unwrap();
+        let seconds = if daily { 86400 } else { 3600 };
+        let reset = chrono::DateTime::from_timestamp(
+            (now.timestamp().div_euclid(seconds) + 1) * seconds,
+            0,
+        )
+        .unwrap();
+        // Synthetic deadlines on either side isolate the persisted retry bound.
+        // Production initializes the completion window separately in new_run.
+        for deadline in [reset + Duration::seconds(1), now + (reset - now) / 2] {
+            run.coordinator_deadline = Some(deadline);
+            defer(&state, &job, &run, "budget_exhausted").await.unwrap();
+            let work = state
+                .db
+                .collection::<Document>(schedules::WORK)
+                .find_one(doc! { "_id": &run.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                work.get_datetime("at").unwrap().timestamp_millis(),
+                reset.min(deadline).timestamp_millis(),
+                "coordinator daily={daily}, deadline={deadline}"
+            );
+            assert!(
+                schedules::claim(&state.db, &run.id, now)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an expired occurrence deadline must not cause immediate retries"
+            );
+        }
+    }
+
+    // Confirmation retries retain their separate expiry/admission flow and do
+    // not become constrained by either the occurrence or coordinator deadline.
+    run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Confirmation);
+    run.coordinator_deadline = Some(run.deadline);
+    let before = Utc::now();
+    defer(&state, &job, &run, "target_busy").await.unwrap();
+    let work = state
+        .db
+        .collection::<Document>(schedules::WORK)
+        .find_one(doc! { "_id": &run.id })
+        .await
+        .unwrap()
+        .unwrap();
+    let at = work.get_datetime("at").unwrap().to_chrono();
+    assert!(at > before && at <= Utc::now() + Duration::seconds(30));
     server.abort();
 }
 
@@ -3881,4 +3988,12 @@ async fn invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_re
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     server.abort();
+}
+
+include!("trigger_scheduler_completion_tests.rs");
+include!("trigger_scheduler_feedback_tests.rs");
+
+mod acceptance {
+    use super::*;
+    include!("trigger_scheduler_acceptance_tests.rs");
 }

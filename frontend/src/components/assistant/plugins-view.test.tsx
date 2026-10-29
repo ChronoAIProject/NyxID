@@ -388,7 +388,21 @@ describe("PluginsView", () => {
     });
   });
 
-  it("hides mutation controls for an auto-connected (platform-managed) key", async () => {
+  it("hides auto-connected services without offering them as new connections", () => {
+    mockLoaded({
+      keyRows: [
+        { ...keys[0]!, auto_connected: true },
+        keys[1]!,
+      ],
+    });
+    render(<PluginsView />);
+
+    expect(screen.queryByRole("button", { name: "Manage OpenAI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect OpenAI" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Manage Internal Admin API" })).toBeInTheDocument();
+  });
+
+  it("hides mutation controls if a connection becomes platform-managed after listing", async () => {
     mocks.useKey.mockReturnValue({
       data: {
         ...keys[0],

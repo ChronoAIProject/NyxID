@@ -90,16 +90,14 @@ async fn model_call(
 }
 
 fn exact_model_requests() -> Vec<(&'static str, Value)> {
+    // Partial known correlation fields are valid guest transport telemetry,
+    // while owner callbacks retain exact body/account approval.
+    let legacy_metadata = json!({"model":"m","store":false,"input":"account context",
+        "client_metadata":{"thread_id":"thread","turn_id":"turn"}});
+    assert!(stateless_model_transport("responses", &legacy_metadata));
+    assert!(!stateless_inference("responses", &legacy_metadata));
     vec![
-        (
-            "responses",
-            // The metadata-aware guest route contract must not turn this
-            // existing owner request into read-class/fungible model consent.
-            json!({"model":"m","store":false,"input":"account context",
-                "client_metadata":{"root_turn_id":"root","session_id":"session",
-                    "thread_id":"thread","turn_id":"turn","x-codex-installation-id":"installation",
-                    "x-codex-turn-metadata":"{\"sandbox_mode\":\"read-only\"}","x-codex-window-id":"window"}}),
-        ),
+        ("responses", legacy_metadata),
         (
             "responses/compact",
             json!({"model":"m","input":"account context"}),

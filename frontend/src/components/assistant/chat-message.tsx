@@ -1,4 +1,5 @@
 import { useRouter, useRouterState } from "@tanstack/react-router";
+import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
 import { CAPACITY_ACKNOWLEDGEMENT, formatCapacityWait } from "@/lib/assistant/capacity-wait";
@@ -29,6 +30,7 @@ import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { ArtifactDelivery } from "@/components/assistant/blocks/artifact-delivery";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
@@ -262,13 +264,21 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
  * waits and channel delivery. Denials and failures surface in the line
  * itself; the rest is on demand.
  */
-function TurnSummary({ message }: { readonly message: ChatMessage }) {
+function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMessage; readonly selectedDecisionId?: string }) {
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
   const decisions = message.decisions ?? [];
   const count = steps.length + tools.length;
   const total = Math.max(count, message.activityTotal ?? 0);
-  const [open, setOpen] = useState(false);
+  const selected = decisions.some((row) => row.id === selectedDecisionId);
+  const target = selected ? selectedDecisionId : undefined;
+  const navigation = useReviewCardNavigation();
+  const reveal = selected && !navigation?.handled;
+  const [expansion, setExpansion] = useState({ target, navigation, open: reveal });
+  if (expansion.target !== target || expansion.navigation !== navigation) {
+    setExpansion({ target, navigation, open: expansion.open || reveal });
+  }
+  const open = expansion.open || ((expansion.target !== target || expansion.navigation !== navigation) && reveal);
   const capacityWaitMs = message.turnMetadata?.capacityWaitMs ?? 0;
   const attempts = message.turnMetadata?.attempts ?? 0;
   const waited = message.status === "complete" && (capacityWaitMs > 0 || attempts > 1);
@@ -295,7 +305,7 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
     <div className={cn("mb-2", ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL)}>
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setExpansion({ target, navigation, open: !open })}
         aria-expanded={open}
         aria-label={`Turn details: ${[...parts, failed ? `${String(failed)} failed` : "", deliveryFailed ? "delivery failed" : ""].filter(Boolean).join(", ")}`}
         className={cn(BANNER_ROW, "text-muted-foreground transition-colors hover:bg-overlay")}
@@ -351,7 +361,8 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
             </div>
           ))}
           {tools.map((tool) => (
-            <details key={tool.id} className="text-11 text-muted-foreground">
+            <ReviewCardTarget key={tool.id} selected={Boolean(onTool.get(tool.id)?.some((row) => row.id === selectedDecisionId))} selectionKey={selectedDecisionId}>
+            <details className="text-11 text-muted-foreground">
               <summary
                 data-tool-status={tool.status}
                 className="flex cursor-pointer list-none flex-col gap-1 py-0.5"
@@ -388,11 +399,14 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
                 </pre>
               ) : null}
             </details>
+            </ReviewCardTarget>
           ))}
           {loose.length ? (
             <ul aria-label="Permissions used" className="space-y-1 pt-0.5">
-              {groupDecisions(loose).map(({ row, count: times }) => (
-                <li key={row.id} title={decisionTitle(row)} className="flex items-start gap-2 text-11 text-muted-foreground">
+              {groupDecisions(loose, selectedDecisionId).map(({ row, count: times }) => (
+                <li key={row.id} title={decisionTitle(row)}>
+                <ReviewCardTarget selected={row.id === selectedDecisionId}>
+                <div className="flex items-start gap-2 text-11 text-muted-foreground">
                   {row.status === "denied" ? (
                     <X aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0 text-warning" />
                   ) : (
@@ -404,6 +418,8 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
                     {row.reason?.trim() ? <span className="text-text-tertiary"> · {row.reason}</span> : null}
                   </span>
                   {times > 1 ? <span className="shrink-0 tabular-nums text-10 text-text-tertiary">×{times}</span> : null}
+                </div>
+                </ReviewCardTarget>
                 </li>
               ))}
             </ul>
@@ -560,6 +576,7 @@ export function ChatMessageBubble({
   onCheckRecovery,
   conversationId,
   feedbackEnabled = true,
+  selectedDecisionId,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
@@ -567,6 +584,7 @@ export function ChatMessageBubble({
   readonly onCheckRecovery?: () => Promise<unknown> | void;
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
+  readonly selectedDecisionId?: string;
 }) {
   const streaming = message.status === "streaming";
   const capacityNote = streaming && message.systemNote === "capacity_wait";
@@ -597,6 +615,7 @@ export function ChatMessageBubble({
     parentId: conversationId ?? "",
     messageId: message.id,
     initialVote: message.feedback?.vote,
+    initialComment: message.feedback?.comment,
     onVoted: (vote) =>
       capture({
         name: "ui.assistant_feedback_submitted",
@@ -609,9 +628,9 @@ export function ChatMessageBubble({
   if (message.role === "user") {
     return (
       <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
-        <div className="rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+        <UserMessageBubble>
           {message.steering && (
-            <p className="mb-1 text-11 text-muted-foreground" role="note">
+            <p className="mb-1 text-11" role="note">
               Steering ·{" "}
               {steeringNotice(message.steering.code, message.steering.outcome)}
             </p>
@@ -624,7 +643,7 @@ export function ChatMessageBubble({
             </div>
           ) : null}
           {content}
-        </div>
+        </UserMessageBubble>
         <div className="flex max-w-full flex-wrap items-center justify-end gap-x-2 gap-y-1 opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:none)]:opacity-100">
           <MessageTime value={message.timestamp} />
           <MessageCopyAction text={content} />
@@ -681,7 +700,7 @@ export function ChatMessageBubble({
     >
       <div className="min-w-0 w-full pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
-        <TurnSummary message={message} />
+        <TurnSummary message={message} selectedDecisionId={selectedDecisionId} />
         {message.toolCalls
           ?.filter((tool) => tool.machine)
           .map((tool) => (
@@ -877,6 +896,7 @@ export function ChatMessageEntry({
   feedbackEnabled = true,
   onRetry,
   onCheckRecovery,
+  selectedDecisionId,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
@@ -884,6 +904,7 @@ export function ChatMessageEntry({
   readonly feedbackEnabled?: boolean;
   readonly onRetry?: () => Promise<void> | void;
   readonly onCheckRecovery?: () => Promise<unknown> | void;
+  readonly selectedDecisionId?: string;
 }) {
   if (
     message.role === "system" &&
@@ -915,6 +936,7 @@ export function ChatMessageEntry({
         ) : null}
         <ChatMessageBubble
           message={message}
+          selectedDecisionId={selectedDecisionId}
           interactiveCards={interactiveCards}
           conversationId={conversationId}
           feedbackEnabled={feedbackEnabled}

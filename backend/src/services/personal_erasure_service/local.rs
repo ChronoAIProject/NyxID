@@ -232,6 +232,11 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::assistant_model_control::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        ("assistant_model_denial_notices", doc! {"user_id":owner}),
+        (
             m::nyxbot_channel::THREADS_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
@@ -243,8 +248,28 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             m::nyxbot_channel::WATCHES_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
+        (
+            m::nyxbot_gateway_response::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (m::assistant_voice::REQUESTS, doc! {"user_id":owner}),
         (m::assistant_settings::COLLECTION_NAME, doc! {"_id":owner}),
+        (
+            m::assistant_sharing::COLLECTION_NAME,
+            doc! {"owner_id": owner},
+        ),
+        (
+            m::assistant_sharing::SHARES_COLLECTION_NAME,
+            doc! {"$or": [{"owner_id": owner}, {"subject_id": owner, "subject_kind": "person"}]},
+        ),
+        (
+            m::assistant_sharing::NOTES_COLLECTION_NAME,
+            doc! {"actor_user_id": owner},
+        ),
+        (
+            m::assistant_sharing::CONSENTS_COLLECTION_NAME,
+            doc! {"$or": [{"actor_user_id": owner}, {"owner_id": owner}]},
+        ),
         (
             m::assistant_skill_draft_attempt::COLLECTION_NAME,
             doc! {"user_id":owner},

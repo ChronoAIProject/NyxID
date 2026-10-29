@@ -305,14 +305,173 @@ uses a different projection. Previously it made the normal generation classify
 as stateful: owners succeeded through legacy transport without recording a
 route, while guests were refused even with matching profiles. Unknown/nested
 metadata remains refused, and actual provider handles anywhere in executable
-input remain disallowed. Correlation values do not enter route identity. The extended classification is
-not used for owner admission: owner callbacks with `client_metadata` retain
-`legacy_inference`, their exact body identity, approval verb, connection selection
-and fallback behavior. Their route is recorded separately after assistant
-admission, without creating model consent. Ordinary callbacks without this
-extension retain their existing raw-inference behavior. Classification inspects
-a cloned JSON value; the forwarded request body, including `client_metadata`,
-is unchanged.
+input remain disallowed. Correlation values do not enter route identity.
+
+Owner admission separately recognizes a narrower contract: exactly those seven
+scalar string fields, six IDs of 1–128 ASCII bytes (letters, digits, `_`, `-`),
+with an optional `:<decimal digits>` suffix only on the window ID within the same
+128-byte total limit, turn metadata of at most 1,024 UTF-8 bytes, and sorted
+compact JSON of at most 2,048 bytes. This strict subset uses stateless Read
+classification and server-input-bound owner model consent. Partial, unknown or
+over-budget metadata retains Write classification and connection identity; it
+does not inherit automatic Read from the broader guest transport classifier.
+Approval remains exact-body unless the separate negotiated contract below
+positively admits reusable consent. Actual stateful/provider-hosted effects
+retain exact approval.
+
+Explicit `_nyxid_via` routing is constrained to the requested catalog and saved
+connection. A saved explicit owner choice fails closed if unavailable.
+Without that choice, catalog-only routing considers eligible personal/org
+connections in saved preference order; strict inference may skip a candidate
+with verified unavailability. A policy Deny is never outage evidence. Read
+classification does not override an explicit choice or exempt the call from
+generic service policy: the writes-only default permits reads, while an explicit
+Deny still blocks them. Billing uses the final resolved connection, credential
+class and resource owner; the guest payer rule does not rewrite owner billing.
+Route recording remains separate from consent and requires an admitted owner
+model attempt. Classification inspects a cloned JSON value; the forwarded body,
+including `client_metadata`, is unchanged.
+
+### Negotiated owner model approval
+
+`ASSISTANT_MODEL_CONTROL_V1_ENABLED` defaults to `false`. This private paired
+protocol is separate from automatic Read and the `assistant:model-controls` UI flag.
+Initial strict Read keeps its existing zero-card path without a reusable dispatch
+step. Optional passive facts are separate from model Write steps and capabilities;
+they never authorize a send or change ordinary tool policy. An eligible non-strict
+callback creates a Write card without sending; only its saved human Allow and
+server-bound continuation can prepare the resumed request. Existing exact-body cards
+never upgrade into reusable authority. Both ordinary authenticated owner and
+captured personal-platform owner turns are eligible; guest/public and
+direct-provider profiles are not.
+
+The reusable subset is bounded standard `POST responses`, no query, `store=false`,
+no background/provider-hosted effects or resource URLs, closed text
+input/configuration and declared host function tools. Selected connection, catalog,
+owner/key/credential epochs, model, approved endpoint family, semantic headers,
+instructions, tools and metadata remain fixed. Fully fixed bounded opaque string
+maps may contain unknown keys or strings over 1,024 bytes under explicit Write
+consent; this never widens automatic Read. Provider options are pinned opaque
+values, not permission to add executable configuration. Generation-first Allow replaces only the final user item with the exact saved continuation text while preserving every
+preceding item exactly, including any captured user environment wrapper. Regenerated
+privileged scaffold, wrappers and paths remain outside the proven native reset
+contract. Later steps require exact server-observed provider output and subsequent
+actual MCP tool results. A provider call declaration is not a tool-result receipt.
+Current native events bind the observed call ID to the current thread/turn; events
+without that ID require unique name/arguments. The exact
+`nyxid-owner-model-control-v1-initial-compact-1` receipt schema requires a
+1,024–65,536-character result limit fixed at first tool prepare. Valid ordinary
+policies with a larger limit keep their ordinary projection/budget without a private
+receipt, provided bounded local retention fits; activated Write refuses unsupported
+receipt limits. The full controlled MCP ingress is bounded at 2 MiB including
+JSON-RPC envelope overhead; supported parsed handler results use the existing
+deterministic Unicode truncation and refusal guidance. Receipts bind that exact
+model-facing text, success flag, originating step and genuine activity; raw results
+are not retained in the root. Local blocked-refusal reuse records its actual origin
+and never claims a new handler execution. Invalid(A), Invalid(B), fresh A requires
+independent actual A evidence while retaining B's latest text/activity. Exact prior
+call-ID redelivery retains its own original text/receipt, revalidates status, and
+cannot repeat an effect or spend another budget slot. The bounded reply cache
+retains native IDs within the exact root, active turn and control, including locally
+blocked declarations. Optional observation loss or a new model request cannot turn a
+retained ID into a new executable call. Ordinary cached replies require current live
+verification and carry no receipt; prepared results require their exact current tool
+status. Ambiguous same-ID reuse remains conservative rather than rerunning an
+effect. Missing activity, ambiguous identity, changed limits or unsupported
+projections cannot advance.
+
+New consent explicitly includes the generation and standalone
+`POST responses/compact` family. Generation configuration, declared tools and opaque
+metadata are sealed before Allow. Generation-first consent seals actual initial
+generation configuration/history as before. Truly first compact instead requires complete caller-supplied prospective
+generation options after the trusted selected-model binding and before tool/store
+filtering. The final callback C and exact compact input/body, control and selected
+connection are bound before the card. Initial compact Allow preserves that exact
+sealed compact body. The bridge never invents future tools/options from a profile.
+Unknown options reach the closed validator and
+reject rather than disappearing. Initial history requests authority; its historical
+calls never certify past execution. Compact has a separate closed schema: the same
+model and exact optional instructions, with no query, tools, metadata or
+generation-only store/stream options. After known automatic Read, initial compact
+consent reconciles the complete actual provider output and every genuine host-tool
+result. A prospective C proposal cannot relabel known history: denied or unexecuted
+call X cannot become an invented successful function_call_output. The passive
+observer saves intent before send, then binds actual output plus EOF and genuine
+handler/activity receipts. Missing, dropped, oversized, redirected, failed or
+concurrent facts make lineage ineligible without widening automatic Read or granting
+a tool. Unsupported observation preserves ordinary routing and host-tool policy when
+ineligibility is durable; a live authority/persistence failure before that fence
+rejects before send. A claimed uncertain Read is never replayed for a receipt. A
+successful `response.compaction` JSON body must reach real upstream EOF; an SSE
+`response.completed` frame cannot certify compact. The encrypted root retains the
+full response and raw-body digest. The whole returned output becomes the exact next
+generation input, without pruning, reordering, additions or native serialization
+projections. Returned privileged/tool history must match the actual sent history;
+retained calls declare no new executable tools and mint no tool receipts. Closed
+nonprivileged provider summaries and opaque compaction items are accepted as
+canonical output without inspecting ciphertext. This follows the [standalone compact
+contract](https://developers.openai.com/api/docs/guides/compaction).
+
+Prepare fixes the complete send digest. Duplicate decisions, continuation redelivery
+and Retry retain the logical root/step; they cannot rearm a claimed send. The final
+transactional claim follows billing admission; a losing callback releases its unused
+reservation. Authenticated recovery returns the same Prepared capability without
+extending expiry or allocating a new step. Cancellation or an uncertain outcome
+after claim never permits replay; known-completed lost output is refused rather than
+resent. Consent expires no later than the saved Allow deadline. This is not an
+external exactly-once promise.
+
+Scalar/non-string or over-budget metadata maps, unproven native opaque correlation
+changes, compact without a preconsent generation proposal or needed known-history
+receipts, native compact filtering/reinjection, external image/file inputs and
+unsupported tool projections remain outside this contract. Compact is not classified
+as inherently stateful. Before activation, unsupported shapes/transports retain
+their legacy exact-only behavior; translated senders, node routes, pools, overrides
+and catalog-only selections cannot activate reusable authority. After activation,
+missing controls, changed authority or unsupported transitions fail closed, even if
+a later body looks like strict Read.
+
+Recorder coverage is atomically written only at a genuinely new initial owner turn,
+including ordinary/platform/invocation admissions, when the exact
+`assistant:model-control-initial-compact-recorder-v1` roster is ready. Recording
+operates while issuance is off. A readiness miss permits the ordinary turn but omits
+coverage; later flags/readiness cannot backfill it. Missing coverage or a negative
+unobserved marker prevents initial compact reuse. Both marker types have no TTL and
+follow existing conversation/owner erasure. Omitted controls, catalog-only
+selection, pools, overrides, recognized unsupported model paths and node senders
+durably exclude reusable history before ordinary send. Card creation and unobserved
+admission share the live-turn fence; a saved family cannot be ignored by a later
+unobserved admission.
+
+The companion journal retains up to 2,048 uncertain control/request bindings
+independently of its latest phase. Only the matching authoritative completion
+removes one; a changed request or restart never evicts another. Capacity refuses
+further passive sends. This bound counts retained uncertainty, not all ordinary
+requests. Full replacement canonical compact and native compact projection are
+separate transitions; the latter still requires source/build/launch provenance.
+
+Model Deny, including a digest-bound compact-first legacy exact card, uses a durable
+deterministic notice and exact saved destination for app and supported modern
+captured-platform replies, with no model call or new card. Legacy one-shot Nyxbot
+additional-reply delivery remains unsupported; expired/unproven destinations or full
+saved-source snapshot drift are refusals, not successful explanations. Proven
+HTTP/SSH effect-Deny explanations retain their existing path.
+
+Deploy both sides and configure the matching existing NyxID model-source profile;
+verify `assistant:model-control-initial-compact-recorder-v1` against the full
+serving roster and drained old writers, then enable the paired flags. Issuance still
+requires actual exact revision negotiation. The original
+`nyxid-owner-model-control-v1`, `nyxid-owner-model-control-v1-tool-projection-1` and
+`nyxid-owner-model-control-v1-canonical-compact-1` revisions must drain under
+matching writers before replacement. Envelopes without the sealed compact family
+cannot gain it by continuation. New peers do not migrate old tokens, permit old-root
+Allow or dispatch, or claim mixed-revision tool compatibility. Digest-proven retired
+cards retain Deny and supported deterministic notice settlement. Disabling cannot
+reset active roots or restore legacy execution. Drain/settle affected work before
+rollback; preserve dispatch/uncertainty tombstones and key revocations, and keep old
+writers away from activated roots. See [environment
+configuration](../ENV.md#engine-and-diagnostics) and [security
+readiness](../SECURITY_ROLLOUT_READINESS.md).
 
 New channel threads inherit their linked agent's configured profile. Existing
 threads retain their model, including legacy channels created with the global
@@ -1542,8 +1701,13 @@ bandwidth measurements are in [validation and measurements](../MACHINE_NODES.md#
 Scheduled and assistant-webhook work enters the same engine with
 `TurnOrigin::Trigger`, `guest = false` and an internal fenced `TurnClaim`.
 `begin_turn` admits that claim inside the conversation/credential transaction;
-the run record and active turn therefore agree even across a crash. This branch
-executes only for trigger turns, adding no database query to ordinary turn start.
+the run record and active turn therefore agree even across a crash. Coordinator
+resumption uses `TurnOrigin::Event` with an internal `TurnClaim` whose
+`continuation` is true. Admission requires the exact owner, run, thread and v2
+queued event, together with live work-lease, trigger-generation and credential
+fences. This trigger-admission branch runs only when an internal claim is present;
+ordinary turns do not perform its run lookup. A claimed event turn drains only
+v2 events for that run, leaving other runs' events and ordinary notices queued.
 Scheduled trigger instructions retain owner authority. Webhook data is untrusted:
 In Auto and Ask every time, `confirmation_policy = changes` (default) enforces owner cards on every changing
 tool call, using the same HTTP/catalog classifier as guest access and explicit
@@ -1559,12 +1723,33 @@ defaults. Dedicated/per-run automation threads are excluded from home adoption
 at creation, turn admission and recovery after deletion.
 
 `ActiveTurn.trigger_run_id` connects settlement and confirmations to metadata-only
-run history. Confirmation requests copy this identity and the active turn ID;
+run history. The server also derives this identity in `ChatAuthority`, group
+followers, direct specialist assignments and their queued result events. A child
+specialist retains separate execution authority from its parent coordinator.
+Group-post registration and the completion barrier transaction fence the
+thread/run handoff versions, so settlement cannot
+complete from a stale snapshot while a follower is registered. Notification keeps
+the follower under a reclaimable, fenced lease; deterministic run-qualified event
+IDs deduplicate replay, and queue acceptance commits with follower removal.
+Trigger-bound followers and events are protected from ordinary capacity eviction.
+Stop of the automation coordinator and terminal cleanup fence late notification
+and continuation admission. An unrelated active-turn Stop on the same home
+thread must leave waiting runs intact; automation cleanup cannot block Stop.
+
+A settled coordinator with an attributable follower, direct assignment or event
+stays `waiting(coordinator)` until its exact thread consumes the replies and reaches a
+final result. Each admitted coordinator event continuation atomically consumes
+the run's independent snapshotted allowance (32 for new or migrated runs) and the persisted owner trigger
+hourly/daily budget; `max_auto_continuations=0` does not disable these handoffs.
+Ordinary event-hour and streak guards retain their separate budgets and
+admission path. The run's continuation count, limit and protocol version persist
+across restart. Confirmation requests copy the run identity and active turn ID;
 automation settlement keeps the run waiting until cards are decided, scheduling
 its fallback at the earliest card expiry. The decision transaction wakes the
 work item; settlement reads card state transactionally to avoid lost wakeups. The
 scheduler resumes it as another trigger turn without a second occurrence-budget
-charge. Ordinary browser and chat continuations skip these cards. A failed/lost
+charge or coordinator allowance debit. Ordinary browser and chat continuations
+skip these cards. A failed/lost
 turn is terminal and never replayed. Final replies remain in the transcript;
 optional chat/push delivery claims one outbound attempt. An interrupted, ambiguous
 send is reported as failed rather than retried, since a remote provider cannot
@@ -1583,8 +1768,27 @@ retention do not scan or delete automation rows. Setup links contain only an
 owner-bound watch ID, with prefill fetched after authentication and consumed in
 the trigger-insert transaction. Cron gaps collapse at the first valid instant;
 folds use the earlier instant. Recovery writes one missed-count/bounds summary
-and one audit. Busy/pool/overlap work backs off to 30 seconds; budget exhaustion
-waits for its next UTC budget window, all capped at the initial grace deadline.
+and one audit. Busy/pool/overlap work backs off to 30 seconds. Initial occurrence
+retries and budget deferrals are capped at the dispatch/grace deadline.
+Coordinator waits and temporary owner-budget exhaustion use the run's separate
+`coordinator_deadline`, one hour after dispatch/grace and capped by retention;
+the next applicable UTC reset is bounded by that deadline. Deadline or allowance
+exhaustion records `coordinator_timeout` or `continuation_limit_exceeded`.
+Confirmation waits retain their card-expiry/decision semantics rather than
+inheriting the coordinator bound.
+
+With the v2 flag off, legacy assistant creation, editing, schedule dispatch and
+ordinary webhooks retain their existing behavior. Persisted v2 work never
+downgrades to this legacy path. Continuation v2 requires every replica/worker
+upgraded, an operator drain of both schedule and assistant-webhook ingress and
+old workers, the durable
+`trigger_migrations/continuation-v2.completed_at` marker, and
+`AUTOMATION_CONTINUATION_V2_ENABLED=true`. The flag and marker do not attest that
+old workers were stopped. Migration classifies existing schedule/webhook runs,
+preserves confirmation waits and terminal history, and records unclassifiable
+legacy waits as terminal failures. Before rollback, drain or Stop v2 runs and
+verify no bound work remains with upgraded code. See the activation, migration
+and rollback procedure in [NyxBot schedules](../NYXBOT_SCHEDULES.md#coordinator-completion-and-continuation-v2-operations).
 
 ### Machines in automation turns
 

@@ -64,6 +64,16 @@ async fn reload_authority(
         .await?
         .filter(|row| row.is_active)
         .ok_or_else(|| AppError::ApiKeyScopeForbidden("Model connection unavailable".into()))?;
+        if auth
+            .org_agent_access
+            .as_ref()
+            .is_some_and(|a| a.shared().is_some())
+            && service.user_id != original.user_id
+        {
+            return Err(AppError::Forbidden(
+                "Shared model transport cannot borrow owner credentials".into(),
+            ));
+        }
         let catalog = service.catalog_service_id.as_deref().ok_or_else(|| {
             AppError::ApiKeyScopeForbidden("Model transport requires an inference catalog".into())
         })?;
@@ -91,9 +101,14 @@ async fn reload_authority(
             "Service grant revoked".into(),
         ));
     }
-    let live = acks::for_key(db, &original.user_id, Some(&original.api_key_id))
-        .await?
-        .ok_or(AppError::AssistantTurnRequired)?;
+    let live = acks::for_key_with_access(
+        db,
+        &original.user_id,
+        Some(&original.api_key_id),
+        auth.org_agent_access.as_ref(),
+    )
+    .await?
+    .ok_or(AppError::AssistantTurnRequired)?;
     if live.conversation_id != original.conversation_id
         || live.agent_id != original.agent_id
         || live.turn_id != original.turn_id
@@ -242,13 +257,42 @@ pub async fn bind_owner_selection(
     };
     let memberships =
         crate::services::org_service::list_memberships_for_member(db, &row.user_id, false).await?;
-    let visible =
+    let mut visible =
         crate::services::user_service_service::list_user_services_with_sources_including_disabled(
             db,
             &row.user_id,
             &memberships,
         )
         .await?;
+    if row.shared_agent_thread {
+        let agent = row
+            .agent_id
+            .as_ref()
+            .ok_or_else(crate::services::shared_agent_service::missing)?;
+        let access = crate::services::shared_agent_service::load(
+            db,
+            &row.user_id,
+            Some(std::slice::from_ref(agent)),
+        )
+        .await?
+        .agents
+        .remove(agent)
+        .ok_or_else(crate::services::shared_agent_service::missing)?;
+        // Shared selection is restricted to the request snapshot. The extra
+        // candidates are owner connections or actor same-catalog alternatives;
+        // no unrelated actor connection may enter this turn.
+        visible.retain(|item| access.allows_resolution(&item.service));
+        for service in access.connections().values() {
+            if !visible.iter().any(|item| item.service.id == service.id) {
+                visible.push(
+                    crate::services::user_service_service::UserServiceWithSource {
+                        service: service.clone(),
+                        source: crate::services::user_service_service::CredentialSource::Personal,
+                    },
+                );
+            }
+        }
+    }
     let choices: Vec<_> =
         if let Some(exact) = visible.iter().find(|item| item.service.id == reference) {
             vec![exact]
