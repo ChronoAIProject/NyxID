@@ -243,7 +243,7 @@ fn preflight_selection(
     {
         Some("separated_requires_separate_users")
     } else if !managed_browser_requested
-        && !existing.is_some_and(|config| config.managed_browser.is_some())
+        && existing.is_none_or(|config| config.managed_browser.is_none())
     {
         Some("separated_requires_managed_browser")
     } else {

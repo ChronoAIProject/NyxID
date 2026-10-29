@@ -4,22 +4,6 @@ use anyhow::{Context, Result, ensure};
 use reqwest::Url;
 use std::path::PathBuf;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn shell_files_prepare_full_infrastructure_without_enabling_graphical_tools() {
-        let config = super::machine_config(&["shell".into(), "files".into()]).unwrap();
-        assert!(
-            config.managed_browser.is_some(),
-            "separation needs managed browser infrastructure"
-        );
-        assert_eq!(config.dev_browser_user.as_deref(), Some("devbrowser"));
-        assert!(config.cua_driver.is_some());
-        assert!(config.shell && config.files);
-        assert!(!config.browser_enabled() && !config.computer);
-    }
-}
-
 pub(super) fn machine_config(capabilities: &[String]) -> Result<nyxid_machine::config::Config> {
     ensure!(
         !capabilities.is_empty() && capabilities.len() <= 4,
@@ -148,4 +132,20 @@ pub(super) fn validate_endpoint(value: &str, websocket: bool) -> Result<Url> {
         );
     }
     Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn shell_files_prepare_full_infrastructure_without_enabling_graphical_tools() {
+        let config = super::machine_config(&["shell".into(), "files".into()]).unwrap();
+        assert!(
+            config.managed_browser.is_some(),
+            "separation needs managed browser infrastructure"
+        );
+        assert_eq!(config.dev_browser_user.as_deref(), Some("devbrowser"));
+        assert!(config.cua_driver.is_some());
+        assert!(config.shell && config.files);
+        assert!(!config.browser_enabled() && !config.computer);
+    }
 }

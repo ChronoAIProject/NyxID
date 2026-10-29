@@ -198,12 +198,11 @@ impl Custody {
             })
             .collect::<Vec<_>>();
         if self.cached.read().ok().is_some_and(|c| {
-            let fresh_for_call = c.as_ref().is_some_and(|v| {
+            c.as_ref().is_some_and(|v| {
                 v.identities == stamp
                     && ((!forced && v.at.elapsed() < CADENCE)
                         || (forced && v.completed_at >= requested_at))
-            });
-            fresh_for_call
+            })
         }) {
             return;
         }
