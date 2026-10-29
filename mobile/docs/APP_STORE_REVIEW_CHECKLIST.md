@@ -54,9 +54,9 @@
 
 | 项 | 状态 | 说明 |
 |----|------|------|
-| 提审/生产 API | ✅ | `pnpm build:ios` / `pnpm release:ios` 使用 `PROD_API_BASE_URL`（默认 `https://nyx-api.chrono-ai.fun/api/v1`，见 `.env.prod`），审核环境可访问 |
+| 提审/生产 API | ✅ | `pnpm build:ios` / `pnpm release:ios` 默认使用 `PROD_API_BASE_URL`；`PROD_USE_NEW_DOMAINS=true` 时使用 `PROD_NEW_API_BASE_URL`（`https://api.nyxid.ai/api/v1`）。见 [域名迁移](DOMAIN_MIGRATION.md)，所选 API 须在审核环境可访问 |
 | URL Scheme | ✅ | `nyxid`，用于 OAuth 回调 |
-| Associated Domains | ✅ | `applinks:nyx-api.chrono-ai.fun`（entitlements） |
+| Associated Domains | ✅ | 根据所选 API / Universal Link 域名生成；新域名模式包含 `applinks:api.nyxid.ai`，保留已有 Universal Link 域名与路径（构建时 prebuild 更新 entitlements） |
 | 最低系统版本 | ✅ | LSMinimumSystemVersion 12.0 |
 
 ---
@@ -66,7 +66,7 @@
 | 风险 | 建议 |
 |------|------|
 | 审核员删掉唯一测试账号 | 在审核备注中说明：请使用提供的账号浏览主要功能；若要测试删除，请先新建账号再删，或注明已提供第二个测试账号 |
-| 审核时 API 不可用 | 确保 `nyx-api.chrono-ai.fun` 在审核期间稳定、无 IP 限制或需 VPN |
+| 审核时 API 不可用 | 确保构建所选 API 域名在审核期间稳定、无 IP 限制或需 VPN；旧版本使用期间保留旧域名 |
 | 隐私营养标签与 App 不一致 | 在 App Store Connect → App 隐私 中如实填写收集的数据类型（邮箱、设备 ID、使用数据等），与隐私政策一致 |
 | 年龄分级 | 若未设 17+，建议与隐私政策「不面向 16 岁以下」一致，选 4+ 或 12+ 并确认无违规内容 |
 
@@ -88,6 +88,6 @@ Account deletion: Available under Account tab → Account & Security → Danger 
 ## 8. 结论
 
 - **已满足**：账号删除、条款/隐私、Sign in with Apple、推送、导出合规、隐私清单、生产 API 配置。
-- **提审前务必确认**：审核备注中说明测试账号与删除测试方式；App Store Connect 中隐私营养标签与隐私政策一致；`nyx-api.chrono-ai.fun` 在审核期间可访问。
+- **提审前务必确认**：审核备注中说明测试账号与删除测试方式；App Store Connect 中隐私营养标签与隐私政策一致；构建所选 API 域名在审核期间可访问。
 
 完成上述 ⚠️ 项后，按当前实现无明显硬性拒审风险；具体通过仍以 Apple 当次审核为准。

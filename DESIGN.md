@@ -77,13 +77,15 @@ Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`)
 | 10px | Section labels (uppercase, tracking 1.5px), badge text, smallest overline text |
 | 11px | Timestamps, stat descriptions, tertiary text, status labels, pagination counters |
 | 12px | Body text, button text, nav items, table cells, input/select text, dropdown items, detail row values, breadcrumbs, page descriptions |
-| 13px | Sidebar nav items, card body text, `DetailSection` headers, mobile-card primary text |
+| 13px | Sidebar nav items, card body text, `DetailSection` headers, standard mobile-card primary text |
 | 14px | Long-form welcome/marketing copy (e.g. onboarding takeover body, mobile nav items) |
-| 15px | Dialog titles, card headings ("Shortcuts", "Getting started"), wizard step titles |
+| 15px | Dialog titles, card headings ("Shortcuts", "Getting started"), mobile Activity service titles, wizard step titles |
 | 22px | Page titles on mobile (auto-scales to 28px at `sm`), `text-lg` mid-page section headings (`channel-bots`, `org-detail`) |
 | 28px | Page titles on `sm+` (`PageHeader`, `font-bold`, `letter-spacing: -0.03em`); dashboard greeting |
 
 > **Off-scale sizes in use** (not endorsed; reconcile when touching the file): `text-2xl` on `StatCard` values in `developer-apps.tsx`; `text-22 font-bold` on node-detail metric values; `text-3xl md:text-5xl font-normal` on the `developer-app-detail` not-found heading; `text-base` on `ApprovalSetupWizard` `CardTitle`; `text-9` badges on `channel-conversation-detail`. New code should snap to the scale above.
+
+Mobile Activity cards lead with the service name at 15px; the action and URL use secondary text at 12px. Service names may wrap to two lines.
 
 ## Components
 
@@ -528,6 +530,13 @@ layer through `OverlayLayer` React context, which follows portals. Each nested
 surface adds 10; its backdrop sits one below it. AssistantShell establishes base
 80 (the mobile drawer), so dialogs/sheets use 90 and their menus use 100 without
 per-control z-index classes. Nested pickers and menus continue the same rule.
+User chat bubbles use three 18px corners and a tighter 4px bottom-right corner.
+Their dedicated `chat-bubble` and `chat-bubble-foreground` colors can be changed
+per theme in Settings → Display, with a live preview and text contrast check.
+The light default is neutral gray (`#E0E0E5` on the `#F4F4F5` canvas) with
+`#18181B` text; the dark default is `#2C2C30` with `#EFEFF1` text. This
+supersedes the bubble fill and corner shape in the 2026-07-22 layout decision.
+
 Tooltips use at least 1000 and stay above their parent. Embedded raw Radix modals
 must provide their content layer to descendants. Avoid per-instance z-index
 classes on these primitives; date pickers and comboboxes inherit through their

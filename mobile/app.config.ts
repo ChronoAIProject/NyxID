@@ -1,19 +1,9 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const {
-  loadEnv,
-  resolveProfile,
-  appIdentity,
-} = require("./scripts/lib/load-env");
-
-function safeHost(url: string): string | null {
-  try {
-    return new URL(url).host;
-  } catch {
-    return null;
-  }
-}
+const { loadEnv, resolveProfile, appIdentity } = require("./scripts/lib/load-env");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { buildNativeLinks } = require("./scripts/lib/native-links");
 
 export default ({ config }: ConfigContext): ExpoConfig => {
   const appEnv = (process.env.APP_ENV ?? "dev") as "dev" | "prod";
@@ -23,39 +13,18 @@ export default ({ config }: ConfigContext): ExpoConfig => {
 
   process.env.EXPO_PUBLIC_API_BASE_URL = r.apiBaseUrl;
   process.env.EXPO_PUBLIC_FRONTEND_URL = r.frontendUrl;
+  process.env.EXPO_PUBLIC_LEGACY_FRONTEND_URL = r.legacyFrontendUrl;
   process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST = r.universalLinkHost;
   process.env.EXPO_PUBLIC_APP_SCHEME = ident.scheme;
   process.env.EXPO_PUBLIC_ALLOWED_EMAILS = r.allowedEmails;
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
-  const apiHost = safeHost(r.apiBaseUrl);
-  const associatedDomains: string[] = [];
-  if (apiHost) associatedDomains.push(`applinks:${apiHost}`);
-  if (r.universalLinkHost)
-    associatedDomains.push(`applinks:${r.universalLinkHost}`);
-
-  const androidIntentFilters: NonNullable<
-    ExpoConfig["android"]
-  >["intentFilters"] = [
-    {
-      action: "VIEW",
-      data: [{ scheme: ident.scheme }],
-      category: ["BROWSABLE", "DEFAULT"],
-    },
-  ];
-  if (r.universalLinkHost) {
-    const data: { scheme: string; host: string; pathPrefix?: string } = {
-      scheme: "https",
-      host: r.universalLinkHost,
-    };
-    if (r.universalLinkPathPrefix) data.pathPrefix = r.universalLinkPathPrefix;
-    androidIntentFilters.unshift({
-      action: "VIEW",
-      autoVerify: true,
-      data: [data],
-      category: ["BROWSABLE", "DEFAULT"],
-    });
-  }
+  const { associatedDomains, androidIntentFilters } = buildNativeLinks({
+    apiBaseUrl: r.apiBaseUrl,
+    universalLinkHost: r.universalLinkHost,
+    universalLinkPathPrefix: r.universalLinkPathPrefix,
+    scheme: ident.scheme,
+  });
 
   return {
     ...config,

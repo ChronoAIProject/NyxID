@@ -11,8 +11,10 @@ export const IS_DEV_BUILD = process.env.EXPO_PUBLIC_DEV_MODE === "true";
  * consumes these values directly so a scanned URL can never choose its own
  * backend or expand the set of accepted frontend origins.
  */
-export const NYXID_API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? "";
+export { NYXID_API_BASE_URL } from "./api/baseUrl";
 export const NYXID_FRONTEND_URL = process.env.EXPO_PUBLIC_FRONTEND_URL ?? "";
+// Fixed build-time trust for web QR codes during the production domain rollout.
+export const NYXID_LEGACY_FRONTEND_URL = process.env.EXPO_PUBLIC_LEGACY_FRONTEND_URL ?? "";
 export const NYXID_UNIVERSAL_LINK_HOST =
   process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST ?? "";
 export const NYXID_APP_SCHEME = process.env.EXPO_PUBLIC_APP_SCHEME ?? "nyxid";

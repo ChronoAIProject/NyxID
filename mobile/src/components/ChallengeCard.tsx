@@ -107,8 +107,8 @@ export function ChallengeCard({
         ) : null}
         <StatusBadge variant="modeChip" label={modeLabel} />
       </View>
-      <Text style={styles.title}>{summary}</Text>
-      <Text style={styles.resource}>{challenge.title}</Text>
+      <Text style={styles.title} numberOfLines={2}>{challenge.title}</Text>
+      <Text style={styles.resource} numberOfLines={1}>{summary}</Text>
       {showRequester ? (
         <Text style={styles.meta}>Requested by {requester}</Text>
       ) : null}
@@ -157,9 +157,8 @@ const createStyles = (c: ThemeColors) =>
       padding: spacing.xxl,
       gap: spacing.xs,
     },
-    // DESIGN.md §List page → mobile-card anatomy: primary text text-[13px] font-semibold.
     title: {
-      ...typeScale.bodyStrong,
+      ...typeScale.title,
       color: c.textPrimary,
     },
     chipRow: {

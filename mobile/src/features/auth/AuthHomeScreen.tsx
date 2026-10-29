@@ -26,6 +26,7 @@ import { MfaChallengeError } from "../../lib/auth/mfaChallenge";
 import { ApiError } from "../../lib/api/ApiError";
 import { authSessionGeneration } from "../../lib/auth/sessionStore";
 import { mobileApi } from "../../lib/api/mobileApi";
+import { NYXID_FRONTEND_URL } from "../../lib/env";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useAuthSession } from "./AuthSessionContext";
 import { getPublicAuthConfig } from "../../lib/api/publicAuthApi";
@@ -657,16 +658,19 @@ export function AuthHomeScreen({ navigation }: Props) {
             {loginError === "WAITLIST" ? (
               <>
                 <Text style={styles.errorText}>
-                  Registration is invite-only.{" "}
-                  <Text
-                    style={styles.errorLink}
-                    onPress={() =>
-                      void Linking.openURL("https://nyx.chrono-ai.fun")
-                    }
-                  >
-                    Join the waitlist
-                  </Text>{" "}
-                  to get access.
+                  Registration is invite-only.
+                  {NYXID_FRONTEND_URL ? (
+                    <>
+                      {" "}
+                      <Text
+                        style={styles.errorLink}
+                        onPress={() => void Linking.openURL(NYXID_FRONTEND_URL)}
+                      >
+                        Join the waitlist
+                      </Text>
+                      {" "}to get access.
+                    </>
+                  ) : null}
                 </Text>
               </>
             ) : (
