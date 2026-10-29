@@ -1730,7 +1730,25 @@ mod tests {
         )
     }
 
+    /// Which NyxBot channel, if any, the receiving route belongs to.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum NyxbotLink {
+        None,
+        /// A personal bot routed to its owner's NyxBot.
+        Personal,
+        /// An organization's bot routed to the NyxBot of the admin who linked it.
+        LinkedOrg,
+    }
+
     async fn assert_verified_group_mention_passthrough(platform: &str, sender_is_bot: bool) {
+        assert_verified_group_mention_relay(platform, sender_is_bot, NyxbotLink::None).await;
+    }
+
+    async fn assert_verified_group_mention_relay(
+        platform: &str,
+        sender_is_bot: bool,
+        nyxbot: NyxbotLink,
+    ) {
         use hmac::{Hmac, Mac};
         use sha2::{Digest, Sha256};
 
@@ -2042,6 +2060,29 @@ mod tests {
             0
         );
 
+        if nyxbot != NyxbotLink::None {
+            let mut row = doc! {
+                "_id": uuid::Uuid::new_v4().to_string(),
+                "user_id": &user_id,
+                "channel_bot_id": &bot_id,
+                "platform": platform,
+                "transport": "gateway",
+                "status": "active",
+                "route_api_key_id": &api_key_id,
+            };
+            if nyxbot == NyxbotLink::LinkedOrg {
+                // The linking admin owns the NyxBot channel; the org owns the bot.
+                row.insert("user_id", uuid::Uuid::new_v4().to_string());
+                row.insert("bot_owner_id", &user_id);
+            }
+            db.collection::<mongodb::bson::Document>(
+                crate::models::nyxbot_channel::COLLECTION_NAME,
+            )
+            .insert_one(row)
+            .await
+            .unwrap();
+        }
+
         let result = handle_webhook_inner_with_deps(
             deps(),
             &bot_id,
@@ -2118,22 +2159,28 @@ mod tests {
         )
         .unwrap();
 
-        let owner_claims = crate::crypto::jwt::verify_token(
-            &jwt_keys,
-            &config,
-            request.headers["X-NyxID-User-Token"].to_str().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(owner_claims.sub, user_id);
-        assert_eq!(owner_claims.relay, Some(true));
-        assert_eq!(
-            owner_claims.relay_api_key_id.as_deref(),
-            Some(api_key_id.as_str())
-        );
-        assert_eq!(owner_claims.relay_allow_all_services, Some(false));
-        assert_eq!(owner_claims.relay_allow_all_nodes, Some(false));
-        assert_eq!(owner_claims.relay_allowed_service_ids, Some(vec![]));
-        assert_eq!(owner_claims.relay_allowed_node_ids, Some(vec![]));
+        if nyxbot == NyxbotLink::LinkedOrg {
+            // The gateway binds this token to the linking admin and would
+            // refuse the org-subject token with HTTP 401.
+            assert!(!request.headers.contains_key("X-NyxID-User-Token"));
+        } else {
+            let owner_claims = crate::crypto::jwt::verify_token(
+                &jwt_keys,
+                &config,
+                request.headers["X-NyxID-User-Token"].to_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(owner_claims.sub, user_id);
+            assert_eq!(owner_claims.relay, Some(true));
+            assert_eq!(
+                owner_claims.relay_api_key_id.as_deref(),
+                Some(api_key_id.as_str())
+            );
+            assert_eq!(owner_claims.relay_allow_all_services, Some(false));
+            assert_eq!(owner_claims.relay_allow_all_nodes, Some(false));
+            assert_eq!(owner_claims.relay_allowed_service_ids, Some(vec![]));
+            assert_eq!(owner_claims.relay_allowed_node_ids, Some(vec![]));
+        }
 
         let stored = db
             .collection::<mongodb::bson::Document>(crate::models::channel_message::COLLECTION_NAME)
@@ -2182,6 +2229,18 @@ mod tests {
     async fn delivered_telegram_bot_message_preserves_group_mentions() {
         // A delivered-update fixture cannot prove that Telegram delivers a bot's message live.
         assert_verified_group_mention_passthrough("telegram", true).await;
+    }
+
+    #[tokio::test]
+    async fn org_bot_linked_to_nyxbot_relays_without_user_token() {
+        for platform in ["lark", "telegram"] {
+            assert_verified_group_mention_relay(platform, false, NyxbotLink::LinkedOrg).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn personal_bot_linked_to_nyxbot_keeps_user_token() {
+        assert_verified_group_mention_relay("lark", false, NyxbotLink::Personal).await;
     }
 
     // ── lark_event_body helper tests ────────────────────────────────────
