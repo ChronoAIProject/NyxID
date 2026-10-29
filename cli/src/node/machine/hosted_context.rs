@@ -607,3 +607,106 @@ impl HostedStore {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "hosted_context_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn pool() -> AccountPool {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "first_uid": nyxid_machine::context::FIRST_UID,
+            "count": ACCOUNT_COUNT,
+        }))
+        .unwrap()
+    }
+
+    fn account_records() -> (String, String) {
+        let mut users = String::new();
+        let mut groups = String::new();
+        for uid in
+            nyxid_machine::context::FIRST_UID..nyxid_machine::context::FIRST_UID + ACCOUNT_COUNT
+        {
+            let name = format!("nyxc{uid}");
+            users.push_str(&format!(
+                "{name}:x:{uid}:{uid}:nyxid-hosted-context-v1:/nonexistent:/usr/sbin/nologin\n"
+            ));
+            groups.push_str(&format!("{name}:x:{uid}:\n"));
+        }
+        (users, groups)
+    }
+
+    #[test]
+    fn account_pool_validates_boundaries_and_rejects_malformed_records() {
+        let pool = pool();
+        let first = nyxid_machine::context::FIRST_UID;
+        assert!(!pool.contains(first.saturating_sub(1)));
+        assert!(pool.contains(first));
+        assert!(pool.contains(first + ACCOUNT_COUNT - 1));
+        assert!(!pool.contains(first + ACCOUNT_COUNT));
+
+        assert!(pool.validate("bad", "bad").is_err());
+        let (users, groups) = account_records();
+        pool.validate(&users, &groups).unwrap();
+
+        let mut malformed = users.clone();
+        malformed.push_str("malformed\n");
+        assert!(pool.validate(&malformed, &groups).is_err());
+
+        let mut missing = users.lines().collect::<Vec<_>>();
+        missing.pop();
+        assert!(pool.validate(&missing.join("\n"), &groups).is_err());
+
+        let mut wrong = users.clone();
+        let needle = format!(
+            "nyxc{first}:x:{first}:{first}:nyxid-hosted-context-v1:/nonexistent:/usr/sbin/nologin"
+        );
+        let replacement =
+            format!("nyxc{first}:x:{first}:{first}:wrong:/nonexistent:/usr/sbin/nologin");
+        wrong = wrong.replacen(&needle, &replacement, 1);
+        assert!(pool.validate(&wrong, &groups).is_err());
+
+        let mut supplementary = groups.clone();
+        supplementary.push_str(&format!("privileged:x:999:nyxc{first}\n"));
+        assert!(pool.validate(&users, &supplementary).is_err());
+
+        let mut duplicate = users.clone();
+        duplicate.push_str(&format!(
+            "other:x:{first}:{first}:nyxid-hosted-context-v1:/nonexistent:/usr/sbin/nologin\n"
+        ));
+        assert!(pool.validate(&duplicate, &groups).is_err());
+    }
+
+    #[test]
+    fn filesystem_boundaries_reject_unsafe_or_non_private_paths() {
+        assert!(directory(Path::new("relative"), false).is_err());
+        assert!(directory(Path::new("/tmp"), false).is_err());
+        assert!(directory(Path::new("/etc/nonexistent"), false).is_err());
+        assert!(directory(Path::new("/etc/hosts"), false).is_err());
+        assert!(directory(Path::new("/etc"), false).is_ok());
+
+        assert!(private_file(Path::new("/etc/hosts"), false).is_err());
+        assert!(private_file(Path::new("/etc"), false).is_err());
+        assert!(private_file(Path::new("/etc/nyxid-no-such-file"), false).is_err());
+        assert!(retained_root(Path::new("/etc/hosts")).is_err());
+
+        let invalid = VolumeBinding {
+            node_id: "node".into(),
+            pvc_uid: "pvc".into(),
+        };
+        assert!(invalid.validate().is_err());
+
+        let valid = VolumeBinding {
+            node_id: uuid::Uuid::new_v4().to_string(),
+            pvc_uid: uuid::Uuid::new_v4().to_string(),
+        };
+        valid.validate().unwrap();
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(validate_private_file(file.reopen().unwrap()).is_err());
+    }
+}

@@ -904,4 +904,47 @@ mod tests {
         assert!(prepare_native_profile(&profile.path().join("custom")).is_err());
         assert!(prepare_native_profile(Path::new("/root/node")).is_err());
     }
+
+    #[test]
+    fn validation_paths_are_safe_without_a_hardened_host_fixture() {
+        // These checks deliberately exercise the rejection gates that run
+        // before any supervisor-owned mutation. They keep coverage useful on
+        // ordinary developer machines where the hosted image is unavailable.
+        assert!(protected(Path::new("relative"),).is_err());
+        assert!(protected(Path::new("/tmp"),).is_err());
+        assert!(prepare_native_profile(Path::new("relative")).is_err());
+        assert!(prepare_native_profile(Path::new("/tmp/node")).is_err());
+
+        let root = tempfile::tempdir().unwrap();
+        assert!(role(root.path(), unsafe { libc::geteuid() }).is_err());
+
+        let descriptor = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_PATH | libc::O_CLOEXEC)
+            .open(root.path())
+            .unwrap();
+        let descriptor: OwnedFd = descriptor.into();
+        let _ = own(
+            &descriptor,
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            0o700,
+        );
+        let _ = readable_as_supervisor(&descriptor);
+
+        assert!(occupied(0));
+        assert!(!occupied(u32::MAX));
+        assert!(account(u32::MAX, &root.path().join("home"), "coverage").is_err());
+
+        let child = child(
+            &descriptor,
+            "child",
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            0o700,
+        );
+        if child.is_ok() {
+            assert!(root.path().join("child").is_dir());
+        }
+    }
 }
