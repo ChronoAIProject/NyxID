@@ -136,13 +136,12 @@ pub(super) fn provider_stream(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(code) if code == "guest_model_route_required" => {
-                            let text = engine::TurnError::new(&code).message;
-                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
+                        Err(error) if error.code == "guest_model_route_required" => {
+                            for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
-                        Err(code) => yield json!({"type": "response.failed", "response": {
+                        Err(error) => yield json!({"type": "response.failed", "response": {
                             "id": &response_id, "status": "failed",
-                            "error": {"code": identifier(&code), "message": "NyxBot could not finish this turn."}}}),
+                            "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}}),
                     }
                 } else {
                     // The deadline/sweeper won: the final answer belongs to the
@@ -338,7 +337,16 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
                     .and_then(|detail| detail.capacity_wait_ms),
             )
         } else {
-            engine::TurnError::new(code).message
+            engine::TurnError::new(code)
+                .with_model_route_reason(
+                    message
+                        .turn_metadata
+                        .as_ref()
+                        .and_then(|data| data.failure_reason.as_ref())
+                        .and_then(|reason| reason.model_route.as_ref())
+                        .map(|route| route.reason.as_str()),
+                )
+                .message
         };
         if message.text.trim().is_empty() {
             failure

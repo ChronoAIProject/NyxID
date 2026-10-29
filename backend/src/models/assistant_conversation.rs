@@ -272,6 +272,17 @@ pub struct ToolProgress {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelRouteDiagnostic {
+    pub reason: String,
+    #[serde(default)]
+    pub unknown_fields: Vec<String>,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRefusal {
     #[serde(default)]
     pub http_status: Option<u16>,
@@ -328,6 +339,8 @@ pub struct ActiveTurn {
     pub model_attribution_uncertain: bool,
     #[serde(default)]
     pub model_refusal: Option<ModelRefusal>,
+    #[serde(default)]
+    pub model_route_diagnostic: Option<ModelRouteDiagnostic>,
     #[serde(default)]
     pub model_stream_fault: Option<ModelStreamFault>,
     #[serde(default)]

@@ -263,6 +263,7 @@ fn gateway_create_refused(response: &GatewayResponse) -> bool {
 
 #[derive(Serialize)]
 pub struct ChannelAgentResponse {
+    guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway_source: Option<crate::models::nyxbot_channel::GatewaySource>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,6 +301,7 @@ pub struct ChannelAgentResponse {
 impl From<&NyxbotChannel> for ChannelAgentResponse {
     fn from(row: &NyxbotChannel) -> Self {
         Self {
+            guest_readiness: None,
             gateway_source: row.gateway_source.clone(),
             gateway_native_phase: row.gateway_native_phase.clone(),
             gateway_native_activation: row.gateway_native_activation.clone(),
@@ -2398,12 +2400,61 @@ pub async fn link(
 }
 
 pub(crate) async fn list_tool(state: &AppState, owner: &str) -> AppResult<Value> {
+    channel_listing(state, owner, true).await
+}
+
+async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) -> AppResult<Value> {
     let rows = list(state, owner).await?;
+    let mut open_chats = std::collections::HashSet::new();
+    let mut nyxbot_id = None;
+    if with_readiness && !rows.is_empty() {
+        let ids: Vec<_> = rows.iter().map(|r| &r.id).collect();
+        open_chats = state
+            .db
+            .collection::<bson::Document>(THREADS)
+            .distinct(
+                "channel_id",
+                doc! {"user_id":owner,"channel_id":{"$in":ids},"kind":{"$ne":"private"},
+                "$or":[{"members":"everyone"},{"members":null,"owner_seen":true}]},
+            )
+            .await?
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        if rows.iter().any(|r| r.agent_id.is_none()) {
+            nyxbot_id = state
+                .db
+                .collection::<bson::Document>("assistant_agents")
+                .find_one(doc! {"user_id":owner,"kind":"nyxbot"})
+                .projection(doc! {"_id":1})
+                .await?
+                .and_then(|r| r.get_str("_id").ok().map(str::to_owned));
+        }
+    }
+    let mut readiness_by_agent = std::collections::HashMap::new();
     let on = thread_follow::enabled(state, owner).await?;
     let mut channel_agents = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
             .map_err(|error| AppError::Internal(error.to_string()))?;
+        if with_readiness
+            && (row.private_chats.as_deref() == Some("everyone") || open_chats.contains(&row.id))
+        {
+            let agent = row.agent_id.as_deref().or(nyxbot_id.as_deref());
+            if let std::collections::hash_map::Entry::Vacant(slot) = readiness_by_agent.entry(agent)
+            {
+                let readiness = crate::services::assistant_service_execution::guest_readiness(
+                    &state.db,
+                    &state.encryption_keys,
+                    owner,
+                    agent,
+                    None,
+                )
+                .await?;
+                slot.insert(readiness);
+            }
+            value["guest_readiness"] = json!(readiness_by_agent.get(&agent));
+        }
         value["follow_readiness"] = json!(if thread_controls::capabilities(state, row, on, true)
             .thread_follow
         {
@@ -2450,7 +2501,7 @@ pub async fn list_channels(
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    Ok(Json(list_tool(&state, &owner).await?))
+    Ok(Json(channel_listing(&state, &owner, false).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -3362,34 +3413,40 @@ async fn repeated_question(
     Ok(None)
 }
 
-/// Wait for the turn and return its final reply, or `None` on failure.
-async fn final_reply(mut receiver: broadcast::Receiver<Value>) -> Result<String, String> {
+/// Preserve the settled diagnostic when delivering a failed channel turn.
+async fn final_reply(
+    mut receiver: broadcast::Receiver<Value>,
+) -> Result<String, Box<engine::TurnError>> {
     let mut text = String::new();
     loop {
         match receiver.recv().await {
-            Ok(event) => match event["event"].as_str() {
-                Some("block.completed") => {
-                    text = event["block"]["text"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned();
-                }
-                Some("turn.completed") => {
-                    return if event["status"] == "completed" {
-                        Ok(text)
-                    } else if !text.trim().is_empty() {
-                        Ok(late_delivery::answer(&text, true))
-                    } else {
-                        Err(event["error"]["code"]
+            Ok(event) => {
+                match event["event"].as_str() {
+                    Some("block.completed") => {
+                        text = event["block"]["text"]
                             .as_str()
-                            .unwrap_or("assistant_unavailable")
-                            .to_owned())
-                    };
+                            .unwrap_or_default()
+                            .to_owned();
+                    }
+                    Some("turn.completed") => {
+                        return if event["status"] == "completed" {
+                            Ok(text)
+                        } else if !text.trim().is_empty() {
+                            Ok(late_delivery::answer(&text, true))
+                        } else {
+                            Err(Box::new(engine::TurnError::new(event["error"]["code"]
+                            .as_str()
+                            .unwrap_or("assistant_unavailable"))
+                            .with_model_route_reason(event["turn_metadata"]["failure_reason"]["model_route"]["reason"].as_str())))
+                        };
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => return Err("turn_lost".into()),
+            Err(broadcast::error::RecvError::Closed) => {
+                return Err(Box::new(engine::TurnError::new("turn_lost")));
+            }
         }
     }
 }
@@ -5714,3 +5771,6 @@ fn native_callback(state: &AppState, row: &NyxbotChannel, relay: String) -> Stri
         relay
     }
 }
+
+#[path = "guest_model_notices.rs"]
+pub(crate) mod guest_model_notices;

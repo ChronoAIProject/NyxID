@@ -2760,6 +2760,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         model_requests_active: 0,
         model_attribution_uncertain: false,
         model_refusal: None,
+        model_route_diagnostic: None,
         model_stream_fault: None,
         model_stream_cancellation: None,
         waiting_for_capacity: false,
@@ -3678,7 +3679,10 @@ async fn finish_turn_inner(
                     .await?
                 {
                     return Ok((saved.error_code.as_deref().map(|code| {
-                        let normalized = TurnError::new(code);
+                        let normalized = TurnError::new(code).with_model_route_reason(
+                            saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.as_ref())
+                                .and_then(|reason| reason.model_route.as_ref()).map(|route| route.reason.as_str()),
+                        );
                         let mut error = result.error.clone().unwrap_or_else(|| normalized.clone());
                         error.code = normalized.code;
                         error.message = normalized.message;
@@ -6135,6 +6139,19 @@ pub struct TurnError {
     pub response_id: Option<Box<str>>,
 }
 impl TurnError {
+    /// Reconstruct only fixed visitor copy from a recorded, attributed diagnostic.
+    /// Unknown or absent reasons never claim that an owner notice was queued.
+    pub fn with_model_route_reason(mut self, reason: Option<&str>) -> Self {
+        if self.code == "guest_model_route_required"
+            && reason.is_some_and(
+                super::assistant_service_execution::model_diagnostic::Reason::setup_code,
+            )
+        {
+            self.message = "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.".into();
+        }
+        self
+    }
+
     pub fn attempts(&self) -> Option<u32> {
         self.metadata.as_deref().and_then(|data| data.attempts)
     }
@@ -6223,7 +6240,7 @@ impl TurnError {
             ),
             "guest_model_route_required" => (
                 "guest_model_route_required",
-                "This assistant isn't available to guests yet.",
+                "This assistant can't answer right now. Please try again later.",
             ),
             "first_byte_timeout" => (
                 "first_byte_timeout",

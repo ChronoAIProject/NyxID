@@ -19,6 +19,10 @@ export const nyxBotQueryKeys = {
   agents: (userId: string | undefined) => ["assistant", "nyxagent", userId, "agents"] as const,
   agent: (userId: string | undefined, agentId: string | undefined) =>
     ["assistant", "nyxagent", userId, "agents", "detail", agentId] as const,
+  guestReadiness: (userId: string | undefined, agentId?: string, conversationId?: string) =>
+    agentId === undefined
+      ? ["assistant", "nyxagent", userId, "guest-readiness"] as const
+      : ["assistant", "nyxagent", userId, "guest-readiness", agentId, conversationId ?? null] as const,
   /** Prefix of every agent's thread list. */
   threads: (userId: string | undefined, agentId?: string) =>
     agentId === undefined
@@ -71,6 +75,18 @@ export function useNyxBotAgent(agentId: string | undefined, enabled = true) {
   });
 }
 
+/** Settings-only; visible rows share one agent query unless their route differs. */
+export function useGuestReadiness(agentId: string | undefined, enabled: boolean, conversationId?: string) {
+  const userId = useAuthStore((state) => state.user?.id);
+  return useQuery({
+    queryKey: nyxBotQueryKeys.guestReadiness(userId, agentId, conversationId),
+    queryFn: () => nyxBotApi.guestReadiness(agentId!, conversationId),
+    enabled: enabled && Boolean(userId && agentId),
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
 function useAgentsMutation<TVariables, TResult>(
   mutationFn: (variables: TVariables) => Promise<TResult>,
   alsoChannels = false,
@@ -82,6 +98,7 @@ function useAgentsMutation<TVariables, TResult>(
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
         ...(alsoChannels
           ? [queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.channels(userId) })]
           : []),
@@ -214,6 +231,7 @@ export function useUpdateNyxBotChannelChat() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.channels(userId) }),
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
       ]);
     },
   });
@@ -295,6 +313,7 @@ export function useChangeNyxAgentModel() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.history(userId, conversationId) }),
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
       ]);
     },
   });

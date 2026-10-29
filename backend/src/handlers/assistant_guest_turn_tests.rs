@@ -110,6 +110,13 @@ async fn guest_1995_fresh_byok_route_needs_owner_and_has_safe_reply() {
     Box::pin(guest_pipeline(false, &["bootstrap_byok"])).await;
 }
 
+#[tokio::test]
+async fn readiness_2092_real_codex_first_guest_all_profiles() {
+    for profile in ["chat", "research", "channel"] {
+        Box::pin(guest_pipeline(false, &["bootstrap_platform", profile])).await;
+    }
+}
+
 async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     let f = if nyxbot {
         Box::pin(orchestrator_fixture("guest_1995_nyxbot")).await
@@ -119,7 +126,16 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     let bootstrap = scenarios
         .iter()
         .any(|scenario| scenario.starts_with("bootstrap_"));
-    let model_slug = if bootstrap {
+    let profile = if scenarios.contains(&"research") {
+        "research"
+    } else if scenarios.contains(&"channel") {
+        "channel"
+    } else {
+        "chat"
+    };
+    let model_slug = if profile == "channel" {
+        "llm-deepseek"
+    } else if bootstrap {
         "chrono-llm-public"
     } else {
         "guest-model"
@@ -129,7 +145,25 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     } else {
         "v1/responses"
     };
-    let model_name = if bootstrap { "gpt-5.6-sol" } else { "test" };
+    let model_name = match profile {
+        "research" => "gpt-6-astra",
+        "channel" => "deepseek-flash",
+        _ if bootstrap => "gpt-5.6-sol",
+        _ => "test",
+    };
+    if profile != "chat" {
+        for collection in ["assistant_agents", "assistant_conversations"] {
+            f.state
+                .db
+                .collection::<bson::Document>(collection)
+                .update_many(
+                    doc! {"user_id":&f.owner},
+                    doc! {"$set":{"model":format!("nyxagent/{profile}")}},
+                )
+                .await
+                .unwrap();
+        }
+    }
     if scenarios.contains(&"bootstrap_legacy") {
         // Existing threads keep their configured profile when the agent's
         // default changes. Bootstrap must follow that server-recorded turn.
@@ -458,7 +492,10 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         )
         .await
         .unwrap();
-    for &scenario in scenarios {
+    for &scenario in scenarios
+        .iter()
+        .filter(|s| !matches!(**s, "chat" | "research" | "channel"))
+    {
         let provider_calls_before = provider.received_requests().await.unwrap().len();
         let guest = !scenario.starts_with("owner");
         *current_scenario.lock().await = scenario.to_owned();
@@ -479,6 +516,18 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             "x-codex-installation-id":"test-installation","x-codex-turn-metadata":"{}",
             "x-codex-window-id":Uuid::new_v4().to_string(),
         });
+        if bootstrap
+            && scenarios
+                .iter()
+                .any(|s| matches!(*s, "chat" | "research" | "channel"))
+        {
+            let fixture = match profile {
+                "research" => include_str!("../../specs/assistant/codex/0.165.0-research.json"),
+                "channel" => include_str!("../../specs/assistant/codex/0.165.0-channel.json"),
+                _ => include_str!("../../specs/assistant/codex/0.165.0-chat.json"),
+            };
+            *model_input.lock().await = serde_json::from_str(fixture).unwrap();
+        }
         f.state
             .db
             .collection::<bson::Document>("service_approval_configs")
@@ -487,8 +536,7 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             .unwrap();
         if !guest {
             // This synthetic, non-platform model route has an existing owner
-            // approval. Codex metadata retains legacy write classification for
-            // owners; it must not silently bypass the writes-only default.
+            // approval. Explicit approval policies remain independently enforced.
             crate::services::approval_service::set_service_approval_config(
                 &f.state.db,
                 &f.owner,
@@ -684,12 +732,6 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 "assistant_unavailable"
             };
             assert_eq!(reply.error_code.as_deref(), Some(mapped));
-            if code == "guest_model_route_required" {
-                assert_eq!(
-                    completed["error"]["message"],
-                    "This assistant isn't available to guests yet."
-                );
-            }
             assert_eq!(reply.upstream_error_code.as_deref(), Some("turn_failed"));
             assert_eq!(reply.error_detail.as_ref().unwrap().stage, "stream");
             let reason = reply
@@ -701,6 +743,23 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 .unwrap();
             assert_eq!(reason.source, "nyxid");
             assert_eq!(reason.code, code);
+            if code == "guest_model_route_required" {
+                let diagnostic = reason
+                    .model_route
+                    .as_ref()
+                    .expect("closed route diagnostic on failure");
+                let setup = crate::services::assistant_service_execution::model_diagnostic::Reason::setup_code(&diagnostic.reason);
+                assert_eq!(
+                    completed["error"]["message"],
+                    if setup {
+                        "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."
+                    } else {
+                        "This assistant can't answer right now. Please try again later."
+                    }
+                );
+                assert!(!diagnostic.reason.is_empty());
+                assert!(diagnostic.unknown_fields.len() <= 8);
+            }
             assert_eq!(reason.http_status, Some(status));
             assert_eq!(reason.nyxid_error_code, Some(numeric));
             let dto = serde_json::to_value(MessageResponse::from(reply.clone())).unwrap();

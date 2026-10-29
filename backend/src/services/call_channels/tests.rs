@@ -4019,7 +4019,10 @@ async fn guest_model_adapter(profile: Profile, platform: bool, owner_first: bool
             vec![200; if owner_first { 2 } else { 1 }]
         );
     } else {
-        assert_eq!(text, "This assistant isn't available to guests yet.");
+        assert_eq!(
+            text,
+            "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."
+        );
         assert_eq!(
             result.error.as_ref().unwrap().code,
             "guest_model_route_required"
@@ -4148,7 +4151,7 @@ async fn guest_1995_sms_refusal_is_sent_to_the_inbound_sender() {
     assert_eq!(replies[0]["From"], f.b.phone_number);
     assert_eq!(
         replies[0]["Body"],
-        "This assistant isn't available to guests yet."
+        "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."
     );
     drop(replies);
     // Wait for the sender's settlement before fixture teardown.
