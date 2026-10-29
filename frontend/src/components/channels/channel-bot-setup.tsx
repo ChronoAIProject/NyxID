@@ -594,7 +594,7 @@ export function ChannelBotSetup({
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent
         ref={dialogContentRef}
-        className="channel-connect-dialog max-h-[90dvh] overflow-y-auto md:max-w-md"
+        className="channel-connect-dialog max-h-[90dvh] scroll-py-1 overflow-y-auto md:max-w-md"
       >
         {content}
       </DialogContent>

@@ -1118,6 +1118,9 @@ export function ChatMessageList({
     overscan: ROW_OVERSCAN,
     gap: rowGap,
     scrollMargin,
+    // Match the non-windowed index navigation's top padding. Home must reach
+    // scroll offset zero so expanding the header keeps the first row visible.
+    scrollPaddingStart: 24,
     // Keep the rows on screen in place when older messages load above them.
     anchorTo: "end",
     // A transcript opens at its newest message.
