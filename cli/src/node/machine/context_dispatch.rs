@@ -500,7 +500,7 @@ impl Runtime {
         target.dev_identity = Some(context.dev);
         let stage_started = Instant::now();
         target.roots = annotate(
-            files::Roots::new(&config.roots, &self.excluded),
+            files::Roots::new(&config.roots, self.roots.exclusions()),
             "context_runtime",
             stage_started,
             authority,
