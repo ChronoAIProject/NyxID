@@ -127,6 +127,12 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
             machine:
+              # Run on Rust PRs so the identical main tree can reuse E2E.
+              # Use direct paths: the backend/cli filters also include docs
+              # and other inputs that should not spend container runner time.
+              - 'backend/**'
+              - 'cli/**'
+              - '.github/**'
               - 'frontend/scripts/machine-seccomp.ts'
               - 'frontend/src/schemas/machines.ts'
               - 'cli/src/commands/update_attestation*'
