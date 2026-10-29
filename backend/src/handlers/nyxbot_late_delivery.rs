@@ -47,7 +47,9 @@ pub(super) async fn prepare(
     let metadata = ChannelTurnDelivery {
         sender_kind: Some(sender.kind),
         version: 1,
-        state: if channel.transport == "gateway" {
+        state: if channel.gateway_source.is_some() && channel.transport == "gateway" {
+            "replay"
+        } else if channel.transport == "gateway" {
             "waiting"
         } else {
             "pending"
@@ -179,6 +181,24 @@ pub(crate) fn spawn_sweep(state: AppState) {
 }
 
 pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
+    use crate::models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse};
+    let pending: Vec<GatewayResponse> = state
+        .db
+        .collection(RESPONSES)
+        .find(doc! {"terminal":false,"expires_at":{"$gt":bson::DateTime::now()}})
+        .sort(doc! {"checked_at":1})
+        .limit(32)
+        .await?
+        .try_collect()
+        .await?;
+    for response in pending {
+        crate::services::nyxbot_response_recovery::refresh(
+            &state.db,
+            &state.encryption_keys,
+            &response,
+        )
+        .await?;
+    }
     let rows: Vec<NyxbotEvent> = state
         .db
         .collection(EVENTS)
@@ -454,7 +474,7 @@ async fn stream_images(
     }
 }
 
-async fn eligible(
+pub(super) async fn eligible(
     state: &AppState,
     event: &NyxbotEvent,
     d: &ChannelTurnDelivery,

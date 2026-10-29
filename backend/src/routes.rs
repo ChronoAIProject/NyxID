@@ -3492,6 +3492,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     get(handlers::nyxbot::get_event_context),
                 )
                 .route("/responses", post(handlers::nyxbot::responses_with_runtime))
+                .route("/responses/{response_id}", get(handlers::nyxbot::native_responses::snapshot))
+                .route("/responses/{response_id}/events", get(handlers::nyxbot::native_responses::events))
                 .route("/relay/{channel_id}", post(handlers::nyxbot::relay_callback))
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )

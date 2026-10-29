@@ -152,6 +152,7 @@ pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
 pub mod nyxbot_channel;
+pub mod nyxbot_gateway_response;
 pub mod nyxbot_image_delivery;
 pub mod service_change_event;
 pub mod usage_rollup_daily;

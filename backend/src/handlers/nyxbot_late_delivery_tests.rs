@@ -100,6 +100,7 @@ async fn fixture(name: &str) -> Fixture {
         version: 1,
         state: "waiting".into(),
         origin: ChannelOrigin {
+            native_event_id: None,
             nyxbot_channel_id: channel.id.clone(),
             partition: PARTITION.into(),
             platform: "telegram".into(),

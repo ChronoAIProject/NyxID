@@ -149,10 +149,13 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
                 now - ChronoDuration::hours(GATEWAY_RETRY_HOURS) + ChronoDuration::minutes(MOVE_RECHECK_MINUTES))}}).await?;
     } else if let Err(code) = outcome {
         channels
-            .update_one(
-                doc! {"_id": &row.id, "transport": "direct"},
-                doc! {"$set": {"gateway_fallback_at": bson::DateTime::now()}},
-            )
+            .update_one(doc! {"_id": &row.id, "transport": "direct"}, {
+                let mut set = doc! {"gateway_fallback_at":bson::DateTime::now()};
+                if row.platform == "discord" {
+                    set.insert("gateway_native_activation", code);
+                }
+                doc! {"$set":set}
+            })
             .await?;
         tracing::info!(code, platform = %row.platform, "NyxBot channel stays on NyxID's relay");
     }
@@ -209,9 +212,13 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
     }
     let mut fence = fence;
     fence.insert("pending_route_api_key_id", &next.id);
-    let update = doc! {"$set": {"transport": "direct", "gateway_no_progress": false, "route_api_key_id": &next.id, "updated_at": bson::DateTime::now()},
+    let mut set = doc! {"transport":"direct","gateway_no_progress":false,"route_api_key_id":&next.id,"updated_at":bson::DateTime::now()};
+    if row.platform == "discord" && row.gateway_source.is_some() {
+        set.insert("gateway_native_activation", "relay_draining");
+    }
+    let update = doc! {"$set": set,
     "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", "gateway_channel_id": "",
-        "gateway_record_id": "", "gateway_threads": "", "gateway_version": "", "binding_id": "", "gateway_bot_id": "",
+        "gateway_source": "", "gateway_native_phase": "", "gateway_record_id": "", "gateway_threads": "", "gateway_version": "", "binding_id": "", "gateway_bot_id": "",
         "gateway_groups": "", "gateway_groups_retry_at": "", "gateway_attempted_at": "", "gateway_fallback_at": "",
         "pending_agent_api_key_id": "", "pending_route_api_key_id": ""}};
     match swap_route(state, row, &next.id, fence, update).await {

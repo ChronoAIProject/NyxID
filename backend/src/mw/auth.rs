@@ -695,6 +695,8 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.as_slice(),
         ["channel-relay", "messages", _, "attachments", _]
+            | ["nyxbot", "responses", _]
+            | ["nyxbot", "responses", _, "events"]
             | ["users", "me", "oauth-consent-requests", _]
             | ["api-keys", _, "machine-grant"]
             | ["users", "me", "consents", _, "machine-grant"]
@@ -2462,6 +2464,23 @@ mod tests {
                 !delegated_request_allowed(&Method::GET, path, &headers, ACCOUNT_READ_SCOPE),
                 "delegated account read should reject GET {path}"
             );
+        }
+    }
+
+    #[test]
+    fn delegated_account_read_denies_nyxbot_recovery_content() {
+        let headers = HeaderMap::new();
+        for path in [
+            "/api/v1/nyxbot/responses/resp_example",
+            "/api/v1/nyxbot/responses/resp_example/events",
+        ] {
+            assert!(delegated_read_denied_path(path));
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                path,
+                &headers,
+                ACCOUNT_READ_SCOPE,
+            ));
         }
     }
 

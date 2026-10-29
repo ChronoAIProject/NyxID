@@ -1376,6 +1376,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             .await?;
     }
     crate::services::nyxbot_gateway_release_service::ensure_indexes(db).await?;
+    crate::services::nyxbot_response_recovery::ensure_indexes(db).await?;
     // Retire the prefix index only after its replacement has been created.
     let channels = db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
     let obsolete_keys = doc! {"user_id": 1, "channel_bot_id": 1};
@@ -5412,6 +5413,7 @@ pub async fn delete(
                         super::assistant_service_execution::COLLECTION,
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::assistant_resource::COLLECTION_NAME,
+                        crate::models::nyxbot_gateway_response::COLLECTION_NAME,
                         crate::models::nyxbot_image_delivery::COLLECTION_NAME,
                         crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
                         crate::models::assistant_upload_retention::TOMBSTONES,

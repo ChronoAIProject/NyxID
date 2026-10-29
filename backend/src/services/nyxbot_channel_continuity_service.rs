@@ -139,7 +139,7 @@ pub(crate) async fn activate(
             if db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&id,"status":"pending","gateway_setup_release_id":&row.gateway_setup_release_id},
                 doc! {"$set":{"status":"active","route_id":&route,"link_code_hash":&link_hash,
                     "link_code_expires_at":bson::DateTime::from_chrono(now+chrono::Duration::hours(LINK_CODE_TTL_HOURS)),
-                    "gateway_groups_retry_at":groups_due,"updated_at":bson::DateTime::from_chrono(now)},
+                    "gateway_groups_retry_at":groups_due,"gateway_native_phase":row.gateway_source.as_ref().map(|_|"ready"),"updated_at":bson::DateTime::from_chrono(now)},
                     "$unset":{"gateway_setup_release_id":""}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             Ok(())
         }).await;transactions::transaction_result(work)

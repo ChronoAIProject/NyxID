@@ -3170,6 +3170,7 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
     // A claimed turn can retain this snapshot after its channel is removed
     // while first-turn history or upload preparation is in flight.
     row.channel = Some(ChannelOrigin {
+        native_event_id: None,
         nyxbot_channel_id: "removed-channel".into(),
         partition: "thread_v1_removed".into(),
         platform: "telegram".into(),
