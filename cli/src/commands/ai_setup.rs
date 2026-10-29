@@ -12,6 +12,8 @@ const GITHUB_RAW: &str = "https://raw.githubusercontent.com/ChronoAIProject/NyxI
 /// Path within the repo to the canonical skill files.
 const SKILL_DIR: &str = "skills/nyxid";
 
+const BUNDLED_SKILLS: &[&str] = &["nyxid", "nyxid-service-skill-authoring"];
+
 /// Reference files split out of SKILL.md per the Anthropic Agent Skills spec.
 /// These are fetched from GitHub and written under the skill's `references/`
 /// directory at install time. Keep in sync with the "Reference map" table in
@@ -41,8 +43,7 @@ const PLUGIN_MARKETPLACE_SOURCE: &str = "ChronoAIProject/NyxID";
 const PLUGIN_MARKETPLACE_NAME: &str = "nyxid";
 
 /// `<plugin>@<marketplace>` spec for the CLI edition of the NyxID plugin,
-/// which ships every repo skill (nyxid, the aevatar family,
-/// github/firecrawl-via-nyxid, the Ornn manual, ...), not just `skills/nyxid`.
+/// which ships the NyxID broker and service-skill authoring guides.
 /// The marketplace's `nyxid` plugin is the hosted-MCP package submitted to the
 /// Claude directory; this command installs the CLI skills instead.
 const PLUGIN_SPEC: &str = "nyxid-cli@nyxid";
@@ -526,7 +527,7 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
             );
             if claude_cli_plugin_present() {
                 eprintln!(
-                    "Installed via the plugin marketplace: every bundled skill (nyxid, the aevatar family, github-via-nyxid, ...) is available, and `claude plugin update {PLUGIN_SPEC}` keeps them current."
+                    "Installed via the plugin marketplace: the NyxID broker and service-skill authoring guides are available. `claude plugin update {PLUGIN_SPEC}` keeps them current."
                 );
             }
         }
@@ -806,15 +807,34 @@ struct RepoSkill {
     files: Vec<RepoSkillFile>,
 }
 
-/// Fetch every skill package under the repo's `skills/` directory: one
-/// git-trees API call for the layout, then raw fetches per file, with the
-/// same URL substitution the single-skill installer applies.
+/// Fetch the core skill packages, with deployment-specific URL substitution.
 async fn fetch_all_skills(base_url: &str, dashboard_url: &str) -> Result<Vec<RepoSkill>> {
     let tree_json =
         fetch_url("https://api.github.com/repos/ChronoAIProject/NyxID/git/trees/main?recursive=1")
             .await?;
     let tree: serde_json::Value =
         serde_json::from_str(&tree_json).context("Failed to parse GitHub tree response")?;
+
+    let by_skill = bundled_skill_paths(&tree)?;
+    let mut skills = Vec::new();
+    for (name, rel_paths) in by_skill {
+        let mut files = Vec::new();
+        for rel in rel_paths {
+            let raw = fetch_github(&format!("skills/{name}/{rel}")).await?;
+            files.push(RepoSkillFile {
+                rel_path: rel,
+                content: substitute_urls(&raw, base_url, dashboard_url),
+            });
+        }
+        skills.push(RepoSkill { name, files });
+    }
+    Ok(skills)
+}
+
+fn bundled_skill_paths(
+    tree: &serde_json::Value,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    anyhow::ensure!(tree["truncated"] != true, "GitHub skill tree is truncated");
 
     let mut by_skill: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for entry in tree["tree"].as_array().unwrap_or(&Vec::new()) {
@@ -831,33 +851,26 @@ async fn fetch_all_skills(base_url: &str, dashboard_url: &str) -> Result<Vec<Rep
         let Some((skill, rel)) = rest.split_once('/') else {
             continue;
         };
+        if !BUNDLED_SKILLS.contains(&skill) {
+            continue;
+        }
         by_skill
             .entry(skill.to_string())
             .or_default()
             .push(rel.to_string());
     }
-    if by_skill.is_empty() {
-        bail!("GitHub tree listed no skill packages under skills/");
+    for name in BUNDLED_SKILLS {
+        anyhow::ensure!(
+            by_skill
+                .get(*name)
+                .is_some_and(|files| files.iter().any(|path| path == "SKILL.md")),
+            "GitHub tree is missing the {name} skill manifest"
+        );
     }
-
-    let mut skills = Vec::new();
-    for (name, rel_paths) in by_skill {
-        let mut files = Vec::new();
-        for rel in rel_paths {
-            let raw = fetch_github(&format!("skills/{name}/{rel}")).await?;
-            files.push(RepoSkillFile {
-                rel_path: rel,
-                content: substitute_urls(&raw, base_url, dashboard_url),
-            });
-        }
-        skills.push(RepoSkill { name, files });
-    }
-    Ok(skills)
+    Ok(by_skill)
 }
 
-/// Install every repo skill under `skills_root`, pruning previously managed
-/// skills that disappeared from the repo (per the manifest) and leaving any
-/// user-authored skill directories alone.
+/// Install core skills and prune packages from the previous managed bundle.
 fn install_all_skills(
     skills_root: &Path,
     skills: &[RepoSkill],
@@ -875,22 +888,6 @@ fn install_all_skills(
         .unwrap_or_default();
     let current: Vec<String> = skills.iter().map(|skill| skill.name.clone()).collect();
 
-    for stale in previous.iter().filter(|name| !current.contains(name)) {
-        let dir = skills_root.join(stale);
-        if dir.exists() {
-            match std::fs::remove_dir_all(&dir) {
-                Ok(()) => eprintln!(
-                    "  Removed managed skill no longer in repo: {}",
-                    dir.display()
-                ),
-                Err(error) => eprintln!(
-                    "  Warning: could not remove stale managed skill {} ({error})",
-                    dir.display()
-                ),
-            }
-        }
-    }
-
     for skill in skills {
         let dir = skills_root.join(&skill.name);
         for file in &skill.files {
@@ -902,15 +899,33 @@ fn install_all_skills(
             }
         }
         if skill.name == "nyxid" {
-            // The playbook reference is generated from the user's server, not
-            // stored in the repo -- keep injecting it like the legacy install.
             write_file(&dir.join("references/playbook.md"), &content.playbook)?;
             cleanup_legacy_layout(&dir);
         }
     }
 
+    let mut retained: std::collections::BTreeSet<_> = current
+        .iter()
+        .chain(
+            previous
+                .iter()
+                .filter(|name| BUNDLED_SKILLS.contains(&name.as_str())),
+        )
+        .collect();
+    for stale in previous
+        .iter()
+        .filter(|name| !BUNDLED_SKILLS.contains(&name.as_str()))
+    {
+        if let Err(error) = remove_retired_managed_skill(skills_root, stale) {
+            retained.insert(stale);
+            eprintln!(
+                "  Warning: retired skill {stale:?} could not be removed ({error:#}); keeping its ownership record for the next update."
+            );
+        }
+    }
+
     let manifest = serde_json::json!({
-        "skills": current,
+        "skills": retained,
         "installed_at": chrono::Utc::now().to_rfc3339(),
     });
     write_file(
@@ -920,7 +935,32 @@ fn install_all_skills(
     Ok(())
 }
 
-/// Install all bundled skills for a `skills/<name>/SKILL.md`-convention tool
+fn remove_retired_managed_skill(skills_root: &Path, name: &str) -> Result<()> {
+    anyhow::ensure!(
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "Invalid managed skill name"
+    );
+    let dir = skills_root.join(name);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) => {
+            if metadata.is_symlink() || metadata.is_file() {
+                std::fs::remove_file(&dir)
+            } else {
+                std::fs::remove_dir_all(&dir)
+            }
+            .with_context(|| format!("Could not remove retired managed skill {}", dir.display()))?;
+            eprintln!("  Removed retired managed skill: {}", dir.display());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("Could not inspect retired managed skill"),
+    }
+    Ok(())
+}
+
+/// Install core skills for a `skills/<name>/SKILL.md`-convention tool
 /// (Codex, OpenClaw). Falls back to the legacy single-skill copy when the
 /// multi-skill fetch fails so installs never regress below the old behavior.
 async fn install_skill_dir_tool(
@@ -953,6 +993,14 @@ async fn install_skill_dir_tool(
                 make_executable(&dir.join("scripts/install.sh"))?;
             }
             cleanup_legacy_layout(&dir);
+            install_all_skills(
+                &skills_root,
+                &[RepoSkill {
+                    name: "nyxid".into(),
+                    files: Vec::new(),
+                }],
+                content,
+            )?;
         }
     }
 
@@ -1356,6 +1404,154 @@ mod command_tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn core_tree() -> serde_json::Value {
+        serde_json::json!({"tree": [
+            {"type": "blob", "path": "skills/nyxid/SKILL.md"},
+            {"type": "blob", "path": "skills/nyxid/references/services.md"},
+            {"type": "blob", "path": "skills/nyxid-service-skill-authoring/SKILL.md"},
+            {"type": "blob", "path": "skills/optional-platform/SKILL.md"},
+            {"type": "blob", "path": "skills/INSTALL.md"}
+        ]})
+    }
+
+    fn fixture_content() -> SkillContent {
+        SkillContent {
+            skill_md: "fixture".into(),
+            playbook: "server fixture".into(),
+            post_install: String::new(),
+            references: Vec::new(),
+            install_sh: String::new(),
+        }
+    }
+
+    #[test]
+    fn bundle_selects_only_core_skills_and_matches_plugin_tree() {
+        let selected = bundled_skill_paths(&core_tree()).unwrap();
+        assert_eq!(
+            selected.keys().map(String::as_str).collect::<Vec<_>>(),
+            BUNDLED_SKILLS
+        );
+        assert_eq!(selected["nyxid"], ["SKILL.md", "references/services.md"]);
+        let mut packages: Vec<_> =
+            std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../skills"))
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.path().join("SKILL.md").is_file())
+                .map(|entry| entry.file_name().into_string().unwrap())
+                .collect();
+        packages.sort();
+        assert_eq!(packages, BUNDLED_SKILLS);
+    }
+
+    #[test]
+    fn bundle_rejects_incomplete_remote_inventories() {
+        let mut tree = core_tree();
+        tree["truncated"] = true.into();
+        assert!(bundled_skill_paths(&tree).is_err());
+        tree["truncated"] = false.into();
+        tree["tree"].as_array_mut().unwrap().remove(2);
+        assert!(bundled_skill_paths(&tree).is_err());
+    }
+
+    #[test]
+    fn single_skill_fallback_prunes_retired_managed_packages_and_preserves_other_skills() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path();
+        for name in [
+            "nyxid",
+            "nyxid-service-skill-authoring",
+            "retired-platform",
+            "personal",
+        ] {
+            write_file(&root.join(name).join("SKILL.md"), name).unwrap();
+        }
+        write_file(
+            &root.join(SKILLS_MANIFEST_FILE),
+            r#"{"skills":["nyxid","nyxid-service-skill-authoring","retired-platform"]}"#,
+        )
+        .unwrap();
+        let core = [RepoSkill {
+            name: "nyxid".into(),
+            files: Vec::new(),
+        }];
+        for _ in 0..2 {
+            install_all_skills(root, &core, &fixture_content()).unwrap();
+            assert!(!root.join("retired-platform").exists());
+            for name in ["nyxid-service-skill-authoring", "personal"] {
+                assert_eq!(
+                    std::fs::read_to_string(root.join(name).join("SKILL.md")).unwrap(),
+                    name
+                );
+            }
+            let manifest: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(root.join(SKILLS_MANIFEST_FILE)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest["skills"], serde_json::json!(BUNDLED_SKILLS));
+        }
+    }
+
+    #[test]
+    fn failed_cleanup_keeps_ownership_and_continues_other_installs_and_removals() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("skills");
+        write_file(&home.path().join("personal/SKILL.md"), "personal").unwrap();
+        write_file(&root.join("retired-platform/SKILL.md"), "retired").unwrap();
+        write_file(
+            &root.join(SKILLS_MANIFEST_FILE),
+            r#"{"skills":["../personal","retired-platform"]}"#,
+        )
+        .unwrap();
+        let core = [RepoSkill {
+            name: "nyxid".into(),
+            files: vec![RepoSkillFile {
+                rel_path: "SKILL.md".into(),
+                content: "updated core".into(),
+            }],
+        }];
+        for _ in 0..2 {
+            install_all_skills(&root, &core, &fixture_content()).unwrap();
+            assert!(!root.join("retired-platform").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.join("nyxid/SKILL.md")).unwrap(),
+                "updated core"
+            );
+            let manifest: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(root.join(SKILLS_MANIFEST_FILE)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                manifest["skills"],
+                serde_json::json!(["../personal", "nyxid"])
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("personal/SKILL.md")).unwrap(),
+            "personal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retired_managed_symlink_is_unlinked_without_deleting_its_target() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("skills");
+        write_file(&home.path().join("personal/SKILL.md"), "personal").unwrap();
+        write_file(
+            &root.join(SKILLS_MANIFEST_FILE),
+            r#"{"skills":["retired-platform"]}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(home.path().join("personal"), root.join("retired-platform"))
+            .unwrap();
+        install_all_skills(&root, &[], &fixture_content()).unwrap();
+        assert!(std::fs::symlink_metadata(root.join("retired-platform")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("personal/SKILL.md")).unwrap(),
+            "personal"
+        );
+    }
 
     #[test]
     fn codex_canonical_install_and_legacy_update_preserve_unmanaged_skills() {

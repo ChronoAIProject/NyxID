@@ -36,33 +36,22 @@ Windows is supported via WSL only.
 
 ## Skills available
 
-| Skill | Purpose | Source |
-|---|---|---|
-| `nyxid` | Credential broker for downstream APIs (OpenAI, Anthropic, GitHub, Slack, internal APIs, SSH, MCP tools). The skill is a thin wrapper over the `nyxid` CLI. | [`nyxid/`](nyxid/) |
-
-### Aevatar platform (control-plane family)
-
-These skills drive the [Aevatar](https://aevatar.ai) control plane over REST, authenticated through the NyxID broker — so they need the `nyxid` CLI plus a NyxID login, exactly like the `nyxid` skill. They mirror the public `aevatar-platform` skillset on Ornn. Start at `aevatar-platform-map`; each spoke is self-contained.
+NyxID's CLI skill bundle contains only these two guides:
 
 | Skill | Purpose | Source |
 |---|---|---|
-| `aevatar-platform-map` | Entry point: object model, auth, and router to the right companion skill for each step. | [`aevatar-platform-map/`](aevatar-platform-map/) |
-| `aevatar-agent-profile-management` | Create, validate, and publish Agent Profiles with exact skill pins and bounded tool authority. | [`aevatar-agent-profile-management/`](aevatar-agent-profile-management/) |
-| `aevatar-feasibility-advisor` | Decide whether a goal is buildable on Aevatar, and its prerequisites, before building. | [`aevatar-feasibility-advisor/`](aevatar-feasibility-advisor/) |
-| `aevatar-workflow-authoring` | Author, validate, and persist an executable Aevatar workflow from a natural-language request. | [`aevatar-workflow-authoring/`](aevatar-workflow-authoring/) |
-| `aevatar-team-builder` | Create a team and its members, bind implementations, and set the team entry member. | [`aevatar-team-builder/`](aevatar-team-builder/) |
-| `aevatar-service-publisher` | Publish a member/team/workflow as an invocable service, register it with NyxID, and invoke it. | [`aevatar-service-publisher/`](aevatar-service-publisher/) |
-| `aevatar-scheduler` | Route and manage Team-member automation or generic service schedules with honest credential semantics. | [`aevatar-scheduler/`](aevatar-scheduler/) |
-| `aevatar-automation` | Create independent scheduled Ornn skill agents and reminders with durable credential semantics. | [`aevatar-automation/`](aevatar-automation/) |
-| `aevatar-channels-delivery` | Configure channel capabilities, delivery targets, and typed credential failure triage. | [`aevatar-channels-delivery/`](aevatar-channels-delivery/) |
-| `aevatar-codex-exec-node-setup` | Configure and prove the managed-sandbox or private-SSH `codex_exec` target. | [`aevatar-codex-exec-node-setup/`](aevatar-codex-exec-node-setup/) |
-| `aevatar-codex-exec-workflow-sample` | Run harmless workflows that verify either `codex_exec` target end to end. | [`aevatar-codex-exec-workflow-sample/`](aevatar-codex-exec-workflow-sample/) |
-| `firecrawl-via-nyxid` | Run Firecrawl research jobs through a caller-owned NyxID connection. | [`firecrawl-via-nyxid/`](firecrawl-via-nyxid/) |
-| `github-via-nyxid` | Use the GitHub REST API through a caller-owned NyxID connection. | [`github-via-nyxid/`](github-via-nyxid/) |
-| `aevatar-triage` | Triage a failure across Aevatar / NyxID / Ornn and file a code-grounded issue or give usage guidance. | [`aevatar-triage/`](aevatar-triage/) |
-| `fallback-to-calling-agent` | Safety net: hand the original task back to the calling agent when Aevatar can't finish it server-side. | [`fallback-to-calling-agent/`](fallback-to-calling-agent/) |
+| `nyxid` | Connect services, proxy requests, and manage credentials, nodes, approvals, and MCP through the NyxID CLI. | [`nyxid/`](nyxid/) |
+| `nyxid-service-skill-authoring` | Find or author API guidance for a connected service that has no machine-readable specification. | [`nyxid-service-skill-authoring/`](nyxid-service-skill-authoring/) |
 
-In Claude Code, the CLI-edition plugin (`claude plugin install nyxid-cli@nyxid` after `claude plugin marketplace add ChronoAIProject/NyxID`) bundles every skill above. The marketplace's `nyxid` plugin is the hosted-MCP edition with a single MCP-first skill. For manual installs, copy each skill directory you want from `skills/`. This manifest will list more as they ship.
+`nyxid ai-setup install` installs this core bundle for Codex and OpenClaw, and
+through `nyxid-cli@nyxid` for hosted Claude Code installations. Cursor and the
+single-skill fallback install only `nyxid`. The hosted `nyxid` MCP plugin has
+its own MCP-oriented guide.
+
+Codex and OpenClaw downloads use an explicit core-skill list. Keep the root
+`skills/` tree limited to this same bundle because plugin clients discover its
+subdirectories. Additional service guidance is discovered when needed through
+the connected service's recommendations.
 
 ---
 
@@ -210,7 +199,13 @@ nyxid update --check      # report installed vs latest, install nothing
 nyxid update --skills-only
 ```
 
-Skills you copied manually into a runtime's skill directory (e.g. `~/.claude/skills/nyxid/`) are not tracked by the CLI and will not auto-update — re-run Step 2 to refresh them.
+Updates remove retired packages recorded in `.nyxid-managed.json`, including
+when the installer falls back to the single NyxID guide. Manually installed
+companion skills without that ownership record are left alone. A failed removal
+prints a warning and keeps the package's ownership record for a later retry;
+other packages and tools continue updating. Claude Code
+updates its CLI plugin through the marketplace; reload the agent after updating
+to clear its cached skill list.
 
 ---
 

@@ -163,7 +163,7 @@ function toolSetupPrompt(
 ): string {
   const installSh = `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"`;
   const cliInstall = [
-    `1. Install the NyxID CLI (handles Rust, build, and PATH automatically):`,
+    `1. Install the NyxID CLI (uses a prebuilt binary when available, falls back to a source build, and configures PATH):`,
     `   ${installSh}`,
     `   Then open a new terminal and log in:`,
     `   nyxid login --base-url ${p.baseUrl}`,
@@ -175,7 +175,7 @@ function toolSetupPrompt(
       `The NyxID server is at ${p.baseUrl} and the dashboard is at ${p.dashboardUrl}.`,
       `Use the nyxid CLI for all operations -- if it's not installed or needs updating, run:`,
       `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"`,
-      `(installs Rust if missing, builds the CLI, and configures PATH).`,
+      `(uses a prebuilt binary when available, falls back to a source build, and configures PATH).`,
       `For secrets, always use --credential-env to read from environment variables.`,
       `Use --output json for machine-readable output.`,
     ].join(" ");
@@ -195,14 +195,11 @@ function toolSetupPrompt(
 
   const toolNotes: Record<string, string[]> = {
     "claude-code": [
-      `This fetches the canonical NyxID skill from GitHub and the latest playbook`,
-      `from ${p.baseUrl}/llms.txt, then installs:`,
-      `  ~/.claude/skills/nyxid/SKILL.md                (concise skill, loaded on demand)`,
-      `  ~/.claude/skills/nyxid/references/             (per-topic references, loaded when needed)`,
-      `  ~/.claude/skills/nyxid/references/playbook.md  (full reference, loaded when needed)`,
+      `For hosted NyxID, this installs nyxid-cli@nyxid with the NyxID broker`,
+      `and service-skill authoring guides. Self-hosted instances or an unavailable`,
+      `plugin installer use ~/.claude/skills/nyxid/SKILL.md with references instead.`,
       ``,
-      `Claude loads the description at startup. Full content loads when you ask about NyxID.`,
-      `Use /nyxid as a slash command, or just ask and it activates automatically.`,
+      `Start a new Claude Code session after installation.`,
     ],
     cursor: [
       `This fetches the NyxID skill from GitHub and installs it as a Cursor rule:`,
@@ -211,13 +208,15 @@ function toolSetupPrompt(
       `Note: Cursor rules are project-level. Run this command in each project.`,
     ],
     codex: [
-      `This fetches the NyxID skill from GitHub and the latest playbook, then installs:`,
-      `  ~/.codex/skills/nyxid/SKILL.md                (concise skill, loaded on demand)`,
-      `  ~/.codex/skills/nyxid/references/             (per-topic references, loaded when needed)`,
-      `  ~/.codex/skills/nyxid/references/playbook.md  (full reference, loaded when needed)`,
+      `This installs the NyxID broker and service-skill authoring guides, plus the latest playbook:`,
+      `  ~/.agents/skills/nyxid-service-skill-authoring/SKILL.md`,
+      `  ~/.agents/skills/nyxid/SKILL.md                (concise skill, loaded on demand)`,
+      `  ~/.agents/skills/nyxid/references/             (per-topic references, loaded when needed)`,
+      `  ~/.agents/skills/nyxid/references/playbook.md  (full reference, loaded when needed)`,
     ],
     openclaw: [
-      `This fetches the NyxID skill from GitHub and installs into OpenClaw:`,
+      `This installs the NyxID broker and service-skill authoring guides into OpenClaw:`,
+      `  ~/.openclaw/skills/nyxid-service-skill-authoring/SKILL.md`,
       `  ~/.openclaw/skills/nyxid/SKILL.md                (concise skill)`,
       `  ~/.openclaw/skills/nyxid/references/             (per-topic references)`,
       `  ~/.openclaw/skills/nyxid/references/playbook.md  (full reference, populated from <BASE_URL>/llms.txt)`,
@@ -260,7 +259,7 @@ export type AiToolSkillType = "auto-refresh" | "manual-refresh" | "provider-leve
 export const AI_TOOL_SKILL_INFO: Record<AiTool, { type: AiToolSkillType; note: string }> = {
   "claude-code": {
     type: "manual-refresh",
-    note: "Same SKILL.md from GitHub + playbook from server. Update skill: nyxid ai-setup update. Update CLI: re-run install.sh",
+    note: "NyxID broker and service-skill authoring guides + playbook from server. Update skill: nyxid ai-setup update. Update CLI: re-run install.sh",
   },
   cursor: {
     type: "manual-refresh",
@@ -268,11 +267,11 @@ export const AI_TOOL_SKILL_INFO: Record<AiTool, { type: AiToolSkillType; note: s
   },
   codex: {
     type: "manual-refresh",
-    note: "Same SKILL.md from GitHub + playbook from server. Update skill: nyxid ai-setup update. Update CLI: re-run install.sh",
+    note: "NyxID broker and service-skill authoring guides + playbook from server. Update skill: nyxid ai-setup update. Update CLI: re-run install.sh",
   },
   openclaw: {
     type: "manual-refresh",
-    note: "Full skill bundle with tool scripts. Update skill: nyxid ai-setup update --tool openclaw. Update CLI: re-run install.sh",
+    note: "NyxID broker and service-skill authoring guides with tool scripts. Update skill: nyxid ai-setup update --tool openclaw. Update CLI: re-run install.sh",
   },
   chatgpt: {
     type: "paste-prompt",

@@ -89,7 +89,7 @@ describe("generateSetupPrompt", () => {
   });
 
   it("codex and openclaw each include their own skill install paths", () => {
-    expect(generateSetupPrompt("codex", sp)).toContain("~/.codex/skills/nyxid/SKILL.md");
+    expect(generateSetupPrompt("codex", sp)).toContain("~/.agents/skills/nyxid/SKILL.md");
     expect(generateSetupPrompt("openclaw", sp)).toContain(
       "~/.openclaw/skills/nyxid/SKILL.md",
     );

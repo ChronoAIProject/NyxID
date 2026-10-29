@@ -177,7 +177,7 @@ jobs:
               - 'cli/**'
               - 'machine/**'
               - 'machine-updater/**'
-              - 'skills/nyxid/scripts/**'
+              - 'skills/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'

@@ -20,7 +20,7 @@ Each package's README, LICENSE and `assets/` stay hand-written.
 
 The Claude marketplace lists two plugins:
 - `nyxid` is the package submitted to the Claude directory. Its MCP server is registered as `plugin:nyxid:nyxid`.
-- `nyxid-cli` is the CLI skill bundle at the repository root, including the Aevatar family and the service skills.
+- `nyxid-cli` is the CLI skill bundle at the repository root, containing only `nyxid` and `nyxid-service-skill-authoring`. The CLI installer explicitly selects these guides; its managed manifest removes retired packages on update.
 
 The Codex marketplace lists only `nyxid`.
 

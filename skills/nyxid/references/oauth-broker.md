@@ -1,14 +1,14 @@
 # OAuth broker bindings (Authorizations)
 
-NyxID can act as an OAuth broker for third-party agent platforms (aevatar, custom apps): when a user authorizes such a platform via NyxID, the platform receives an opaque `binding_id` instead of a refresh_token. NyxID holds the refresh_token server-side, and the platform exchanges its `binding_id` for short-lived access tokens via standard RFC 8693 token exchange. Users can list and revoke these bindings at any time.
+NyxID can act as an OAuth broker for third-party agent platforms and custom apps: when a user authorizes such a platform via NyxID, the platform receives an opaque `binding_id` instead of a refresh_token. NyxID holds the refresh_token server-side, and the platform exchanges its `binding_id` for short-lived access tokens via standard RFC 8693 token exchange. Users can list and revoke these bindings at any time.
 
 This is distinct from OAuth **consents** (`/settings/consents` in the web UI, `references/oauth-consent.md`): a consent is "I let this OAuth client authenticate as me with these scopes and this NyxID service allowlist"; a binding is "this client holds a server-side credential handle for me so it can act on my behalf via NyxID without ever holding my refresh_token". The two surfaces are adjacent in the user's settings.
 
 ## When the user might ask about this
 
 - "What apps have access to my account?" → list both consents AND broker bindings; they're separate views.
-- "Revoke aevatar's access" → check both pages; an integration may have a consent (for sign-in and service access) and a binding (for delegated capability). Revoking the consent also revokes that client's refresh-token chain and broker bindings for the same user/client, but a user may still want to inspect the Authorizations tab for other bindings.
-- "Which services can aevatar reach?" → read the consent's `allow_all_services`, `allowed_services`, and `legacy_unrestricted` fields, not the broker binding alone.
+- "Revoke an app's access" → check both pages; an integration may have a consent (for sign-in and service access) and a binding (for delegated capability). Revoking the consent also revokes that client's refresh-token chain and broker bindings for the same user/client, but a user may still want to inspect the Authorizations tab for other bindings.
+- "Which services can an app reach?" → read the consent's `allow_all_services`, `allowed_services`, and `legacy_unrestricted` fields, not the broker binding alone.
 - "Why does revoking show no effect immediately?" → access tokens already issued from a binding stay valid until they expire (5 min by default for broker-issued tokens). Revocation prevents new tokens from being minted; in-flight ones expire on their own.
 
 ## CLI

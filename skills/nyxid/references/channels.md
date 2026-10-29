@@ -20,7 +20,7 @@
 
 ## Bot-Capable Service Connections
 
-NyxID treats messaging platform bots as standard service connections. The credentials live in the same place as any other service (encrypted, scoped, audited) and outbound bot API calls go through the regular `/api/v1/proxy/s/{slug}/{path}` proxy. Inbound webhook handling is the responsibility of the calling agent runtime (Aevatar, custom backend, etc.) -- NyxID does not own chat runtime.
+NyxID treats messaging platform bots as standard service connections. The credentials live in the same place as any other service (encrypted, scoped, audited) and outbound bot API calls go through the regular `/api/v1/proxy/s/{slug}/{path}` proxy. Inbound webhook handling is the responsibility of the calling agent runtime (for example, a custom backend) -- NyxID does not own chat runtime.
 
 ```bash
 # Telegram bot (path-injected token)
@@ -34,7 +34,7 @@ nyxid proxy request api-telegram-bot sendMessage \
   -m POST -d '{"chat_id":12345,"text":"hello"}'
 
 nyxid proxy request api-telegram-bot setWebhook \
-  -m POST -d '{"url":"https://aevatar-host/api/channels/telegram/callback/abc"}'
+  -m POST -d '{"url":"https://agent.example.com/webhooks/telegram"}'
 
 nyxid proxy request api-telegram-bot getWebhookInfo -m POST -d '{}'
 
@@ -342,7 +342,7 @@ Every callback delivery carries an RS256 JWT in `X-NyxID-Callback-Token` that do
 
 #### Reply token (dual-auth on `/channel-relay/reply` and `/channel-relay/reply/update`)
 
-The callback payload includes a short-lived `reply_token` (RS256 JWT) the agent can present as `Authorization: Bearer <reply_token>` instead of the agent API key. Intended for runtimes that don't want to persist agent credentials (e.g. Aevatar).
+The callback payload includes a short-lived `reply_token` (RS256 JWT) the agent can present as `Authorization: Bearer <reply_token>` instead of the agent API key. Intended for runtimes that don't want to persist agent credentials (e.g. a hosted agent runtime).
 
 - **Shape:** RS256 JWT. `aud = "channel-relay/reply"` (reply, reply/update and exact-message attachment downloads only). `token_type = "relay_reply"`.
 - **Claim bindings:** `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request. For `/reply`, the body's `message_id` must equal `inbound_message_id`. For `/reply/update`, NyxID looks up the outbound row by the body's `message_id` (platform id) only among rows sent by the token's `api_key_id` in its `conversation_id` with `reply_to_message_id` equal to its `inbound_message_id`; other rows return `404`.
