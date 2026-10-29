@@ -946,5 +946,18 @@ mod tests {
         if child.is_ok() {
             assert!(root.path().join("child").is_dir());
         }
+
+        let mut identity = Identity::resolve(None).unwrap();
+        identity.uid = 0;
+        identity.gid = 0;
+        assert!(protect_legacy_roots(&[], &identity).is_err());
+        assert!(protect_legacy_browser_home(&identity).is_err());
+        identity.uid = unsafe { libc::geteuid() }.saturating_add(1);
+        identity.gid = unsafe { libc::getegid() }.saturating_add(1);
+        identity.home = PathBuf::from("relative-home");
+        assert!(protect_legacy_roots(&[PathBuf::from("relative-root")], &identity).is_err());
+        assert!(protect_legacy_browser_home(&identity).is_err());
+
+        assert!(Store::open(Path::new("/tmp/nyxid-invalid-store"), "invalid-node").is_err());
     }
 }
