@@ -42,6 +42,13 @@ class CoverageBaseLookupTests(unittest.TestCase):
                          {"run-id": 42, "artifact-id": 84})
         self.assertTrue(validate_baseline(self.root, "recipe", True))
 
+    def test_publish_images_baseline_artifact_is_selected(self):
+        publish = {**self.run, "path": ".github/workflows/publish-images.yml",
+                   "event": "push", "head_sha": "base-sha"}
+        artifact = {"id": 91, "name": "backend-coverage-baseline", "expired": False}
+        self.assertEqual(find_baseline([publish], "base-sha", lambda _: [artifact]),
+                         {"run-id": 42, "artifact-id": 91})
+
     def test_pr_failed_wrong_sha_and_untrusted_workflow_runs_are_rejected(self):
         def unexpected_request(run_id):
             self.fail(f"artifact lookup for untrusted run {run_id}")

@@ -11,6 +11,7 @@ use futures::TryStreamExt;
 pub fn classification(session: &Session) -> MfaAssurance {
     match (session.mfa_assured, session.mfa_exemption) {
         (Some(true), _) => MfaAssurance::Verified,
+        (_, Some(MfaExemption::ApprovedSignInPolicy)) => MfaAssurance::ApprovedSignInExempt,
         (_, Some(MfaExemption::MobileRollout)) => MfaAssurance::MobileExempt,
         (None, _) | (_, Some(MfaExemption::LegacyMigration)) => MfaAssurance::Legacy,
         (Some(false), None) => MfaAssurance::Unverified,
@@ -26,12 +27,16 @@ pub fn may_derive(mfa_enabled: bool, verified: bool) -> bool {
 }
 
 /// Account policy and exact session/proof assurance already resolved by the
-/// caller. Unknown policy cannot authorize derivation. Derivation never reloads
-/// a person or resolves a feature flag.
+/// caller. Unknown policy cannot authorize derivation. Ordinary derivation stays
+/// strict; approved sign-in policy separately resolves and fences live opt-in.
 #[derive(Clone, Copy, Debug)]
 pub struct DerivedMfaAuthority {
     pub mfa_enabled: Option<bool>,
     pub verified: bool,
+    /// Only an identified completed human session can opt into app approval policy.
+    pub session_id: Option<uuid::Uuid>,
+    /// Request-only app proofs retain the exact policy revision that verified them.
+    pub app_policy_revision: Option<uuid::Uuid>,
 }
 
 impl DerivedMfaAuthority {
@@ -39,6 +44,8 @@ impl DerivedMfaAuthority {
         Self {
             mfa_enabled: Some(mfa_enabled),
             verified,
+            session_id: None,
+            app_policy_revision: None,
         }
     }
 }

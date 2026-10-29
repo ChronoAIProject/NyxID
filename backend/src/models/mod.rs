@@ -8,6 +8,7 @@ pub mod approval_grant;
 pub mod approval_request;
 pub mod assistant_action_receipt;
 pub mod assistant_resource;
+pub mod assistant_sharing;
 pub mod assistant_wire_log;
 pub mod audit_log;
 pub mod auth_device_code;
@@ -151,6 +152,7 @@ pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
 pub mod nyxbot_channel;
+pub mod nyxbot_gateway_response;
 pub mod nyxbot_image_delivery;
 pub mod service_change_event;
 pub mod usage_rollup_daily;
@@ -231,3 +233,5 @@ pub mod oauth_delegation_authority;
 pub mod platform_help;
 
 pub mod nyxbot_gateway_release;
+
+pub mod discord_gateway;

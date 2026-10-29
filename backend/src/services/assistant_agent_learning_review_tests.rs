@@ -878,6 +878,8 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         specialty: None,
         grants: Default::default(),
         guest_access: Default::default(),
+        guest_operation_scopes: Default::default(),
+        guest_operation_scope_revisions: Default::default(),
         operation_scopes: Default::default(),
         skills: Vec::new(),
         skills_revision: 0,
@@ -888,6 +890,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         saved_login_ids: Vec::new(),
         created_by: "user".into(),
         model: "default".into(),
+        owner_model_route: None,
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
@@ -1831,6 +1834,7 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            activity_id: None,
             invocation_id: None,
             link: None,
             requester_agent_id: None,
@@ -2212,6 +2216,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            activity_id: None,
             invocation_id: None,
             link: None,
             requester_agent_id: None,

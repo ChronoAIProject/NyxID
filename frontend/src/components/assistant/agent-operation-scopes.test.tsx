@@ -67,7 +67,7 @@ describe("agent operation scopes", () => {
   it("hides configuration and skips catalog queries while the rollout flag is off", () => {
     render(<AgentOperationScopes agentId="agent" />);
     expect(feature).toHaveBeenCalledWith("assistant:operation-scopes");
-    expect(query).toHaveBeenCalledWith("agent", false);
+    expect(query).toHaveBeenCalledWith("agent", false, false);
     expect(screen.getByRole("status")).toHaveTextContent("not enabled yet");
     expect(screen.getByRole("status")).toHaveTextContent("Existing operation limits still apply");
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
@@ -76,7 +76,7 @@ describe("agent operation scopes", () => {
   it("shows configuration when the rollout flag is enabled", () => {
     feature.mockReturnValue(true);
     render(<AgentOperationScopes agentId="agent" />);
-    expect(query).toHaveBeenCalledWith("agent", true);
+    expect(query).toHaveBeenCalledWith("agent", true, false);
     expect(screen.getByRole("combobox", { name: "Example operation access" })).toBeInTheDocument();
   });
   it("hides an already loaded selector when the flag is disabled", () => {
@@ -84,7 +84,7 @@ describe("agent operation scopes", () => {
     const view = render(<AgentOperationScopes agentId="agent" />);
     feature.mockReturnValue(false);
     view.rerender(<AgentOperationScopes agentId="agent" />);
-    expect(query).toHaveBeenLastCalledWith("agent", false);
+    expect(query).toHaveBeenLastCalledWith("agent", false, false);
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("not enabled yet");
   });
@@ -198,4 +198,35 @@ it("keeps the operation selector above an assistant dialog", async () => {
   await user.click(screen.getByRole("combobox", { name: "Example operation access" }));
   expect(dialog).toHaveStyle({ zIndex: "90" });
   expect(screen.getByRole("listbox")).toHaveStyle({ zIndex: "100" });
+});
+
+it("withholds a service from guests without changing the owner operation selection", async () => {
+  const user = userEvent.setup();
+  render(<ServiceOperationForm agentId="agent" service={service} guests />);
+  await user.click(screen.getByRole("combobox", { name: "Example guest operation access" }));
+  await user.click(screen.getByRole("option", { name: "No guest access" }));
+  await user.click(screen.getByRole("button", { name: "Save guest operations" }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith({
+    serviceId: "svc",
+    selection: { expected_revision: 4, all_operations: false, endpoint_ids: [], rules: [] },
+  }));
+  expect(service.endpoint_ids).toEqual(["write"]);
+});
+
+it("uses the separate guest rollout flag and query lane", () => {
+  render(<AgentOperationScopes agentId="agent" guests />);
+  expect(feature).toHaveBeenCalledWith("assistant:guest-operation-scopes");
+  expect(query).toHaveBeenCalledWith("agent", false, true);
+  expect(screen.getByRole("status")).toHaveTextContent("Guest operation configuration is not enabled yet");
+  expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+});
+
+it("saves a guest-only catalog selection and preserves its revision", async () => {
+  render(<ServiceOperationForm agentId="agent" service={service} guests />);
+  fireEvent.click(screen.getByRole("button", { name: "Select all reads" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save guest operations" }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith({
+    serviceId: "svc",
+    selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["read", "marked"], rules: [] },
+  }));
 });

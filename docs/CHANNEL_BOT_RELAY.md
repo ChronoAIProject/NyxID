@@ -10,7 +10,7 @@ owner Lark/Feishu files as encrypted assistant uploads under
 `assistant:channel-media`; relay history still contains routing metadata only.
 See [Lark/Feishu posts and NyxBot ingestion](#larkfeishu-posts-and-nyxbot-ingestion).
 
-NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**. Users register bots or connect accounts (Telegram, Discord, Lark, Feishu, Slack, WhatsApp, X). Adapter-owned webhooks or polling normalize inbound messages into a common format, route each message to the correct AI agent's callback URL, and relay the agent's asynchronous response back to the chat.
+NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**. Users register bots or connect accounts (Telegram, Discord, Lark, Feishu, Slack, WhatsApp, X). Adapter-owned webhooks, Discord Gateway sessions or polling normalize inbound messages into a common format, route each message to the correct AI agent's callback URL, and relay the agent's asynchronous response back to the chat.
 
 Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can wire different messaging platforms (or even different conversations on the same platform) to different AI agents -- each with independent credentials, rate limits, and audit trails.
 
@@ -751,6 +751,117 @@ For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Confi
 - **Verification Token** -> `ChannelBot.lark_verification_token_encrypted`
 - **Encrypt Key** -> `ChannelBot.lark_encrypt_key_encrypted` (optional)
 
+### Discord: ordinary chat and interactions
+
+Protocol references: [Discord Gateway](https://docs.discord.com/developers/events/gateway)
+and [Webhook Events](https://docs.discord.com/developers/events/webhook-events).
+The latter also supports Social SDK lobby/game-message events, which are separate
+from ordinary bot guild and DM chat.
+
+The **Interactions Endpoint URL** under Developer Portal > General Information
+and the **Webhooks / Event Webhooks** page are different features. Paste NyxID's
+callback URL only into **Interactions Endpoint URL**. Its signed `type:1` PING
+receives the existing `type:1` PONG, and commands/components keep their existing
+behavior. NyxID does not register slash commands. Event Webhooks carry application
+events and Social SDK lobby/game messages, not ordinary bot guild/DM messages. NyxID deliberately **refuses** an
+Ed25519-authenticated Event Webhooks `type:0` PING with HTTP 400 and
+`discord_event_webhooks_wrong_endpoint`, with a Health recommendation explaining
+the correct field. It does not return the 204 that would validate the wrong
+setup. Unauthenticated PINGs cannot change bot diagnostics.
+
+Ordinary chat uses a separate, default-off **`channel:discord-gateway`** feature
+flag, resolved for the bot owner (global/user cohorts, including org-owned bot
+IDs). `nyxbot:gateway-discord` selects the Agent Event Gateway transport;
+NyxID opens a Discord socket **only for relay-transport bots**. No additional
+environment variable is needed. Deploy with ingress off. Activation uses the
+existing security rollout readiness roster and drain assertion: all serving
+replicas must advertise `channel:discord-gateway`, since old transport writers
+do not wait for socket shutdown before remote setup. Then enable a test owner.
+Loss of readiness stops local ingress at renewal.
+Interaction-only bots require no change while the ingress flag stays off.
+
+1. In Developer Portal > Bot > Privileged Gateway Intents, enable **Message
+   Content Intent**. Verified apps require Discord approval. NyxID requests
+   `GUILDS`, `GUILD_MESSAGES`, `DIRECT_MESSAGES`, and `MESSAGE_CONTENT` (37377).
+2. Invite/install with the **bot** scope. Include **applications.commands** only
+   when using interactions. Grant **View Channels**, **Send Messages**, **Send
+   Messages in Threads**, and **Read Message History**. Grant **Attach Files**
+   only for media replies. Private threads also require the bot to be a member.
+3. Assign the agent/NyxBot route in NyxID. Send a DM, then a structured @mention
+   in a guild channel and a thread. Groups use their existing `reply_mode`
+   settings; mentions compare Discord's `mentions[].id` to the bot user ID,
+   never names or words. Self messages, other bots, webhooks and system messages
+   are suppressed. Followed threads use the existing `nyxbot:thread-follow`
+   flag, per-chat settings and sender authority. Other-user-only mentions remain
+   quiet context; broadcasts do not become bot mentions.
+4. Check **Health > Last NyxID relay Gateway state** and the recovery recommendation. A
+   missing/denied intent (close 4013/4014), invalid token (4004), identity mismatch,
+   or repeated transport/heartbeat/ingress failure records a stable metadata-only
+   reason. Correct tokens/intents in place; blocked sessions retry within five
+   minutes, and credential rotation closes the old session at lease renewal.
+   Interactions remain available independently of the socket status. A reported
+   historical state is not proof of current external delivery.
+
+The worker caps each replica at 32 bot sessions; unclaimed eligible bots beyond
+capacity receive a `waiting_capacity` status and an administrator recommendation. It scans at most 100 active
+Discord bots per existing `CHANNEL_POLL_INTERVAL_SECS` tick (30 seconds by
+default; if polling is disabled it uses the existing sweep fallback of 60
+seconds). The scan advances by bot ID so replicas do not starve later bots.
+Each session uses `coordination_leases`, the existing database-time lease TTL
+and renewal interval, a unique holder generation and lease ID. Renewal failure,
+flag disable, deletion, ownership change, token replacement and SIGTERM/SIGINT
+cancel the socket. A local deadline also bounds a stuck renewal. The socket is
+dropped before its exact lease is released. A suspended old process may retain
+a TCP connection until it runs again, but cannot admit or checkpoint events
+under an expired/replaced fence.
+
+IDENTIFY honors Discord's session-start budget and a shared five-second identify gate; RESUME uses the last completed
+ordered dispatch sequence. The lease checkpoint contains session ID, validated
+resume host, sequence, bot/owner identities and an encrypted-credential digest/ownership generation,
+never the token or message content. Handover resumes only for the same credential
+and owner generation. Invalid sessions clear resume state when required;
+reconnections use capped jittered backoff. The bounded 32-event queue lets
+heartbeats and ACKs continue during callback I/O. Overflow reconnects from the
+completed sequence. Channel metadata uses a bounded 256-entry, 60-second cache,
+invalidated on guild/channel/thread dispatches; thread targets are checked again
+by the native reply path. Bots requiring multiple shards are explicitly blocked
+with an actionable diagnostic; this implementation holds one session per bot.
+
+MESSAGE_CREATE enters the existing routing/callback/NyxBot pipeline. Discord
+metadata admission atomically commits the exact lease, live bot/owner authority
+and bot/owner/message dedup claim. Replay creates no second callback. Dedup
+markers retain the existing 30-day admission policy. This is **at-most-once
+callback dispatch after admission**, not guaranteed external delivery: a crash
+or callback failure after admission is not retried, consistent with ADR-013's
+absence of a durable content queue. Discord can also expire a resume session;
+NyxID does not replay REST message history to guess missed work.
+
+Callbacks add only `thread_context.discord_gateway` version 1 and its correlated
+thread facts. These are minted on authenticated Gateway ingress, not accepted
+from the public webhook. They include exact bot mention, other-user-only mention,
+combined everyone/here and role broadcast booleans, correlated reply-to-bot,
+author-is-bot, bot identity, channel type and native thread/parent channel IDs.
+Discord provides a single everyone-or-here flag, so NyxID does not invent a
+separate distinction. No mentioned names/user IDs, role IDs or credentials are
+added. DMs are normalized as private; actual thread channels retain their own
+channel ID, never an attached thread belonging to a different message.
+
+**Gateway transport:** the gateway-side Discord implementation is owned by the
+CMA owner. NyxID remains the gateway's `nyxbot` provider. A bot hosted on the
+gateway must not simultaneously run NyxID's relay WebSocket. Pending setup
+fences admission and renewal before the remote create; setup waits for the
+local lease to release or expire. The existing route remains in place until
+remote setup succeeds, then channel and route key swap atomically. Successful
+activation also clears the relay resume cursor, so returning cannot replay
+messages processed during gateway ownership; refused setup keeps the cursor. On flag-off
+return, ingress waits for confirmed remote cleanup before reacquiring. Explicit
+validation/authentication refusals restore relay eligibility; ambiguous create
+or delete outcomes remain paused under the existing durable cleanup/review
+workflow. This trades availability during uncertain cleanup for avoiding two
+producers. Additive verified facts remain in relay callbacks without selecting
+a gateway-side ingress design.
+See [the NyxID gateway integration](CHANNEL_EVENT_GATEWAY.md).
+
 ### Adding New Platforms
 
 Managed registration is optional. Adapters declare `platform_credentials()` (provider key, fields, masking, setup checklist), `managed_onboarding()` (safe bootstrap and accepted completion fields), and implement completion/setup/re-registration hooks. `platform_webhook()` opts into the shared callback; handshake and target extraction remain adapter-owned. The admin inventory comes from `registered_adapters()` in the same registry used by `resolve_adapter`. Generic handlers never branch on an IM name. Registration fields can declare `platform_fallback`; managed verification resolves missing bot secrets from encrypted platform credentials on demand. Existing adapters keep their default hooks.
@@ -1294,7 +1405,7 @@ A sender needs no additional NyxID OAuth/channel binding merely to address a rec
 | `X-NyxID-Message-Id` | UUID of the `channel_message` record |
 | `X-NyxID-Timestamp` | ISO 8601 timestamp (for replay protection) |
 | `X-NyxID-Platform` | Platform identifier (`telegram`, `discord`, `lark`, `feishu`) |
-| `X-NyxID-User-Token` | Short-lived access token for the bot owner (`JWT_RELAY_ACCESS_TTL_SECS`, default `300`s). The agent uses it as `Authorization: Bearer <token>` to call NyxID's **proxy / LLM gateway / MCP** (and approval *status* polling) on behalf of the user. It is a relay token: it is **rejected** on account, admin, key-management, session, channel-reply, and other non-proxy endpoints; it inherits the originating agent key's service/node allowlist; on MCP it is stateless (no session is minted, so it re-authenticates every call); and it stops working the moment that agent key is revoked/deactivated. To *reply* to a conversation, use the agent API key or the per-callback `reply_token`, not this token. Absent if token generation fails. |
+| `X-NyxID-User-Token` | Short-lived access token for the bot owner (`JWT_RELAY_ACCESS_TTL_SECS`, default `300`s). The agent uses it as `Authorization: Bearer <token>` to call NyxID's **proxy / LLM gateway / MCP** (and approval *status* polling) on behalf of the user. It is a relay token: it is **rejected** on account, admin, key-management, session, channel-reply, and other non-proxy endpoints; it inherits the originating agent key's service/node allowlist; on MCP it is stateless (no session is minted, so it re-authenticates every call); and it stops working the moment that agent key is revoked/deactivated. To *reply* to a conversation, use the agent API key or the per-callback `reply_token`, not this token. Absent if token generation fails, and on routes of an organization's bot linked to a person's NyxBot: the token would name the organization while the Agent Event Gateway binds it to the linking person and refuses a mismatch (HTTP 401 `relay_user_mismatch`). |
 
 **NyxID-hosted native bot mentions.** A delivered Telegram/Lark/Feishu message
 that positively and exactly mentions the receiving native bot may start a guest

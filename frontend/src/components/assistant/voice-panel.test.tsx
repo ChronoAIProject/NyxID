@@ -14,7 +14,7 @@ import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import type { VoicePreferences } from "@/schemas/assistant-voice";
 import { VoicePanel } from "./voice-panel";
 vi.mock("@/lib/api-client", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@/lib/api-client")>(),
+  ...(await importOriginal<typeof import("@/lib/api-client")>()),
   api: { put: vi.fn().mockResolvedValue({}) },
 }));
 const mock = vi.hoisted(() => ({
@@ -23,6 +23,7 @@ const mock = vi.hoisted(() => ({
   refetch: vi.fn(),
   optionsError: false,
   starting: false,
+  connectionStatus: "ready",
   error: null as string | null,
   connected: true,
   options: [] as unknown[],
@@ -58,6 +59,7 @@ vi.mock("@/hooks/use-assistant-voice", () => ({
   useAssistantVoice: () => ({
     connected: mock.connected,
     starting: mock.starting,
+    connectionStatus: mock.connectionStatus,
     error: mock.error,
     speakerMuted: false,
     end: mock.end,
@@ -104,6 +106,7 @@ beforeEach(() => {
   mock.options = [];
   mock.optionsError = false;
   mock.starting = false;
+  mock.connectionStatus = "ready";
   mock.error = null;
   mock.refetch.mockResolvedValue({});
   mock.conflictSession = null;
@@ -708,9 +711,7 @@ it("compact startup error offers only an intentional retry of the exact selected
   expect(screen.getByRole("alert")).toHaveTextContent(
     "Check your available credits",
   );
-  fireEvent.click(
-    screen.getByRole("button", { name: "Retry voice" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "Retry voice" }));
   expect(mock.start).toHaveBeenCalledWith(
     expect.objectContaining({
       service_id: voicePreferences.service_id,
@@ -838,3 +839,52 @@ it("failed saved preferences can be retried and hydrate before editing or the ne
     ),
   );
 });
+
+it.each([
+  ["expanded", "Space", " "],
+  ["expanded", "Enter", "Enter"],
+  ["minimized", "Space", " "],
+  ["minimized", "Enter", "Enter"],
+])(
+  "requires a fresh %s panel %s press after reconnecting",
+  (view, _name, key) => {
+    const props = {
+      threadId: "thread",
+      savedPreferences: {
+        ...voicePreferences,
+        input_mode: "push_to_talk" as const,
+      },
+      onClose: vi.fn(),
+    };
+    const { rerender } = render(<VoicePanel {...props} />);
+    if (view === "minimized")
+      fireEvent.click(
+        screen.getByRole("button", { name: "Minimize voice call" }),
+      );
+    fireEvent.keyDown(screen.getByRole("button", { name: "Hold to talk" }), {
+      key,
+      repeat: false,
+    });
+    expect(mock.hold).toHaveBeenLastCalledWith(true);
+
+    mock.starting = true;
+    mock.connected = false;
+    mock.connectionStatus = "reconnecting";
+    rerender(<VoicePanel {...props} />);
+    expect(screen.getByRole("button", { name: "Hold to talk" })).toBeDisabled();
+    mock.starting = false;
+    mock.connected = true;
+    mock.connectionStatus = "ready";
+    rerender(<VoicePanel {...props} />);
+    const talk = screen.getByRole("button", { name: "Hold to talk" });
+    expect(talk).toBeEnabled();
+
+    mock.hold.mockClear();
+    fireEvent.keyDown(talk, { key, repeat: true });
+    expect(mock.hold).not.toHaveBeenCalled();
+    fireEvent.keyUp(talk, { key });
+    expect(mock.hold).toHaveBeenLastCalledWith(false);
+    fireEvent.keyDown(talk, { key, repeat: false });
+    expect(mock.hold).toHaveBeenLastCalledWith(true);
+  },
+);

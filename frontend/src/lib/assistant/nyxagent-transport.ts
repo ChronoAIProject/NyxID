@@ -29,6 +29,7 @@ import {
   type NyxAgentHistory,
   type NyxAgentTurnActivity,
   type NyxAgentAttachment,
+  type NyxAgentAcknowledgement,
 } from "@/schemas/assistant-nyxagent";
 
 const ROOT = "/assistant/nyxagent";
@@ -139,6 +140,7 @@ export function storedError(code: string | null, capacityWaitMs?: number | null)
   if (code === "first_byte_timeout") return "The assistant did not start responding in time. Try again.";
   if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
   if (code === "output_too_large") return "The assistant reached its response limit.";
+  if (code === "guest_model_route_required") return "This assistant isn't available to guests yet.";
   if (code === "nyxid_error") return "NyxID could not authorize the assistant operation.";
   if (code === "stale_response") return "The assistant context changed. Start a new turn.";
   if (code === "context_unavailable") return "The assistant context could not be restored. Try a new turn.";
@@ -218,6 +220,8 @@ export class NyxAgentTransport {
   private settledViews = new WeakMap<NyxAgentMessage, ChatMessage>();
   private liveViews = new WeakMap<LiveMessage, { id?: string; settled?: NyxAgentMessage; view: ChatMessage }>();
   private views = new Map<string, Map<string, ChatMessage>>();
+  /** Per reply: its folded decisions, kept by reference while unchanged. */
+  private decisionViews = new Map<string, { key: string; rows: readonly NyxAgentAcknowledgement[] }>();
 
   constructor() {
     subscribeAssistantIdentity(() => this.clear());
@@ -253,6 +257,7 @@ export class NyxAgentTransport {
     this.acceptedTurns.clear();
     this.reviewCards.clear();
     this.views.clear();
+    this.decisionViews.clear();
     this.draftModel = "nyxagent/chat";
     this.changed();
   }
@@ -611,7 +616,7 @@ export class NyxAgentTransport {
         error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms) : undefined,
         channelDelivery: message.turn_metadata?.channel_delivery,
         turnMetadata: message.turn_metadata ? { attempts: message.turn_metadata.attempts, capacityWaitMs: message.turn_metadata.capacity_wait_ms } : undefined,
-        errorDetail: message.error_detail ? { attempts: message.error_detail.attempts, capacityWaitMs: message.error_detail.capacity_wait_ms, upstreamCode: message.upstream_error_code, stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
+        errorDetail: message.error_detail ? { failureReason: message.turn_metadata?.failure_reason, attempts: message.error_detail.attempts, capacityWaitMs: message.error_detail.capacity_wait_ms, upstreamCode: message.upstream_error_code, stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
         errorCode: message.error_code,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
@@ -619,6 +624,10 @@ export class NyxAgentTransport {
         activityTotal: message.activity_total,
         steering: message.steering,
         continuation_of: message.continuation_of,
+        origin: message.origin,
+        automation: message.automation
+          ? { triggerId: message.automation.trigger_id, runId: message.automation.run_id, label: message.automation.label }
+          : undefined,
       };
       this.settledViews.set(message, view);
       return view;
@@ -669,6 +678,7 @@ export class NyxAgentTransport {
           turnMetadata: streaming ? live.state.activeTurn?.turnMetadata : settled?.turn_metadata
             ? { attempts: settled.turn_metadata.attempts, capacityWaitMs: settled.turn_metadata.capacity_wait_ms } : undefined,
           errorDetail: streaming && live.state.activeTurn?.error?.stage ? {
+            failureReason: live.state.activeTurn.turnMetadata?.failureReason,
             attempts: live.state.activeTurn.error.attempts, capacityWaitMs: live.state.activeTurn.error.capacity_wait_ms,
             stage: live.state.activeTurn.error.stage,
             upstreamCode: live.state.activeTurn.error.upstream_error_code,
@@ -737,11 +747,14 @@ export class NyxAgentTransport {
         status: "complete",
       });
     }
-    // Build a linear, exact-turn join. The receipt keeps its own virtual row
-    // and stable card ID, so deep links and offscreen focusing keep working.
+    // Build a linear, exact-turn join. A settled decision folds into its
+    // reply's turn summary (beside the tool call that raised it); pending
+    // cards and authored-skill reviews keep their own virtual row and stable
+    // card ID, so deep links and offscreen focusing keep working.
     const replies = new Map(messages.filter((m) => m.role === "assistant" && m.turnId)
       .map((m) => [m.turnId!, m.id]));
     const footers = new Map<string, ChatMessage[]>();
+    const folded = new Map<string, NyxAgentAcknowledgement[]>();
     for (const acknowledgement of history?.acknowledgements ?? []) {
       const timestamp = Date.parse(acknowledgement.created_at);
       const receipt: ChatMessage = {
@@ -749,7 +762,9 @@ export class NyxAgentTransport {
         role: "system", content: acknowledgement.summary, timestamp, status: "complete",
       };
       const reply = acknowledgement.creation_turn_id && replies.get(acknowledgement.creation_turn_id);
-      if (acknowledgement.status !== "pending" && reply) {
+      if (acknowledgement.status !== "pending" && reply && !acknowledgement.authored_skill) {
+        folded.set(reply, [...(folded.get(reply) ?? []), acknowledgement]);
+      } else if (acknowledgement.status !== "pending" && reply) {
         const rows = footers.get(reply) ?? [];
         rows.push(receipt);
         footers.set(reply, rows);
@@ -761,6 +776,17 @@ export class NyxAgentTransport {
       }
     }
     if (footers.size) messages = messages.flatMap((message) => [message, ...(footers.get(message.id) ?? [])]);
+    if (folded.size) {
+      messages = messages.map((message) => {
+        const rows = folded.get(message.id);
+        if (!rows) return message;
+        const key = rows.map((row) => `${row.id}:${row.status}`).join(",");
+        const previous = this.decisionViews.get(message.id);
+        const decisions = previous?.key === key ? previous.rows : rows;
+        this.decisionViews.set(message.id, { key, rows: decisions });
+        return { ...message, decisions };
+      });
+    }
     // Proxy approvals block the running tool call until decided; show them
     // at the tail while the turn waits.
     for (const approval of history?.approvals ?? []) {

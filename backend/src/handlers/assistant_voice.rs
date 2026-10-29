@@ -68,7 +68,7 @@ pub fn preference_patch<'de, D: serde::Deserializer<'de>>(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptionsQuery {
-    conversation_id: String,
+    conversation_id: Option<String>,
 }
 
 pub async fn options(
@@ -79,8 +79,12 @@ pub async fn options(
     super::login_client_context::require_first_party_human(&auth)?;
     let user = auth.user_id.to_string();
     voice::require_enabled(&state.db, &user).await?;
-    let thread = voice::thread(&state.db, &user, &q.conversation_id).await?;
-    let options = voice::options(&state.db, &state.encryption_keys, &thread).await?;
+    let options = if let Some(id) = q.conversation_id {
+        let thread = voice::thread(&state.db, &user, &id).await?;
+        voice::options(&state.db, &state.encryption_keys, &thread).await?
+    } else {
+        voice::settings_options(&state.db, &state.encryption_keys, &user).await?
+    };
     Ok(Json(serde_json::json!({"options":options,"limits": {
         "call_seconds":crate::models::assistant_voice::MAX_CALL_SECONDS,"idle_seconds":crate::models::assistant_voice::IDLE_SECONDS,"idle_warning_seconds":crate::models::assistant_voice::IDLE_WARNING_SECONDS,
         "transmitting_calls":1,"queued_requests":crate::models::assistant_voice::MAX_QUEUED},"recording":false})))
@@ -376,12 +380,15 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 .collection::<crate::models::assistant_voice::VoiceRequest>(REQUESTS)
                 .update_one(
                     doc! {"_id":&request.id,"state":"queued"},
-                    doc! {"$set":{"state":"cancelled"}},
+                    doc! {"$set":{"state":"cancelled", "terminal_error_code":
+                        if request.expires_at <= chrono::Utc::now() { "voice_request_expired".to_owned() }
+                        else { result.as_ref().err().map(|e|e.error_key().to_owned()).unwrap_or_else(||"cancelled".into()) } }},
                 )
                 .await?;
         }
         // Pool/active-turn/temporary database errors leave the durable queue intact.
     }
+    voice::publish_completed_results(&state.db).await?;
     Ok(())
 }
 
@@ -399,6 +406,8 @@ fn require_origin(state: &AppState, headers: &axum::http::HeaderMap) -> AppResul
     let trusted = std::iter::once(&state.config.frontend_url)
         .chain(std::iter::once(&state.config.base_url))
         .chain(state.config.cors_allowed_origins.iter())
+        .chain(state.config.domain_aliases.frontend_urls.iter())
+        .chain(state.config.domain_aliases.base_urls.iter())
         .any(|s| url::Url::parse(s).is_ok_and(|u| u.origin().ascii_serialization() == origin));
     if !trusted {
         return Err(crate::errors::AppError::Forbidden(
@@ -458,5 +467,20 @@ mod tests {
         assert!(call_has_capacity(2, 8));
         assert!(!call_has_capacity(3, 8));
         assert!(!call_has_capacity(1, 1));
+    }
+}
+
+#[cfg(test)]
+mod domain_alias_tests {
+    #[tokio::test]
+    async fn domain_alias_browser_origin_gate_is_opt_in() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("origin", "https://old.example".parse().unwrap());
+        assert!(super::require_origin(&state, &headers).is_err());
+        state.config.domain_aliases.frontend_urls = vec!["https://old.example".into()];
+        assert!(super::require_origin(&state, &headers).is_ok());
+        headers.insert("origin", "https://old.example.evil".parse().unwrap());
+        assert!(super::require_origin(&state, &headers).is_err());
     }
 }

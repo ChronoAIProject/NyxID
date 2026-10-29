@@ -37,6 +37,7 @@ import {
 } from "@/lib/url-tabs";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
+import { ApprovedSignInPolicy } from "@/components/settings/approved-sign-in-policy";
 import { DisplaySettings } from "@/components/settings/display-settings";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -59,11 +60,6 @@ import { Input } from "@/components/ui/input";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -289,13 +285,9 @@ function SecurityTab() {
   const [showNewPw, setShowNewPw] = useState(false);
   const [showConfirmPw, setShowConfirmPw] = useState(false);
 
-  // Linked social accounts may retain a password. Older servers omit the
-  // explicit availability flag, so retain the legacy inference as a fallback.
+  // MFA disable keeps the legacy credential inference for older servers.
+  // The password-change card below requires explicit credential availability.
   const isPasswordUser = user?.has_password ?? !user?.social_provider;
-  const providerLabel = user?.social_provider
-    ? user.social_provider.charAt(0).toUpperCase() +
-      user.social_provider.slice(1)
-    : null;
 
   const passwordForm = useAppForm<ChangePasswordFormData>({
     resolver: zodResolver(changePasswordSchema),
@@ -306,9 +298,6 @@ function SecurityTab() {
     },
   });
 
-  // NOTE: this route is not implemented on the backend yet — password login
-  // flows are opt-in (OAuth is the default) and this form is wired up ahead
-  // of that integration.
   async function handleChangePassword(data: ChangePasswordFormData) {
     try {
       await api.post<void>("/auth/password/change", {
@@ -410,7 +399,7 @@ function SecurityTab() {
               : "Add an extra layer of security to your account."}
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Switch
@@ -429,6 +418,8 @@ function SecurityTab() {
               </span>
             </div>
           </div>
+          <Separator />
+          <ApprovedSignInPolicy key={user?.id} />
         </CardContent>
       </Card>
 
@@ -502,159 +493,153 @@ function SecurityTab() {
         </DialogContent>
       </Dialog>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Change Password</CardTitle>
-          <CardDescription>
-            {isPasswordUser
-              ? "Update your password to keep your account secure."
-              : `You signed in with ${providerLabel ?? "an OAuth provider"} — this account has no password to change.`}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Form {...passwordForm}>
-            <form
-              onSubmit={passwordForm.handleSubmit(handleChangePassword)}
-            >
-            <fieldset
-              disabled={!isPasswordUser}
-              className="space-y-4 disabled:opacity-60"
-            >
-              {passwordForm.formState.errors.root && (
-                <div
-                  role="alert"
-                  className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
-                >
-                  {passwordForm.formState.errors.root.message}
-                </div>
-              )}
+      {user?.has_password === true && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Change Password</CardTitle>
+            <CardDescription>
+              Use 8–128 UTF-8 bytes. Existing sessions remain signed in.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Form {...passwordForm}>
+              <form onSubmit={passwordForm.handleSubmit(handleChangePassword)}>
+                <fieldset className="space-y-4">
+                  {passwordForm.formState.errors.root && (
+                    <div
+                      role="alert"
+                      className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+                    >
+                      {passwordForm.formState.errors.root.message}
+                    </div>
+                  )}
 
-              <FormField
-                control={passwordForm.control}
-                name="currentPassword"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Current Password</FormLabel>
-                    <FormControl>
-                      <div className="relative">
-                        <Input
-                          type={showCurrentPw ? "text" : "password"}
-                          autoComplete="current-password"
-                          className="pr-10"
-                          {...field}
-                        />
-                        <button
-                          type="button"
-                          tabIndex={-1}
-                          onClick={() => setShowCurrentPw((v) => !v)}
-                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                          aria-label={showCurrentPw ? "Hide password" : "Show password"}
-                        >
-                          {showCurrentPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-                        </button>
-                      </div>
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+                  <FormField
+                    control={passwordForm.control}
+                    name="currentPassword"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Current Password</FormLabel>
+                        <div className="relative">
+                          <FormControl>
+                            <Input
+                              type={showCurrentPw ? "text" : "password"}
+                              autoComplete="current-password"
+                              className="pr-10"
+                              {...field}
+                            />
+                          </FormControl>
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            onClick={() => setShowCurrentPw((v) => !v)}
+                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                            aria-label={
+                              showCurrentPw ? "Hide password" : "Show password"
+                            }
+                          >
+                            {showCurrentPw ? (
+                              <Eye className="h-4 w-4" />
+                            ) : (
+                              <EyeOff className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
 
-              <Separator />
+                  <Separator />
 
-              <FormField
-                control={passwordForm.control}
-                name="newPassword"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>New Password</FormLabel>
-                    <FormControl>
-                      <div className="relative">
-                        <Input
-                          type={showNewPw ? "text" : "password"}
-                          autoComplete="new-password"
-                          className="pr-10"
-                          {...field}
-                        />
-                        <button
-                          type="button"
-                          tabIndex={-1}
-                          onClick={() => setShowNewPw((v) => !v)}
-                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                          aria-label={showNewPw ? "Hide password" : "Show password"}
-                        >
-                          {showNewPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-                        </button>
-                      </div>
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+                  <FormField
+                    control={passwordForm.control}
+                    name="newPassword"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>New Password</FormLabel>
+                        <div className="relative">
+                          <FormControl>
+                            <Input
+                              type={showNewPw ? "text" : "password"}
+                              autoComplete="new-password"
+                              className="pr-10"
+                              {...field}
+                            />
+                          </FormControl>
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            onClick={() => setShowNewPw((v) => !v)}
+                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                            aria-label={
+                              showNewPw ? "Hide password" : "Show password"
+                            }
+                          >
+                            {showNewPw ? (
+                              <Eye className="h-4 w-4" />
+                            ) : (
+                              <EyeOff className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
 
-              <FormField
-                control={passwordForm.control}
-                name="confirmNewPassword"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Confirm New Password</FormLabel>
-                    <FormControl>
-                      <div className="relative">
-                        <Input
-                          type={showConfirmPw ? "text" : "password"}
-                          autoComplete="new-password"
-                          className="pr-10"
-                          {...field}
-                        />
-                        <button
-                          type="button"
-                          tabIndex={-1}
-                          onClick={() => setShowConfirmPw((v) => !v)}
-                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                          aria-label={showConfirmPw ? "Hide password" : "Show password"}
-                        >
-                          {showConfirmPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-                        </button>
-                      </div>
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+                  <FormField
+                    control={passwordForm.control}
+                    name="confirmNewPassword"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Confirm New Password</FormLabel>
+                        <div className="relative">
+                          <FormControl>
+                            <Input
+                              type={showConfirmPw ? "text" : "password"}
+                              autoComplete="new-password"
+                              className="pr-10"
+                              {...field}
+                            />
+                          </FormControl>
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            onClick={() => setShowConfirmPw((v) => !v)}
+                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                            aria-label={
+                              showConfirmPw ? "Hide password" : "Show password"
+                            }
+                          >
+                            {showConfirmPw ? (
+                              <Eye className="h-4 w-4" />
+                            ) : (
+                              <EyeOff className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
 
-              <div className="flex justify-end">
-                {isPasswordUser ? (
-                  <Button
-                    variant="primary"
-                    type="submit"
-                    isLoading={passwordForm.formState.isSubmitting}
-                    disabled={!passwordForm.formState.isDirty}
-                  >
-                    Change Password
-                  </Button>
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      {/* span wrapper: disabled buttons swallow pointer events */}
-                      <span tabIndex={0}>
-                        <Button variant="primary" type="button" disabled>
-                          Change Password
-                        </Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-[280px] text-xs">
-                      You signed in with{" "}
-                      {providerLabel ?? "an OAuth provider"}, so this account
-                      has no password. Password sign-in can be added when
-                      email/password login is enabled for your account.
-                    </TooltipContent>
-                  </Tooltip>
-                )}
-              </div>
-            </fieldset>
-            </form>
-          </Form>
-        </CardContent>
-      </Card>
+                  <div className="flex justify-end">
+                    <Button
+                      variant="primary"
+                      type="submit"
+                      isLoading={passwordForm.formState.isSubmitting}
+                      disabled={!passwordForm.formState.isDirty}
+                    >
+                      Change Password
+                    </Button>
+                  </div>
+                </fieldset>
+              </form>
+            </Form>
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="border-destructive/40">
         <CardHeader className="flex-col sm:flex-row sm:items-center sm:justify-between gap-4">

@@ -1,5 +1,6 @@
 export type ChallengeStatus = "PENDING" | "APPROVED" | "DENIED" | "EXPIRED";
 export type ApprovalMode = "per_request" | "grant";
+export type ApprovalDecisionChannel = "web" | "telegram" | "mobile";
 
 export type ChallengeItem = {
   id: string;
@@ -7,7 +8,7 @@ export type ChallengeItem = {
   action: string;
   resource: string;
   approval_mode: ApprovalMode;
-  risk_level: "low" | "medium" | "high";
+  risk_level: "low" | "medium" | "high" | "unknown";
   status: ChallengeStatus;
   created_at: string;
   expires_at: string;
@@ -22,9 +23,12 @@ export type ChallengeItem = {
 
 export type ChallengeDetail = ChallengeItem & {
   summary: string;
+  /** Actual decision metadata, absent on older servers and pending requests. */
+  decided_at?: string | null;
+  decision_channel?: ApprovalDecisionChannel | null;
   request_context: {
     client: string;
-    location: string;
+    requester: string;
   };
   /**
    * Stable service identifier (e.g. catalog slug or `UserService.slug`).
@@ -33,6 +37,11 @@ export type ChallengeDetail = ChallengeItem & {
    * underlying service rather than the user-editable display title.
    */
   service_slug: string;
+  tool_name?: string | null;
+  tool_call_id?: string | null;
+  tool_arguments?: string | null;
+  is_destructive?: boolean | null;
+  verb?: string | null;
 };
 
 export type ApprovalItem = {

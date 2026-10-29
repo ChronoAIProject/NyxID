@@ -41,6 +41,7 @@ export function ComposerSettings({
   agentOverride,
   active = false,
   disabled = false,
+  onVoiceSettings,
 }: {
   readonly conversationId?: string;
   readonly model: string;
@@ -48,6 +49,7 @@ export function ComposerSettings({
   readonly agentOverride?: NyxAgentAccessMode | null;
   readonly active?: boolean;
   readonly disabled?: boolean;
+  readonly onVoiceSettings?: () => void;
 }) {
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const thinking = model === "nyxagent/research";
@@ -227,6 +229,10 @@ export function ComposerSettings({
             </DropdownMenuItem>
           )}
         </SettingsSection>
+        {onVoiceSettings && <>
+          <DropdownMenuSeparator className="my-0.5" />
+          <DropdownMenuItem onSelect={onVoiceSettings}>Voice settings</DropdownMenuItem>
+        </>}
       </DropdownMenuContent>
     </DropdownMenu>
   );

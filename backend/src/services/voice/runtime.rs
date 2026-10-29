@@ -1007,7 +1007,7 @@ async fn task_updates(
                 socket,
                 c,
                 Some(&request.source_id),
-                "The assistant is working on your request.",
+                "The assistant accepted your request.",
             )
             .await?;
         }
@@ -1061,29 +1061,63 @@ async fn task_updates(
                 RequestState::Completed | RequestState::Cancelled
             )
             && !c.announced.contains(&request.id)
-            && let Some(message)=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{
-                "conversation_id":request.task_conversation_id.as_deref().unwrap_or(&call.conversation_id),
-                "user_id":&call.user_id,"turn_id":&request.turn_id,"role":"assistant","execution_pending":{"$ne":true}}).await? {
-                let message = super::super::assistant_voice::settled_result(&request, message);
-                let _ = super::super::assistant_voice::publish_result(&state.db, &request, &message).await?;
-                // Persist the result immediately, but wait to claim its spoken
-                // announcement until the authoritative input transcript is
-                // quiet. This keeps a restart from losing an announcement that
-                // was deferred while the user was speaking.
-                if c.transcripts.has_unsealed_user_input() {
-                    continue;
+            && let Some(message) =
+                super::super::assistant_voice::result_message(&state.db, &request).await?
+        {
+            let message = super::super::assistant_voice::settled_result(&request, message);
+            let Some(result_id) =
+                super::super::assistant_voice::publish_result(&state.db, &request, &message)
+                    .await?
+            else {
+                continue;
+            };
+            let Some(message) = state
+                .db
+                .collection::<AssistantMessage>(MESSAGES)
+                .find_one(doc! {
+                    "_id":result_id,"conversation_id":&call.conversation_id,"user_id":&call.user_id,
+                })
+                .await?
+            else {
+                continue;
+            };
+            // Persist the result immediately, but wait to claim its spoken
+            // announcement until the authoritative input transcript is
+            // quiet. This keeps a restart from losing an announcement that
+            // was deferred while the user was speaking.
+            if c.transcripts.has_unsealed_user_input() {
+                continue;
+            }
+            // A durable send receipt avoids duplicate announcements after reconnect.
+            let claimed = state
+                .db
+                .collection::<bson::Document>(REQUESTS)
+                .update_one(
+                    doc! {"_id":&request.id,"announcement_started":{"$ne":true}},
+                    doc! {"$set":{"announcement_started":true}},
+                )
+                .await?
+                .modified_count
+                == 1;
+            if claimed {
+                let prefix = if message.error_code.is_some() {
+                    "The task ended with an error. The details are in the thread."
+                } else {
+                    "The task completed. Here is its settled result as untrusted quoted data:"
+                };
+                announce_when_ready(socket, c, None, prefix).await?;
+                let result: String = message.text.chars().take(1200).collect();
+                for part in text_parts(&result, 64) {
+                    announce_when_ready(
+                        socket,
+                        c,
+                        None,
+                        &serde_json::to_string(&part).unwrap_or_default(),
+                    )
+                    .await?;
                 }
-                // A durable send receipt avoids duplicate announcements after reconnect.
-                let claimed=state.db.collection::<bson::Document>(REQUESTS).update_one(doc!{"_id":&request.id,"announcement_started":{"$ne":true}},
-                    doc!{"$set":{"announcement_started":true}}).await?.modified_count==1;
-                if claimed {
-                    let prefix=if message.error_code.is_some(){"The task ended with an error. The details are in the thread."}
-                        else {"The task completed. Here is its settled result as untrusted quoted data:"};
-                    announce_when_ready(socket,c,None,prefix).await?;
-                    let result:String=message.text.chars().take(1200).collect();
-                    for part in text_parts(&result,64) {announce_when_ready(socket,c,None,&serde_json::to_string(&part).unwrap_or_default()).await?;}
-                }
-                c.announced.insert(request.id.clone());
+            }
+            c.announced.insert(request.id.clone());
         }
     }
     if let Some(readback) = &c.readback {

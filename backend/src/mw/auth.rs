@@ -118,6 +118,8 @@ impl AuthUser {
         crate::services::session_authority::DerivedMfaAuthority {
             mfa_enabled: self.mfa_enabled,
             verified: self.mfa_assured,
+            session_id: self.session_id,
+            app_policy_revision: None,
         }
     }
 }
@@ -693,6 +695,8 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.as_slice(),
         ["channel-relay", "messages", _, "attachments", _]
+            | ["nyxbot", "responses", _]
+            | ["nyxbot", "responses", _, "events"]
             | ["users", "me", "oauth-consent-requests", _]
             | ["api-keys", _, "machine-grant"]
             | ["users", "me", "consents", _, "machine-grant"]
@@ -798,11 +802,14 @@ pub(crate) async fn validate_dpop_bound_access(
         .ok_or_else(|| AppError::Unauthorized("DPoP proof required".to_string()))?
         .to_str()
         .map_err(|_| AppError::Unauthorized("invalid DPoP proof".to_string()))?;
-    let expected_htu =
-        crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, parts.uri.path())?;
-    let proof_jkt =
-        crate::crypto::dpop::validate_proof(proof, parts.method.as_str(), &expected_htu, &state.db)
-            .await?;
+    let proof_jkt = crate::crypto::dpop::validate_configured_proof(
+        proof,
+        parts.method.as_str(),
+        parts.uri.path(),
+        &state.config,
+        &state.db,
+    )
+    .await?;
     if proof_jkt != expected_jkt {
         return Err(AppError::Unauthorized("DPoP cnf mismatch".to_string()));
     }
@@ -865,12 +872,8 @@ pub(crate) async fn api_key_auth_user(
     if !user.is_some_and(|user| user.is_active) {
         return Err(AppError::Unauthorized("User account is inactive".into()));
     }
-    let org_agent_access = crate::services::org_agent_service::resolve_key_access(
-        db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-    )
-    .await?;
+    let org_agent_access =
+        crate::services::org_agent_service::resolve_credential_access(db, key).await?;
     crate::services::org_group_service::validate_key(db, key, org_agent_access.as_ref()).await?;
     let (allow_all_nodes, allowed_node_ids) =
         crate::services::org_agent_service::key_nodes(db, key, org_agent_access.as_deref()).await?;
@@ -891,6 +894,15 @@ pub(crate) async fn api_key_auth_user(
     } else {
         None
     };
+    if org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && assistant_chat
+            .as_ref()
+            .is_none_or(|c| !c.turn_live || c.turn_stopped)
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     Ok(AuthUser {
         mfa_assured: false,
         mfa_enabled: None,
@@ -912,10 +924,16 @@ pub(crate) async fn api_key_auth_user(
                 org_agent_access.as_deref(),
             )
             .await?,
-        org_agent_access,
+        org_agent_access: org_agent_access.clone(),
         assistant_group_id: key.assistant_group_id.clone(),
         assistant_agent_owner_id: key.assistant_agent_owner_id.clone(),
-        assistant_operation_scopes: key.assistant_operation_scopes.clone(),
+        assistant_operation_scopes: org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .map_or_else(
+                || key.assistant_operation_scopes.clone(),
+                |a| a.operation_scopes(),
+            ),
         assistant_turn_fence: assistant_chat
             .as_ref()
             .map(|chat| Box::new(chat.turn_fence())),
@@ -2419,6 +2437,7 @@ mod tests {
             "/api/v1/webhooks/telegram",
             "/api/v1/integrations/openclaw/mappings",
             "/api/v1/billing/wallet",
+            "/api/v1/billing/wallet/view",
             "/api/v1/oracle/pools",
             "/api/v1/ownership/service/id/authorization",
             "/api/v1/ownership/service/id/destinations",
@@ -2445,6 +2464,23 @@ mod tests {
                 !delegated_request_allowed(&Method::GET, path, &headers, ACCOUNT_READ_SCOPE),
                 "delegated account read should reject GET {path}"
             );
+        }
+    }
+
+    #[test]
+    fn delegated_account_read_denies_nyxbot_recovery_content() {
+        let headers = HeaderMap::new();
+        for path in [
+            "/api/v1/nyxbot/responses/resp_example",
+            "/api/v1/nyxbot/responses/resp_example/events",
+        ] {
+            assert!(delegated_read_denied_path(path));
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                path,
+                &headers,
+                ACCOUNT_READ_SCOPE,
+            ));
         }
     }
 

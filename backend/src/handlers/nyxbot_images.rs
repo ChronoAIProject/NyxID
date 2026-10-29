@@ -313,6 +313,10 @@ pub(super) async fn send_turn_images_with_stop(
     if attachments.is_empty() {
         return Ok(report);
     }
+    if ctx.channel.gateway_source.is_some() {
+        // A native source never borrows relay anchors, credentials or sends.
+        return Err(AppError::ChannelMediaUnsupported);
+    }
     let key = audience_key(state, &ctx).await?;
     let started = Instant::now();
     let budget = ctx.deadline.map_or(Duration::from_secs(120), |deadline| {
@@ -771,6 +775,9 @@ pub fn event_anchor(
     event: &crate::models::nyxbot_channel::NyxbotEvent,
     delivery: &crate::models::nyxbot_channel::ChannelTurnDelivery,
 ) -> ImageAnchor {
+    if delivery.state == "replay" {
+        return ImageAnchor::NoAnchor;
+    }
     if delivery.origin.thread.is_some() {
         return ImageAnchor::Thread {
             origin: delivery.origin.clone(),
@@ -790,6 +797,9 @@ pub fn event_anchor(
 }
 
 pub fn thread_anchor(channel: &NyxbotChannel, thread: &NyxbotThread) -> ImageAnchor {
+    if channel.transport == "gateway" && channel.gateway_source.is_some() {
+        return ImageAnchor::NoAnchor;
+    }
     let relay_era = thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
     let direct_text_path = channel.transport != "gateway" || relay_era;
     let message = if direct_text_path {

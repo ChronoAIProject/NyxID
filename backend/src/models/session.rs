@@ -18,15 +18,17 @@ pub enum SessionPurpose {
 pub enum MfaExemption {
     MobileRollout,
     LegacyMigration,
+    ApprovedSignInPolicy,
 }
 
-/// Authentication accepts existing devices; derivation requires verified MFA.
+/// Authentication accepts explicit exemptions; ordinary derivation requires verified MFA.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MfaAssurance {
     Verified,
     Unverified,
     Legacy,
     MobileExempt,
+    ApprovedSignInExempt,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +133,16 @@ mod tests {
             (
                 Some(bson::Bson::Boolean(true)),
                 Some("mobile_rollout"),
+                MfaAssurance::Verified,
+            ),
+            (
+                Some(bson::Bson::Boolean(false)),
+                Some("approved_sign_in_policy"),
+                MfaAssurance::ApprovedSignInExempt,
+            ),
+            (
+                Some(bson::Bson::Boolean(true)),
+                Some("approved_sign_in_policy"),
                 MfaAssurance::Verified,
             ),
         ] {

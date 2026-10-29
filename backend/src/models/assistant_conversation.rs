@@ -122,6 +122,9 @@ pub fn carried_report_to(report_to: Option<&str>, provenance: u8) -> Option<Stri
 /// channel bot through the Agent Event Gateway. Identifiers only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelOrigin {
+    /// Original native provider event for asynchronous updates; never a capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_event_id: Option<String>,
     #[serde(default)]
     pub thread: Option<Box<super::channel_thread_follow::ThreadTurnBinding>>,
     /// The NyxBot channel (`nyxbot_channels._id`).
@@ -270,6 +273,10 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRefusal {
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub error_code: Option<u32>,
     pub code: String,
     pub attempt_id: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -494,6 +501,10 @@ pub struct AssistantConversation {
     #[serde(default)]
     pub title_source: TitleSource,
     pub model: String,
+    /// Exact route admitted by an owner on this thread, including legacy channel
+    /// threads whose profile differs from the agent default. Never browser input.
+    #[serde(default)]
+    pub owner_model_route: Option<Box<super::assistant_agent::OwnerModelRoute>>,
     #[serde(default)]
     pub access_mode: AccessMode,
     pub nyxagent_session_id: Option<String>,
@@ -530,6 +541,9 @@ pub struct AssistantConversation {
     /// Stable agent owner binding; the conversation itself belongs to the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner_id: Option<String>,
+    /// Actor-owned private history survives withdrawal of personal-agent sharing.
+    #[serde(default)]
+    pub shared_agent_thread: bool,
     /// L1 enrollment cohort. Missing or zero-valued legacy rows are not
     /// eligible evidence; new rows set this only when learning is enabled and
     /// the owner/member has opted in.

@@ -1,6 +1,14 @@
 import Constants from "expo-constants";
+import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View, type ViewStyle } from "react-native";
+import {
+  ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  type ViewStyle,
+} from "react-native";
 import Markdown from "react-native-markdown-display";
 
 import { BlurBackButton } from "../../components/BlurBackButton";
@@ -30,9 +38,13 @@ type Props = {
 
 const FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n*/;
 
-function stripFrontMatter(md: string): { content: string; effectiveDate: string | null } {
+function stripFrontMatter(md: string): {
+  content: string;
+  effectiveDate: string | null;
+} {
   const match = md.match(FRONT_MATTER_RE);
-  if (!match || !match[0] || !match[1]) return { content: md, effectiveDate: null };
+  if (!match || !match[0] || !match[1])
+    return { content: md, effectiveDate: null };
   const body = md.slice(match[0].length);
   const dateMatch = match[1].match(/effective_date:\s*(\S+)/);
   return { content: body, effectiveDate: dateMatch?.[1] ?? null };
@@ -40,12 +52,21 @@ function stripFrontMatter(md: string): { content: string; effectiveDate: string 
 
 function resolveDocUrl(docKey: "privacy" | "terms"): string | null {
   const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, unknown>;
-  const baseUrl = typeof extra.LEGAL_BASE_URL === "string" ? extra.LEGAL_BASE_URL.replace(/\/$/, "") : "";
+  const baseUrl =
+    typeof extra.LEGAL_BASE_URL === "string"
+      ? extra.LEGAL_BASE_URL.replace(/\/$/, "")
+      : "";
   if (!baseUrl) return null;
   return `${baseUrl}/legal/${docKey}.md`;
 }
 
-export function LegalDocumentScreen({ title, docKey, telemetryBackTarget, onBack }: Props) {
+export function LegalDocumentScreen({
+  title,
+  docKey,
+  telemetryBackTarget,
+  onBack,
+}: Props) {
+  const inWorkspaceSheet = Boolean(useWorkspaceSheet());
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
@@ -88,33 +109,48 @@ export function LegalDocumentScreen({ title, docKey, telemetryBackTarget, onBack
 
   return (
     <ScreenContainer>
-      <View style={styles.stickyBack}>
-        <BlurBackButton
-          onPress={() => {
-            capture({
-              name: "ui.mobile_nav_target_opened",
-              props: { target: telemetryBackTarget, source: "back" },
-            });
-            onBack();
-          }}
-        />
-      </View>
+      {!inWorkspaceSheet && (
+        <View style={styles.stickyBack}>
+          <BlurBackButton
+            onPress={() => {
+              capture({
+                name: "ui.mobile_nav_target_opened",
+                props: { target: telemetryBackTarget, source: "back" },
+              });
+              onBack();
+            }}
+          />
+        </View>
+      )}
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra, { paddingHorizontal: spacing.xxl }]}
+        contentContainerStyle={[
+          flowStyles.scrollContent,
+          styles.scrollContentExtra,
+          inWorkspaceSheet && { paddingTop: spacing.xxl },
+          { paddingHorizontal: spacing.xxl },
+        ]}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={flowStyles.title}>{title}</Text>
+        {!inWorkspaceSheet && <Text style={flowStyles.title}>{title}</Text>}
         {effectiveDate ? (
-          <Text style={flowStyles.subtitle}>Effective date: {effectiveDate}</Text>
+          <Text style={flowStyles.subtitle}>
+            Effective date: {effectiveDate}
+          </Text>
         ) : null}
 
         <View style={flowStyles.card}>
           {error ? (
             <View>
-              <Text style={styles.errorTitle}>Unable to load {title.toLowerCase()}</Text>
+              <Text style={styles.errorTitle}>
+                Unable to load {title.toLowerCase()}
+              </Text>
               <Text style={styles.errorBody}>{error}</Text>
-              {url ? <Text style={styles.errorBody}>You can view the latest version at: {url}</Text> : null}
+              {url ? (
+                <Text style={styles.errorBody}>
+                  You can view the latest version at: {url}
+                </Text>
+              ) : null}
             </View>
           ) : content ? (
             <Markdown style={markdownStyles}>{content}</Markdown>
@@ -129,33 +165,34 @@ export function LegalDocumentScreen({ title, docKey, telemetryBackTarget, onBack
   );
 }
 
-const createStyles = (c: ThemeColors) => StyleSheet.create({
-  stickyBack: {
-    position: "absolute",
-    top: spacing.xxl,
-    left: spacing.xxl,
-    zIndex: 10,
-  } satisfies ViewStyle,
-  scrollContentExtra: {
-    paddingTop: 64,
-    paddingBottom: spacing.xxxl,
-  },
-  loading: {
-    paddingVertical: spacing.xxl,
-    alignItems: "center",
-  },
-  errorTitle: {
-    color: c.textPrimary,
-    ...typeScale.bodyStrong,
-    marginBottom: spacing.xs,
-  },
-  errorBody: {
-    color: c.textSecondary,
-    ...typeScale.caption,
-    lineHeight: 18,
-    marginBottom: spacing.xs,
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    stickyBack: {
+      position: "absolute",
+      top: spacing.xxl,
+      left: spacing.xxl,
+      zIndex: 10,
+    } satisfies ViewStyle,
+    scrollContentExtra: {
+      paddingTop: 64,
+      paddingBottom: spacing.xxxl,
+    },
+    loading: {
+      paddingVertical: spacing.xxl,
+      alignItems: "center",
+    },
+    errorTitle: {
+      color: c.textPrimary,
+      ...typeScale.bodyStrong,
+      marginBottom: spacing.xs,
+    },
+    errorBody: {
+      color: c.textSecondary,
+      ...typeScale.caption,
+      lineHeight: 18,
+      marginBottom: spacing.xs,
+    },
+  });
 
 const createMarkdownStyles = (c: ThemeColors) => ({
   body: {
@@ -197,7 +234,7 @@ const createMarkdownStyles = (c: ThemeColors) => ({
     color: c.textPrimary,
   },
   link: {
-    color: c.primary,
+    color: c.primaryOnTint,
   },
   code_inline: {
     color: c.textPrimary,

@@ -146,6 +146,70 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("voice media boundaries", () => {
+  it.each([true, false])(
+    "reports readiness only after both signals (provider first: %s)",
+    async (providerFirst) => {
+      const status = vi.fn();
+      const measure = vi.spyOn(performance, "measure");
+      const client = new AssistantVoiceClient(
+        "thread",
+        vi.fn(),
+        vi.fn(),
+        vi.fn(),
+        vi.fn(),
+        undefined,
+        status,
+      );
+      await client.start(preferences);
+      expect(status.mock.calls.map(([value]) => value)).toEqual([
+        "microphone",
+        "audio",
+        "server",
+        "connecting",
+      ]);
+      expect(measure).not.toHaveBeenCalledWith(
+        "nyxid.voice.startup.total",
+        expect.anything(),
+      );
+      const providerReady = () =>
+        Peer.current.channel.onmessage?.({
+          data: JSON.stringify({ type: "session.started" }),
+        });
+      if (providerFirst) providerReady();
+      else Socket.current.snapshot();
+      expect(status).toHaveBeenLastCalledWith("connecting");
+      expect(track.enabled).toBe(false);
+      await vi.advanceTimersByTimeAsync(250);
+      if (providerFirst) Socket.current.snapshot();
+      else providerReady();
+      expect(status).toHaveBeenLastCalledWith("ready");
+      expect(track.enabled).toBe(true);
+      expect(measure).toHaveBeenCalledWith("nyxid.voice.startup.total", {
+        start: 0,
+        end: 250,
+      });
+      Socket.current.snapshot();
+      expect(
+        status.mock.calls.filter(([value]) => value === "ready"),
+      ).toHaveLength(1);
+      await client.end();
+    },
+  );
+
+  it("ignores a hold started before readiness until the person presses again", async () => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await client.start({ ...preferences, input_mode: "push_to_talk" });
+    client.hold(true);
+    Socket.current.snapshot();
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    });
+    expect(track.enabled).toBe(false);
+    client.hold(true);
+    expect(track.enabled).toBe(true);
+    await client.end();
+  });
+
   it("waits for both authorities, keeps speaker mute local, and never sends provider commands", async () => {
     const closed = vi.fn();
     const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn(), closed);
@@ -214,14 +278,31 @@ describe("voice media boundaries", () => {
   });
   it("reconnects the control stream without ending the call and adopts a new generation", async () => {
     const snapshots = vi.fn();
-    const client = new AssistantVoiceClient("thread", snapshots, vi.fn());
+    const status = vi.fn();
+    const client = new AssistantVoiceClient(
+      "thread",
+      snapshots,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      status,
+    );
     await client.start(preferences);
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    });
     const first = Socket.current;
     first.snapshot();
+    expect(track.enabled).toBe(true);
     first.onclose?.();
+    expect(track.enabled).toBe(false);
+    expect(status).toHaveBeenLastCalledWith("reconnecting");
     expect(client.isClosed).toBe(false);
     await vi.advanceTimersByTimeAsync(1000);
     expect(Socket.current).not.toBe(first);
+    first.snapshot();
+    expect(track.enabled).toBe(false);
     const recovered = { ...session, generation: 2 };
     Socket.current.onmessage?.({
       data: JSON.stringify({
@@ -237,6 +318,8 @@ describe("voice media boundaries", () => {
       }),
     );
     expect(client.isClosed).toBe(false);
+    expect(track.enabled).toBe(true);
+    expect(status).toHaveBeenLastCalledWith("ready");
     await client.end();
   });
 });

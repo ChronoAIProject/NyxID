@@ -580,6 +580,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/verify-email", post(handlers::auth::verify_email))
         .route("/forgot-password", post(handlers::auth::forgot_password))
         .route("/reset-password", post(handlers::auth::reset_password))
+        .route("/password/change", post(handlers::auth::change_password))
         .route("/setup", post(handlers::auth::setup))
         .route("/social/{provider}", get(handlers::social_auth::authorize))
         .route(
@@ -600,6 +601,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/me/preferences/analytics",
             get(handlers::users::get_analytics_consent).put(handlers::users::set_analytics_consent),
+        )
+        .route(
+            "/me/security",
+            put(handlers::users::save_security_preferences),
         )
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
@@ -1906,6 +1911,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/wallet",
             get(handlers::billing::get_wallet).post(handlers::billing::provision_wallet),
         )
+        .route("/wallet/view", get(handlers::billing::view_wallet))
         .route("/topup", post(handlers::billing::create_topup))
         .route("/topups", get(handlers::billing::list_topups))
         .route("/bill", get(handlers::billing::get_bill))
@@ -2574,6 +2580,29 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::catalog),
         )
         .route(
+            "/nyxagent/agents/{id}/consents",
+            get(handlers::assistant_sharing::consents),
+        )
+        .route(
+            "/nyxagent/shared-consents/{id}",
+            axum::routing::post(handlers::assistant_sharing::decide_consent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/sharing",
+            get(handlers::assistant_sharing::get).put(handlers::assistant_sharing::update),
+        )
+        .route(
+            "/nyxagent/agents/{id}/private-notes",
+            get(handlers::assistant_sharing::private_notes)
+                .put(handlers::assistant_sharing::update_notes)
+                .delete(handlers::assistant_sharing::delete_notes),
+        )
+        .route(
+            "/nyxagent/agents/{id}/shared-memory",
+            get(handlers::assistant_sharing::memory)
+                .put(handlers::assistant_sharing::update_memory),
+        )
+        .route(
             "/nyxagent/agents/{id}/skills",
             get(handlers::agent_skills::get).put(handlers::agent_skills::set),
         )
@@ -2654,6 +2683,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/agents/{id}/machines/{node_id}/context-request",
             post(handlers::machine_access::request_context),
+        )
+        .route(
+            "/nyxagent/agents/{id}/guest-operations",
+            get(handlers::assistant_team::guest_operations),
+        )
+        .route(
+            "/nyxagent/agents/{id}/guest-operations/{service_id}",
+            axum::routing::put(handlers::assistant_team::set_guest_operations),
         )
         .route(
             "/nyxagent/agents/{id}/operations",
@@ -3467,6 +3504,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     get(handlers::nyxbot::get_event_context),
                 )
                 .route("/responses", post(handlers::nyxbot::responses_with_runtime))
+                .route("/responses/{response_id}", get(handlers::nyxbot::native_responses::snapshot))
+                .route("/responses/{response_id}/events", get(handlers::nyxbot::native_responses::events))
                 .route("/relay/{channel_id}", post(handlers::nyxbot::relay_callback))
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
@@ -3494,6 +3533,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ))
     } else {
         private
+    };
+
+    let (public_oauth, private) = if let Some(state) = router_state.as_ref() {
+        let layer =
+            middleware::from_fn_with_state(state.clone(), crate::mw::cookie_domain::middleware);
+        (public_oauth.layer(layer.clone()), private.layer(layer))
+    } else {
+        (public_oauth, private)
     };
 
     (

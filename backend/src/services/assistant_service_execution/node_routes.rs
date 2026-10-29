@@ -27,12 +27,8 @@ pub fn verify_node_route<'a>(
             .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
             .await?
             .ok_or_else(|| AppError::Forbidden("Assistant credential revoked".into()))?;
-        let access = crate::services::org_agent_service::resolve_key_access(
-            db,
-            &key.user_id,
-            key.assistant_agent_owner_id.as_deref(),
-        )
-        .await?;
+        let access =
+            crate::services::org_agent_service::resolve_credential_access(db, &key).await?;
         let (all, nodes) =
             crate::services::org_agent_service::key_nodes(db, &key, access.as_deref()).await?;
         if let Some(route) = route {

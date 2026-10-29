@@ -1,4 +1,6 @@
 use super::*;
+#[path = "assistant_guest_turn_tests.rs"]
+mod guest_turn_tests;
 use crate::services::assistant_engine_policy as engine_policy;
 use crate::services::assistant_nyxagent::TurnResult;
 use crate::{
@@ -2257,6 +2259,160 @@ async fn retired_access_mode_route_answers_gone_and_every_chat_reports_full() {
 }
 
 #[tokio::test]
+async fn history_names_the_automation_behind_an_automation_turn() {
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("history_automation")
+        .await;
+    let messages = f
+        .state
+        .db
+        .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME);
+    let mut message = messages
+        .find_one(doc! {"conversation_id": &f.row.id, "role": "user"})
+        .await
+        .unwrap()
+        .unwrap();
+    message.id = uuid::Uuid::new_v4().to_string();
+    message.turn_id = "automation-turn".into();
+    message.role = "event".into();
+    message.seq = 50;
+    message.origin = Some(crate::models::assistant_conversation::TurnOrigin::Trigger);
+    messages.insert_one(&message).await.unwrap();
+    let docs = |name: &str| f.state.db.collection::<mongodb::bson::Document>(name);
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "run-1", "trigger_id": "trigger-1", "user_id": &f.owner, "turn_id": "automation-turn"})
+        .await
+        .unwrap();
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "trigger-1", "user_id": &f.owner, "label": "Keep the FAQ current"})
+        .await
+        .unwrap();
+    // Another owner's trigger with the same turn never names this message.
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "run-2", "trigger_id": "trigger-2", "user_id": "someone-else", "turn_id": "automation-turn"})
+        .await
+        .unwrap();
+    let Json(page) = history(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path(f.row.id.clone()),
+        Query(HistoryQuery::default()),
+    )
+    .await
+    .unwrap();
+    let dto = serde_json::to_value(page).unwrap();
+    let rows = dto["messages"].as_array().unwrap();
+    let automation = rows
+        .iter()
+        .find(|m| m["turn_id"] == "automation-turn")
+        .unwrap();
+    assert_eq!(automation["origin"], "trigger");
+    assert_eq!(
+        automation["automation"],
+        serde_json::json!({"trigger_id": "trigger-1", "run_id": "run-1", "label": "Keep the FAQ current"})
+    );
+    assert!(
+        rows.iter()
+            .filter(|m| m["turn_id"] != "automation-turn")
+            .all(|m| m["automation"].is_null())
+    );
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "run-1"},
+            doc! {"$set": {"label": "Original run label"}},
+        )
+        .await
+        .unwrap();
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "trigger-1"},
+            doc! {"$set": {"label": "Renamed automation"}},
+        )
+        .await
+        .unwrap();
+    let mut named = vec![MessageResponse::from(message.clone())];
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
+    assert_eq!(
+        named[0].automation.as_ref().unwrap().label,
+        "Renamed automation"
+    );
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .delete_one(doc! {"_id": "trigger-1"})
+        .await
+        .unwrap();
+    named[0].automation = None;
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
+    assert_eq!(
+        named[0].automation.as_ref().unwrap().label,
+        "Original run label"
+    );
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .delete_one(doc! {"_id": "run-1"})
+        .await
+        .unwrap();
+    named[0].automation = None;
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
+    assert!(named[0].automation.is_none());
+
+    let client =
+        mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=50")
+            .await
+            .unwrap();
+    attach_automations(
+        &client.database("unavailable"),
+        &f.owner,
+        &f.row.id,
+        &mut named,
+    )
+    .await;
+    assert!(named[0].automation.is_none());
+    assert_eq!(named[0].text, message.text);
+}
+
+#[tokio::test]
+async fn automation_enrichment_warning_keeps_diagnostics_and_omits_message_text() {
+    use tracing::instrument::WithSubscriber;
+
+    let client =
+        mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=50")
+            .await
+            .unwrap();
+    let message = bson::from_document::<AssistantMessage>(doc! {
+        "_id": "automation-message", "conversation_id": "automation-conversation", "user_id": OWNER,
+        "seq": 1_i64, "turn_id": "automation-turn", "role": "event",
+        "text": "PRIVATE automation input", "status": "completed", "origin": "trigger",
+        "created_at": bson::DateTime::now(), "activities": [], "attachments": [],
+    })
+    .unwrap();
+    let mut messages = vec![MessageResponse::from(message)];
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let writer = capture.reopen().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.try_clone().unwrap())
+        .finish();
+    Box::pin(attach_automations(
+        &client.database("unavailable"),
+        OWNER,
+        "automation-conversation",
+        &mut messages,
+    ))
+    .with_subscriber(subscriber)
+    .await;
+    let logs = std::fs::read_to_string(capture.path()).unwrap();
+    assert!(logs.contains("WARN"));
+    assert!(logs.contains("Could not attach automation names to history"));
+    assert!(logs.contains("error=Database error"));
+    assert!(logs.contains(OWNER));
+    assert!(logs.contains("conversation_id=\"automation-conversation\""));
+    assert!(logs.contains("message_count=1"));
+    assert!(!logs.contains("PRIVATE automation input"));
+    assert_eq!(messages[0].text, "PRIVATE automation input");
+    assert!(messages[0].automation.is_none());
+}
+
+#[tokio::test]
 async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
     use crate::models::assistant_acknowledgement::{
         AssistantAcknowledgement, COLLECTION_NAME as ACKS,
@@ -2524,6 +2680,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        activity_id: None,
         invocation_id: None,
         routing: None,
         link: None,
@@ -3108,6 +3265,7 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
     // A claimed turn can retain this snapshot after its channel is removed
     // while first-turn history or upload preparation is in flight.
     row.channel = Some(ChannelOrigin {
+        native_event_id: None,
         nyxbot_channel_id: "removed-channel".into(),
         partition: "thread_v1_removed".into(),
         platform: "telegram".into(),

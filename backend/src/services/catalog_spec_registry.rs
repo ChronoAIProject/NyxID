@@ -305,13 +305,18 @@ pub struct OperationMarks {
     /// Aevatar's marker is Aevatar's contract; NyxID adds its own rather
     /// than change it.
     pub changes_existing: Option<bool>,
+    /// NyxID-owned append-only attestation, matched by exact route only.
+    pub append_only: bool,
+    pub append_only_query: Option<&'static serde_json::Map<String, serde_json::Value>>,
 }
 
 impl OperationMarks {
-    pub fn of(operation: &serde_json::Value) -> Self {
+    pub fn of(operation: &'static serde_json::Value) -> Self {
         Self {
             destructive: operation["x-aevatar-tool"]["destructive"].as_bool() == Some(true),
             changes_existing: operation["x-nyxid-changes-existing"].as_bool(),
+            append_only: operation["x-nyxid-append-only"].as_bool() == Some(true),
+            append_only_query: operation["x-nyxid-append-only-query"].as_object(),
         }
     }
 }
@@ -356,6 +361,8 @@ pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> Oper
         .unwrap_or_default();
     OperationMarks {
         destructive: by_name.destructive || by_route.destructive,
+        append_only: by_route.append_only,
+        append_only_query: by_route.append_only_query,
         changes_existing: if by_name.changes_existing == Some(true)
             || by_route.changes_existing == Some(true)
         {

@@ -239,6 +239,13 @@ impl Drop for Fixture {
     }
 }
 async fn fixture(profile: Profile, gated: bool) -> Fixture {
+    fixture_with_model(profile, gated, None).await
+}
+async fn fixture_with_model(
+    profile: Profile,
+    gated: bool,
+    platform_model: Option<bool>,
+) -> Fixture {
     crate::test_utils::init_test_audit_chain_hmac_key();
     let db = connect_transaction_test_database("adapter_faq").await;
     engine::ensure_indexes(&db).await.unwrap();
@@ -248,7 +255,7 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
         .insert_one(test_user(&owner, UserType::Person))
         .await
         .unwrap();
-    let state = test_app_state(db);
+    let mut state = test_app_state(db);
     crate::services::feature_flag_service::set_platform_override(
         &state.db,
         crate::services::feature_flag_service::NYXBOT_ADAPTERS_FLAG_KEY,
@@ -272,7 +279,7 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
                 Json(json!({"faq":*f.read().await}))
             }
         }),
-    ))
+    ).route("/responses",post(||async {Json(json!({"id":"provider-response","output":[],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}))})))
     .await;
     let notion = connection(
         &state,
@@ -365,6 +372,62 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
         .unwrap()
         .identity;
     persist_binding(&state, &b).await;
+    if let Some(platform) = platform_model {
+        // Add an actual callback before the FAQ tool, exactly as the channel
+        // runtime uses the engine's thread key for model transport.
+        let model = connection(
+            &state,
+            &owner,
+            "chrono-llm-public",
+            &notion_origin,
+            "bearer",
+            "test-model",
+        )
+        .await;
+        let selected = state
+            .db
+            .collection::<bson::Document>("user_services")
+            .find_one(doc! {"_id":&model})
+            .await
+            .unwrap()
+            .unwrap();
+        let catalog = selected.get_str("catalog_service_id").unwrap();
+        let mut fields = doc! {"inference":{"wire_protocol":"openai_responses"}};
+        if platform {
+            fields.insert("platform_key", doc! {"enabled":true,"audience":"public"});
+            fields.insert("requires_user_credential", false);
+            fields.insert("service_category", "internal");
+            fields.insert(
+                "credential_encrypted",
+                bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: state.encryption_keys.encrypt(b"test-model").await.unwrap(),
+                },
+            );
+            state.db.collection::<bson::Document>("user_services").update_one(doc!{"_id":&model},doc!{"$set":{"credential_binding":"platform","source":"auto_provision","api_key_id":bson::Bson::Null}}).await.unwrap();
+        }
+        state
+            .db
+            .collection::<bson::Document>("downstream_services")
+            .update_one(doc! {"_id":catalog}, doc! {"$set":fields})
+            .await
+            .unwrap();
+        crate::billing_integration_tests::create_usage_index(&state.db).await;
+        state.billing = Arc::new(crate::billing_integration_tests::billing_service(
+            &state.db,
+            Arc::new(crate::billing_integration_tests::FakeLago::default()),
+            1000,
+        ));
+        for metric in ["platform_requests", "platform_tokens", "platform_bytes"] {
+            state
+                .db
+                .collection("billing_rate_cache")
+                .insert_one(crate::billing_integration_tests::rate(metric, Utc::now()))
+                .await
+                .unwrap();
+        }
+        state.db.collection::<bson::Document>("downstream_services").update_many(doc!{"_id":{"$in":[catalog,&faq_service_id]}},doc!{"$set":{"billing":{"platform_billable":true,"platform_charge_nyxid_credentials_only":false}}}).await.unwrap();
+    }
     let proxy = Router::new()
         .route(
             "/proxy/s/{slug}/{*path}",
@@ -396,6 +459,16 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
         let _finished = finished.drop_guard();
         captures.lock().await.push(body);g.acquire().await.unwrap().forget();
         let authorization=headers.get("authorization").unwrap().clone();
+        if platform_model.is_some() {
+            let response=proxy.clone().oneshot(Request::builder().method("POST").uri("/proxy/s/chrono-llm-public/responses").header("authorization",authorization.clone()).header("content-type","application/json").header("accept","*/*")
+                .body(Body::from(json!({"model":"gpt-5.6-sol","store":false,"input":"channel question","client_metadata":{"session_id":"fixture-session","thread_id":"fixture-thread","turn_id":"fixture-turn"}}).to_string())).unwrap()).await.unwrap();
+            let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
+            if !status.is_success() {
+                assert_eq!(status,StatusCode::FORBIDDEN,"{}",String::from_utf8_lossy(&bytes));
+                let failed=json!({"type":"response.failed","sequence_number":0,"response":{"id":"resp_fixture","status":"failed","error":{"code":"turn_failed","message":"never disclose provider detail"}}});
+                return ([("content-type","text/event-stream")],Body::from(format!("data: {failed}\n\n"))).into_response();
+            }
+        }
         let response=proxy.oneshot(Request::builder().uri(format!("/proxy/s/api-notion/faq?_nyxid_via={notion}")).header("authorization",authorization).body(Body::empty()).unwrap()).await.unwrap();
         let status=response.status();codes.lock().await.push(status.as_u16());let bytes=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
         error_codes.lock().await.push(serde_json::from_slice::<Value>(&bytes).ok().and_then(|body| body["error_code"].as_u64()));
@@ -3830,6 +3903,277 @@ async fn late_authenticated_receipts_cannot_recreate_data_after_binding_or_owner
             .db
             .collection::<EventReceipt>(EVENTS)
             .count_documents(doc! {"user_id":&f.b.user_id})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+macro_rules! guest_model_adapter_cases {
+    ($($name:ident => $profile:ident),+ $(,)?) => {$ (
+        #[tokio::test]
+        async fn $name() {
+            for (platform, owner_first) in [(true, true), (false, true), (true, false), (false, false)] {
+                Box::pin(guest_model_adapter(Profile::$profile, platform, owner_first)).await;
+            }
+        }
+    )+};
+}
+guest_model_adapter_cases! {
+    guest_1995_telnyx_relay_model_and_refusal => TelnyxRelay,
+    guest_1995_twilio_relay_model_and_refusal => TwilioRelay,
+    guest_1995_telnyx_sms_model_and_refusal => TelnyxSms,
+    guest_1995_twilio_sms_model_and_refusal => TwilioSms,
+    guest_1995_elevenlabs_model_and_refusal => ElevenlabsCustomLlm,
+}
+
+async fn guest_model_adapter(profile: Profile, platform: bool, owner_first: bool) {
+    use crate::models::usage_meter::{CredentialClass, UsageMeterRow, UsageStatus};
+    let f = fixture_with_model(profile, false, Some(platform)).await;
+    if owner_first {
+        let model = f
+            .state
+            .db
+            .collection::<DownstreamService>("downstream_services")
+            .find_one(doc! {"slug":"chrono-llm-public"})
+            .await
+            .unwrap()
+            .unwrap();
+        crate::services::approval_service::set_service_approval_config(
+            &f.state.db,
+            &f.b.user_id,
+            &model.id,
+            "Model",
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let request: engine::TurnRequest = serde_json::from_value(json!({
+            "agent_id":f.b.agent_id,"text":"Read the FAQ."
+        }))
+        .unwrap();
+        let permit = f
+            .state
+            .direct_chat_limiter
+            .try_acquire(&f.b.user_id)
+            .await
+            .unwrap();
+        let (_, mut events) = Box::pin(crate::handlers::assistant_nyxagent::start_turn(
+            &f.state,
+            crate::test_utils::test_auth_user(&f.b.user_id),
+            &engine::TurnStart::from(&request),
+            Some(crate::handlers::assistant_nyxagent::SERVER_TURN_POLICY),
+            permit,
+        ))
+        .await
+        .unwrap();
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event["event"] == "turn.completed" {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(completed["status"], "completed", "{completed}");
+        let agent = f
+            .state
+            .db
+            .collection::<AssistantAgent>("assistant_agents")
+            .find_one(doc! {"_id":&f.b.agent_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            agent.owner_model_route.is_some(),
+            "owner callback establishes the route"
+        );
+    }
+    let s = active_session(&f, "model-call").await;
+    let (mut output, worker) =
+        coordinator::turn(f.state.clone(), &f.b, &s, "question-1", "When do you open?")
+            .await
+            .unwrap();
+    let mut text = String::new();
+    let mut done = false;
+    while let Some(out) = output.recv().await {
+        assert!(!out.error, "safe refusal must reach the channel");
+        // Custom LLM finish chunks discard text, so refusal must precede final.
+        assert!(!out.last || out.text.is_empty());
+        text.push_str(&out.text);
+        done |= out.last;
+    }
+    let result = worker.await.unwrap().unwrap();
+    assert!(done);
+    if platform || owner_first {
+        assert!(result.error.is_none());
+        assert_eq!(text, "The office opens at nine.");
+        assert_eq!(
+            *f.callback_codes.lock().await,
+            vec![200; if owner_first { 2 } else { 1 }]
+        );
+    } else {
+        assert_eq!(text, "This assistant isn't available to guests yet.");
+        assert_eq!(
+            result.error.as_ref().unwrap().code,
+            "guest_model_route_required"
+        );
+        assert!(
+            f.callback_codes.lock().await.is_empty(),
+            "no tool after model refusal"
+        );
+    }
+    let row = f
+        .state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":&s.conversation_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.guest_turn);
+    assert_eq!(row.user_id, f.b.user_id);
+    assert_eq!(row.model, engine::DEFAULT_MODEL);
+    let usage: Vec<UsageMeterRow> = crate::billing_integration_tests::wait_for_charged_usage(
+        &f.state.db,
+        doc! {"service_slug":{"$in":["chrono-llm-public","api-notion"]}},
+        if owner_first {
+            4
+        } else if platform {
+            2
+        } else {
+            0
+        },
+    )
+    .await;
+    for usage in usage {
+        assert_eq!(usage.status, UsageStatus::Finalized);
+        assert_eq!(usage.billing_owner_id, f.b.user_id);
+        assert_eq!(usage.actor_user_id, f.b.user_id);
+        assert_eq!(
+            usage.credential_class,
+            if platform && usage.service_slug.as_deref() == Some("chrono-llm-public") {
+                CredentialClass::NyxidManagedMaster
+            } else {
+                CredentialClass::UserOwned
+            }
+        );
+        assert!(usage.wallet_id.is_some());
+        assert!(usage.funding.as_ref().unwrap().settled);
+        assert!(
+            f.state
+                .db
+                .collection::<bson::Document>("billing_ledger")
+                .find_one(doc! {"owner_id":&f.b.user_id,"reference_id":&usage.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert_eq!(f.state.db.collection::<bson::Document>("usage_meter").count_documents(doc!{"$or":[{"billing_owner_id":{"$ne":&f.b.user_id}},{"actor_user_id":{"$ne":&f.b.user_id}}]}).await.unwrap(),0);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_1995_sms_refusal_is_sent_to_the_inbound_sender() {
+    let mut f = fixture_with_model(Profile::TwilioSms, false, Some(false)).await;
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let captured = sent.clone();
+    let account = f.b.account_id.clone();
+    let provider = Router::new().fallback(any(move |req: Request<Body>| {
+        let captured = captured.clone();
+        let account = account.clone();
+        async move {
+            assert_eq!(req.method(), axum::http::Method::POST);
+            let bytes = axum::body::to_bytes(req.into_body(), 65536).await.unwrap();
+            let fields = url::form_urlencoded::parse(&bytes)
+                .into_owned()
+                .collect::<std::collections::BTreeMap<_, _>>();
+            captured.lock().await.push(fields);
+            Json(json!({"sid":"SM11111111111111111111111111111111",
+                "account_sid":account,"num_segments":"1","status":"sent"}))
+        }
+    }));
+    let (origin, task) = serve(provider).await;
+    f.tasks.push(task);
+    profiles::FIXTURE_ORIGINS
+        .lock()
+        .unwrap()
+        .insert(f.b.account_id.clone(), origin);
+    expose_ingress(&mut f).await;
+    let fields = std::collections::BTreeMap::from([
+        ("AccountSid".into(), f.b.account_id.clone()),
+        (
+            "MessageSid".into(),
+            "SM22222222222222222222222222222222".into(),
+        ),
+        ("From".into(), "+14155550199".into()),
+        ("To".into(), f.b.phone_number.clone()),
+        ("SmsStatus".into(), "received".into()),
+        ("NumSegments".into(), "1".into()),
+        ("NumMedia".into(), "0".into()),
+        ("Body".into(), "Hello".into()),
+    ]);
+    let url = coordinator::webhook_url(&f.state, &f.b);
+    let response = reqwest::Client::new()
+        .post(&url)
+        .header(
+            "x-twilio-signature",
+            twilio_signature(&url, &fields, "fixture-auth-token"),
+        )
+        .form(&fields)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if !sent.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let replies = sent.lock().await;
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["To"], "+14155550199");
+    assert_eq!(replies[0]["From"], f.b.phone_number);
+    assert_eq!(
+        replies[0]["Body"],
+        "This assistant isn't available to guests yet."
+    );
+    drop(replies);
+    // Wait for the sender's settlement before fixture teardown.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if f.state
+                .db
+                .collection::<CallSession>(SESSIONS)
+                .find_one(doc! {"state":"closed","billing_finalized":true})
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("usage_meter")
+            .count_documents(doc! {"billing_owner_id":{"$ne":&f.b.user_id}})
             .await
             .unwrap(),
         0

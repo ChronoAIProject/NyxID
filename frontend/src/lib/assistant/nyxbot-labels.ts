@@ -87,14 +87,30 @@ export const AGENT_STATUS_LABEL = {
 // wording over time, so any NyxID events header is stripped.
 const EVENT_HEADER = /^NyxID events[^:\n]*:\s*/;
 
-/** The individual notices of a server-authored `event` message. */
+/**
+ * The individual notices of a server-authored `event` message. The server
+ * indents continuation lines, leaving unindented `- ` lines as boundaries.
+ * Old rows use quote balancing, with known event openers recovering from
+ * excerpts whose closing quote was truncated by the server.
+ * Text without the events header (an automation's instruction) is one notice.
+ */
 export function eventNotices(text: string): string[] {
-  const body = text.replace(EVENT_HEADER, "");
-  const lines = body
-    .split("\n")
-    .map((line) => line.replace(/^\s*-\s+/, "").trim())
-    .filter(Boolean);
-  return lines.length ? lines : [text.trim()];
+  if (!EVENT_HEADER.test(text)) return [text.trim()];
+  const indented = text.match(EVENT_HEADER)?.[0].includes("continuation lines are indented");
+  const notices: string[] = [];
+  const lines = text.replace(EVENT_HEADER, "").split("\n");
+  let remainingQuotes = (lines.join("\n").match(/"/g) ?? []).length;
+  for (const line of lines) {
+    const current = notices.at(-1);
+    const insideQuote = current !== undefined && (current.match(/"/g)?.length ?? 0) % 2 === 1;
+    const knownEvent = /^- (?:Specialist |The user |NyxBot |Asynchronous service operation|Skill |The owner |The \S+ channel bot )/.test(line);
+    if (/^- /.test(line) && (indented || !insideQuote || (knownEvent && remainingQuotes === 0))) notices.push(line.slice(2).trim());
+    else if (current === undefined) notices.push(line.replace(/^\s*-\s+/, "").trim());
+    else notices[notices.length - 1] = `${current}\n${indented ? line.replace(/^ {2}/, "") : line}`;
+    remainingQuotes -= (line.match(/"/g) ?? []).length;
+  }
+  const kept = notices.map((notice) => notice.trim()).filter(Boolean);
+  return kept.length ? kept : [text.trim()];
 }
 
 export const AGENT_KIND_LABEL = { nyxbot: "NyxBot", specialist: "Specialist" } as const;
@@ -107,6 +123,7 @@ export type EventNoticeKind =
   | "connection"
   | "channel"
   | "message"
+  | "task"
   | "notice";
 export type EventNoticeTone = "neutral" | "success" | "warning" | "destructive";
 
@@ -234,6 +251,16 @@ export function describeEventNotice(text: string): EventNotice {
       detail: match[2]?.trim() || undefined,
     };
   }
+  match = /^Asynchronous service operation finished: ([^.]+)\./.exec(notice);
+  if (match) {
+    const outcome = match[1]?.trim() ?? "";
+    const ok = outcome === "done";
+    return {
+      kind: "task",
+      tone: ok ? "success" : "warning",
+      summary: ok ? "Background task finished" : `Background task ${outcome.replace(/_/g, " ")}`,
+    };
+  }
   const summary = firstSentence(notice);
   return {
     kind: "notice",
@@ -310,10 +337,10 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
   >();
   for (const agent of agents) {
     const id =
-      agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
+      agent.share_role ? "shared" : agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
     const section = groups.get(id) ?? {
       id,
-      label: id === "personal" ? "Personal" : (agent.owner_name ?? id),
+      label: id === "personal" ? "Personal" : id === "shared" ? "Shared with me" : (agent.owner_name ?? id),
       agents: [],
     };
     section.agents.push(agent);

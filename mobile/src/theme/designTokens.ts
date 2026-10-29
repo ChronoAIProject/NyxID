@@ -79,7 +79,7 @@ export const typeScale = {
     lineHeight: 24,
     fontWeight: "600" as const,
   },
-  // 15px — dialog titles, card headings ("Shortcuts", wizard step titles)
+  // 15px — dialog titles, card headings, Activity service titles, wizard step titles
   title: {
     fontFamily: fonts.displaySemi,
     fontSize: 15,
@@ -93,14 +93,14 @@ export const typeScale = {
     lineHeight: 19,
     fontWeight: "400" as const,
   },
-  // 13px — sidebar nav items, card body text, mobile-card primary text
+  // 13px — sidebar nav items, card body text, standard mobile-card primary text
   body: {
     fontFamily: fonts.bodyRegular,
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "400" as const,
   },
-  // 13px — body bold for emphasis (form labels, mobile-card primary text per spec)
+  // 13px — body emphasis and standard mobile-card primary text; Activity titles use title
   bodyStrong: {
     fontFamily: fonts.bodySemi,
     fontSize: 13,

@@ -1869,6 +1869,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         jwt_private_key_path: "keys/private.pem".to_string(),
         jwt_public_key_path: "keys/public.pem".to_string(),
         jwt_retained_public_key_paths: Vec::new(),
+        domain_aliases: Default::default(),
         jwt_issuer: "nyxid".to_string(),
         jwt_access_ttl_secs: 900,
         jwt_relay_reply_ttl_secs: 1800,
@@ -2249,6 +2250,18 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
             db.clone(),
             "auth_device_request",
+            5,
+            60,
+        ),
+        password_change_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "password_change_ip",
+            20,
+            60,
+        ),
+        password_change_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "password_change_user",
             5,
             60,
         ),

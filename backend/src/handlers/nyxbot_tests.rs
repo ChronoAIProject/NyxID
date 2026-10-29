@@ -14,11 +14,19 @@ use tokio::sync::Mutex;
 #[path = "nyxbot_transport_tests.rs"]
 mod transport_tests;
 
+#[path = "nyxbot_discord_tests.rs"]
+mod discord_tests;
+#[path = "nyxbot_native_tests.rs"]
+mod native_tests;
+
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
 
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
+
+#[path = "nyxbot_guest_model_tests.rs"]
+mod guest_model_tests;
 
 const LEGACY_PROVENANCE: crate::services::nyxbot_watch_service::ReportProvenance =
     crate::services::nyxbot_watch_service::ReportProvenance::LEGACY;
@@ -159,6 +167,10 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        gateway_source: None,
+        gateway_native_phase: None,
+        gateway_native_activation: None,
+        gateway_native_delivery: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
@@ -424,6 +436,58 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     assert!(saved.binding_id.is_none());
     assert!(!format!("{saved:?}").contains(&agent_key));
     server.abort();
+}
+
+#[tokio::test]
+async fn channel_service_selection_failure_returns_actionable_reply_without_model_turn() {
+    // Keep the fixture and provider handler futures off the test polling stack.
+    let (state, calls, server) = Box::pin(setup("nyxbot_service_selection_2022")).await;
+    let _server = tokio_util::task::AbortOnDropHandle::new(server);
+    let (row, agent_key) = Box::pin(channel(&state, "gateway")).await;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"owner_sender_ids":["7"]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        Box::pin(put_binding(
+            State(state.clone()),
+            Path("bnd_selection".into()),
+            bearer(&agent_key),
+            Json(binding_body(&agent_key, OWNER))
+        ))
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        Box::pin(put_conversation(
+            State(state.clone()),
+            Path(("bnd_selection".into(), PARTITION.into())),
+            bearer(&agent_key)
+        ))
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let input = format!("/service {}\nContinue the search", Uuid::new_v4());
+    let response = Box::pin(respond(
+        &state,
+        &agent_key,
+        &event(&input, "7", "evt-selection"),
+        "evt_selection",
+    ))
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_text(response).await;
+    assert!(body.contains("connection_unavailable"), "{body}");
+    assert!(body.contains("Reconnect it or restore access"), "{body}");
+    assert!(body.contains("response.completed"), "{body}");
+    assert!(calls.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -3093,6 +3157,10 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            gateway_source: None,
+            gateway_native_phase: None,
+            gateway_native_activation: None,
+            gateway_native_delivery: None,
             gateway_bot_mentions: Default::default(),
             gateway_threads: Default::default(),
             follow_capacity_revision: 0,
@@ -3767,6 +3835,7 @@ async fn the_same_question_is_not_worked_on_twice() {
         .unwrap()
         .unwrap();
     let asked_from = ChannelOrigin {
+        native_event_id: None,
         thread: None,
         nyxbot_channel_id: telegram.id.clone(),
         partition: chat_row.partition.clone(),
@@ -4172,10 +4241,19 @@ async fn mock_gateway(
                 );
             }
             let channel_id = format!("cmaeg1.ch.{}", body["record_id"].as_str().unwrap());
-            let response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":1,
+            if body["sources"][0]["type"] == "discord" {
+                // Remote auto-activation can race the local transport swap.
+                let pending = respond(&nyxid, &key, &json!({}), "preparation-probe").await;
+                assert_eq!(pending.status(), StatusCode::TOO_MANY_REQUESTS);
+            }
+            let mut response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":1,
                 "endpoints":{"nyxid_callback_url":format!("{callback_base}/callbacks/{channel_id}")},"provider":{"slug":"nyxbot","binding_id":binding},
                 "definition":{"owner":{"kind":"human","subject":claims.sub},"sources":body["sources"],
                     "reply":body["reply"],"profile":body["profile"]}});
+            if body["sources"][0]["type"] == "discord" {
+                response["native_discord_activation"] = json!({"state":"pending_discovery"});
+                response["definition"]["routing"] = body["routing"].clone();
+            }
             remote
                 .lock()
                 .await
@@ -4202,7 +4280,7 @@ async fn mock_gateway(
                 return (StatusCode::CONFLICT, Json(json!({"code":"conflict"})));
             }
             current["version"] = json!(expected + 1);
-            for field in ["sources", "reply", "profile"] {
+            for field in ["sources", "reply", "profile", "routing", "partition"] {
                 current["definition"][field] = body[field].clone();
             }
             (StatusCode::OK, Json(current.clone()))
@@ -4285,6 +4363,8 @@ async fn mock_gateway(
         }
     };
     let routes = Router::new()
+        .route("/channel-capabilities",axum::routing::get(||async {Json(json!({"relay_authoring":{
+            "native_discord_writes_enabled":true,"native_discord_auto_activation_enabled":true,"multi_consumer_writes_enabled":true}}))}))
         .route("/channels", post(create))
         .route("/channel-records/{id}", axum::routing::get(read.clone()))
         .route(

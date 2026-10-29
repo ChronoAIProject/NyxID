@@ -8,6 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
+use zeroize::Zeroizing;
 
 use mongodb::bson::doc;
 
@@ -1062,15 +1063,10 @@ pub async fn forgot_password(
 
 // --- Reset Password ---
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize)]
 pub struct ResetPasswordRequest {
-    pub token: String,
-    #[validate(length(
-        min = 8,
-        max = 128,
-        message = "Password must be between 8 and 128 characters"
-    ))]
-    pub new_password: String,
+    pub token: Zeroizing<String>,
+    pub new_password: Zeroizing<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1085,9 +1081,6 @@ pub async fn reset_password(
     State(state): State<AppState>,
     Json(body): Json<ResetPasswordRequest>,
 ) -> AppResult<Json<ResetPasswordResponse>> {
-    body.validate()
-        .map_err(|e| AppError::ValidationError(e.to_string()))?;
-
     auth_service::reset_password(&state.db, &body.token, &body.new_password).await?;
 
     // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_completed).
@@ -1098,6 +1091,56 @@ pub async fn reset_password(
 
     Ok(Json(ResetPasswordResponse {
         message: "Password has been reset successfully".to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangePasswordRequest {
+    pub current_password: Zeroizing<String>,
+    pub new_password: Zeroizing<String>,
+}
+
+/// POST /api/v1/auth/password/change
+pub async fn change_password(
+    State(state): State<AppState>,
+    user: AuthUser,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<ChangePasswordRequest>,
+) -> AppResult<Json<ResetPasswordResponse>> {
+    super::login_client_context::require_first_party_human(&user)?;
+    let ip = super::login_client_context::resolve_client_ip(&headers, peer, &state)?;
+    if !state.password_change_ip_limiter.check_shared(ip).await? {
+        return Err(AppError::RateLimited);
+    }
+    let user_id = user.user_id.to_string();
+    if !state
+        .password_change_user_limiter
+        .check_shared(&user_id)
+        .await?
+    {
+        return Err(AppError::RateLimited);
+    }
+    auth_service::change_password(
+        &state.db,
+        &user_id,
+        body.current_password,
+        body.new_password,
+    )
+    .await?;
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "password_changed".into(),
+        Some(serde_json::json!({ "sessions_retained": true })),
+        Some(ip.to_string()),
+        extract_user_agent(&headers),
+        None,
+        None,
+    );
+    Ok(Json(ResetPasswordResponse {
+        message: "Password changed successfully. Existing sessions remain signed in.".into(),
     }))
 }
 
@@ -1604,6 +1647,7 @@ crate::errors::redacted_debug!(
     RefreshRequest,
     VerifyEmailRequest,
     ResetPasswordRequest,
+    ChangePasswordRequest,
     SetupRequest,
     CliTokenResponse
 );

@@ -864,7 +864,7 @@ struct GatewayReconciliation<'a> {
 /// Compare only the provider fields that NyxID authored. Gateways may add
 /// harmless definition metadata, but identity, admission and route scope must
 /// echo exactly before NyxID enables bot delivery.
-fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
+pub(super) fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
     let Some(definition) = body.get("definition") else {
         return false;
     };
@@ -883,7 +883,15 @@ fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
     let Some(expected) = requested.pointer("/sources/0") else {
         return false;
     };
-    if actual.get("trust_normalized").and_then(Value::as_bool) == Some(true) {
+    if actual
+        .get("trust_normalized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        != expected
+            .get("trust_normalized")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
         return false;
     }
     [
@@ -894,6 +902,7 @@ fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
         "/route_ids",
         "/bot_id",
         "/bot_username",
+        "/intents",
         "/admission",
     ]
     .iter()
@@ -904,6 +913,16 @@ fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
             == Some(0)
         && definition.pointer("/reply/thread_contract")
             == requested.pointer("/reply/thread_contract")
+        && (expected["type"] == "nyxid_relay"
+            || [
+                "/routing",
+                "/partition/version",
+                "/partition/key",
+                "/reply/auto_final",
+                "/reply/sinks",
+            ]
+            .iter()
+            .all(|pointer| definition.pointer(pointer) == requested.pointer(pointer)))
 }
 
 async fn persist_gateway_groups(

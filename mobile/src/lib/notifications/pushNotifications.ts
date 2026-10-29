@@ -222,7 +222,6 @@ async function ensureAndroidChannels() {
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 200, 200, 200],
     lightColor: "#9775fa",
-    sound: "default",
     enableVibrate: true,
     showBadge: true,
   });
@@ -233,7 +232,6 @@ async function ensureAndroidChannels() {
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 200, 200, 200],
     lightColor: "#9775fa",
-    sound: "default",
     enableVibrate: true,
     showBadge: true,
   });

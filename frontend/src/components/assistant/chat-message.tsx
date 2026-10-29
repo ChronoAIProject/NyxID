@@ -1,4 +1,5 @@
 import { useRouter, useRouterState } from "@tanstack/react-router";
+import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
 import { CAPACITY_ACKNOWLEDGEMENT, formatCapacityWait } from "@/lib/assistant/capacity-wait";
@@ -22,28 +23,40 @@ import {
   Copy,
   MessageSquare,
   RotateCcw,
-  Sparkles,
   X,
-  ThumbsDown,
-  ThumbsUp,
 } from "lucide-react";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
+import { ACCORDION_MAX_W, BANNER_CHEVRON, BANNER_DESTRUCTIVE, BANNER_FRAME, BANNER_ICON, BANNER_NEUTRAL, BANNER_ROW, STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
+import {
+  countDecisions,
+  decisionLabel,
+  decisionSummary,
+  decisionText,
+  decisionTitle,
+  groupDecisions,
+} from "@/lib/assistant/turn-decisions";
+import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 import { MachineToolCard } from "./machine-tool-card";
 import { MessageCopyAction } from "./message-copy-action";
 import { CmaOperationCard } from "./cma-operation-card";
 import { MessageTime } from "./message-time";
-import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
+import { useReplyFeedback } from "@/hooks/use-assistant-feedback";
+import { ReplyFeedbackFollowUp, ReplyFeedbackVotes } from "./reply-feedback";
 import { capture } from "@/lib/telemetry";
+import { ChatIndexRail } from "./chat-index-rail";
+import { JumpToLatestButton } from "./jump-to-latest-button";
+import { JUMP_TO_LATEST_DISTANCE, glideToEnd, prefersReducedMotion } from "@/lib/assistant/jump-to-latest";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
@@ -99,7 +112,7 @@ function ThinkingBlock({
         {streaming ? <PulseDot /> : null}
       </button>
       {open ? (
-        <div className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-11 leading-relaxed text-text-tertiary whitespace-pre-wrap">
+        <div data-scroll-fade="" className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-11 leading-relaxed text-text-tertiary whitespace-pre-wrap">
           {text}
         </div>
       ) : null}
@@ -176,14 +189,14 @@ function StatusLabel({ label, interrupted }: {
 }
 
 function ActivitySummaryIcon({ status }: { readonly status: ChatMessage["status"] }) {
-  if (status === "streaming") return <PulseDot />;
+  if (status === "streaming") return <span className={BANNER_ICON}><PulseDot /></span>;
   if (status === "error") {
-    return <X className="h-3 w-3 text-destructive" aria-label="Turn failed" />;
+    return <X className="h-3.5 w-3.5 shrink-0 text-destructive" aria-label="Turn failed" />;
   }
   if (status === "stopped") {
-    return <CircleAlert className="h-3 w-3 text-muted-foreground" aria-label="Stopped" />;
+    return <CircleAlert className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-label="Stopped" />;
   }
-  return <Check className="h-3 w-3 text-success" aria-label="Completed" />;
+  return <Check className="h-3.5 w-3.5 shrink-0 text-success" aria-label="Completed" />;
 }
 
 function activitySummary(message: ChatMessage): string {
@@ -215,38 +228,113 @@ function ToolStatusIcon({
   );
 }
 
-function ActivityBlock({ message }: { readonly message: ChatMessage }) {
+/** Channel delivery, in a few words; `undefined` when there is nothing to say. */
+function deliveryText(delivery: NonNullable<ChatMessage["channelDelivery"]>): string {
+  if (delivery.status === "interrupted_prefix" && delivery.heard_prefix_matches_sent) {
+    return `Caller interrupted after a verified prefix of ${String(delivery.heard_prefix_chars ?? 0)} characters. The remaining answer is unconfirmed.`;
+  }
+  if (delivery.status === "delivered") return "Provider confirmed message delivery.";
+  if (delivery.status === "failed") return "Provider reported delivery failure.";
+  return "Generated reply; caller hearing or message delivery is unconfirmed.";
+}
+
+/** A decision on its tool call: a short pill, the full receipt on hover. */
+function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
+  const denied = row.status === "denied";
+  return (
+    <span
+      title={decisionTitle(row)}
+      className={cn(
+        "shrink-0 rounded border px-1 font-sans text-9 leading-4",
+        denied
+          ? "border-warning/30 bg-warning/10 text-warning"
+          : "border-hairline bg-overlay text-text-tertiary",
+      )}
+    >
+      {decisionLabel(row)}
+    </span>
+  );
+}
+
+/**
+ * Everything a turn did besides its text, folded into one line: tool calls,
+ * the permissions they used (Full access receipts and settled decisions,
+ * each beside its tool call when the server recorded which one), capacity
+ * waits and channel delivery. Denials and failures surface in the line
+ * itself; the rest is on demand.
+ */
+function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMessage; readonly selectedDecisionId?: string }) {
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
+  const decisions = message.decisions ?? [];
   const count = steps.length + tools.length;
   const total = Math.max(count, message.activityTotal ?? 0);
-  const [open, setOpen] = useState(false);
-  if (!count) return null;
+  const selected = decisions.some((row) => row.id === selectedDecisionId);
+  const target = selected ? selectedDecisionId : undefined;
+  const navigation = useReviewCardNavigation();
+  const reveal = selected && !navigation?.handled;
+  const [expansion, setExpansion] = useState({ target, navigation, open: reveal });
+  if (expansion.target !== target || expansion.navigation !== navigation) {
+    setExpansion({ target, navigation, open: expansion.open || reveal });
+  }
+  const open = expansion.open || ((expansion.target !== target || expansion.navigation !== navigation) && reveal);
+  const capacityWaitMs = message.turnMetadata?.capacityWaitMs ?? 0;
+  const attempts = message.turnMetadata?.attempts ?? 0;
+  const waited = message.status === "complete" && (capacityWaitMs > 0 || attempts > 1);
+  const delivery = message.role === "assistant" ? message.channelDelivery : undefined;
+  if (!count && !decisions.length && !waited && !delivery) return null;
   const failed = steps.filter((step) => step.status === "error").length
     + tools.filter((tool) => tool.status === "error").length;
-  const summary = activitySummary(message);
+  const onTool = new Map<string, NyxAgentAcknowledgement[]>();
+  const loose: NyxAgentAcknowledgement[] = [];
+  for (const row of decisions) {
+    const tool = row.activity_id ? tools.find((candidate) => candidate.id === row.activity_id) : undefined;
+    if (tool) onTool.set(tool.id, [...(onTool.get(tool.id) ?? []), row]);
+    else loose.push(row);
+  }
+  const counts = countDecisions(decisions);
+  const parts = [
+    activitySummary(message),
+    total ? `${String(total)} ${total === 1 ? "action" : "actions"}` : "",
+    ...decisionSummary(counts),
+    capacityWaitMs > 0 && waited ? `waited ${formatCapacityWait(capacityWaitMs)}` : "",
+  ].filter(Boolean);
+  const deliveryFailed = delivery?.status === "failed";
   return (
-    <div className="mb-2 overflow-hidden rounded-lg border border-hairline bg-overlay/35">
+    <div className={cn("mb-2", ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL)}>
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setExpansion({ target, navigation, open: !open })}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-muted-foreground hover:bg-overlay"
+        aria-label={`Turn details: ${[...parts, failed ? `${String(failed)} failed` : "", deliveryFailed ? "delivery failed" : ""].filter(Boolean).join(", ")}`}
+        className={cn(BANNER_ROW, "text-muted-foreground transition-colors hover:bg-overlay")}
       >
-        <ChevronRight
-          className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
-        />
         <ActivitySummaryIcon status={message.status} />
-        <span>
-          {summary} · {total} {total === 1 ? "action" : "actions"}
+        <span className="min-w-0 flex-1 truncate">
+          {parts.map((part, index) => (
+            <span
+              key={part}
+              className={cn(
+                index > 0 && "before:mx-1 before:content-['·']",
+                counts.denied && part.endsWith(" denied") && "text-warning",
+              )}
+            >
+              {part}
+            </span>
+          ))}
           {message.activityTotal && message.activityTotal > count ? (
             <span className="ml-1">· latest {count} of {message.activityTotal} shown</span>
           ) : null}
           {failed ? <span className="ml-1 text-warning">· {failed} failed</span> : null}
+          {deliveryFailed ? <span className="ml-1 text-warning">· delivery failed</span> : null}
         </span>
+        <ChevronRight
+          aria-hidden="true"
+          className={cn(BANNER_CHEVRON, open && "rotate-90")}
+        />
       </button>
       {open ? (
-        <div className="space-y-1 border-t border-hairline px-2.5 py-2">
+        <div className="space-y-1 border-t border-hairline px-3 py-2">
           {steps.map((step) => (
             <div key={step.id} className="flex items-start gap-2 text-11">
               {step.status === "running" ? (
@@ -256,23 +344,24 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
               ) : (
                 <Check className="mt-0.5 h-3 w-3 text-success" />
               )}
-              <span className="min-w-0 flex-1 break-words text-muted-foreground">
+              <span className={cn("min-w-0 flex-1 break-words", step.status === "error" ? "text-destructive" : "text-muted-foreground")}>
                 {step.name || "Processing"}
               </span>
               {step.status === "error" ? (
-                <span className="text-text-tertiary">
+                <span className="text-destructive opacity-70">
                   Step failed. The assistant can continue after a failed step.
                 </span>
               ) : null}
               {step.stepType ? (
-                <span className="shrink-0 font-mono text-9 text-text-tertiary">
+                <span className={cn("shrink-0 font-mono text-9", step.status === "error" ? "text-destructive" : "text-text-tertiary")}>
                   {step.stepType}
                 </span>
               ) : null}
             </div>
           ))}
           {tools.map((tool) => (
-            <details key={tool.id} className="text-11 text-muted-foreground">
+            <ReviewCardTarget key={tool.id} selected={Boolean(onTool.get(tool.id)?.some((row) => row.id === selectedDecisionId))} selectionKey={selectedDecisionId}>
+            <details className="text-11 text-muted-foreground">
               <summary
                 data-tool-status={tool.status}
                 className="flex cursor-pointer list-none flex-col gap-1 py-0.5"
@@ -287,7 +376,8 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
                   >
                     {describeToolActivity(tool.name || tool.id, tool.status)}
                   </span>
-                  <span className="flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-10 text-text-tertiary">
+                  {onTool.get(tool.id)?.map((row) => <DecisionPill key={row.id} row={row} />)}
+                  <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-10", tool.status === "error" ? "text-destructive" : "text-text-tertiary")}>
                     <span className="truncate">{tool.name || tool.id}</span>
                     {Number.isFinite(tool.startedAt) ? <span className="shrink-0"><ToolElapsed
                       startedAt={new Date(tool.startedAt).toISOString()}
@@ -296,19 +386,49 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
                   </span>
                 </span>
                 {tool.status === "error" ? (
-                  <span className="break-words pl-5 text-text-tertiary">
+                  <span className="break-words pl-5 text-destructive opacity-70">
                     {toolFailureCopy(tool.failure)} The assistant can continue
                     after a failed step.
                   </span>
                 ) : null}
               </summary>
               {tool.result ? (
-                <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
+                <pre data-scroll-fade="" className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
                   {tool.result.slice(0, 500)}
                 </pre>
               ) : null}
             </details>
+            </ReviewCardTarget>
           ))}
+          {loose.length ? (
+            <ul aria-label="Permissions used" className="space-y-1 pt-0.5">
+              {groupDecisions(loose, selectedDecisionId).map(({ row, count: times }) => (
+                <li key={row.id} title={decisionTitle(row)}>
+                <ReviewCardTarget selected={row.id === selectedDecisionId}>
+                <div className="flex items-start gap-2 text-11 text-muted-foreground">
+                  {row.status === "denied" ? (
+                    <X aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0 text-warning" />
+                  ) : (
+                    <Check aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0 text-text-tertiary" />
+                  )}
+                  <span className="min-w-0 flex-1 break-words">
+                    <span className={cn(row.status === "denied" && "text-warning")}>{decisionLabel(row)}</span>
+                    {" · "}{decisionText(row)}
+                    {row.reason?.trim() ? <span className="text-text-tertiary"> · {row.reason}</span> : null}
+                  </span>
+                  {times > 1 ? <span className="shrink-0 tabular-nums text-10 text-text-tertiary">×{times}</span> : null}
+                </div>
+                </ReviewCardTarget>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {waited || delivery ? (
+            <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pt-0.5 text-10 text-text-tertiary">
+              {waited ? <CapacityDetails attempts={message.turnMetadata?.attempts} capacityWaitMs={capacityWaitMs} /> : null}
+              {delivery ? <><dt>delivery</dt><dd className={cn(deliveryFailed && "text-warning")}>{deliveryText(delivery)}</dd></> : null}
+            </dl>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -337,23 +457,33 @@ function CapacityDetails({ attempts, capacityWaitMs }: { readonly attempts?: num
 
 /** Metadata-only diagnostics of a failed turn, with a copyable ID. */
 function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
+  const failure = detail.failureReason;
+  const failureLabel = failure ? [failure.source, failure.stage, failure.code,
+    failure.http_status != null ? `HTTP ${failure.http_status}` : null,
+    failure.nyxid_error_code != null ? `NyxID ${failure.nyxid_error_code}` : null,
+  ].filter(Boolean).join(" / ") : null;
   const diagnosticId = [
     `turn ${detail.turnId}`,
     detail.attempts != null ? `attempts ${detail.attempts}` : null,
     detail.capacityWaitMs != null ? `capacity_wait_ms ${detail.capacityWaitMs}` : null,
     detail.upstreamCode ? `upstream ${detail.upstreamCode}` : null,
+    failureLabel ? `cause ${failureLabel}` : null,
     detail.responseId ? `response ${detail.responseId}` : null,
     detail.upstreamRequestId ? `request ${detail.upstreamRequestId}` : null,
   ]
     .filter(Boolean)
     .join(" / ");
   return (
-    <details className="mt-2 text-11 text-text-tertiary">
+    <details className="mt-2 max-w-[900px] text-11 text-text-tertiary">
       <summary className="cursor-pointer">Details</summary>
+      {failure?.source === "nyxid" && failure.code === "guest_model_route_required" ? (
+        <p className="mt-1">Send one message to this agent as its owner using its configured model to record the route for guest replies.</p>
+      ) : null}
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
         <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
         <dt>stage</dt>
         <dd>{detail.stage}</dd>
+        {failureLabel ? <><dt>cause</dt><dd>{failureLabel}</dd></> : null}
         {detail.httpStatus != null ? (
           <>
             <dt>http</dt>
@@ -445,6 +575,7 @@ export function ChatMessageBubble({
   onCheckRecovery,
   conversationId,
   feedbackEnabled = true,
+  selectedDecisionId,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
@@ -452,6 +583,7 @@ export function ChatMessageBubble({
   readonly onCheckRecovery?: () => Promise<unknown> | void;
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
+  readonly selectedDecisionId?: string;
 }) {
   const streaming = message.status === "streaming";
   const capacityNote = streaming && message.systemNote === "capacity_wait";
@@ -477,45 +609,27 @@ export function ChatMessageBubble({
     message.role === "assistant"
       ? sanitizeAssistantMessageContent(message.content)
       : message.content;
-  const [vote, setVote] = useState<"up" | "down" | undefined>(
-    message.feedback?.vote,
-  );
-  const [commentOpen, setCommentOpen] = useState(false);
-  const [comment, setComment] = useState(message.feedback?.comment ?? "");
-  const [feedbackError, setFeedbackError] = useState(false);
-  const feedback = useAssistantFeedback(
-    "conversation",
-    conversationId ?? "",
-    message.id,
-  );
-  const setFeedback = async (next: "up" | "down") => {
-    const previous = vote;
-    const selected = previous === next ? undefined : next;
-    setVote(selected);
-    if (!conversationId || !feedbackEnabled) return;
-    try {
-      await feedback.mutateAsync(selected ? { vote: selected } : {});
-      setFeedbackError(false);
-    } catch {
-      setVote(previous);
-      setFeedbackError(true);
-      return;
-    }
-    if (selected)
+  const feedback = useReplyFeedback({
+    scope: "conversation",
+    parentId: conversationId ?? "",
+    messageId: message.id,
+    initialVote: message.feedback?.vote,
+    initialComment: message.feedback?.comment,
+    onVoted: (vote) =>
       capture({
         name: "ui.assistant_feedback_submitted",
-        props: { message_id: message.id, vote: selected },
-      });
-  };
+        props: { message_id: message.id, vote },
+      }),
+  });
   if (message.continuation_of) {
     return <p role="status" className="px-[7px] text-11 text-muted-foreground">Continuing after your decision</p>;
   }
   if (message.role === "user") {
     return (
       <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
-        <div className="rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+        <UserMessageBubble>
           {message.steering && (
-            <p className="mb-1 text-11 text-muted-foreground" role="note">
+            <p className="mb-1 text-11" role="note">
               Steering ·{" "}
               {steeringNotice(message.steering.code, message.steering.outcome)}
             </p>
@@ -528,12 +642,7 @@ export function ChatMessageBubble({
             </div>
           ) : null}
           {content}
-          {feedbackError ? (
-            <p role="alert" className="mt-1 text-11 text-destructive">
-              Unable to save feedback. Try again.
-            </p>
-          ) : null}
-        </div>
+        </UserMessageBubble>
         <div className="flex max-w-full flex-wrap items-center justify-end gap-x-2 gap-y-1 opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:none)]:opacity-100">
           <MessageTime value={message.timestamp} />
           <MessageCopyAction text={content} />
@@ -588,16 +697,9 @@ export function ChatMessageBubble({
       data-system-note={capacityNote ? "capacity_wait" : undefined}
       className="group/message flex items-start gap-2.5"
     >
-      <span
-        {...(thinking ? { "data-assistant-halo": "" } : {})}
-        aria-hidden="true"
-        className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-nyx-secondary-400/25 bg-nyx-secondary-400/10 text-nyx-secondary-400"
-      >
-        <Sparkles className="h-3 w-3" />
-      </span>
-      <div className="min-w-0 max-w-[min(84%,758px)] flex-1 pt-0.5">
+      <div className="min-w-0 w-full pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
-        <ActivityBlock message={message} />
+        <TurnSummary message={message} selectedDecisionId={selectedDecisionId} />
         {message.toolCalls
           ?.filter((tool) => tool.machine)
           .map((tool) => (
@@ -620,25 +722,19 @@ export function ChatMessageBubble({
         ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
         {message.cmaOperations?.map((operation) => <CmaOperationCard key={operation.id} operation={operation} />)}
         {message.status === "error" && errorMessage ? (
-          <div role={billing ? "alert" : undefined} className="mt-2 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-11 text-destructive">
-            <CircleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <div>
-              {billing ? <p className="font-medium">{billing.title}</p> : null}
-              <p>{errorMessage}</p>
+          <div role={billing ? "alert" : undefined} className={cn("mt-2", STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_DESTRUCTIVE)}>
+            <div className={BANNER_ROW}>
+              <CircleAlert aria-hidden className="h-3.5 w-3.5 shrink-0" />
+              <div className="min-w-0">
+                {billing ? <p className="font-medium">{billing.title}</p> : null}
+                <p>{errorMessage}</p>
+              </div>
             </div>
           </div>
         ) : null}
         {billing?.openBilling ? (
           <BillingRemedy />
         ) : null}
-        {message.status === "complete" && message.turnMetadata && ((message.turnMetadata.capacityWaitMs ?? 0) > 0 || (message.turnMetadata.attempts ?? 0) > 1) ? (
-          <details className="mt-2 text-11 text-text-tertiary"><summary className="cursor-pointer">Details</summary>
-            <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
-              <CapacityDetails {...message.turnMetadata} />
-            </dl>
-          </details>
-        ) : null}
-        {message.role === "assistant" && message.channelDelivery ? <p className="mt-2 text-11 text-text-tertiary" role="note">{message.channelDelivery.status === "interrupted_prefix" && message.channelDelivery.heard_prefix_matches_sent ? `Caller interrupted after a verified prefix of ${message.channelDelivery.heard_prefix_chars ?? 0} characters. The remaining answer is unconfirmed.` : message.channelDelivery.status === "delivered" ? "Provider confirmed message delivery." : message.channelDelivery.status === "failed" ? "Provider reported delivery failure." : "Generated reply; caller hearing or message delivery is unconfirmed."}</p> : null}
         {message.status === "error" && message.errorDetail ? (
           <ErrorDetails detail={message.errorDetail} />
         ) : null}
@@ -671,7 +767,7 @@ export function ChatMessageBubble({
                   Review request
                 </button>
                 {reviewOpen ? (
-                  <div className="max-h-56 overflow-auto rounded-md border border-border p-2">
+                  <div data-scroll-fade="" className="max-h-56 overflow-auto rounded-md border border-border p-2">
                     <p className="whitespace-pre-wrap break-words text-foreground">{message.recovery.text}</p>
                     {message.recovery.attachments.length ? (
                       <p className="mt-2 break-all">Attachments: {message.recovery.attachments.join(", ")}</p>
@@ -735,7 +831,7 @@ export function ChatMessageBubble({
             data-turn-status
             className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
           >
-            {!content ? <span data-streaming-dots><PulseDot /></span> : null}
+            {!content ? <span data-streaming-dots {...(thinking ? { "data-assistant-halo": "" } : {})}><PulseDot /></span> : null}
             <span
               {...(!content && runningTool ? { "data-running-tool": runningTool.name } : {})}
               {...(!runningTool && lastTool ? { "data-last-tool": true } : {})}
@@ -777,48 +873,7 @@ export function ChatMessageBubble({
         {streaming ? null : (
           <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
             <MessageCopyAction text={content} />
-            {showFeedback ? (
-              <div
-                role="group"
-                className="flex items-center gap-1"
-                aria-label="Reply feedback"
-              >
-                <button
-                  type="button"
-                  aria-label="Helpful"
-                  aria-pressed={vote === "up"}
-                  disabled={feedback.isPending}
-                  onClick={() => void setFeedback("up")}
-                  className={cn(
-                    "rounded p-1 text-text-tertiary hover:bg-overlay",
-                    vote === "up" && "text-success",
-                  )}
-                >
-                  <ThumbsUp className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  aria-label="Not helpful"
-                  aria-pressed={vote === "down"}
-                  disabled={feedback.isPending}
-                  onClick={() => void setFeedback("down")}
-                  className={cn(
-                    "rounded p-1 text-text-tertiary hover:bg-overlay",
-                    vote === "down" && "text-destructive",
-                  )}
-                >
-                  <ThumbsDown className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  aria-label="Add feedback comment"
-                  onClick={() => setCommentOpen((open) => !open)}
-                  className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
-                >
-                  Comment
-                </button>
-              </div>
-            ) : null}
+            {showFeedback ? <ReplyFeedbackVotes feedback={feedback} /> : null}
             <MessageTime
               value={message.timestamp}
               reveal
@@ -826,44 +881,7 @@ export function ChatMessageBubble({
             />
           </div>
         )}
-        {feedbackEnabled && conversationId && commentOpen && !streaming ? (
-          <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
-            <textarea
-              autoFocus
-              aria-label="Optional feedback comment"
-              onKeyDown={(event) => {
-                if (event.key === "Escape") setCommentOpen(false);
-              }}
-              value={comment}
-              maxLength={1000}
-              onChange={(event) => setComment(event.target.value)}
-              className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none"
-              placeholder="Optional comment"
-            />
-            <button
-              type="button"
-              disabled={!vote || feedback.isPending}
-              className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10 disabled:opacity-50"
-              onClick={() => {
-                if (!conversationId || !vote) return;
-                void feedback
-                  .mutateAsync({ vote, comment })
-                  .then(() => {
-                    setFeedbackError(false);
-                    setCommentOpen(false);
-                  })
-                  .catch(() => setFeedbackError(true));
-              }}
-            >
-              Send
-            </button>
-          </div>
-        ) : null}
-        {feedbackError ? (
-          <p role="alert" className="mt-1 text-11 text-destructive">
-            Unable to save feedback. Try again.
-          </p>
-        ) : null}
+        {showFeedback ? <ReplyFeedbackFollowUp feedback={feedback} /> : null}
       </div>
     </article>
   );
@@ -876,6 +894,7 @@ export function ChatMessageEntry({
   feedbackEnabled = true,
   onRetry,
   onCheckRecovery,
+  selectedDecisionId,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
@@ -883,6 +902,7 @@ export function ChatMessageEntry({
   readonly feedbackEnabled?: boolean;
   readonly onRetry?: () => Promise<void> | void;
   readonly onCheckRecovery?: () => Promise<unknown> | void;
+  readonly selectedDecisionId?: string;
 }) {
   if (
     message.role === "system" &&
@@ -906,7 +926,7 @@ export function ChatMessageEntry({
           <div
             className={cn(
               "text-10 text-text-tertiary",
-              message.role === "user" ? "self-end" : "ml-8",
+              message.role === "user" ? "self-end" : undefined,
             )}
           >
             {authorName}
@@ -914,6 +934,7 @@ export function ChatMessageEntry({
         ) : null}
         <ChatMessageBubble
           message={message}
+          selectedDecisionId={selectedDecisionId}
           interactiveCards={interactiveCards}
           conversationId={conversationId}
           feedbackEnabled={feedbackEnabled}
@@ -986,7 +1007,7 @@ const MessageRow = memo(
     measure,
   }: MessageRowProps) {
     return (
-      <div id={`message-${message.id}`} data-index={index} ref={measure}>
+      <div id={`message-${message.id}`} data-index={index} data-chat-message-index={index} ref={measure}>
         {renderMessage?.(message) ?? (
           <ChatMessageEntry
             message={message}
@@ -1063,6 +1084,9 @@ export function ChatMessageList({
   const listRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  const [awayFromLatest, setAwayFromLatest] = useState(false);
+  const stopGlideRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopGlideRef.current?.(), []);
   const previousConversationRef = useRef<string | undefined>(undefined);
   const previousUserMessageRef = useRef<string | undefined>(undefined);
   const previousWindowedRef = useRef(false);
@@ -1112,6 +1136,7 @@ export function ChatMessageList({
     if (jump && windowedRef.current) virtualizer.scrollToEnd();
     else element.scrollTop = element.scrollHeight;
     lastScrollTopRef.current = element.scrollTop;
+    setAwayFromLatest(false);
   };
   const pinRef = useRef(pinToBottom);
   pinRef.current = pinToBottom;
@@ -1238,6 +1263,22 @@ export function ChatMessageList({
       followingRef.current = false;
     }
     lastScrollTopRef.current = element.scrollTop;
+    setAwayFromLatest(distance > JUMP_TO_LATEST_DISTANCE);
+  }
+
+  function jumpToLatest() {
+    const element = scrollRef.current;
+    if (!element) return;
+    stopGlideRef.current?.();
+    followingRef.current = true;
+    // A windowed list jumps: its rows near the end are not mounted yet.
+    if (windowed || prefersReducedMotion()) pinRef.current(true);
+    else {
+      stopGlideRef.current = glideToEnd(element, () => {
+        followingRef.current = true;
+        pinRef.current(false);
+      });
+    }
   }
 
   const rows = windowed
@@ -1245,63 +1286,82 @@ export function ChatMessageList({
     : messages.map((_, index) => ({ index, start: 0 }));
   const firstStart = rows[0]?.start ?? scrollMargin;
 
+  function navigateToMessage(index: number) {
+    const element = scrollRef.current;
+    if (!element) return;
+    followingRef.current = index === messages.length - 1;
+    if (followingRef.current) pinRef.current(true);
+    else if (windowed) virtualizer.scrollToIndex(index, { align: "start" });
+    else {
+      const row = element.querySelector<HTMLElement>(`[data-chat-message-index="${index}"]`);
+      if (row) element.scrollTop += row.getBoundingClientRect().top - element.getBoundingClientRect().top - 24;
+    }
+    lastScrollTopRef.current = element.scrollTop;
+  }
+
   return (
-    <div
-      ref={scrollRef}
-      onScroll={handleScroll}
-      className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6"
-      // The windowed list anchors rows itself; the browser's anchoring would double it.
-      style={windowed ? { overflowAnchor: "none" } : undefined}
-    >
+    <div className="relative flex min-h-0 flex-1">
       <div
-        ref={contentRef}
-        className="mx-auto flex min-h-full w-full max-w-[758px] flex-col gap-4 pt-6"
-        style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
+        ref={scrollRef}
+        onScroll={handleScroll}
+        data-chat-transcript=""
+        data-scroll-fade=""
+        className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 sm:pl-6 sm:pr-[calc(var(--spacing)*6+var(--chat-index-width,0px))]"
+        // The windowed list anchors rows itself; the browser's anchoring would double it.
+        style={windowed ? { overflowAnchor: "none" } : undefined}
       >
-        {notice ? (
-          <div
-            role="status"
-            className="rounded-lg border border-border bg-overlay px-3 py-2 text-11 text-muted-foreground"
-          >
-            {notice}
-          </div>
-        ) : null}
-        {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
-        {/* One element tree in both modes, so crossing the threshold never
-            remounts a row (or restarts a streaming reply's reveal). */}
         <div
-          ref={listRef}
-          className={windowed ? "relative w-full" : "contents"}
-          style={windowed ? { height: virtualizer.getTotalSize() } : undefined}
+          ref={contentRef}
+          className="mx-auto flex min-h-full w-full max-w-[var(--chat-content-width,758px)] flex-col gap-4 pt-6"
+          style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
         >
+          {notice ? (
+            <div
+              role="status"
+              className={cn(STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_NEUTRAL, "text-muted-foreground")}
+            >
+              <div className={BANNER_ROW}>{notice}</div>
+            </div>
+          ) : null}
+          {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
+          {/* One element tree in both modes, so crossing the threshold never
+              remounts a row (or restarts a streaming reply's reveal). */}
           <div
-            className={windowed ? "absolute inset-x-0 top-0 flex flex-col gap-4" : "contents"}
-            style={
-              windowed ? { transform: `translateY(${String(firstStart - scrollMargin)}px)` } : undefined
-            }
+            ref={listRef}
+            className={windowed ? "relative w-full" : "contents"}
+            style={windowed ? { height: virtualizer.getTotalSize() } : undefined}
           >
-            {rows.map(({ index }) => {
-              const message = messages[index]!;
-              return (
-                <MessageRow
-                  key={message.id}
-                  message={message}
-                  conversationId={session?.conversationId}
-                  feedbackEnabled={feedbackEnabled}
-                  renderMessage={renderMessage}
-                  projectionVersion={projectionVersion}
-                  index={windowed ? index : undefined}
-                  measure={windowed ? virtualizer.measureElement : undefined}
-                />
-              );
-            })}
+            <div
+              className={windowed ? "absolute inset-x-0 top-0 flex flex-col gap-4" : "contents"}
+              style={
+                windowed ? { transform: `translateY(${String(firstStart - scrollMargin)}px)` } : undefined
+              }
+            >
+              {rows.map(({ index }) => {
+                const message = messages[index]!;
+                return (
+                  <MessageRow
+                    key={message.id}
+                    message={message}
+                    conversationId={session?.conversationId}
+                    feedbackEnabled={feedbackEnabled}
+                    renderMessage={renderMessage}
+                    projectionVersion={projectionVersion}
+                    index={index}
+                    measure={windowed ? virtualizer.measureElement : undefined}
+                  />
+                );
+              })}
+            </div>
           </div>
+          {footer}
+          {emptyTurnDetected ? (
+            <span data-empty-turn-error className="sr-only" aria-hidden="true" />
+          ) : null}
         </div>
-        {footer}
-        {emptyTurnDetected ? (
-          <span data-empty-turn-error className="sr-only" aria-hidden="true" />
-        ) : null}
       </div>
+      <ChatIndexRail key={conversationKey} messages={messages} scrollRef={scrollRef} bottomInset={bottomInset} onNavigate={navigateToMessage} />
+      <JumpToLatestButton visible={awayFromLatest} bottomInset={bottomInset} onJump={jumpToLatest} />
     </div>
   );
 }

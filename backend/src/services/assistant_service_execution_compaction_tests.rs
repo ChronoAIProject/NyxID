@@ -8,7 +8,7 @@ use crate::services::{
 use axum::{body::Body, http::Request, response::Response};
 use tower::ServiceExt;
 
-async fn compact_connection(
+pub(super) async fn compact_connection(
     f: &Fixture,
     owner: &str,
     catalog: &str,
@@ -72,11 +72,16 @@ async fn model_call(
         request = request.header(ACK_HEADER, id);
     }
     let (_, router) = crate::routes::build_router();
-    let response = router
-        .with_state(f.state.clone())
-        .oneshot(request.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
+    // Match the server's request task without retaining the fixture's polling
+    // frame. Abandoning this helper still cancels the request.
+    let response = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+        router
+            .with_state(f.state.clone())
+            .oneshot(request.body(Body::from(body.to_string())).unwrap()),
+    ))
+    .await
+    .unwrap()
+    .unwrap();
     let status = response.status().as_u16();
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
@@ -86,6 +91,15 @@ async fn model_call(
 
 fn exact_model_requests() -> Vec<(&'static str, Value)> {
     vec![
+        (
+            "responses",
+            // The metadata-aware guest route contract must not turn this
+            // existing owner request into read-class/fungible model consent.
+            json!({"model":"m","store":false,"input":"account context",
+                "client_metadata":{"root_turn_id":"root","session_id":"session",
+                    "thread_id":"thread","turn_id":"turn","x-codex-installation-id":"installation",
+                    "x-codex-turn-metadata":"{\"sandbox_mode\":\"read-only\"}","x-codex-window-id":"window"}}),
+        ),
         (
             "responses/compact",
             json!({"model":"m","input":"account context"}),
@@ -514,7 +528,7 @@ async fn org_owned_specialist_model_transport_keeps_only_the_implicit_scope_exce
         assert_eq!(status, 200, "{path}: {result}");
     }
     let sent = provider.received_requests().await.unwrap().len();
-    assert_eq!(sent, 7);
+    assert_eq!(sent, exact_model_requests().len() + 1);
     // This inference catalog does not authorize arbitrary provider resources.
     let (status, refusal) = model_call(
         &f,

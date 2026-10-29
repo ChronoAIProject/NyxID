@@ -4,7 +4,10 @@ import {
   silentActivity,
   type PreparedMicrophone,
 } from "@/lib/microphone-capture";
-import { AssistantVoiceClient } from "@/lib/assistant-voice-client";
+import {
+  AssistantVoiceClient,
+  type VoiceConnectionStatus,
+} from "@/lib/assistant-voice-client";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import type {
@@ -23,6 +26,8 @@ export function useAssistantVoice(thread: string) {
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [connectionStatus, setConnectionStatus] =
+    useState<VoiceConnectionStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [conflictSession, setConflictSession] = useState<VoiceSession | null>(
     null,
@@ -55,12 +60,11 @@ export function useAssistantVoice(thread: string) {
         (value) => {
           if (generation.current === ticket) {
             setSnapshot(value);
-            if (protocol === "xai_realtime")
-              setStarting(value.session.state === "starting");
-            setConnected(
-              value.session.state === "active" ||
-                value.session.state === "closing",
-            );
+            if (value.session.state === "closing") {
+              setStarting(false);
+              setConnected(true);
+              setHolding(false);
+            }
           }
         },
         (message) => {
@@ -71,6 +75,8 @@ export function useAssistantVoice(thread: string) {
             client.current = null;
             setStarting(false);
             setConnected(false);
+            setHolding(false);
+            setConnectionStatus(null);
           }
         },
         (session) => {
@@ -78,6 +84,14 @@ export function useAssistantVoice(thread: string) {
         },
         (value) => {
           if (generation.current === ticket) setActivity(value);
+        },
+        (status) => {
+          if (generation.current === ticket) {
+            setConnectionStatus(status);
+            setStarting(status !== "ready");
+            setConnected(status === "ready");
+            if (status !== "ready") setHolding(false);
+          }
         },
       );
       client.current = next;
@@ -88,9 +102,9 @@ export function useAssistantVoice(thread: string) {
         preparation,
         microphoneDevice(actor ?? ""),
       );
-      if (generation.current === ticket) {
-        if (protocol !== "xai_realtime" || next.isClosed) setStarting(false);
-        if (next.isClosed) client.current = null;
+      if (generation.current === ticket && next.isClosed) {
+        setStarting(false);
+        client.current = null;
       }
     },
     [actor, thread],
@@ -102,6 +116,7 @@ export function useAssistantVoice(thread: string) {
     setHolding(false);
     setStarting(false);
     setConnected(false);
+    setConnectionStatus(null);
     setSnapshot(null);
     setActivity((previous) => ({
       ...silentActivity(),
@@ -133,10 +148,11 @@ export function useAssistantVoice(thread: string) {
         if (generation.current === ticket) {
           setConflictSession(null);
           setSnapshot(value);
-          setConnected(
-            value.session.state === "active" ||
-              value.session.state === "closing",
-          );
+          if (value.session.state === "closing") {
+            setStarting(false);
+            setConnected(true);
+            setHolding(false);
+          }
         }
       },
       (message) => {
@@ -145,11 +161,23 @@ export function useAssistantVoice(thread: string) {
       () => {
         if (generation.current === ticket) {
           client.current = null;
+          setStarting(false);
           setConnected(false);
+          setHolding(false);
+          setConnectionStatus(null);
         }
       },
       (session) => {
         if (generation.current === ticket) setConflictSession(session);
+      },
+      undefined,
+      (status) => {
+        if (generation.current === ticket) {
+          setConnectionStatus(status);
+          setStarting(status !== "ready");
+          setConnected(status === "ready");
+          if (status !== "ready") setHolding(false);
+        }
       },
     );
     client.current = next;
@@ -163,6 +191,7 @@ export function useAssistantVoice(thread: string) {
     connected,
     snapshot,
     starting,
+    connectionStatus,
     error,
     conflictSession,
     rejoin,
@@ -174,6 +203,7 @@ export function useAssistantVoice(thread: string) {
       setSpeakerMuted(muted);
     },
     hold: (pressed: boolean) => {
+      if (pressed && (starting || !connected)) return;
       setHolding(pressed);
       client.current?.hold(pressed);
     },

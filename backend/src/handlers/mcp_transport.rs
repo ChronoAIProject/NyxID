@@ -953,13 +953,12 @@ async fn authenticate_mcp_or_public(
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
                 let user_id = verify_user_active(state, user_id).await?;
-                let org_agent_access = crate::services::org_agent_service::resolve_key_access(
-                    &state.db,
-                    &user_id,
-                    api_key.assistant_agent_owner_id.as_deref(),
-                )
-                .await
-                .map_err(axum::response::IntoResponse::into_response)?;
+                let org_agent_access =
+                    crate::services::org_agent_service::resolve_credential_access(
+                        &state.db, &api_key,
+                    )
+                    .await
+                    .map_err(axum::response::IntoResponse::into_response)?;
                 crate::services::org_group_service::validate_key(
                     &state.db,
                     &api_key,
@@ -979,6 +978,13 @@ async fn authenticate_mcp_or_public(
                 } else {
                     None
                 };
+                if org_agent_access
+                    .as_ref()
+                    .is_some_and(|a| a.shared().is_some())
+                    && chat.as_ref().is_none_or(|c| !c.turn_live || c.turn_stopped)
+                {
+                    return Err(mcp_401(&state.config.base_url));
+                }
                 // Platform grants are meaningful only for assistant chat keys.
                 let platform_grants = if chat.is_some() {
                     api_key.allowed_platform_service_ids.clone()
@@ -1032,10 +1038,16 @@ async fn authenticate_mcp_or_public(
                         .await
                         .map_err(axum::response::IntoResponse::into_response)?,
                     allowed_platform_service_ids: platform_grants,
-                    org_agent_access,
+                    org_agent_access: org_agent_access.clone(),
                     assistant_group_id: api_key.assistant_group_id.clone(),
                     assistant_agent_owner_id: api_key.assistant_agent_owner_id.clone(),
-                    assistant_operation_scopes: api_key.assistant_operation_scopes.clone(),
+                    assistant_operation_scopes: org_agent_access
+                        .as_ref()
+                        .and_then(|a| a.shared())
+                        .map_or_else(
+                            || api_key.assistant_operation_scopes.clone(),
+                            |a| a.operation_scopes(),
+                        ),
                     allowed_node_ids,
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
@@ -2176,6 +2188,16 @@ async fn handle_tools_list(
         return rpc_error(request.id.clone(), -32603, "Failed to load tools");
     }
 
+    if let Err(error) = crate::services::agent_operation_scope_service::filter_guest_catalog(
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await
+    {
+        tracing::warn!(code = error.error_code(), "Failed to filter guest tools");
+        return rpc_error(request.id.clone(), -32603, "Failed to load tools");
+    }
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth.assistant_operation_scopes,
         &mut services,
@@ -2208,10 +2230,7 @@ async fn handle_tools_list(
     }
 
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
-        tool_defs.push(crate::services::assistant_upload_service::definition());
-        tool_defs.push(crate::services::assistant_upload_service::list_definition());
-        tool_defs.push(crate::services::assistant_nyxagent::conversation_history_definition());
+        tool_defs.extend(Box::pin(chat_native_definitions(state, chat)).await);
     } else if auth.chat.is_none()
         && let Some(source) = auth.machine_source.as_ref()
         && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
@@ -2241,6 +2260,9 @@ async fn handle_tools_list(
             if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
                 tool["title"] = annotations["title"].clone();
                 tool["annotations"] = annotations;
+            }
+            if let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services) {
+                annotate_shared_connection(auth, service, &mut tool);
             }
             tool
         })
@@ -2690,6 +2712,7 @@ async fn dispatch_tools_call(
             class,
             read_only: false,
             destructive: class == acks::OwnerActionClass::Destructive,
+            delegation: false,
         };
         let gate = async {
             match acks::confirmation_needed(&state.db, chat, facts, false).await? {
@@ -3510,6 +3533,7 @@ async fn authorize_mcp_tool_operation(
         &state.db,
         &auth.effective_approval_owner_user_id(),
         service,
+        auth.org_agent_access.as_deref().and_then(|a| a.shared()),
     )
     .await
     .map_err(|e| {
@@ -3714,6 +3738,34 @@ fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> 
     }
 }
 
+fn annotate_shared_connection(
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    value: &mut serde_json::Value,
+) {
+    if let Some(metadata) = auth
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .and_then(|access| access.discovery_metadata(&service.service_id))
+    {
+        value["shared_connection"] = metadata;
+        value["owner_kind"] = "personal".into();
+    }
+}
+
+fn chat_access_hint(auth: &McpAuthContext) -> &'static str {
+    if auth
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+    {
+        "Shared connections have exact identities. owner_shared uses only the owner's explicitly shared access. actor_personal requires the person's connection consent; call to present their private card and await their decision. Ordinary action confirmations also apply. Never retry against a different account after a refusal, Skip or unavailable credential."
+    } else {
+        CHAT_ACCESS_HINT
+    }
+}
+
 async fn chat_service_gate(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3786,8 +3838,10 @@ fn guest_tool_refusal(
 /// runs only reads (GET, HEAD, OPTIONS, or a POST its stored catalog contract
 /// marks read-only), `use` (the default) reads, creates and acts but never
 /// changes or removes what exists (PUT, PATCH and DELETE by default, a POST
-/// or PUT as NyxID's `x-nyxid-changes-existing` says, never an operation
-/// marked `x-aevatar-tool.destructive`), `all` everything the specialist may.
+/// or PUT as NyxID's `x-nyxid-changes-existing` says). A compiled append-only
+/// POST attestation may permit use despite `x-aevatar-tool.destructive`;
+/// its query conditions still apply. `all` permits everything the specialist
+/// may do. Guest-only selections intersect every level, including `all`.
 /// A guest call never carries a method override. The agent's key already
 /// holds only its granted services, and operations behind the owner's
 /// approval are refused later (`authorize_mcp_operation`) at every level.
@@ -3800,6 +3854,50 @@ async fn guest_service_refusal(
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
     use crate::models::assistant_agent::GuestAccess;
+    if let Some(shared) = auth
+        .chat
+        .as_ref()
+        .and_then(|c| c.org_agent_access.as_ref())
+        .and_then(|a| a.shared())
+    {
+        let service_id = match &service.source {
+            mcp_service::McpToolSource::UserManaged {
+                user_service_id, ..
+            } => user_service_id.as_str(),
+            _ => &service.service_id,
+        };
+        if let Some(connection) = shared.connections().get(service_id) {
+            if connection.user_id == shared.owner() {
+                let effects = mcp_service::operation_effects(
+                    prepared.method(),
+                    service
+                        .durable_endpoint_metadata
+                        .get(&endpoint.endpoint_id)
+                        .copied()
+                        .unwrap_or_default(),
+                );
+                if prepared.carries_method_override()
+                    || !crate::services::shared_agent_service::permits(
+                        shared.level(service_id),
+                        effects,
+                    )
+                {
+                    return Some(tool_result(
+                        request_id,
+                        "The owner's shared access does not permit this operation",
+                        true,
+                    ));
+                }
+            }
+        } else {
+            return Some(tool_result(
+                request_id,
+                "Shared connection unavailable",
+                true,
+            ));
+        }
+        return None;
+    }
     let chat = auth.chat.as_ref().filter(|chat| chat.guest)?;
     let Ok(agent) =
         crate::services::assistant_team_service::agent(&state.db, &chat.user_id, &chat.agent_id)
@@ -3807,11 +3905,17 @@ async fn guest_service_refusal(
     else {
         return Some(guest_refused(request_id));
     };
-    let access = agent
-        .guest_access
-        .get(&service.service_id)
-        .copied()
-        .unwrap_or_default();
+    if prepared
+        .authorize_agent_operations(&agent.guest_operation_scopes, service, endpoint)
+        .is_err()
+    {
+        return Some(guest_refused(request_id));
+    }
+    let access = crate::services::agent_operation_scope_service::guest_level(
+        &agent,
+        &service.service_id,
+        crate::services::agent_operation_scope_service::mcp_catalog_id(service),
+    );
     let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)
@@ -3829,7 +3933,33 @@ async fn guest_service_refusal(
             true,
         ));
     }
-    let effects = mcp_service::operation_effects(prepared.method(), metadata);
+    let mut effects = prepared.guest_effects(metadata);
+    if service.is_generic_proxy
+        && (crate::services::agent_operation_scope_service::mcp_catalog_id(service).is_some()
+            || matches!(&service.source, mcp_service::McpToolSource::Platform { .. }))
+    {
+        let Ok(path) = prepared.canonical_path() else {
+            return Some(guest_refused(request_id));
+        };
+        let Ok(concrete) = Box::pin(
+            crate::services::agent_operation_scope_service::unscoped_guest_effects(
+                &state.db,
+                &service.service_id,
+                crate::services::agent_operation_scope_service::mcp_catalog_id(service),
+                prepared.method(),
+                Some(&path),
+                prepared.query(),
+            ),
+        )
+        .await
+        else {
+            return Some(guest_refused(request_id));
+        };
+        effects = crate::services::agent_operation_scope_service::intersect_effects(
+            Some(effects),
+            concrete,
+        );
+    }
     let reads = effects.reads;
     let uses = effects.uses;
     let allowed = match access {
@@ -3940,6 +4070,7 @@ async fn webhook_service_gate(
         class: acks::service_action_class(read_only, destructive),
         read_only,
         destructive,
+        delegation: false,
     };
     let summary = format!(
         "{} {} on {}",
@@ -4720,6 +4851,20 @@ async fn handle_meta_call_tool(
 
 /// A discovery failure must not hide its cause or remove unrelated tools.
 /// Record only fixed error metadata: no query, identifiers, or error contents.
+/// Native tools of an owner chat thread. `tools/list` and `nyx__search_tools`
+/// share this list: NyxAgent discovers tools through search, and the reset
+/// recap points at `nyx__conversation_history`.
+async fn chat_native_definitions(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) -> Vec<mcp_service::McpToolDefinition> {
+    let mut tools = Box::pin(machine_discovery_definitions(state, chat)).await;
+    tools.push(crate::services::assistant_upload_service::definition());
+    tools.push(crate::services::assistant_upload_service::list_definition());
+    tools.push(crate::services::assistant_nyxagent::conversation_history_definition());
+    tools
+}
+
 async fn machine_discovery_definitions(
     state: &AppState,
     chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
@@ -4824,8 +4969,7 @@ async fn handle_meta_search(
     let mut candidates = search_result.matches;
     if !exact_service_id_query {
         if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-            candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
-            candidates.push(crate::services::assistant_upload_service::definition());
+            candidates.extend(Box::pin(chat_native_definitions(state, chat)).await);
         } else if auth.chat.is_none()
             && let Some(source) = auth.machine_source.as_ref()
             && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
@@ -4864,6 +5008,7 @@ async fn handle_meta_search(
                 if auth.chat.is_some() {
                     value["chat_access"] = serde_json::json!(chat_access(auth, service));
                 }
+                annotate_shared_connection(auth, service, &mut value);
             } else {
                 value["executable"] = serde_json::json!(true);
                 value["preference_rank"] = serde_json::Value::Null;
@@ -4879,7 +5024,7 @@ async fn handle_meta_search(
             Pass the tool name and arguments as shown in the match results. At equal relevance, connections of the same service follow the owner's agent order in their original slots. preference_rank is relative to that service; executable reports current credential and routing availability.",
     });
     if auth.chat.is_some() {
-        response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+        response_json["chat_access_hint"] = serde_json::json!(chat_access_hint(auth));
     }
 
     let text = if auth.chat.is_some() {
@@ -4905,6 +5050,12 @@ async fn load_all_services_for_meta_tools(
     )
     .await?;
     crate::services::lark_attachment_tool::filter_discovery(
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await?;
+    crate::services::agent_operation_scope_service::filter_guest_catalog(
         &state.db,
         auth.chat.as_ref(),
         &mut services,
@@ -4980,9 +5131,10 @@ async fn handle_meta_list_connected(
                 .find(|service| row["service_id"] == service.service_id)
             {
                 row["chat_access"] = serde_json::json!(chat_access(auth, service));
+                annotate_shared_connection(auth, service, row);
             }
         }
-        result["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+        result["chat_access_hint"] = serde_json::json!(chat_access_hint(auth));
     }
     let text = serde_json::to_string_pretty(&result).unwrap_or_default();
     tool_result(request_id, &text, false)
@@ -7682,6 +7834,7 @@ mod tests {
             &db,
             &auth.effective_approval_owner_user_id(),
             &svc,
+            None,
         )
         .await
         .unwrap();

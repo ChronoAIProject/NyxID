@@ -62,6 +62,13 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
             false,
         ),
         (RUNS, doc! { "expires_at": 1 }, "trigger_run_ttl", true),
+        // The transcript names an automation turn's automation by its turn.
+        (
+            RUNS,
+            doc! { "user_id": 1, "turn_id": 1 },
+            "trigger_run_turn",
+            false,
+        ),
         (
             BUDGETS,
             doc! { "expires_at": 1 },

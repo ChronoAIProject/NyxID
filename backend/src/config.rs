@@ -1,3 +1,5 @@
+pub mod domain_aliases;
+
 use std::{
     env,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
@@ -195,6 +197,7 @@ pub struct AppConfig {
     pub port: u16,
     /// Base URL for the backend (e.g. https://auth.nyxid.dev)
     pub base_url: String,
+    pub domain_aliases: domain_aliases::DomainAliases,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
     /// Eight-character public codes; false retains the old v2 marker for rollout rollback.
@@ -636,6 +639,7 @@ impl std::fmt::Debug for AppConfig {
             .field("jwt_private_key_path", &self.jwt_private_key_path)
             .field("jwt_public_key_path", &self.jwt_public_key_path)
             .field("jwt_issuer", &self.jwt_issuer)
+            .field("domain_aliases", &self.domain_aliases)
             .field("jwt_access_ttl_secs", &self.jwt_access_ttl_secs)
             .field("jwt_relay_reply_ttl_secs", &self.jwt_relay_reply_ttl_secs)
             .field(
@@ -1096,6 +1100,7 @@ impl AppConfig {
             jwt_issuer: env::var("JWT_ISSUER").unwrap_or_else(|_| base_url.clone()),
 
             base_url,
+            domain_aliases: domain_aliases::DomainAliases::from_env(),
             jwt_access_ttl_secs: env::var("JWT_ACCESS_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1947,6 +1952,7 @@ mod tests {
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_retained_public_key_paths: Vec::new(),
+            domain_aliases: Default::default(),
             jwt_issuer: base_url.to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,

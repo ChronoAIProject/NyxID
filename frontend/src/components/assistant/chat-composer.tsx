@@ -31,10 +31,10 @@ import type { AudioActivity } from "@/lib/microphone-capture";
 import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { COMPOSER_MAX_HEIGHT, useThemeStore } from "@/stores/theme-store";
 
 const DRAFT_DEBOUNCE_MS = 300;
-const MAX_ROWS = 4;
-const MIN_TEXT_HEIGHT = 64;
+const MIN_TEXT_HEIGHT: number = COMPOSER_MAX_HEIGHT.min;
 
 function composerHeightLimit(
   surface: HTMLElement | null,
@@ -305,10 +305,19 @@ function DraftedChatComposer({
     readOwnedDraft(ownerUserId, draftKey),
   );
   const [multiline, setMultiline] = useState(false);
+  const savedMaxHeight = useThemeStore((state) => state.composerMaxHeight);
+  const setMaxTextHeight = useThemeStore((state) => state.setComposerMaxHeight);
+  const [previewHeight, setPreviewHeight] = useState<number | null>(null);
+  const maxTextHeight = previewHeight ?? savedMaxHeight;
   const [resizedTextHeight, setResizedTextHeight] = useState<number>();
   const [resizing, setResizing] = useState(false);
   const [heightRange, setHeightRange] = useState({ current: 92, min: MIN_TEXT_HEIGHT, max: 480 });
-  const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
+  const resizeStartRef = useRef<{ pointer: number; y: number; height: number; current: number } | null>(null);
+  function cancelHeightResize() {
+    resizeStartRef.current = null;
+    setPreviewHeight(null);
+    setResizing(false);
+  }
   const expanded = multiline;
   const hasDraftContent = Boolean(
     content.trim() || hasAttachments || attachmentMentions?.length,
@@ -586,7 +595,7 @@ function DraftedChatComposer({
       Number.parseFloat(styles.paddingTop) +
       Number.parseFloat(styles.paddingBottom);
     const oneRow = lineHeight + padding;
-    const limit = composerHeightLimit(surfaceRef.current, element);
+    const limit = Math.min(COMPOSER_MAX_HEIGHT.max, composerHeightLimit(surfaceRef.current, element));
     if (bandRef.current) {
       // Extra height overlays the transcript instead of growing its bottom inset.
       bandRef.current.style.maxHeight = `${Math.min(480, (window.visualViewport?.height ?? window.innerHeight) / 2)}px`;
@@ -600,8 +609,8 @@ function DraftedChatComposer({
     void element.offsetHeight;
 
     const minHeight = Math.min(MIN_TEXT_HEIGHT, Math.max(natural, oneRow), limit);
-    const maxHeight = Math.max(oneRow, Math.min(resizedTextHeight ?? lineHeight * MAX_ROWS + padding, limit));
-    const height = resizedTextHeight !== undefined && expanded
+    const maxHeight = Math.max(oneRow, Math.min(maxTextHeight, limit));
+    const height = (previewHeight !== null || resizedTextHeight === savedMaxHeight) && expanded
       ? Math.max(minHeight, maxHeight)
       : Math.max(Math.min(natural, maxHeight), oneRow);
     setHeightRange((current) => current.current === Math.round(height) && current.min === minHeight && current.max === limit
@@ -610,7 +619,7 @@ function DraftedChatComposer({
     element.style.height = `${String(height)}px`;
     element.style.overflowY = natural > height ? "scroll" : "hidden";
     setScrollEdges(getScrollEdges(element));
-  }, [resizedTextHeight, expanded]);
+  }, [resizedTextHeight, expanded, maxTextHeight, previewHeight, savedMaxHeight]);
 
   useLayoutEffect(() => {
     syncComposerLayout(content);
@@ -947,25 +956,25 @@ function DraftedChatComposer({
       ref={bandRef}
       className="relative flex shrink-0 flex-col justify-end bg-background"
       style={{
-        width: "calc(100% - var(--assistant-scrollbar-width, 0px))",
+        width: "calc(100% - var(--assistant-content-inset, 0px))",
         maxHeight: "min(50dvh, 480px)",
       }}
     >
-      <div ref={surfaceRef} data-composer-surface className="relative shrink-0 bg-background">
+      <div ref={surfaceRef} data-composer-surface className="relative shrink-0 bg-background px-4 sm:px-6">
         <div
           aria-hidden="true"
           data-composer-fade
           className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
         />
         <div
-          className="mx-auto w-full max-w-[758px] px-3 pt-2 sm:px-6"
+          className="mx-auto w-full max-w-[var(--chat-content-width,758px)] pt-2"
           style={{ paddingBottom: "max(1rem, var(--sab))" }}
         >
           {controls}
           {active && allowActiveInput ? (
             <p
               data-steering-hint
-              className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]"
+              className="mb-1.5 text-11 text-muted-foreground"
             >
               Still replying. What you send now steers this reply; Stop ends it.
             </p>
@@ -1050,7 +1059,7 @@ function DraftedChatComposer({
             data-audio-input={voiceActivity?.input ?? dictation.activity.input}
             data-audio-output={voiceActivity?.output ?? 0}
             className={cn(
-              "composer-audio-surface relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong",
+              "composer-audio-surface relative rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong",
               dragging ? "border-primary ring-1 ring-primary" : "border-hairline",
             )}
           >
@@ -1064,65 +1073,48 @@ function DraftedChatComposer({
                 aria-valuemax={heightRange.max}
                 aria-valuenow={heightRange.current}
                 tabIndex={0}
-                title="Drag up to show more text. Double-click to reset."
+                title="Drag to set maximum height for all chats. Double-click to reset."
                 className="group absolute -top-1.5 left-1/2 z-20 flex h-3 w-12 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onPointerDown={(event) => {
-                  if (event.button !== 0) return;
+                  if (event.button !== 0 || resizeStartRef.current) return;
                   event.preventDefault();
                   resizeStartRef.current = {
+                    pointer: event.pointerId,
                     y: event.clientY,
-                    height:
-                      editorRef.current?.element.getBoundingClientRect().height ??
-                      MIN_TEXT_HEIGHT,
+                    height: editorRef.current?.element.getBoundingClientRect().height ?? MIN_TEXT_HEIGHT,
+                    current: savedMaxHeight,
                   };
                   event.currentTarget.setPointerCapture(event.pointerId);
                   setResizing(true);
                 }}
                 onPointerMove={(event) => {
                   const start = resizeStartRef.current;
-                  if (
-                    !start ||
-                    !event.currentTarget.hasPointerCapture(event.pointerId)
-                  )
-                    return;
-                  setResizedTextHeight(
-                    Math.max(
-                      heightRange.min,
-                      Math.min(
-                        composerHeightLimit(surfaceRef.current, editorRef.current?.element),
-                        start.height + start.y - event.clientY,
-                      ),
-                    ),
-                  );
+                  if (!start || start.pointer !== event.pointerId) return;
+                  start.current = Math.round(Math.max(heightRange.min, Math.min(heightRange.max, start.height + start.y - event.clientY)));
+                  setPreviewHeight(start.current);
                 }}
-                onLostPointerCapture={() => {
-                  resizeStartRef.current = null;
-                  setResizing(false);
-                }}
+                onPointerCancel={cancelHeightResize}
+                onLostPointerCapture={cancelHeightResize}
                 onPointerUp={(event) => {
-                  if (event.currentTarget.hasPointerCapture(event.pointerId))
-                    event.currentTarget.releasePointerCapture(event.pointerId);
+                  if (resizeStartRef.current?.pointer !== event.pointerId) return;
+                  setMaxTextHeight(resizeStartRef.current.current);
+                  setResizedTextHeight(resizeStartRef.current.current);
+                  cancelHeightResize();
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
                 }}
-                onDoubleClick={() => setResizedTextHeight(undefined)}
+                onDoubleClick={() => {
+                  setMaxTextHeight(COMPOSER_MAX_HEIGHT.default);
+                  setResizedTextHeight(undefined);
+                }}
                 onKeyDown={(event) => {
-                  if (
-                    !["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)
-                  )
-                    return;
+                  if (event.key === "Escape") { cancelHeightResize(); return; }
+                  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
                   event.preventDefault();
                   const current = heightRange.current;
-                  const next =
-                    event.key === "Home"
-                      ? heightRange.min
-                      : event.key === "End"
-                        ? composerHeightLimit(surfaceRef.current, editorRef.current?.element)
-                        : current + (event.key === "ArrowUp" ? 24 : -24);
-                  setResizedTextHeight(
-                    Math.max(
-                      heightRange.min,
-                      Math.min(composerHeightLimit(surfaceRef.current, editorRef.current?.element), next),
-                    ),
-                  );
+                  const next = event.key === "Home" ? heightRange.min : event.key === "End" ? heightRange.max : current + (event.key === "ArrowUp" ? 24 : -24);
+                  const height = Math.max(heightRange.min, Math.min(heightRange.max, next));
+                  setMaxTextHeight(height);
+                  setResizedTextHeight(height);
                 }}
               >
                 <span

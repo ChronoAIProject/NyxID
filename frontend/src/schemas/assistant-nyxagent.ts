@@ -146,6 +146,20 @@ export const nyxAgentRecoverySchema = z.object({
   attachments: z.array(z.string()),
 });
 export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
+const nyxAgentFailureReasonSchema = z.object({
+  source: z.string(),
+  stage: z.string(),
+  code: z.string(),
+  http_status: z.number().int().nullish(),
+  nyxid_error_code: z.number().int().nullish(),
+});
+export type NyxAgentFailureReason = z.infer<typeof nyxAgentFailureReasonSchema>;
+const turnMetadataSchema = z.object({
+  attempts: z.number().int().nonnegative().nullish(),
+  capacity_wait_ms: z.number().nonnegative().nullish(),
+  failure_reason: nyxAgentFailureReasonSchema.nullish(),
+  channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
+});
 export const nyxAgentMessageSchema = z.object({
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
@@ -160,7 +174,7 @@ export const nyxAgentMessageSchema = z.object({
   status: z.enum(["completed", "failed"]),
   error_code: z.string().nullable(),
   upstream_error_code: z.string().nullable().optional(),
-  turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(), channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish() }).nullish(),
+  turn_metadata: turnMetadataSchema.nullish(),
   error_detail: z.object({
     attempts: z.number().int().nonnegative().nullish(),
     capacity_wait_ms: z.number().nonnegative().nullish(),
@@ -179,6 +193,10 @@ export const nyxAgentMessageSchema = z.object({
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
+  /** Who started the turn this message opens; absent on older rows. */
+  origin: z.string().nullish(),
+  /** The automation an automation-started message came from, while its run is retained. */
+  automation: z.object({ trigger_id: z.string(), run_id: z.string(), label: z.string() }).nullish(),
 });
 /** How NyxBot asks before acting: never, for sensitive/destructive actions, or for every change. */
 export const nyxAgentAccessModeSchema = z.enum(["autopilot", "nyxmode", "ask_every_time"]);
@@ -203,6 +221,8 @@ export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
   creation_turn_id: z.string().nullish(),
+  /** The tool call (turn activity) this card or receipt belongs to. */
+  activity_id: z.string().nullish(),
   authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
   continuation_receipt_id: z.string().uuid().nullish(),
@@ -308,7 +328,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.completed"),
     turn_id: z.string(),
     status: z.enum(["completed", "failed", "cancelled"]),
-    turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(), channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish() }).nullish(),
+    turn_metadata: turnMetadataSchema.nullish(),
     error: z.object({
       attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(),
       code: z.string(), message: z.string(), upstream_error_code: z.string().nullish(),
@@ -425,6 +445,7 @@ export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
 export const assistantAgentSchema = z.object({
+  share_role: z.enum(["manager", "user"]).nullable().optional(),
   owner_id: z.string().optional(),
   owner_name: z.string().nullable().optional(),
   owner_kind: z.enum(["person", "org"]).optional(),

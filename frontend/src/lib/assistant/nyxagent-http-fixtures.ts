@@ -610,11 +610,11 @@ export class NyxAgentHttpFixtures {
       return;
     }
     const previous = acknowledgements.at(-1);
-    const confirmed = /^Confirmed: .*\(acknowledgement_id ([0-9a-f-]{36})\)\. Retry it now\.$/m.exec(
+    const confirmed = /^Confirmed: .*\(acknowledgement_id ([0-9a-f-]{36})\)\. Retry it now\./m.exec(
       text,
     );
     if (text === "Delete agent key ci-bot") {
-      if (this.settings.skip_destructive_confirmation) {
+      if ((this.settings.access_mode ?? (this.settings.skip_destructive_confirmation ? "autopilot" : "nyxmode")) === "autopilot") {
         row.reply = "Deleted agent key ci-bot.";
         return;
       }

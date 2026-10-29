@@ -205,6 +205,11 @@ async fn serve(
                 let Some(audio)=audio else {return Ok(());};
                 let result=tokio::time::timeout(std::time::Duration::from_secs(2),async {
                     match audio {
+                        Output::Ready => {
+                            // Wake the authenticated snapshot path as soon as setup commits.
+                            tick.reset_immediately();
+                            Ok(())
+                        },
                         Output::StartFailed(error) => {
                             startup_reported = true; // Grok startup boundary already audited it.
                             socket.send(Message::Text(json!({"type":"start_failed","error":error}).to_string().into())).await

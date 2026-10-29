@@ -25,9 +25,59 @@ pub struct OnboardingStateResponse {
 /// User-scoped config / preferences surfaced on `GET /users/me`.
 #[derive(Debug, Serialize)]
 pub struct ProfileConfigResponse {
+    pub security: SecurityPreferencesResponse,
     pub services_view: Option<ServiceViewResponse>,
     pub service_views: Option<ServiceViewsResponse>,
     pub onboarding: OnboardingStateResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SecurityPreferencesResponse {
+    pub skip_mfa_for_approved_sign_ins: bool,
+}
+
+impl Default for SecurityPreferencesResponse {
+    fn default() -> Self {
+        crate::models::user::SecurityPreferences::default().into()
+    }
+}
+
+impl From<crate::models::user::SecurityPreferences> for SecurityPreferencesResponse {
+    fn from(value: crate::models::user::SecurityPreferences) -> Self {
+        Self {
+            skip_mfa_for_approved_sign_ins: value.skip_mfa_for_approved_sign_ins,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveSecurityPreferencesRequest {
+    pub skip_mfa_for_approved_sign_ins: bool,
+}
+
+pub async fn save_security_preferences(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<SaveSecurityPreferencesRequest>,
+) -> AppResult<Json<SecurityPreferencesResponse>> {
+    super::login_client_context::require_first_party_human(&user)?;
+    let actor = crate::services::audit_service::AuditActor {
+        user_id: user.user_id.to_string(),
+        ip_address: user.ip_address.clone(),
+        user_agent: user.user_agent.clone(),
+        api_key_id: None,
+        api_key_name: None,
+    };
+    let policy = crate::services::approved_sign_in_policy::save(
+        &state.db,
+        &actor.user_id,
+        body.skip_mfa_for_approved_sign_ins,
+        user.derived_mfa_authority(),
+        &actor,
+    )
+    .await?;
+    Ok(Json(policy.into()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +434,7 @@ pub async fn get_me(
         updated_at: user_model.updated_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
         profile_config: ProfileConfigResponse {
+            security: user_model.profile_config.security.into(),
             services_view: user_model.profile_config.services_view.map(Into::into),
             service_views: user_model.profile_config.service_views.map(Into::into),
             onboarding: OnboardingStateResponse {
@@ -581,6 +632,38 @@ mod tests {
     use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn profile_reports_stored_password_independently_of_social_provider() {
+        let db = connect_test_database("profile_password").await.unwrap();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for (has_password, provider) in [
+            (false, None),
+            (false, Some("google")),
+            (true, None),
+            (true, Some("google")),
+        ] {
+            let user_id = Uuid::new_v4().to_string();
+            let mut user = test_user(&user_id, UserType::Person);
+            user.password_hash = has_password.then(|| "$argon2id$test-hash".to_string());
+            user.social_provider = provider.map(str::to_owned);
+            db.collection::<User>(USERS)
+                .insert_one(&user)
+                .await
+                .unwrap();
+
+            let Json(profile) = get_me(State(state.clone()), test_auth_user(&user_id))
+                .await
+                .unwrap();
+            let json = serde_json::to_value(profile).unwrap();
+            assert_eq!(json["has_password"], has_password);
+            assert!(json.get("password_hash").is_none());
+        }
+        db.drop().await.unwrap();
+    }
 
     fn service_view_request() -> SaveServiceViewRequest {
         SaveServiceViewRequest {
@@ -1136,6 +1219,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
             profile_config: ProfileConfigResponse {
+                security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
                 onboarding: OnboardingStateResponse {
@@ -1196,6 +1280,7 @@ mod tests {
             updated_at: "2025-06-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
                 onboarding: OnboardingStateResponse {
@@ -1247,6 +1332,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:01Z".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
                 onboarding: OnboardingStateResponse {
@@ -1299,6 +1385,7 @@ mod tests {
     #[test]
     fn profile_config_response_serialization() {
         let resp = ProfileConfigResponse {
+            security: SecurityPreferencesResponse::default(),
             services_view: None,
             service_views: None,
             onboarding: OnboardingStateResponse {
@@ -1444,6 +1531,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
                 onboarding: OnboardingStateResponse {

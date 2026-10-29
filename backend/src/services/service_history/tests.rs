@@ -511,6 +511,67 @@ async fn persisted_default_null_is_not_delete_and_manual_keys_are_not_oauth() {
 }
 
 #[tokio::test]
+async fn usage_touch_preserves_pending_credential_edit_but_rotation_invalidates_it() {
+    use crate::services::credential_record_service::exact_source_filter;
+
+    let db = connect_transaction_test_database("usage_touch_edit").await;
+    let keys = db.collection::<Document>("user_api_keys");
+    let edited_at = bson::DateTime::from_millis(1_000);
+    let source = doc! {
+        "_id": "touch-edit-race", "user_id": "owner", "status": "active",
+        "credential_type": "api_key", "credential_epoch": 1_i64,
+        "updated_at": edited_at,
+    };
+    keys.insert_one(&source).await.unwrap();
+    let pending_edit = exact_source_filter("user_api_keys", &source).unwrap();
+
+    // Force the proxy's background write between a read and its exact-source
+    // compare-and-set. The same interleaving used to report a missing key.
+    super::mutation::touch_credential_usage(&db, "touch-edit-race")
+        .await
+        .unwrap();
+    let used = keys
+        .find_one(doc! {"_id": "touch-edit-race"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(used.get_datetime("updated_at").unwrap(), &edited_at);
+    assert!(used.get_datetime("last_used_at").unwrap() > &edited_at);
+    assert_eq!(keys.count_documents(pending_edit.clone()).await.unwrap(), 1);
+
+    // An out-of-order touch cannot move usage backwards either.
+    let future = bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::days(1));
+    keys.update_one(
+        doc! {"_id": "touch-edit-race"},
+        doc! {"$set": {"last_used_at": future}},
+    )
+    .await
+    .unwrap();
+    super::mutation::touch_credential_usage(&db, "touch-edit-race")
+        .await
+        .unwrap();
+    assert_eq!(
+        keys.find_one(doc! {"_id": "touch-edit-race"})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_datetime("last_used_at")
+            .unwrap(),
+        &future
+    );
+
+    // Keep the security fence: an actual credential replacement must still
+    // reject the earlier snapshot even when the edit timestamp is identical.
+    keys.update_one(
+        doc! {"_id": "touch-edit-race"},
+        doc! {"$inc": {"credential_epoch": 1_i64}},
+    )
+    .await
+    .unwrap();
+    assert_eq!(keys.count_documents(pending_edit).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn bulk_updates_over_previous_ceiling_and_transactional_batch_abort() {
     let (db, s) = fixture().await;
     let rows = (0..10_010)

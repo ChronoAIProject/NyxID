@@ -39,6 +39,8 @@ pub use bootstrap::{begin_model_attempt, finish_model_attempt};
 mod authority;
 pub use authority::connection_binding;
 mod availability;
+mod guest_model;
+mod guest_model_defaults;
 mod http;
 mod receipts;
 mod request_identity;
@@ -48,11 +50,13 @@ mod selection;
 use availability::verified_unavailable;
 pub use availability::{NodeFailureEvidence, observe_transport};
 #[cfg(test)]
+pub(crate) use guest_model::{is_shared_chat, owner_model_route_allowed};
+#[cfg(test)]
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
 use request_identity::selection_fingerprint;
-pub(crate) use request_identity::stateless_inference;
 pub use request_identity::{bind_headers, http_operation};
+pub(crate) use request_identity::{stateless_inference, stateless_model_transport};
 pub use resolution::resolve_implicit_for_request;
 #[cfg(test)]
 use selection::owner_selector;
@@ -163,6 +167,7 @@ async fn check_job_http_inner(
         refusal: None,
         automatic: None,
         admission: Some(Admission {
+            shared_permit: None,
             connection: id.to_owned(),
             binding: connection_binding(&state.db, id, &chat.api_key_id).await?,
             execution: Some(execution_digest(target)),
@@ -283,6 +288,101 @@ async fn check_inner(
         .await?;
     let service =
         super::user_service_service::get_user_service(db, effective_owner, connection_id).await?;
+    if let Some(access) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        if !chat.turn_live || chat.turn_stopped {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        let model = matches!(
+            operation["kind"].as_str(),
+            Some("raw_inference" | "legacy_inference")
+        ) && access.allows_model_connection(&service);
+        if pool || !(access.allows_connection(&service) || model) {
+            return Err(AppError::Forbidden(
+                "Shared connection is unavailable".into(),
+            ));
+        }
+        if let Some(selected) = selection::selected(db, chat).await?
+            && let Ok(selected_id) = selected.get_str("connection_id")
+            && selected_id != connection_id
+            && service.catalog_service_id.is_some()
+            && (selected.get_str("catalog_service_id").ok()
+                == service.catalog_service_id.as_deref()
+                || selected
+                    .get_document("operation")
+                    .ok()
+                    .and_then(|op| op.get_str("provider").ok())
+                    == service.catalog_service_id.as_deref())
+        {
+            return Err(AppError::Forbidden("Use the person's exact selected connection; choose a new connection before changing accounts".into()));
+        }
+        let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
+        if service.user_id == chat.user_id
+            && let Some(refusal) =
+                super::shared_agent_consent::prompt(db, chat, access, &service, &binding, operation)
+                    .await?
+        {
+            return Ok(Decision {
+                refusal: Some(refusal),
+                admission: None,
+                automatic: None,
+            });
+        }
+        // Connection consent is independent of the actor's action policy.
+        // Always may remember a connection; it never bypasses an action card.
+        let gate = acks::confirmation_needed(db, chat, facts, false).await?;
+        if let Some(need) = gate.ask() {
+            let args = json!({"connection_id": connection_id, "execution_binding": binding,
+                "operation": operation, "acknowledgement_id": acknowledgement});
+            if let Some(refusal) =
+                acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, summary)
+                    .await?
+            {
+                return Ok(Decision {
+                    refusal: Some(refusal),
+                    admission: None,
+                    automatic: None,
+                });
+            }
+        }
+        let permit = if service.user_id == chat.user_id {
+            match super::shared_agent_consent::authorize(
+                db, chat, access, &service, &binding, operation,
+            )
+            .await?
+            {
+                Ok(permit) => Some(permit),
+                Err(refusal) => {
+                    return Ok(Decision {
+                        refusal: Some(refusal),
+                        admission: None,
+                        automatic: None,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        return Ok(Decision {
+            refusal: None,
+            automatic: gate.auto_allowed(),
+            admission: Some(Admission {
+                shared_permit: permit,
+                connection: connection_id.into(),
+                binding,
+                execution: target.map(execution_digest),
+                execution_credential: true,
+                operation: digest(operation.clone()),
+                operation_identity: operation.clone(),
+                native_execution: None,
+                read: facts.class == acks::OwnerActionClass::Read,
+                api_key_id: chat.api_key_id.clone(),
+                summary: summary.into(),
+                job_id: None,
+                async_continuation: None,
+                chat: chat.clone(),
+            }),
+        });
+    }
     let owner_row = db
         .collection::<crate::models::user::User>("users")
         .find_one(doc! {"_id":effective_owner,"is_active":true})
@@ -405,14 +505,28 @@ async fn check_inner(
             } else {
                 false
             };
-        if same_group
+        if (same_group || selected_id == connection_id)
             && !pool_fallback
             && applies
             && (selected_id != connection_id || !selection_matches(selected, &service, &binding))
         {
+            let (reason, instructions) = match selected_service.as_ref() {
+                None => (
+                    "selected_connection_unavailable",
+                    "The owner already selected this connection, but it is now removed, disabled or inaccessible. Enable or reconnect it in Connections, or restore access. Ask the owner for a replacement only if they want a different account; do not substitute one.",
+                ),
+                Some(_) if selected_id == connection_id => (
+                    "selected_connection_changed",
+                    "The selected connection's identity or confirmed operation binding changed. Ask the owner to review the changed connection before selecting it again. Do not use another account.",
+                ),
+                Some(_) => (
+                    "wrong_connection",
+                    "The owner already selected an exact connection. Use nyx__search_tools with query set to selected_connection_id to find that connection's tool, preserving the operation and arguments. If it cannot be addressed unambiguously, report that limitation. Do not ask the owner to repeat their selection or use another account.",
+                ),
+            };
             return Ok(Decision {
                 refusal: Some(json!({"error":"service_selection_required",
-                    "selected_connection_id":selected_id,"instructions":"Use the owner's exact selected connection for this operation. If it is unavailable, ask the owner to choose a new target."})),
+                    "reason":reason,"selected_connection_id":selected_id,"instructions":instructions})),
                 admission: None,
                 automatic: None,
             });
@@ -432,12 +546,7 @@ async fn check_inner(
             .find_one(doc! {"_id": &chat.api_key_id, "is_active": true})
             .await?
             .ok_or_else(|| AppError::Forbidden("Assistant credential unavailable".into()))?;
-        let request_access = super::org_agent_service::resolve_key_access(
-            db,
-            &key.user_id,
-            key.assistant_agent_owner_id.as_deref(),
-        )
-        .await?;
+        let request_access = super::org_agent_service::resolve_credential_access(db, &key).await?;
         let allowed_services = super::key_service::effective_allowed_service_ids_with_access(
             db,
             &key,
@@ -567,7 +676,7 @@ async fn check_inner(
             if !equivalent(&service, &candidate, inference) {
                 return Ok(Decision {
                     refusal: Some(json!({"error": "service_target_selection_required",
-                    "proposed_connection_id": connection_id, "instructions": "These connections may access different accounts. Ask the owner to choose the exact target with the connection picker or a leading /service <connection UUID>. Do not replace an account-specific call with another connection."})),
+                    "proposed_connection_id": connection_id, "instructions": "These connections may access different accounts. Ask the owner to start a new message with /service <connection UUID>, followed by their request on the next line. Do not replace an account-specific call with another connection."})),
                     admission: None,
                     automatic: None,
                 });
@@ -598,6 +707,7 @@ async fn check_inner(
         return Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                shared_permit: None,
                 connection: connection_id.into(),
                 binding,
                 execution: target.map(|target| execution_projection_digest(target, !pool)),
@@ -638,7 +748,7 @@ async fn check_inner(
             summary.to_owned()
         };
         let gate = if resource_replay && acknowledgement.is_some() {
-            acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true })
+            acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
         } else { acks::confirmation_needed(db, chat, facts, org && !model_consent).await? };
         if gate.ask().is_some() {
             // Legacy idle calls can retain their existing automatic behavior, but
@@ -670,6 +780,7 @@ async fn check_inner(
         Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                shared_permit: None,
                 connection: connection_id.into(),
                 binding,
                 execution: target.map(|target| execution_projection_digest(target, !pool)),

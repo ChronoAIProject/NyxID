@@ -288,6 +288,8 @@ pub async fn delegate(
     super::super::assistant_voice::require_enabled(db, &call.user_id).await?;
     super::super::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
     let request = VoiceRequest {
+        started_at: None,
+        terminal_error_code: None,
         async_operation_pending: false,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: call.user_id.clone(),

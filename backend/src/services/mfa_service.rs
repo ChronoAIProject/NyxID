@@ -475,7 +475,9 @@ pub async fn disable_totp(
                 "password_hash": &proof.user.password_hash,
             },
             doc! {
-                "$set": {"mfa_enabled": false, "updated_at": bson::DateTime::now()},
+                "$set": {"mfa_enabled": false, "updated_at": bson::DateTime::now(),
+                    "profile_config.security.revision": uuid::Uuid::new_v4().to_string(),
+                    "profile_config.security.changed_at": bson::DateTime::now()},
                 "$inc": {"mfa_state_version": 1_i64},
             },
         )
@@ -508,7 +510,7 @@ pub async fn disable_totp(
             api_key_name: None,
         },
         "mfa_disabled",
-        serde_json::json!({"factor_kind": completion.factor.as_str()}),
+        serde_json::json!({"factor_kind": completion.factor.as_str(), "approved_sign_in_revision_rotated": true}),
     )
     .await?;
     completion.commit().await

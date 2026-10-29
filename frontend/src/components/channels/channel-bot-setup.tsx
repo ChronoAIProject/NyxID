@@ -333,7 +333,7 @@ export function ChannelBotSetup({
           )}
           {createdBot?.webhook_url && (
             <CopyableUrlCallout
-              label="Callback URL"
+              label={createdBot.platform === "discord" ? "Interactions Endpoint URL" : "Callback URL"}
               url={createdBot.webhook_url}
               docsHref={getPlatform(createdBot.platform).webhookDocs}
             />

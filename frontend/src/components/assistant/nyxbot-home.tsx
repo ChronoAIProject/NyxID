@@ -1,11 +1,11 @@
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useState, type ReactNode } from "react";
-import { MessageSquare, Plus } from "lucide-react";
+import { MessageSquare, NotebookPen, Plus } from "lucide-react";
 import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
 import { Button } from "@/components/ui/button";
 import { nyxBotOf, useNyxBotAgent } from "@/hooks/use-nyxbot-agents";
-import { awayItems } from "@/lib/assistant/nyxbot-away";
+import { AWAY_PREVIEW, awayItems } from "@/lib/assistant/nyxbot-away";
 import {
   AGENT_STATUS_LABEL,
   agentHandle,
@@ -48,7 +48,73 @@ function Quiet({ children }: { readonly children: ReactNode }) {
   );
 }
 
-function AwayList({
+/**
+ * The home's list card, shared by "While you were away" and "What NyxBot
+ * remembers": a lead (avatar or icon), a title line, two lines of body and an
+ * optional action per row, then "and N more".
+ */
+function HomeList({
+  label,
+  more,
+  children,
+}: {
+  readonly label?: string;
+  readonly more?: ReactNode;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div className="overflow-hidden rounded-xl border border-border/50 bg-card">
+      <ul aria-label={label}>{children}</ul>
+      {more ? <div className="px-4 pb-3 text-11">{more}</div> : null}
+    </div>
+  );
+}
+
+function HomeListRow({
+  lead,
+  title,
+  body,
+  action,
+}: {
+  readonly lead: ReactNode;
+  readonly title: ReactNode;
+  readonly body: ReactNode;
+  readonly action?: ReactNode;
+}) {
+  return (
+    <li className="flex items-start gap-3 px-4 py-3">
+      {lead}
+      <div className="min-w-0 flex-1 space-y-0.5">
+        <div className="flex items-center gap-2 text-12">{title}</div>
+        <p className="line-clamp-2 text-12 text-muted-foreground">{body}</p>
+      </div>
+      {action}
+    </li>
+  );
+}
+
+function MoreButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  readonly onClick: () => void;
+  readonly disabled?: boolean;
+  readonly children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="text-text-tertiary underline-offset-2 transition-colors hover:text-foreground hover:underline focus-visible:underline focus-visible:outline-none"
+    >
+      {children}
+    </button>
+  );
+}
+
+export function AwayList({
   agents,
   onOpenAgent,
   onOpenConversation,
@@ -58,18 +124,26 @@ function AwayList({
   readonly onOpenConversation: (conversationId: string) => void;
 }) {
   const items = awayItems(agents);
+  const [shown, setShown] = useState(AWAY_PREVIEW);
   if (!items.length) {
     return (
       <Quiet>All caught up. Replies and requests from your specialists show up here.</Quiet>
     );
   }
   return (
-    <ul className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-card">
-      {items.map((item) => (
-        <li key={item.key} className="flex items-start gap-3 px-4 py-3">
-          <AgentAvatar agent={item.agent} size="lg" />
-          <div className="min-w-0 flex-1 space-y-0.5">
-            <div className="flex items-center gap-2 text-12">
+    <HomeList
+      more={items.length > AWAY_PREVIEW ? (
+        <MoreButton onClick={() => setShown(shown < items.length ? shown + AWAY_PREVIEW : AWAY_PREVIEW)}>
+          {shown < items.length ? `and ${items.length - shown} more` : "Show less"}
+        </MoreButton>
+      ) : null}
+    >
+      {items.slice(0, shown).map((item) => (
+        <HomeListRow
+          key={item.key}
+          lead={<AgentAvatar agent={item.agent} size="lg" />}
+          title={
+            <>
               <span className="font-medium text-foreground">{agentTitle(item.agent)}</span>
               {item.kind === "request" ? (
                 <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning light:border-transparent light:bg-warning light:text-white">
@@ -83,12 +157,10 @@ function AwayList({
                   {formatRelativeTime(item.at)}
                 </span>
               )}
-            </div>
-            <p className="line-clamp-2 text-12 text-muted-foreground">
-              {item.kind === "request" ? item.request.summary : item.text}
-            </p>
-          </div>
-          {item.kind === "request" ? (
+            </>
+          }
+          body={item.kind === "request" ? item.request.summary : item.text}
+          action={item.kind === "request" ? (
             <Button
               size="sm"
               variant="outline"
@@ -107,9 +179,9 @@ function AwayList({
               Open
             </Button>
           )}
-        </li>
+        />
       ))}
-    </ul>
+    </HomeList>
   );
 }
 
@@ -135,21 +207,32 @@ function MemoryPreview({
       {detail.isPending && nyxbot ? (
         <Quiet>Loading memory...</Quiet>
       ) : notes.length ? (
-        <ul
-          aria-label="NyxBot memory preview"
-          className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-card"
+        <HomeList
+          label="NyxBot memory preview"
+          more={notes.length > MEMORY_PREVIEW ? (
+            <MoreButton onClick={onManage} disabled={!nyxbot}>
+              and {notes.length - MEMORY_PREVIEW} more
+            </MoreButton>
+          ) : null}
         >
           {notes.slice(0, MEMORY_PREVIEW).map((note) => (
-            <li key={note.id} className="line-clamp-2 px-4 py-2.5 text-12 text-foreground">
-              {note.text}
-            </li>
+            <HomeListRow
+              key={note.id}
+              lead={
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-text-tertiary">
+                  <NotebookPen aria-hidden="true" className="size-3.5" />
+                </span>
+              }
+              title={
+                <>
+                  <span className="font-medium text-foreground">Remembered</span>
+                  <span className="text-11 text-text-tertiary">{formatRelativeTime(note.updated_at)}</span>
+                </>
+              }
+              body={note.text}
+            />
           ))}
-          {notes.length > MEMORY_PREVIEW ? (
-            <li className="px-4 py-2 text-11 text-text-tertiary">
-              and {notes.length - MEMORY_PREVIEW} more
-            </li>
-          ) : null}
-        </ul>
+        </HomeList>
       ) : (
         <Quiet>
           Nothing yet. Tell NyxBot &ldquo;Remember …&rdquo; and it keeps that
@@ -237,7 +320,7 @@ function GroupCard({
       <button
         type="button"
         onClick={onOpen}
-        aria-label={`Open group ${group.name}`}
+        aria-label={`Open crew ${group.name}`}
         className="flex w-full flex-col gap-2.5 rounded-xl border border-border/50 bg-card p-4 text-left transition-colors hover:bg-overlay"
       >
         <div className="flex w-full items-center gap-2">
@@ -264,7 +347,7 @@ function GroupCard({
 
 /**
  * The NyxBot home: a greeting, what happened while the user was away, what
- * NyxBot remembers, the roster and the groups. The page renders the
+ * NyxBot remembers, the roster and the crews. The page renders the
  * "Message NyxBot" composer below it.
  */
 export function NyxBotHome({
@@ -299,10 +382,9 @@ export function NyxBotHome({
     .filter((agent) => agent.status !== "destroyed")
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
-    <div className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6">
-      {/* Same column as the composer below it: its 758px rail, side padding and 30px gutter. */}
+    <div data-chat-transcript="" data-scroll-fade="" className="assistant-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 sm:px-6">
       <div
-        className="mx-auto flex w-full max-w-[758px] flex-col gap-8 pl-[30px] pt-8 sm:pl-[54px] sm:pr-6"
+        className="mx-auto flex w-full max-w-[var(--chat-content-width,758px)] flex-col gap-8 pt-8"
         style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
       >
         <header className="flex items-center gap-4">
@@ -374,16 +456,16 @@ export function NyxBotHome({
 
         <Section
           id="nyxbot-home-groups"
-          title="Groups"
+          title="Crews"
           action={
             <Button size="sm" variant="ghost" onClick={onNewGroup}>
               <Plus aria-hidden="true" />
-              New group
+              New crew
             </Button>
           }
         >
           {groups.length ? (
-            <ul aria-label="Groups" className="grid gap-3 sm:grid-cols-2">
+            <ul aria-label="Crews" className="grid gap-3 sm:grid-cols-2">
               {groups.map((group) => (
                 <GroupCard key={group.id} group={group} onOpen={() => onOpenGroup(group.id)} />
               ))}

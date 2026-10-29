@@ -12,6 +12,8 @@ const SIZES = {
   sm: "h-5 w-5 text-9",
   md: "h-6 w-6 text-9",
   lg: "h-8 w-8 text-11",
+  /** Spans a two-line thread header (28px name line + 16px handle line). */
+  xl: "h-11 w-11 text-13",
 } as const;
 
 /**
@@ -72,6 +74,7 @@ export function AgentAvatarStack({
   max = 3,
   size = "sm",
   className,
+  ring = "ring-background",
 }: {
   readonly agents: readonly {
     readonly id: string;
@@ -82,18 +85,21 @@ export function AgentAvatarStack({
   readonly max?: number;
   readonly size?: keyof typeof SIZES;
   readonly className?: string;
+  /** Ring color classes matching the surface behind the stack, so overlaps read as cutouts. */
+  readonly ring?: string;
 }) {
   const shown = agents.slice(0, max);
   const hidden = agents.length - shown.length;
   return (
     <span aria-hidden="true" className={cn("flex shrink-0 items-center -space-x-1.5", className)}>
       {shown.map((agent) => (
-        <AgentAvatar key={agent.id} agent={agent} size={size} className="ring-2 ring-background" />
+        <AgentAvatar key={agent.id} agent={agent} size={size} className={cn("ring-2", ring)} />
       ))}
       {hidden > 0 ? (
         <span
           className={cn(
-            "flex items-center justify-center rounded-full border border-hairline bg-muted font-medium text-muted-foreground ring-2 ring-background",
+            "flex items-center justify-center rounded-full border border-hairline bg-muted font-medium text-muted-foreground ring-2",
+            ring,
             SIZES[size],
           )}
         >

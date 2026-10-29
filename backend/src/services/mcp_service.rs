@@ -106,6 +106,7 @@ impl McpBillingRouteContextBuilder {
     #[allow(clippy::too_many_arguments)]
     async fn build(
         self,
+        access: Option<&super::org_agent_service::RequestAccess>,
         billing: &crate::services::billing::BillingService,
         actor_user_id: &str,
         billing_principal_user_id: &str,
@@ -126,10 +127,11 @@ impl McpBillingRouteContextBuilder {
         });
         let billing_owner = billing
             .owner_resolver()
-            .resolve_for_execution(
+            .resolve_for_assistant_execution(
                 billing_principal_user_id,
                 &self.effective_owner_id,
                 credential_class,
+                access,
             )
             .await?;
         let node_intent = match node_route {
@@ -236,6 +238,9 @@ pub struct McpDurableEndpointMetadata {
     /// method says otherwise (NyxID's `x-nyxid-changes-existing`: a POST that
     /// edits, a PUT that only acts); `None` leaves it to the method.
     pub changes_existing: Option<bool>,
+    /// Compiled NyxID overlay only; remote specs cannot assert this.
+    pub append_only: bool,
+    pub append_only_query: Option<&'static serde_json::Map<String, serde_json::Value>>,
     /// The operation comes from a catalog contract (a stored
     /// `ServiceEndpoint` row, or NyxID's hosted overlay, including one an
     /// instance mounts by URL), not a remote spec read at call time. Only
@@ -277,9 +282,34 @@ pub fn operation_effects(
     let destructive = *method == reqwest::Method::DELETE || metadata.destructive;
     OperationEffects {
         reads: reads && !changes && !destructive,
-        uses: !changes && !destructive,
+        // Keep Aevatar's destructive classification for approvals/webhooks.
+        // Only this NyxID contract permits additive guest use despite it.
+        uses: !changes
+            && (!destructive
+                || (metadata.catalog_contract
+                    && metadata.append_only
+                    && *method == reqwest::Method::POST)),
         destructive,
     }
+}
+
+/// Conditions for a compiled append-only attestation. Query parsing refuses
+/// duplicate/ambiguous encodings; no operation or parameter names are policy.
+pub(crate) fn append_query_allowed(
+    required: Option<&serde_json::Map<String, serde_json::Value>>,
+    query: Option<&str>,
+) -> bool {
+    let Some(required) = required else {
+        return true;
+    };
+    let Ok(query) = nyxid_permissions::parse_query(query.unwrap_or_default()) else {
+        return false;
+    };
+    required.iter().all(|(name, value)| {
+        value
+            .as_str()
+            .is_some_and(|value| query.get(name).is_some_and(|actual| actual == value))
+    })
 }
 
 /// Resolve the operation revision published by the owning producer. Missing or
@@ -843,7 +873,7 @@ impl ServiceScope<'_> {
                 &service.source,
                 McpToolSource::UserManaged {
                     effective_owner_id, ..
-                } if effective_owner_id == access.owner()
+                } if access.shared().map_or_else(|| effective_owner_id == access.owner(), |shared| shared.connections().contains_key(&service.service_id))
             ),
         }
     }
@@ -860,7 +890,8 @@ impl ServiceScope<'_> {
             ServiceScope::Unrestricted | ServiceScope::Preferring(_) => true,
             ServiceScope::Allowed(ids) => ids.iter().any(|id| id == &service.id),
             ServiceScope::Organization { access } => {
-                service.user_id == access.owner() && access.allows_service(service)
+                access.allows_service(service)
+                    && (access.shared().is_some() || service.user_id == access.owner())
             }
         }
     }
@@ -1643,8 +1674,26 @@ async fn load_user_tools_with_grants(
             recommended_skill_refs,
             skills_revision,
             service_id: us.id.clone(),
-            service_name: endpoint_label.to_string(),
-            service_slug: us.slug.clone(),
+            service_name: match service_scope {
+                ServiceScope::Organization { access } if access.shared().is_some() => format!(
+                    "{} ({})",
+                    endpoint_label,
+                    if us.user_id == user_id {
+                        "your connection; consent required"
+                    } else {
+                        "owner's shared connection"
+                    }
+                ),
+                _ => endpoint_label.to_string(),
+            },
+            // A shared tool name permanently identifies one connection. Never
+            // let a same-slug actor connection shadow the owner's or vice versa.
+            service_slug: match service_scope {
+                ServiceScope::Organization { access } if access.shared().is_some() => {
+                    format!("shared_{}", us.id.replace('-', ""))
+                }
+                _ => us.slug.clone(),
+            },
             description: None,
             service_category: "user_service".to_string(),
             endpoints: published.endpoints,
@@ -1767,6 +1816,8 @@ fn service_endpoint_durable_metadata(
                     catalog_contract: true,
                     destructive: marks.destructive,
                     changes_existing: marks.changes_existing,
+                    append_only: marks.append_only,
+                    append_only_query: marks.append_only_query,
                     supports_idempotency_key: endpoint.supports_idempotency_key,
                     operation_generation: endpoint.operation_generation,
                 },
@@ -1788,6 +1839,8 @@ fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &st
             &endpoint.name,
         );
         if let Some(metadata) = published.durable_metadata.get_mut(&endpoint.endpoint_id) {
+            metadata.append_only = metadata.catalog_contract && marks.append_only;
+            metadata.append_only_query = marks.append_only_query;
             metadata.destructive |= marks.destructive;
             // Whichever says the operation edits wins.
             metadata.changes_existing = match (metadata.changes_existing, marks.changes_existing) {
@@ -1811,6 +1864,8 @@ fn generic_proxy_endpoints(service_label: &str) -> ParsedMcpEndpoints {
             risk: None,
             destructive: false,
             changes_existing: None,
+            append_only: false,
+            append_only_query: None,
             catalog_contract: false,
             supports_idempotency_key: false,
             // The generic proxy is a NyxID-owned protocol operation. Its
@@ -1905,6 +1960,8 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
                 risk: parsed_endpoint.risk,
                 destructive: parsed_endpoint.destructive,
                 changes_existing: parsed_endpoint.changes_existing,
+                append_only: false,
+                append_only_query: None,
                 catalog_contract: false,
                 supports_idempotency_key: parsed_endpoint.supports_idempotency_key,
                 // Remote instance specs have no durable producer revision.
@@ -2053,7 +2110,11 @@ async fn load_callable_user_services(
     // -- Org-shared services --
     let mut org_services: Vec<(UserService, String)> = Vec::new(); // (service, org_user_id)
     if let ServiceScope::Organization { access } = service_scope {
-        let org_svcs: Vec<UserService> =
+        let org_svcs: Vec<UserService> = if let Some(shared) = access.shared() {
+            let mut connections: Vec<_> = shared.connections().values().cloned().collect();
+            connections.sort_by(|a, b| a.id.cmp(&b.id));
+            connections
+        } else {
             crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
                 .find(doc! {
                     "user_id": access.owner(),
@@ -2062,13 +2123,15 @@ async fn load_callable_user_services(
                 })
                 .await?
                 .try_collect()
-                .await?;
+                .await?
+        };
         for svc in org_svcs {
             if access.allows_service(&svc) {
                 if let Some(ak_id) = &svc.api_key_id {
                     all_api_key_ids.push(ak_id.clone());
                 }
-                org_services.push((svc, access.owner().to_string()));
+                let owner = svc.user_id.clone();
+                org_services.push((svc, owner));
             }
         }
     } else {
@@ -2220,6 +2283,14 @@ async fn load_callable_user_services(
         service_has_dispatchable_route.insert(svc.id.clone(), any_dispatchable);
     }
 
+    // A shared catalog may contain the owner's explicitly shared platform
+    // connection and an actor-owned account connection. Platform ACLs must be
+    // checked against the connection owner in this lane; using the actor for
+    // the owner's row would make a valid owner grant disappear from discovery.
+    let shared_principal = match service_scope {
+        ServiceScope::Organization { access } if access.shared().is_some() => Some(user_id),
+        _ => None,
+    };
     // Resolve authority and credential state before slug collisions. A
     // temporarily unavailable preferred connection still owns its slug.
     let mut candidates = Vec::new();
@@ -2236,11 +2307,19 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info =
-            match platform_credential_classification(&us, &catalog_map, providers, grants) {
-                Some(info) => info,
-                None => classify_credential(&us, &active_key_map, has_route),
-            };
+        let platform_principal = shared_principal
+            .map(|_| us.user_id.as_str())
+            .unwrap_or(&us.user_id);
+        let cred_info = match platform_credential_classification(
+            &us,
+            platform_principal,
+            &catalog_map,
+            providers,
+            grants,
+        ) {
+            Some(info) => info,
+            None => classify_credential(&us, &active_key_map, has_route),
+        };
         candidates.push(ResolvedUserService {
             service: us,
             effective_owner_id: user_id.to_string(),
@@ -2261,11 +2340,19 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info =
-            match platform_credential_classification(&us, &catalog_map, providers, grants) {
-                Some(info) => info,
-                None => classify_credential(&us, &active_key_map, has_route),
-            };
+        let platform_principal = shared_principal
+            .map(|_| us.user_id.as_str())
+            .unwrap_or(&us.user_id);
+        let cred_info = match platform_credential_classification(
+            &us,
+            platform_principal,
+            &catalog_map,
+            providers,
+            grants,
+        ) {
+            Some(info) => info,
+            None => classify_credential(&us, &active_key_map, has_route),
+        };
         candidates.push(ResolvedUserService {
             service: us,
             effective_owner_id: org_user_id,
@@ -2304,6 +2391,7 @@ struct CredentialClassification {
 /// credential. No-auth services are always executable.
 fn platform_credential_classification(
     service: &UserService,
+    principal: &str,
     catalogs: &HashMap<&str, &DownstreamService>,
     providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
     grants: &crate::services::platform_key_service::OwnerGrants,
@@ -2325,7 +2413,7 @@ fn platform_credential_classification(
                         .provider_config_id
                         .as_ref()
                         .and_then(|id| providers.get(id)),
-                    &service.user_id,
+                    principal,
                     grants,
                 )
         });
@@ -2418,6 +2506,9 @@ fn select_slug_winner_indices(
     service_scope: ServiceScope<'_>,
     actor: &str,
 ) -> HashSet<usize> {
+    if matches!(service_scope, ServiceScope::Organization { access } if access.shared().is_some()) {
+        return (0..candidates.len()).collect();
+    }
     let mut winners: HashMap<String, (usize, (usize, usize))> = HashMap::new();
     for (index, candidate) in candidates.iter().enumerate() {
         let priority = (
@@ -2760,6 +2851,7 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
+        "nyxid__task_status" => (true, false, false),
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
@@ -2804,6 +2896,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 /// Unknown names return `None`.
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
+        "nyxid__task_status" => "Read task execution status",
         "nyx__resource_get" => "Retrieve a source image",
         "nyx__search_tools" => "Search service tools",
         "nyx__call_tool" => "Call a service tool",
@@ -3846,6 +3939,19 @@ impl PreparedProxyCall {
         )
     }
 
+    pub(crate) fn guest_effects(
+        &self,
+        mut metadata: McpDurableEndpointMetadata,
+    ) -> OperationEffects {
+        metadata.append_only &=
+            append_query_allowed(metadata.append_only_query, self.query.as_deref());
+        operation_effects(&self.method, metadata)
+    }
+
+    pub(crate) fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+
     pub(crate) fn canonical_path(&self) -> AppResult<super::proxy_authorization::CanonicalPath> {
         if self.is_generic_proxy_endpoint {
             super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)
@@ -4591,15 +4697,17 @@ pub async fn execute_tool(
     .map(|response| (response.status, response.text))
 }
 
-/// A scoped call authorized one exact operation; never follow a redirect away from it.
+/// Guest and scoped calls authorize one operation; never follow a redirect
+/// away from it. Guest selections are live on the agent, not mirrored on keys.
 fn scoped_execution(exec_ctx: &McpExecContext<'_>, service: &McpToolService) -> bool {
-    exec_ctx.operation_scopes.is_some_and(|scopes| {
-        super::agent_operation_scope_service::is_scoped(
-            scopes,
-            &service.service_id,
-            super::agent_operation_scope_service::mcp_catalog_id(service),
-        )
-    })
+    exec_ctx.assistant_chat.is_some_and(|chat| chat.guest)
+        || exec_ctx.operation_scopes.is_some_and(|scopes| {
+            super::agent_operation_scope_service::is_scoped(
+                scopes,
+                &service.service_id,
+                super::agent_operation_scope_service::mcp_catalog_id(service),
+            )
+        })
 }
 
 // Resolve before polling dispatch so credential/node resolution's debug poll frame
@@ -4649,22 +4757,36 @@ fn resolve_tool_target(
                 ));
             }
             McpToolSource::UserManaged {
-                user_service_id, ..
+                user_service_id,
+                catalog_service_id,
+                ..
             } => {
+                // Shared tools intentionally expose an exact connection alias
+                // (`shared_<user-service-id>`) so same-slug owner and actor
+                // connections cannot shadow one another.  That display slug
+                // is not the persisted UserService slug and must not be used
+                // as the route identity during execution.  The exact ID is
+                // already authoritative; retain the catalog check when one
+                // exists and only apply the slug check on ordinary MCP paths.
+                let shared = exec_ctx
+                    .org_agent_access
+                    .and_then(|access| access.shared())
+                    .is_some();
                 let mut resolution = proxy_service::resolve_proxy_target_by_user_service_id(
                     db,
                     encryption_keys,
                     user_id,
                     user_service_id,
-                    Some(&service.service_slug),
-                    None,
+                    (!shared).then_some(service.service_slug.as_str()),
+                    catalog_service_id.as_deref(),
                     proxy_service::ProxyExecutionContext::new(
                         Some(connection_expiry_notifier),
                         crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
                             config.platform_service_rate_limit_per_second,
                             config.platform_service_rate_limit_burst,
                         ),
-                    ),
+                    )
+                    .with_assistant_access(exec_ctx.org_agent_access),
                 )
                 .await?
                 .ok_or_else(|| {
@@ -4787,6 +4909,17 @@ fn resolve_tool_target(
                         billing_principal_user_id,
                         &resolution,
                     );
+                if exec_ctx
+                    .org_agent_access
+                    .is_some_and(|a| a.shared().is_some())
+                    && let McpToolSource::UserManaged {
+                        effective_owner_id, ..
+                    } = &service.source
+                {
+                    billing_context_builder
+                        .effective_owner_id
+                        .clone_from(effective_owner_id);
+                }
                 if agent_override {
                     billing_context_builder.credential_class_override =
                         Some(CredentialClass::AgentOverrideUserOwned);
@@ -5432,6 +5565,9 @@ async fn execute_tool_resolved_inner(
             )?;
         }
     }
+    if exec_ctx.assistant_chat.is_some_and(|chat| chat.guest) {
+        super::agent_operation_scope_service::validate_target(&target, prepared.method().as_str())?;
+    }
     let http_client = if scoped_execution(exec_ctx, service)
         && super::resource_adapter::source(
             service,
@@ -5721,12 +5857,12 @@ async fn execute_tool_resolved_inner(
         // Build before the direct/node split, exactly as the REST proxy does.
         if target.service.inject_delegation_token {
             // See the REST proxy: delegated tokens cannot carry operation limits.
-            if exec_ctx
+            if exec_ctx.assistant_chat.is_some_and(|chat| chat.guest) || exec_ctx
                 .operation_scopes
                 .is_some_and(|scopes| !scopes.is_empty())
             {
                 return Err(AppError::ApiKeyScopeForbidden(
-                    "Services that receive a delegation token are unavailable to operation-scoped keys"
+                    "Services that receive a delegation token are unavailable to guests or operation-scoped keys"
                         .into(),
                 ));
             }
@@ -5828,6 +5964,7 @@ async fn execute_tool_resolved_inner(
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
             .build(
+                exec_ctx.org_agent_access,
                 billing.as_ref(),
                 user_id,
                 billing_principal_user_id,
@@ -5840,6 +5977,7 @@ async fn execute_tool_resolved_inner(
                 (!is_generic_proxy_endpoint).then_some(endpoint.name.as_str()),
             )
             .await?;
+        let billing_ctx = billing_ctx.with_assistant_payer(assistant_chat.as_ref());
         let billing_ctx = billing_ctx.with_assistant_provenance(
             assistant_chat.is_some(), false,
             super::llm_usage_service::model_execution(super::llm_usage_service::inference_service(&target.service), method.as_str(), &path, false),
@@ -5873,6 +6011,7 @@ async fn execute_tool_resolved_inner(
             &billing_ctx.billing_request_id,
             billing_ctx.credential_class,
         );
+        request_audit.assistant(assistant_chat.as_ref());
         if super::telnyx_platform_service::contract(&target.service).is_some() {
             if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
                 return Err(AppError::BadRequest(
@@ -8231,6 +8370,8 @@ mod tests {
                         risk: None,
                         destructive: false,
                         changes_existing: None,
+                        append_only: false,
+                        append_only_query: None,
                         catalog_contract: true,
                         supports_idempotency_key: false,
                         operation_generation: 1,
@@ -14153,6 +14294,7 @@ mod tests {
             let ctx =
                 McpBillingRouteContextBuilder::from_user_service_resolution("actor", &resolution)
                     .build(
+                        None,
                         &billing,
                         "actor",
                         "actor",
@@ -14185,6 +14327,7 @@ mod tests {
         let billing_ctx =
             McpBillingRouteContextBuilder::from_user_service_resolution("actor", &resolution)
                 .build(
+                    None,
                     &billing,
                     "actor",
                     "actor",
@@ -14236,6 +14379,7 @@ mod tests {
             &resolution,
         )
         .build(
+            None,
             &billing,
             &actor_user_id,
             &actor_user_id,
@@ -14252,6 +14396,17 @@ mod tests {
         assert_eq!(billing_ctx.actor_user_id, actor_user_id);
         assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
         assert_eq!(billing_ctx.user_service_id.as_deref(), Some("user-service"));
+
+        let mut guest = test_chat(crate::models::assistant_conversation::AgentRole::Subagent);
+        guest.user_id.clone_from(&actor_user_id);
+        guest.guest = true;
+        let guest_billing = billing_ctx.with_assistant_payer(Some(&guest));
+        assert_eq!(guest_billing.billing_owner_id, actor_user_id);
+        assert_eq!(guest_billing.actor_user_id, actor_user_id);
+        assert_eq!(
+            guest_billing.user_service_id.as_deref(),
+            Some("user-service")
+        );
 
         // The same org connection can supply the master key or an agent's
         // override. Payer selection must use that final credential class.
@@ -14274,6 +14429,7 @@ mod tests {
             }
             let ctx = builder
                 .build(
+                    None,
                     &billing,
                     &actor_user_id,
                     &actor_user_id,
@@ -14312,6 +14468,7 @@ mod tests {
 
         let billing_ctx = McpBillingRouteContextBuilder::for_platform_service("owner")
             .build(
+                None,
                 &billing,
                 "service-account",
                 "owner",
@@ -14632,5 +14789,114 @@ mod tests {
             assert!(services.is_empty());
             assert!(mcp_service::generate_public_tool_definitions(&services).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod guest_append_classification_tests {
+    use super::*;
+
+    #[test]
+    fn compiled_append_exception_is_conditional_and_does_not_change_aevatar() {
+        let spec =
+            super::super::catalog_spec_registry::spec_for_slug("api-google-workspace").unwrap();
+        let path = "/v4/spreadsheets/{spreadsheetId}/values/{range}:append";
+        assert_eq!(
+            spec["paths"][path]["post"]["x-aevatar-tool"]["destructive"],
+            true
+        );
+        let marks = super::super::catalog_spec_registry::operation_marks(
+            "api-google-workspace",
+            "POST",
+            path,
+            "renamed",
+        );
+        let metadata = McpDurableEndpointMetadata {
+            catalog_contract: true,
+            destructive: marks.destructive,
+            append_only: marks.append_only,
+            append_only_query: marks.append_only_query,
+            ..Default::default()
+        };
+        assert!(operation_effects(&reqwest::Method::POST, metadata).uses);
+        assert!(operation_effects(&reqwest::Method::POST, metadata).destructive);
+        for (query, allowed) in [
+            (None, false),
+            (Some("insertDataOption=INSERT_ROWS"), true),
+            (Some("insertDataOption=OVERWRITE"), false),
+            (
+                Some("insertDataOption=INSERT_ROWS&insertDataOption=OVERWRITE"),
+                false,
+            ),
+            (Some("insertDataOption=INSERT_ROWS%26x"), false),
+        ] {
+            assert_eq!(
+                append_query_allowed(metadata.append_only_query, query),
+                allowed
+            );
+        }
+        assert!(!operation_effects(&reqwest::Method::DELETE, metadata).uses);
+        assert!(
+            !operation_effects(
+                &reqwest::Method::POST,
+                McpDurableEndpointMetadata {
+                    changes_existing: Some(true),
+                    ..metadata
+                }
+            )
+            .uses
+        );
+        for (method, path) in [
+            ("POST", "/v4/spreadsheets/{spreadsheetId}:batchUpdate"),
+            ("PUT", "/v4/spreadsheets/{spreadsheetId}/values/{range}"),
+            (
+                "POST",
+                "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+            ),
+        ] {
+            let marks = super::super::catalog_spec_registry::operation_marks(
+                "api-google-workspace",
+                method,
+                path,
+                "",
+            );
+            let metadata = McpDurableEndpointMetadata {
+                catalog_contract: true,
+                destructive: marks.destructive,
+                changes_existing: marks.changes_existing,
+                append_only: marks.append_only,
+                ..Default::default()
+            };
+            assert!(!operation_effects(&method.parse().unwrap(), metadata).uses);
+        }
+    }
+
+    #[test]
+    fn remote_append_marker_cannot_widen_or_impersonate_compiled_route() {
+        let mut spec = (*super::super::catalog_spec_registry::spec_for_slug("api-google-sheets")
+            .unwrap())
+        .clone();
+        // This is parsed as a remote/mounted document. Even an exact copy of
+        // NyxID's marker does not make it a compiled contract.
+        spec["paths"]["/v4/spreadsheets/{spreadsheetId}:batchUpdate"]["post"]["x-nyxid-append-only"] =
+            serde_json::json!(true);
+        let mut published =
+            parsed_endpoints_to_mcp(openapi_parser::parse_openapi_spec_value(&spec).unwrap());
+        mark_catalog_operations(&mut published, "api-google-sheets");
+        for endpoint in &published.endpoints {
+            let metadata = published.durable_metadata[&endpoint.endpoint_id];
+            assert!(!metadata.append_only);
+            if endpoint.path.ends_with(":append") || endpoint.path.ends_with(":batchUpdate") {
+                assert!(!operation_effects(&reqwest::Method::POST, metadata).uses);
+            }
+        }
+        let forged = super::super::catalog_spec_registry::operation_marks(
+            "api-google-sheets",
+            "POST",
+            "/arbitrary",
+            "sheets_append_values",
+        );
+        assert!(!forged.append_only);
+        assert!(forged.destructive);
     }
 }

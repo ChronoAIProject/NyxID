@@ -97,19 +97,57 @@ async fn deleted_owner_selection_still_blocks_other_exact_same_catalog_calls() {
         .delete_one(doc! {"_id":&a})
         .await
         .unwrap();
-    assert_eq!(
-        gate(
-            &f,
-            &b,
-            &f.owner,
-            &json!({"kind":"inference","provider":c,"model":"m"}),
-            None
+    let refusal = gate(
+        &f,
+        &b,
+        &f.owner,
+        &json!({"kind":"inference","provider":c,"model":"m"}),
+        None,
+    )
+    .await
+    .refusal
+    .unwrap();
+    assert_eq!(refusal["error"], "service_selection_required");
+    assert_eq!(refusal["reason"], "selected_connection_unavailable");
+    assert_eq!(refusal["selected_connection_id"], a);
+    assert!(
+        refusal["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("already selected")
+    );
+}
+
+#[tokio::test]
+async fn owner_selection_rejects_changed_catalog_but_leaves_other_families_unpinned() {
+    let f = orchestrator_fixture("changed_selection_identity").await;
+    let original = catalog(&f).await;
+    let other = catalog(&f).await;
+    let chosen = connection(&f, &f.owner, "chosen", Some(&original)).await;
+    let unrelated = connection(&f, &f.owner, "unrelated", Some(&other)).await;
+    choose(&f, &chosen).await;
+    let operation = json!({"kind":"inference","provider":other,"model":"m"});
+    assert!(
+        gate(&f, &unrelated, &f.owner, &operation, None)
+            .await
+            .refusal
+            .is_none()
+    );
+    f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(
+            doc! {"_id":&chosen},
+            doc! {"$set":{"catalog_service_id":&other}},
         )
         .await
+        .unwrap();
+    let refusal = gate(&f, &chosen, &f.owner, &operation, None)
+        .await
         .refusal
-        .unwrap()["error"],
-        "service_selection_required"
-    );
+        .unwrap();
+    assert_eq!(refusal["reason"], "selected_connection_changed");
+    assert_eq!(refusal["selected_connection_id"], chosen);
 }
 
 #[tokio::test]

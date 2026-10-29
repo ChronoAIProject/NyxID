@@ -652,10 +652,11 @@ pub async fn llm_proxy_request(
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_assistant_execution(
             &billing_resolution_user_id,
             billing_resource_owner_id,
             credential_class,
+            auth_user.org_agent_access.as_deref(),
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
@@ -686,6 +687,7 @@ pub async fn llm_proxy_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_assistant_payer(auth_user.assistant_chat.as_deref())
         .with_assistant_provenance(
             auth_user.assistant_turn_fence.is_some(),
             false,
@@ -1419,10 +1421,11 @@ async fn gateway_provider_request(
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_assistant_execution(
             &billing_resolution_user_id,
             billing_resource_owner_id,
             credential_class,
+            auth_user.org_agent_access.as_deref(),
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
@@ -1453,6 +1456,7 @@ async fn gateway_provider_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_assistant_payer(auth_user.assistant_chat.as_deref())
         .with_assistant_provenance(
             auth_user.assistant_turn_fence.is_some(),
             false,
@@ -2523,7 +2527,16 @@ async fn check_llm_approval(
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
     let mut operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
-    operation_descriptor::apply_inference_contract(&mut operation, service, body, method_override);
+    operation_descriptor::apply_inference_contract(
+        &mut operation,
+        service,
+        body,
+        method_override,
+        auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(|chat| chat.guest && chat.turn_live),
+    );
     let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
@@ -2669,6 +2682,10 @@ async fn enforce_agent_llm_operations(
             catalog_id,
             method,
             canonical.as_ref(),
+            operations::GuestHttpContext {
+                query,
+                websocket: headers.contains_key(axum::http::header::UPGRADE),
+            },
         ))
         .await?;
         return Ok(LlmOperationScope {
@@ -2695,6 +2712,10 @@ async fn enforce_agent_llm_operations(
         catalog_id,
         method,
         Some(&canonical),
+        operations::GuestHttpContext {
+            query,
+            websocket: headers.contains_key(axum::http::header::UPGRADE),
+        },
     ))
     .await?;
     Ok(LlmOperationScope {
@@ -2743,7 +2764,7 @@ impl LlmOperationScope {
     }
 
     fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
-        if self.identity.is_some() {
+        if self.guest || self.identity.is_some() {
             proxy_service::no_redirect_http_client()
         } else {
             shared

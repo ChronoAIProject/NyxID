@@ -39,3 +39,32 @@ test('late parsed body and retry response are guarded before session effects', a
     assert.equal(invalidations, 0);
   }
 });
+
+test('MFA refusal retains the session when invalidation is disabled; default 401 invalidates', async () => {
+  for (const invalidateOnAuthFailure of [false, undefined]) {
+    let invalidations = 0;
+    let guardChecks = 0;
+    await assert.rejects(guardedJsonTransport({
+      send: async () => new Response('{"error":"invalid_mfa_code"}', { status: 401 }),
+      read: (response) => response.json(),
+      guard: () => { guardChecks++; },
+      refresh: async () => false,
+      invalidate: () => { invalidations++; },
+      requiresAuth: true, retry: false, invalidateOnAuthFailure,
+      failure: () => new Error('invalid_mfa_code'),
+    }), /invalid_mfa_code/);
+    assert.equal(invalidations, invalidateOnAuthFailure === false ? 0 : 1);
+    assert.ok(guardChecks >= 4);
+  }
+});
+test('disabling invalidation never admits a successful body from a replacement account', async () => {
+  let actor = 'original';
+  await assert.rejects(guardedJsonTransport({
+    send: async () => new Response('{}'),
+    read: async (response) => { actor = 'replacement'; return response.json(); },
+    guard: () => { if (actor !== 'original') throw new Error('account changed'); },
+    refresh: async () => false, invalidate: () => { throw new Error('must not invalidate'); },
+    requiresAuth: true, retry: false, invalidateOnAuthFailure: false,
+    failure: () => new Error('request failed'),
+  }), /account changed/);
+});

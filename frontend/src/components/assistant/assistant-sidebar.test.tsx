@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { SidebarRailContext } from "./sidebar-rail-context";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
@@ -65,6 +66,26 @@ const SECOND_CONVERSATION: Conversation = {
   created_at: "2026-07-19T00:00:00.000Z",
   last_message_at: "2026-07-19T00:05:00.000Z",
 };
+
+it("keeps legacy New chat and previous chats in the rail, opening only on click", async () => {
+  const user = userEvent.setup();
+  const onNewChat = vi.fn();
+  const onSelect = vi.fn();
+  render(<TooltipProvider><SidebarRailContext value>
+    <AssistantSidebar conversations={[CONVERSATION, SECOND_CONVERSATION]} activeConversationId={CONVERSATION.id} onNewChat={onNewChat} onSelect={onSelect} onDelete={vi.fn()} />
+  </SidebarRailContext></TooltipProvider>);
+  await user.click(screen.getByRole("button", { name: "New chat" }));
+  expect(onNewChat).toHaveBeenCalledOnce();
+  const previous = screen.getByRole("button", { name: "Previous chats" });
+  await user.hover(previous);
+  expect(screen.queryByRole("list", { name: "Previous chats" })).not.toBeInTheDocument();
+  await user.click(previous);
+  const list = screen.getByRole("list", { name: "Previous chats" });
+  expect(within(list).getByRole("button", { name: CONVERSATION.title })).toHaveAttribute("aria-current", "page");
+  await user.click(within(list).getByRole("button", { name: SECOND_CONVERSATION.title }));
+  expect(onSelect).toHaveBeenCalledWith(SECOND_CONVERSATION.id);
+  expect(screen.queryByRole("list", { name: "Previous chats" })).not.toBeInTheDocument();
+});
 
 const USER: User = {
   id: "user-1",
@@ -651,8 +672,53 @@ describe("NyxBot agents in the sidebar", () => {
     expect(researcher).toHaveTextContent("2");
     await user.click(researcher);
     expect(onSelectAgent).toHaveBeenCalledWith("agent-researcher");
-    await user.click(screen.getByRole("button", { name: "New agent" }));
-    expect(onNewAgent).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Create new agent" }));
+    await user.click(screen.getByRole("menuitem", { name: "Personal agent" }));
+    expect(onNewAgent).toHaveBeenCalledWith("personal");
+  });
+
+  it("folds the open agent in place and pins it while unfolded", async () => {
+    const user = userEvent.setup();
+    const { onSelectAgent } = renderAgents();
+    const nyxbot = screen.getByRole("button", { name: "NyxBot — your personal agent" });
+    expect(nyxbot).toHaveAttribute("aria-expanded", "true");
+    expect(nyxbot).toHaveAttribute("data-keep-drawer-open", "");
+    expect(nyxbot.parentElement).toHaveAttribute("data-sticky-agent", "");
+    await user.click(nyxbot);
+    expect(onSelectAgent).not.toHaveBeenCalled();
+    expect(nyxbot).toHaveAttribute("aria-expanded", "false");
+    expect(nyxbot.parentElement).not.toHaveAttribute("data-sticky-agent");
+    expect(screen.queryByRole("group", { name: "Threads with NyxBot" })).not.toBeInTheDocument();
+    await user.click(nyxbot);
+    expect(nyxbot).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("group", { name: "Threads with NyxBot" })).toBeInTheDocument();
+  });
+
+  it("unfolds the selected agent on the home, where no thread is open", async () => {
+    const user = userEvent.setup();
+    render(
+      <TooltipProvider>
+        <AssistantSidebar
+          conversations={[]}
+          activeConversationId={undefined}
+          onNewChat={vi.fn()}
+          onSelect={vi.fn()}
+          onDelete={vi.fn()}
+          agents={{
+            agents,
+            selectedAgentId: "agent-nyxbot",
+            threads: [thread],
+            onSelectAgent: vi.fn(),
+            onNewThread: vi.fn(),
+            onNewAgent: vi.fn(),
+          }}
+        />
+      </TooltipProvider>,
+    );
+    const nyxbot = screen.getByRole("button", { name: "NyxBot — your personal agent" });
+    expect(nyxbot).toHaveAttribute("aria-expanded", "true");
+    await user.click(nyxbot);
+    expect(nyxbot).toHaveAttribute("aria-expanded", "false");
   });
 
   it("keeps destroyed specialists behind a toggle, dimmed", async () => {
@@ -669,7 +735,16 @@ describe("NyxBot agents in the sidebar", () => {
     );
   });
 
-  it("names agents by their display name with the @handle beneath", () => {
+  it("offers organization agents in the create menu when allowed", async () => {
+    const user = userEvent.setup();
+    const { onNewAgent } = renderAgents({ canCreateOrgAgent: true });
+    await user.click(screen.getByRole("button", { name: "Create new agent" }));
+    await user.click(screen.getByRole("menuitem", { name: "Organization agent" }));
+    expect(onNewAgent).toHaveBeenCalledWith("org");
+  });
+
+  it("names agents by their display name on one line, the @handle on hover", async () => {
+    const user = userEvent.setup();
     renderAgents({
       agents: [
         agent({ display_name: "Nyx" }),
@@ -677,10 +752,16 @@ describe("NyxBot agents in the sidebar", () => {
       ],
     });
     const nyxbot = screen.getByRole("button", { name: "Nyx (@NyxBot) — your personal agent" });
-    expect(nyxbot).toHaveTextContent("@NyxBot · personal agent");
+    expect(nyxbot).toHaveTextContent("Nyx");
+    expect(nyxbot).not.toHaveTextContent("@NyxBot");
+    await user.hover(nyxbot);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("@NyxBot");
+    await user.unhover(nyxbot);
     const writer = screen.getByRole("button", { name: "Luna (@writer), specialist, Idle" });
     expect(writer).toHaveTextContent("Luna");
-    expect(writer).toHaveTextContent("@writer");
+    expect(writer).not.toHaveTextContent("@writer");
+    await user.hover(writer);
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent("@writer"));
   });
 
   it("drops the generic New chat and the earlier engines' Chats list", () => {
@@ -732,7 +813,11 @@ describe("NyxBot agents in the sidebar", () => {
     );
     await user.click(crew);
     expect(groups.onSelectGroup).toHaveBeenCalledWith("nyxg-1");
-    await user.click(screen.getByRole("button", { name: "New group" }));
+    // Crews are created from the one "Create new agent" menu, not a second button.
+    expect(screen.queryByRole("button", { name: "New group" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create new agent" }));
+    expect(screen.queryByRole("menuitem", { name: "Organization agent" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: "Crew" }));
     expect(groups.onNewGroup).toHaveBeenCalledOnce();
   });
 

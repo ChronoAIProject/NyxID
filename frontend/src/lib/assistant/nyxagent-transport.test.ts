@@ -25,6 +25,7 @@ const afterReset = "2026-09-17T00:00:02Z";
 
 it.each([
   ["turn_lost", "interrupted"], ["assistant_unavailable", "could not complete"],
+  ["guest_model_route_required", "isn't available to guests yet"],
   ["internal_error", "NyxBot hit an internal error on this turn. Check which actions completed before retrying."],
   ["first_byte_timeout", "did not start"], ["invalid_stream", "ended unexpectedly"],
   ["output_too_large", "response limit"], ["nyxid_error", "authorize"],
@@ -2325,7 +2326,7 @@ function creationReceipt(turn: string | null, status: "pending" | "allowed" | "d
     created_at: reset, decided_at: afterReset, expires_at: afterReset, creation_turn_id: turn,
   };
 }
-it("joins decisions to the exact assistant event turn even when the initiating user is older", async () => {
+it("folds settled decisions into the exact assistant event turn even when the initiating user is older", async () => {
   const transport = new NyxAgentTransport();
   const page = history();
   page.messages.push({ ...page.messages[1]!, id: "event-answer", turn_id: "event-turn", seq: 3, created_at: "2026-09-17T00:00:05Z" });
@@ -2333,15 +2334,31 @@ it("joins decisions to the exact assistant event turn even when the initiating u
   page.acknowledgements = [receipt];
   globalThis.__nyxidAssistantHttpMock = () => json(page);
   await transport.history(id);
-  const key = `nyxagent-acknowledgement:${receipt.id}`;
-  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer", key]);
-  // A decision-state refresh keeps one stable card row at the same anchor.
+  // No standalone row: the decision rides on its reply's turn summary.
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer"]);
+  const first = transport.session(id).messages.at(-1)!.decisions;
+  expect(first?.map((row) => row.id)).toEqual([receipt.id]);
+  // An unchanged refresh keeps the folded rows by reference.
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)!.decisions).toBe(first);
+  // A decision-state change is reflected on the same reply.
   page.acknowledgements = [{ ...receipt, status: "denied" }];
   await transport.history(id);
-  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer", key]);
-  expect(transport.getHistory(id)?.acknowledgements[0]?.status).toBe("denied");
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer"]);
+  expect(transport.session(id).messages.at(-1)!.decisions?.[0]?.status).toBe("denied");
 });
-it("anchors an automatic receipt to the live assistant placeholder then the settled answer", async () => {
+it("keeps a pending card as its own row beside the reply it was raised in", async () => {
+  const transport = new NyxAgentTransport();
+  const page = history();
+  page.messages.push({ ...page.messages[1]!, id: "event-answer", turn_id: "event-turn", seq: 3, created_at: "2026-09-17T00:00:05Z" });
+  const card = { ...creationReceipt("event-turn"), status: "pending" as const, decided_by: null, decided_at: null };
+  page.acknowledgements = [card];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id);
+  expect(transport.session(id).messages.map((m) => m.id)).toContain(`nyxagent-acknowledgement:${card.id}`);
+  expect(transport.session(id).messages.find((m) => m.id === "event-answer")?.decisions).toBeUndefined();
+});
+it("folds an automatic receipt into the live assistant placeholder then the settled answer", async () => {
   const transport = new NyxAgentTransport();
   const page = history();
   page.conversation.active_turn = { turn_id: "event-turn", started_at: afterReset, activities: [], attachments: [] };
@@ -2349,12 +2366,15 @@ it("anchors an automatic receipt to the live assistant placeholder then the sett
   page.acknowledgements = [receipt];
   globalThis.__nyxidAssistantHttpMock = () => json(page);
   await transport.history(id);
-  const key = `nyxagent-acknowledgement:${receipt.id}`;
-  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-turn-assistant", key]);
+  let messages = transport.session(id).messages;
+  expect(messages.map((m) => m.id)).toEqual(["u", "a", "event-turn-assistant"]);
+  expect(messages.at(-1)!.decisions?.map((row) => row.id)).toEqual([receipt.id]);
   page.conversation.active_turn = null;
   page.messages.push({ ...page.messages[1]!, id: "event-answer", turn_id: "event-turn", seq: 3 });
   await transport.history(id);
-  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer", key]);
+  messages = transport.session(id).messages;
+  expect(messages.map((m) => m.id)).toEqual(["u", "a", "event-answer"]);
+  expect(messages.at(-1)!.decisions?.map((row) => row.id)).toEqual([receipt.id]);
 });
 it.each([null, "unloaded-turn"])("keeps a linked receipt with %s anchor standalone and deduplicated", async (turn) => {
   const transport = new NyxAgentTransport();
@@ -2446,4 +2466,37 @@ it.each(["model_interrupted", null, "cancelled"])("reports history-recovered liv
   if (code !== "cancelled") expect(capture).toHaveBeenCalledWith({ name: "nyxbot.error", props: expect.objectContaining({
     error_code: "NYXBOT_RUN_ERROR", upstream_error_code: code ?? "other", engine: "nyxagent", stage: "stream",
   }) });
+});
+
+
+it.each([
+  { source: "nyxid", stage: "model_proxy", code: "api_key_scope_forbidden", http_status: 403, nyxid_error_code: 9000 },
+  { source: "nyxagent", stage: "stream", code: "turn_failed", http_status: null, nyxid_error_code: null },
+])("keeps sanitized failure metadata live and after reload ($source)", async (failure) => {
+  const page = history();
+  const transport = new NyxAgentTransport();
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? chunked(sseBytes(runningStatus,
+        { event: "message.started", message_id: "failure-reply", role: "assistant" },
+        { event: "turn.completed", turn_id: "turn", status: "failed",
+          turn_metadata: { failure_reason: failure },
+          error: { code: "assistant_unavailable", message: "fixed copy", upstream_error_code: "turn_failed", stage: "stream" } },
+      ))
+    : json(page);
+  await transport.history(id);
+  const views: import("@/lib/assistant/chat-types").ChatMessage[] = [];
+  const unsubscribe = transport.subscribe(() => {
+    const tail = transport.session(id).messages.at(-1);
+    if (tail) views.push(tail);
+  });
+  await transport.send(id, "hello", vi.fn());
+  unsubscribe();
+  expect(views.some((view) => view.errorDetail?.failureReason?.code === failure.code)).toBe(true);
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "assistant_unavailable",
+    turn_metadata: { failure_reason: failure }, upstream_error_code: "turn_failed",
+    error_detail: { stage: "stream", http_status: 200, upstream_request_id: null, response_id: null,
+      continuations: 0, turn_id: "turn", occurred_at: start } };
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages[1]?.errorDetail?.failureReason).toEqual(failure);
 });

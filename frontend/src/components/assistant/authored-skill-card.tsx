@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import type { z } from "zod";
 import { DecisionReceipt } from "./decision-receipt";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -242,7 +243,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     </div>;
   }
   if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
-  return <section aria-label="Review skill draft" className="ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4">
+  return <section aria-label="Review skill draft" className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
     <p className="text-[13px] font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
     {data ? <p className="text-[12px]">Attach to {data.agent_name}</p> : null}
     <p className="text-[12px] text-muted-foreground">Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.</p>

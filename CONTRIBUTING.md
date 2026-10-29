@@ -361,6 +361,15 @@ and instrumented native journeys. Each build and execution shard has a 60-minute
 budget. Tests retain the CI profile's five-minute deadline and one retry; every
 retried test is named in the job summary, and a second failure fails the run.
 
+For failed backend runs, open the verification job summary or download
+`backend-test-diagnostics` / `backend-coverage-diagnostics` (retained for 14 days).
+These contain available shard JUnit reports, failures/retries/skips, missing
+reports and the slowest cases; completeness and coverage remain separate gates.
+See the [CI stability follow-up](docs/plans/2026-10-22-ci-load-sensitive-tests.md)
+for focused reproduction commands and cache changes, and
+[service history](docs/SERVICE_HISTORY.md#writer-inventory-and-exclusions)
+for the credential usage/edit timestamp contract.
+
 ### Rollup Health Triage
 
 Rollup-health watchdog issues are incident-routing records, not a second source

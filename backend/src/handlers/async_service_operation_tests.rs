@@ -356,6 +356,8 @@ async fn cma_agent_input_receipts_deduplicate_by_idempotency_key() {
 
 #[tokio::test]
 async fn cma_agent_input_waits_for_activity_before_settling_ready() {
+    use futures::TryStreamExt;
+
     let a = cma_fixture().await;
     *a.phase.lock().unwrap() = "ready".into();
     let auth = authenticate(&a.f).await;
@@ -380,28 +382,112 @@ async fn cma_agent_input_waits_for_activity_before_settling_ready() {
         Some("agt_coffee")
     );
 
-    a.due().await;
-    async_operations::sweep(&a.f.state).await.unwrap();
-    let ready = a.watch().await;
-    assert_eq!(ready.state, "waiting");
-    assert!(!ready.cma.as_ref().unwrap().seen_working);
+    // Main keeps receipt deduplication in its own test. This lifecycle fixture
+    // still needs two distinct watches to exercise deferred capacity polling.
+    let response = direct_call(
+        &a.f,
+        &auth,
+        "sandbox__post_agent_input",
+        json!({"id":"agt_coffee","text":"private task","Idempotency-Key":"input-2"}),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["result"]["isError"], false, "{result}");
 
-    *a.phase.lock().unwrap() = "working".into();
-    a.due().await;
-    async_operations::sweep(&a.f.state).await.unwrap();
-    let working = a.watch().await;
-    assert_eq!(working.state, "waiting");
-    assert!(working.cma.as_ref().unwrap().seen_working);
-
-    *a.phase.lock().unwrap() = "ready".into();
-    a.due().await;
-    async_operations::sweep(&a.f.state).await.unwrap();
-    let finished = a.watch().await;
-    assert_eq!(finished.reason.as_deref(), Some("completed"));
-    assert_eq!(
-        finished.cma.as_ref().unwrap().status.as_deref(),
-        Some("ready")
-    );
+    let watches = a.f.state.db.collection::<AsyncServiceOperation>(WATCHES);
+    let initial: Vec<AsyncServiceOperation> = watches
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let ids: Vec<String> = ["input-1", "input-2"]
+        .into_iter()
+        .map(|key| {
+            initial
+                .iter()
+                .find(|watch| watch.cma.as_ref().unwrap().idempotency_key.as_deref() == Some(key))
+                .unwrap()
+                .id
+                .clone()
+        })
+        .collect();
+    for (phase, seen_working, reason) in [
+        ("ready", false, None),
+        ("working", true, None),
+        ("ready", true, Some("completed")),
+    ] {
+        *a.phase.lock().unwrap() = phase.into();
+        let mut observed = Vec::new();
+        // Both watches share one service slot. A sweep may legitimately defer
+        // either watch (including between its status and result calls), so wait
+        // for each stable ID to observe this phase before changing upstream.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let rows: Vec<AsyncServiceOperation> = watches
+                    .find(doc! {"_id":{"$in":&ids}})
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 2);
+                observed = rows
+                    .iter()
+                    .map(|watch| {
+                        let cma = watch.cma.as_ref().unwrap();
+                        (
+                            watch.id.clone(),
+                            watch.state.clone(),
+                            cma.status.clone(),
+                            watch.reason.clone(),
+                        )
+                    })
+                    .collect();
+                for watch in &rows {
+                    if reason.is_none() {
+                        assert_eq!(watch.state, "waiting", "{observed:?}");
+                        assert!(watch.reason.is_none(), "{observed:?}");
+                    } else if let Some(actual) = &watch.reason {
+                        assert_eq!(actual, "completed", "{observed:?}");
+                    }
+                }
+                let pending: Vec<&str> = rows
+                    .iter()
+                    .filter(|watch| {
+                        let cma = watch.cma.as_ref().unwrap();
+                        cma.status.as_deref() != Some(phase)
+                            || cma.checked_at.is_none()
+                            || cma.seen_working != seen_working
+                            || watch.reason.as_deref() != reason
+                    })
+                    .map(|watch| watch.id.as_str())
+                    .collect();
+                if pending.is_empty() {
+                    break;
+                }
+                a.f.state
+                    .db
+                    .collection::<bson::Document>(WATCHES)
+                    .update_many(
+                        doc! {"_id":{"$in":pending}},
+                        doc! {"$set":{"poll_at":bson::DateTime::from_millis(0)}},
+                    )
+                    .await
+                    .unwrap();
+                async_operations::sweep(&a.f.state).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("both watches must observe {phase} with reason {reason:?}: {observed:?}")
+        });
+    }
 }
 
 #[tokio::test]
@@ -594,6 +680,7 @@ async fn async_revocation_and_timeout_wake_with_stable_reason_without_polling() 
 async fn async_delivery_binding_survives_thread_destination_changes() {
     let a = AsyncFixture::new().await;
     let origin = ChannelOrigin {
+        native_event_id: None,
         thread: None,
         nyxbot_channel_id: "source-channel".into(),
         partition: "source-place".into(),
@@ -980,6 +1067,7 @@ async fn async_ordinary_tool_has_no_watch_database_reads() {
 async fn async_event_keeps_original_reply_place_for_nested_work() {
     let a = AsyncFixture::new().await;
     let origin = ChannelOrigin {
+        native_event_id: None,
         thread: None,
         nyxbot_channel_id: "channel".into(),
         partition: "original-chat".into(),
@@ -1057,6 +1145,8 @@ async fn attach_voice(
     .await;
     let now = chrono::Utc::now();
     let request = VoiceRequest {
+        started_at: None,
+        terminal_error_code: None,
         async_operation_pending: false,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: a.f.owner.clone(),
@@ -1386,6 +1476,7 @@ async fn async_channel_event_validates_original_source_after_newer_message() {
         .await
         .unwrap();
     let original = ChannelOrigin {
+        native_event_id: None,
         nyxbot_channel_id: "link".into(),
         partition: child.partition.clone(),
         platform: "telegram".into(),

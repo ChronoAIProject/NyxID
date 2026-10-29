@@ -1,17 +1,18 @@
-import { useState, type ReactNode } from "react";
-import { ChevronRight, PanelRightOpen, Users } from "lucide-react";
+import { ThreadTitle } from "./thread-title";
+import { useContext, type ComponentProps, type ReactNode } from "react";
+import { MotionConfig, motion } from "motion/react";
+import { ChatHeaderAnimateContext, ChatHeaderCompactContext } from "./chat-header-context";
+import { PanelRightOpen } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import {
   AGENT_KIND_LABEL,
-  AGENT_STATUS_LABEL,
-  agentTitle,
   channelPlatformName,
 } from "@/lib/assistant/nyxbot-labels";
+import { REFLOW } from "@/hooks/use-card-sequence";
 import { cn, formatTimeDistance } from "@/lib/utils";
 import type {
-  AssistantAgent,
   AssistantAgentKind,
   AssistantAgentStatus,
   NyxAgentWaiting,
@@ -51,6 +52,59 @@ export function ChannelBadge({ platform }: { readonly platform: string }) {
   return <Badge variant="secondary">via {channelPlatformName(platform)}</Badge>;
 }
 
+export function ThreadPanels({ children }: { readonly children: ReactNode }) {
+  const compact = useContext(ChatHeaderCompactContext);
+  return (
+    <div
+      data-chat-thread-panels=""
+      className={cn("shrink-0 px-4 sm:px-6", !compact && "pt-3")}
+      style={{ width: "calc(100% - var(--assistant-content-inset, 0px))" }}
+    >
+      <div className="mx-auto w-full max-w-[var(--chat-content-width,758px)] space-y-2">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * A thread's header row. Once the transcript scrolls past it, the row glides
+ * into a pill aligned with the header's right edge, above the conversation
+ * index rail (`ChatContentLayout` decides when). A pill too narrow for one
+ * line wraps after the name instead of cutting it. Wrap each child in
+ * `HeaderItem` so it slides at its final size instead of stretching with the
+ * row.
+ */
+export function HeaderBar({ children }: { readonly children: ReactNode }) {
+  const compact = useContext(ChatHeaderCompactContext);
+  const animate = useContext(ChatHeaderAnimateContext);
+  return (
+    <MotionConfig reducedMotion="user" transition={animate ? REFLOW : { duration: 0 }}>
+      <motion.div
+        layout
+        layoutDependency={compact}
+        role="group"
+        aria-label="Conversation controls"
+        data-compact={compact}
+        style={{ borderRadius: 12 }}
+        className={cn(
+          "flex flex-wrap items-center",
+          compact
+            // 12px from the top and from the column's edge: level with the
+            // machine card's top and mirroring its inset across the divider.
+            ? "absolute top-3 right-3 z-35 max-w-[calc(100%-1.5rem)] gap-x-2 gap-y-1 border border-hairline bg-background/95 px-2 py-1 shadow-sm backdrop-blur-sm"
+            : "gap-2",
+        )}
+      >
+        {children}
+      </motion.div>
+    </MotionConfig>
+  );
+}
+
+export function HeaderItem(props: ComponentProps<typeof motion.div>) {
+  const compact = useContext(ChatHeaderCompactContext);
+  return <motion.div {...props} layout="position" layoutDependency={compact} />;
+}
+
 /**
  * Which agent this thread talks to. Threads of a destroyed specialist are
  * read-only; the banner says so and the page disables the composer.
@@ -59,48 +113,100 @@ export function ThreadHeader({
   name,
   handle,
   kind,
+  loading = false,
   agentId,
   destroyed,
   channelPlatform,
   onOpenDetails,
   controls,
+  title,
+  titleKey,
+  onRenameTitle,
 }: {
+  /** The thread's title, shown above the agent in the expanded header. */
+  readonly title?: string;
+  /** Resets an open rename when another thread is shown. */
+  readonly titleKey?: string;
+  /** Makes the title editable in place. */
+  readonly onRenameTitle?: (title: string) => Promise<void>;
   /** The agent's display name (or handle). */
   readonly name: string;
   /** "@handle", shown when a display name hides it. */
   readonly handle?: string;
   readonly kind: AssistantAgentKind;
+  readonly loading?: boolean;
   /** Picks the specialist's avatar tint. */
   readonly agentId?: string;
   readonly destroyed: boolean;
   /** Set when the thread answers one of the user's channel bots. */
   readonly channelPlatform?: string | null;
   readonly onOpenDetails?: () => void;
-  /** The thread's access mode and model controls. */
+  /** Additional thread controls. */
   readonly controls?: ReactNode;
 }) {
+  const compact = useContext(ChatHeaderCompactContext);
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2">
-        <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size="md" />
-        <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">{name}</h2>
-        {handle ? <span className="shrink-0 text-11 text-text-tertiary">{handle}</span> : null}
-        <AgentKindBadge kind={kind} />
-        {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
-        {controls ? <div className="flex flex-wrap items-center gap-1.5">{controls}</div> : null}
-        {onOpenDetails ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="ml-auto"
-            aria-label="Agent details"
-            onClick={onOpenDetails}
-          >
-            <PanelRightOpen aria-hidden="true" />
-            Details
-          </Button>
+      {/* The thread's title is the page heading, on a row of its own above
+          the agent it talks to; the pill the header becomes on scroll stays
+          name-only. */}
+      {title && !compact ? (
+        <div className="flex min-w-0 items-center">
+          {onRenameTitle ? (
+            <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
+          ) : (
+            <h1 title={title} className="truncate text-15 font-semibold text-foreground">{title}</h1>
+          )}
+        </div>
+      ) : null}
+      <HeaderBar>
+        <HeaderItem className="shrink-0">
+          {loading ? (
+            <span aria-hidden="true" className={cn("block rounded-full bg-overlay", compact ? "h-5 w-5" : "h-6 w-6")} />
+          ) : (
+            <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size={compact ? "sm" : handle ? "xl" : "md"} />
+          )}
+        </HeaderItem>
+        <HeaderItem className={cn("min-w-0", !compact && "self-start")}>
+          {compact ? (
+            <h2 className="truncate text-11 font-semibold text-foreground">{name}</h2>
+          ) : (
+            // The name line is as tall as the controls so both share one top
+            // line; the @handle sits under it.
+            <div className="min-w-0">
+              <div className="flex h-7 min-w-0 items-center gap-2">
+                <h2 className="truncate text-13 font-semibold text-foreground">{name}</h2>
+                <span className="flex shrink-0 items-center gap-2 whitespace-nowrap">
+                  {loading ? null : <AgentKindBadge kind={kind} />}
+                  {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
+                </span>
+              </div>
+              {handle ? <p className="truncate text-11 leading-4 text-text-tertiary">{handle}</p> : null}
+            </div>
+          )}
+        </HeaderItem>
+        {/* Pushes the controls right while they fit on the name line; when
+            they wrap to their own line they start at the left. */}
+        {controls || onOpenDetails ? <div aria-hidden="true" className="min-w-0 flex-1 basis-0" /> : null}
+        {controls || onOpenDetails ? (
+          <HeaderItem className={cn("flex flex-wrap items-center gap-1.5", !compact && "min-h-7 self-start")}>
+            {controls}
+            {onOpenDetails ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label="Agent details"
+                title="Agent details"
+                className={compact ? "h-7 w-7 px-0" : undefined}
+                onClick={onOpenDetails}
+              >
+                <PanelRightOpen aria-hidden="true" />
+                <span className={compact ? "sr-only" : undefined}>Details</span>
+              </Button>
+            ) : null}
+          </HeaderItem>
         ) : null}
-      </div>
+      </HeaderBar>
       {destroyed ? (
         <p
           role="status"
@@ -110,105 +216,6 @@ export function ThreadHeader({
         </p>
       ) : null}
     </div>
-  );
-}
-
-function excerpt(text: string, length = 140): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > length ? `${flat.slice(0, length - 1)}…` : flat;
-}
-
-/**
- * NyxBot's view of its specialists: what each is doing, its latest reply,
- * and permission requests waiting for a decision.
- */
-export function TeamStrip({
-  agents,
-  onOpenConversation,
-}: {
-  readonly agents: readonly AssistantAgent[];
-  readonly onOpenConversation: (conversationId: string) => void;
-}) {
-  const [open, setOpen] = useState(true);
-  // Live specialists, most recently active first.
-  const specialists = agents
-    .filter((agent) => agent.kind === "specialist" && agent.status !== "destroyed")
-    .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at));
-  if (!specialists.length) return null;
-  const requests = specialists.reduce((total, agent) => total + agent.pending_requests.length, 0);
-  const running = specialists.filter((agent) => agent.status === "running").length;
-  return (
-    <section aria-label="Team" className="rounded-xl border border-border/50 bg-card">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-12 text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronRight className={cn("h-3 w-3 transition-transform", open && "rotate-90")} />
-        <Users aria-hidden="true" className="h-3.5 w-3.5 text-text-tertiary" />
-        <span className="font-medium text-foreground">Team</span>
-        <span>
-          {specialists.length} {specialists.length === 1 ? "specialist" : "specialists"}
-          {running ? ` · ${String(running)} working` : ""}
-        </span>
-        {requests ? (
-          <span className="ml-auto rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
-            {requests} {requests === 1 ? "request" : "requests"}
-          </span>
-        ) : null}
-      </button>
-      {open ? (
-        <ul className="assistant-scrollbar max-h-56 divide-y divide-border/30 overflow-y-auto border-t border-border/50">
-          {specialists.map((agent) => (
-            <li key={agent.id} className="space-y-1.5 px-4 py-2.5">
-              <div className="flex items-center gap-2">
-                <AgentStatusDot status={agent.status} />
-                {agent.home_conversation_id ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenConversation(agent.home_conversation_id!)}
-                    className="min-w-0 truncate text-12 font-medium text-foreground hover:underline"
-                  >
-                    {agentTitle(agent)}
-                  </button>
-                ) : (
-                  <span className="min-w-0 truncate text-12 font-medium text-foreground">
-                    {agentTitle(agent)}
-                  </span>
-                )}
-                <span className="text-11 text-text-tertiary">
-                  {AGENT_STATUS_LABEL[agent.status]}
-                </span>
-              </div>
-              {agent.last_reply ? (
-                <p className="line-clamp-1 pl-3.5 text-11 text-muted-foreground">
-                  {excerpt(agent.last_reply.text)}
-                </p>
-              ) : null}
-              {agent.pending_requests.map((request) => (
-                <div
-                  key={request.request_id}
-                  className="ml-3.5 flex items-center gap-2 rounded-lg border border-warning/15 bg-warning/[0.04] px-2.5 py-1.5"
-                >
-                  <span className="min-w-0 flex-1 truncate text-11 text-warning">
-                    {request.summary}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    aria-label={`Review ${agentTitle(agent)}'s request: ${request.summary}`}
-                    onClick={() => onOpenConversation(request.conversation_id)}
-                  >
-                    Review
-                  </Button>
-                </div>
-              ))}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </section>
   );
 }
 

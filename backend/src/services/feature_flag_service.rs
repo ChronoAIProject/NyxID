@@ -130,6 +130,13 @@ const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const DISCORD_GATEWAY_FLAG_KEY: &str = "channel:discord-gateway";
+const DISCORD_GATEWAY_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: DISCORD_GATEWAY_FLAG_KEY,
+    description: "Receive ordinary Discord messages through leased Gateway sessions. Interactions remain independent.",
+    default_enabled: false,
+};
+
 pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
 pub const NYXBOT_ADAPTERS_FLAG_KEY: &str = "nyxbot:service-adapters";
 const NYXBOT_ADAPTERS_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -171,9 +178,23 @@ const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+pub const SHARED_AGENTS_FLAG_KEY: &str = "assistant:shared-agents";
+const SHARED_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SHARED_AGENTS_FLAG_KEY,
+    description: "Allows personal specialist sharing after all replicas enforce shared authority and consent.",
+    default_enabled: false,
+};
+
 const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: "assistant:org-agents",
     description: "Allows organization specialist creation after all replicas enforce live member authority.",
+    default_enabled: false,
+};
+
+pub const GUEST_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:guest-operation-scopes";
+const GUEST_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: GUEST_OPERATION_SCOPES_FLAG_KEY,
+    description: "Configure guest-only operation limits after all replicas enforce them. Saved limits are always enforced.",
     default_enabled: false,
 };
 
@@ -318,8 +339,10 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -328,6 +351,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
@@ -357,8 +381,10 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -367,6 +393,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
@@ -773,7 +800,7 @@ pub fn resolve_personal_from_overrides(
     )
 }
 
-fn resolve_personal_definitions<'a>(
+pub(crate) fn resolve_personal_definitions<'a>(
     definitions: impl IntoIterator<Item = (&'a str, bool, Option<&'a str>)>,
     platform: &[FeatureFlagOverride],
     org_rows: &[FeatureFlagOverride],
@@ -2940,8 +2967,10 @@ mod tests {
                 "assistant:workspace-preview",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
+                "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:guest-operation-scopes",
                 "assistant:channel-media",
                 "assistant:attachment-writes",
                 "assistant:live-turn-gate",
@@ -2950,6 +2979,7 @@ mod tests {
                 "assistant:machine-contexts",
                 "assistant:agent-learning",
                 "assistant:org-agents",
+                "assistant:shared-agents",
                 "assistant:voice",
                 "assistant:voice-openai-platform",
                 "assistant:voice-grok",

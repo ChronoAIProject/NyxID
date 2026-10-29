@@ -251,12 +251,26 @@ fn gateway_error_code(response: &GatewayResponse) -> &'static str {
     }
 }
 
+/// Validation/authentication refusals establish that this create was rejected.
+/// Conflicts, timeouts and provider/server failures can follow a remote effect.
+fn gateway_create_refused(response: &GatewayResponse) -> bool {
+    matches!(response.status, 400 | 401 | 403 | 422)
+}
+
 // ---------------------------------------------------------------------------
 // Connect, list, disconnect
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct ChannelAgentResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_source: Option<crate::models::nyxbot_channel::GatewaySource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_native_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_native_activation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_native_delivery: Option<String>,
     /// Admission ships separately; gateway follow also needs a negotiated version.
     follow_readiness: &'static str,
     id: String,
@@ -286,6 +300,10 @@ pub struct ChannelAgentResponse {
 impl From<&NyxbotChannel> for ChannelAgentResponse {
     fn from(row: &NyxbotChannel) -> Self {
         Self {
+            gateway_source: row.gateway_source.clone(),
+            gateway_native_phase: row.gateway_native_phase.clone(),
+            gateway_native_activation: row.gateway_native_activation.clone(),
+            gateway_native_delivery: row.gateway_native_delivery.clone(),
             follow_readiness: "unavailable",
             id: row.id.clone(),
             channel_bot_id: row.channel_bot_id.clone(),
@@ -626,6 +644,10 @@ async fn connect_inner(
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
     }
     let row = NyxbotChannel {
+        gateway_source: None,
+        gateway_native_phase: None,
+        gateway_native_activation: None,
+        gateway_native_delivery: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
@@ -750,6 +772,16 @@ async fn connect_inner(
         && let Err(code) = outcome
     {
         tracing::info!(code, platform = %platform, "NyxBot channel stays on NyxID's relay");
+        if platform == "discord" {
+            state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"gateway_native_activation":code}},
+                )
+                .await?;
+        }
         outcome = fall_back_to_direct(state, &row, &bot, &direct_callback).await;
     }
     if let Ok(route_id) = &outcome
@@ -929,6 +961,7 @@ fn gateway_policy(
     if row.gateway_threads.version == Some(1) {
         policy["reply"]["thread_contract"] = gateway_threads::policy(&row.gateway_threads);
     }
+    crate::services::nyxbot_gateway_source::apply_policy(row, &mut policy);
     policy
 }
 
@@ -950,8 +983,20 @@ async fn connect_gateway(
     let creator = creator.as_str();
     // Other platforms pin the bot's own user ID so mentions of it are known.
     let mut row = row.clone();
+    row.gateway_source = crate::services::nyxbot_gateway_source::select(state, &row, bot)
+        .await
+        .map_err(|_| "gateway_native_unavailable")?;
+    if row.gateway_source.is_some() {
+        state.db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"status":"pending"},
+            doc! {"$set":{"gateway_source":bson::to_bson(&row.gateway_source).map_err(|_|"storage_unavailable")?,"gateway_native_phase":"preparing"}}).await.map_err(|_|"storage_unavailable")?;
+    }
     if row.platform != "telegram"
-        && let Some(bot_id) = bot_user_id(state, bot).await
+        && let Some(bot_id) = match crate::services::nyxbot_gateway_source::verified_bot_id(
+            row.gateway_source.as_ref(),
+        ) {
+            Some(id) => Some(id.to_owned()),
+            None => bot_user_id(state, bot).await,
+        }
     {
         let _ = state
             .db
@@ -969,7 +1014,10 @@ async fn connect_gateway(
     let row = &row;
     let mut body = gateway_policy(state, row, bot, &[], GATEWAY_GROUPS_DEFAULT);
     body["record_id"] = json!(record_id);
-    body["credentials"] = json!({"agent_key": agent_key, "channel_key": route_key});
+    body["credentials"] =
+        crate::services::nyxbot_gateway_source::credentials(state, row, bot, agent_key, route_key)
+            .await
+            .map_err(|_| "gateway_credentials_unavailable")?;
     releases::continue_setup(state, &release)
         .await
         .map_err(|_| "storage_unavailable")?;
@@ -987,7 +1035,7 @@ async fn connect_gateway(
     .await
     .map_err(|_| "gateway_unavailable")?;
     if created.status != 201 && created.status != 200 {
-        if matches!(created.status, 401 | 403) {
+        if gateway_create_refused(&created) {
             releases::not_created(&state.db, &release)
                 .await
                 .map_err(|_| "storage_unavailable")?;
@@ -996,6 +1044,12 @@ async fn connect_gateway(
     }
     let (channel_id, callback, version) = releases::validate_create(&release, &created.body)
         .map_err(|_| "gateway_invalid_response")?;
+    crate::services::nyxbot_gateway_source::validate_created(row, &created.body)
+        .map_err(|_| "gateway_invalid_response")?;
+    let callback = native_callback(state, row, callback);
+    crate::services::nyxbot_gateway_source::record_activation(&state.db, row, &created.body)
+        .await
+        .map_err(|_| "storage_unavailable")?;
     releases::record_ack(&state.db, &release, &channel_id, version)
         .await
         .map_err(|_| "storage_unavailable")?;
@@ -1066,6 +1120,11 @@ async fn connect_gateway(
     .await;
     match attached {
         Ok(response) if response.status == 200 => {
+            if row.gateway_source.is_some()
+                && !chats::gateway_policy_acknowledged(&response.body, &update)
+            {
+                return Err("gateway_invalid_response");
+            }
             let Some(version) = response.body["version"].as_i64().filter(|value| *value > 0) else {
                 return Err("gateway_invalid_response");
             };
@@ -1129,6 +1188,10 @@ async fn own_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
 
 /// The bot's own user ID on its platform (best effort).
 async fn bot_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
+    if bot.platform == "discord" {
+        return crate::services::discord_gateway::valid_message_id(&bot.platform_bot_id)
+            .then(|| bot.platform_bot_id.clone());
+    }
     #[cfg(test)]
     if let Some(id) = TEST_BOT_USER_IDS
         .lock()
@@ -1270,9 +1333,16 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     {
         return Err("issuer_unsupported");
     }
+    let source = crate::services::nyxbot_gateway_source::select(state, row, &bot)
+        .await
+        .map_err(|_| "gateway_native_unavailable")?;
     // Mentions of the bot are recognised exactly by its own user ID when
     // NyxID can look it up (without it the gateway counts any mention).
-    let bot_id = if row.platform == "telegram" {
+    let bot_id = if let Some(id) =
+        crate::services::nyxbot_gateway_source::verified_bot_id(source.as_ref())
+    {
+        Some(id.to_owned())
+    } else if row.platform == "telegram" {
         None
     } else {
         bot_user_id(state, &bot).await
@@ -1306,7 +1376,9 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
             doc! {"_id": &row.id, "status": "active", "transport": "direct",
             "route_api_key_id": &row.route_api_key_id},
             doc! {"$set": {"pending_agent_api_key_id": &agent.id,
-            "pending_route_api_key_id": &route_key.id, "gateway_no_progress": false},
+            "pending_route_api_key_id": &route_key.id, "gateway_no_progress": false,
+            "gateway_source":bson::to_bson(&source).map_err(|_|"storage_unavailable")?,
+            "gateway_native_phase":source.as_ref().map(|_|"preparing")},
             "$unset": {"binding_id": ""}},
         )
         .await
@@ -1315,6 +1387,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         _ => return Err("storage_unavailable"),
     }
     let mut next = row.clone();
+    next.gateway_source = source;
     next.route_api_key_id = route_key.id.clone();
     next.gateway_bot_id = bot_id;
     next.agent_api_key_id = Some(agent.id.clone());
@@ -1332,7 +1405,15 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     };
     let mut body = gateway_policy(state, &next, &bot, &[], GATEWAY_GROUPS_DEFAULT);
     body["record_id"] = json!(record_id);
-    body["credentials"] = json!({"agent_key": agent.full_key, "channel_key": route_key.full_key});
+    body["credentials"] = crate::services::nyxbot_gateway_source::credentials(
+        state,
+        &next,
+        &bot,
+        &agent.full_key,
+        &route_key.full_key,
+    )
+    .await
+    .map_err(|_| "gateway_credentials_unavailable")?;
     releases::continue_setup(state, &release)
         .await
         .map_err(|_| "storage_unavailable")?;
@@ -1351,7 +1432,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     {
         Ok(created) if matches!(created.status, 200 | 201) => created,
         Ok(refused) => {
-            if matches!(refused.status, 401 | 403) {
+            if gateway_create_refused(&refused) {
                 releases::not_created(&state.db, &release)
                     .await
                     .map_err(|_| "storage_unavailable")?;
@@ -1365,6 +1446,13 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         Err(_) => return Err(discard("gateway_invalid_response").await),
     };
     releases::record_ack(&state.db, &release, &channel_id, version)
+        .await
+        .map_err(|_| "storage_unavailable")?;
+    if crate::services::nyxbot_gateway_source::validate_created(&next, &created.body).is_err() {
+        return Err(discard("gateway_invalid_response").await);
+    }
+    let callback = native_callback(state, &next, callback);
+    crate::services::nyxbot_gateway_source::record_activation(&state.db, &next, &created.body)
         .await
         .map_err(|_| "storage_unavailable")?;
     // The new route key calls the gateway, then the route is attached.
@@ -1414,6 +1502,11 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     .await
     {
         Ok(response) if response.status == 200 => {
+            if next.gateway_source.is_some()
+                && !chats::gateway_policy_acknowledged(&response.body, &update)
+            {
+                return Err(discard("gateway_invalid_response").await);
+            }
             match response.body["version"].as_i64().filter(|value| *value > 0) {
                 Some(version) => version,
                 None => return Err(discard("gateway_invalid_response").await),
@@ -1443,6 +1536,9 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         subtype: bson::spec::BinarySubtype::Generic, bytes: ciphertext },
     "gateway_channel_id": &channel_id, "gateway_record_id": record_id,
     "gateway_version": version, "gateway_no_progress": false, "gateway_groups_retry_at":bson::DateTime::now(), "updated_at": bson::DateTime::now()};
+    if next.gateway_source.is_some() {
+        set.insert("gateway_native_phase", "ready");
+    }
     if let Some(binding_id) = created.body["provider"]["binding_id"].as_str() {
         set.insert("binding_id", binding_id);
     }
@@ -2813,6 +2909,11 @@ async fn start_chat_turn(
     if text.trim().is_empty() && !had_media {
         return Ok(Inbound::Silent);
     }
+    if row.gateway_source.is_some() && text.trim().is_empty() && had_media {
+        return Ok(Inbound::Reply(
+            crate::services::nyxbot_response_recovery::MEDIA_UNAVAILABLE.into(),
+        ));
+    }
     let private = chat.kind.as_deref() == Some("private");
     // An organization's bot never carries the owner's personal thread.
     let shared = private && !guest && row.bot_owner_id.is_none();
@@ -2825,6 +2926,7 @@ async fn start_chat_turn(
         }
     };
     let origin = ChannelOrigin {
+        native_event_id: row.gateway_source.as_ref().map(|_| event_key.to_owned()),
         thread: binding.map(Box::new),
         nyxbot_channel_id: row.id.clone(),
         partition: chat.partition.clone(),
@@ -3020,7 +3122,9 @@ async fn start_chat_turn(
             crate::services::assistant_profile_routing::model_for(
                 &state.db,
                 crate::services::assistant_profile_routing::RouteRole::Channel,
-                engine::DEFAULT_MODEL,
+                &crate::services::assistant_team_service::agent(&state.db, &row.user_id, &agent_id)
+                    .await?
+                    .model,
             )
             .await,
         ),
@@ -3035,6 +3139,8 @@ async fn start_chat_turn(
         group_id: None,
         guest,
         question_key: question_key.clone(),
+        // Both relay and provider ingress retain the original channel text:
+        // owner /service selection must precede the shared-chat attribution.
         question: Some(excerpt(text, engine::QUESTION_EXCERPT_CHARS)),
         reply_channel: shared.then(|| origin.clone()),
     };
@@ -3143,6 +3249,9 @@ async fn start_chat_turn(
         // A concurrent first message created the chat: it now exists.
         Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => {
             Ok(Inbound::Busy)
+        }
+        Err(AppError::ServiceSelectionInvalid { reason, message }) => {
+            Ok(Inbound::Reply(format!("{reason}: {message}")))
         }
         Err(error) => Err(error),
     }
@@ -3604,6 +3713,36 @@ pub async fn delete_conversation(
     if row.binding_id.as_deref() != Some(binding_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
+    if row.gateway_source.is_some() {
+        let db = state.db.clone();
+        let channel = row.id.clone();
+        let partition = conversation_id.clone();
+        let result: AppResult<()> = async {
+            let mut session = db.client().start_session().await?;
+            session
+                .start_transaction()
+                .and_run2(async move |session| {
+                    db.collection::<NyxbotThread>(THREADS)
+                        .delete_one(doc! {"channel_id":&channel,"partition":&partition})
+                        .session(&mut *session)
+                        .await?;
+                    db.collection::<bson::Document>(
+                        crate::models::nyxbot_gateway_response::COLLECTION_NAME,
+                    )
+                    .delete_many(doc! {"channel_id":&channel,"partition":&partition})
+                    .session(&mut *session)
+                    .await?;
+                    Ok(())
+                })
+                .await?;
+            Ok(())
+        }
+        .await;
+        return match result {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
     // The NyxBot chat itself stays in the owner's history.
     let _ = state
         .db
@@ -3833,6 +3972,9 @@ async fn responses_with_producers_impl(
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     };
+    if row.gateway_source.is_some() {
+        return native_responses::respond(state, row, headers.clone(), request, idempotency).await;
+    }
     let partition = request["conversation"]
         .as_str()
         .unwrap_or_default()
@@ -3879,6 +4021,9 @@ async fn responses_with_producers_impl(
         ));
     }
     if context["conversation_id"] != json!(partition) || context["activity"].is_null() {
+        return problem(StatusCode::BAD_REQUEST, "invalid_request");
+    }
+    if row.platform == "discord" && !discord_provider_context(&row, context) {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     }
     // Durable admission: one turn per idempotency key, context kept verbatim.
@@ -3961,7 +4106,17 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     } else {
-        (0, None)
+        // Discord's provider path has no negotiated attachment ingestion.
+        // Preserve presence for the existing unavailable-media note; never
+        // fetch gateway-supplied locators or silently claim the files were read.
+        let declared = if row.platform == "discord" {
+            activity["kind"]["attachments"]
+                .as_array()
+                .map_or(0, Vec::len)
+        } else {
+            0
+        };
+        (declared, None)
     };
     let retention = if media.is_some() {
         ChronoDuration::days(7)
@@ -4208,9 +4363,44 @@ async fn discard_failed_provider_event(db: &mongodb::Database, event: &str) {
         .await;
 }
 
-/// A gateway message: record its chat (private chats keep the gateway's
-/// conversation; a group is one thread whatever the sender), keep the newest
-/// event reference there for asynchronous replies, then decide.
+/// Validate the existing provider Activity envelope without choosing how the
+/// gateway obtains Discord events. The authenticated provider supplies actor and
+/// address evidence; display names and rendered text never establish identity.
+fn discord_provider_context(row: &NyxbotChannel, context: &Value) -> bool {
+    use crate::services::discord_gateway::valid_message_id as snowflake;
+    let activity = &context["activity"];
+    let conversation = &activity["conversation"];
+    let thread = &conversation["thread_id"];
+    row.transport == "gateway"
+        && activity["source"]["platform"] == "discord"
+        && (activity["source"]["type"] != "nyxid_relay"
+            || activity["source"]["route_id"].as_str() == row.route_id.as_deref())
+        && row
+            .gateway_channel_id
+            .as_deref()
+            .is_some_and(|id| context["channel_id"].as_str() == Some(id))
+        && activity["event_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 256)
+        && context["event_ref"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && s.len() <= 4096)
+        && activity["kind"]["type"] == "message"
+        && activity["kind"]["attachments"]
+            .as_array()
+            .is_none_or(|items| items.len() <= 32)
+        && matches!(
+            conversation["kind"].as_str(),
+            Some("private" | "group" | "channel")
+        )
+        && conversation["id"].as_str().is_some_and(snowflake)
+        && (thread.is_null()
+            || (conversation["kind"] != "private" && thread.as_str().is_some_and(snowflake)))
+        && (!matches!(activity["actor"]["kind"].as_str(), Some("human" | "bot"))
+            || activity["actor"]["id"].as_str().is_some_and(snowflake))
+}
+
+/// Record the chat and its event reference, then apply shared sender policy.
 #[allow(clippy::too_many_arguments)]
 async fn gateway_inbound(
     state: &AppState,
@@ -4225,11 +4415,24 @@ async fn gateway_inbound(
     thread_reply: &mut bool,
 ) -> AppResult<Inbound> {
     let conversation = &activity["conversation"];
-    let kind = chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"));
-    let chat_id = conversation["id"].as_str().unwrap_or_default();
+    let kind = if row.platform == "discord" && conversation["kind"] != "private" {
+        "group"
+    } else {
+        chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"))
+    };
     let thread_id = conversation["thread_id"].as_str();
+    // Discord threads are addressable channels themselves. Preserve the relay
+    // partition whether the provider supplies the parent or child as chat ID.
+    let chat_id = (row.platform == "discord")
+        .then_some(thread_id)
+        .flatten()
+        .or_else(|| conversation["id"].as_str())
+        .unwrap_or_default();
     use crate::models::channel_thread::ThreadSenderKind;
     if sender.id.is_empty() || sender.kind == ThreadSenderKind::Unknown {
+        return Ok(Inbound::Silent);
+    }
+    if row.platform == "discord" && row.gateway_bot_id.as_deref() == Some(sender.id) {
         return Ok(Inbound::Silent);
     }
     if sender.kind == ThreadSenderKind::Bot {
@@ -4242,11 +4445,38 @@ async fn gateway_inbound(
             return Ok(Inbound::Silent);
         }
     }
-    let receiver_known = !matches!(canonical_platform(&row.platform), "lark" | "feishu")
-        || row
-            .gateway_bot_id
+    let native_evidence = if row.gateway_source.is_some() && row.platform == "discord" {
+        Some(native_discord::evidence(state, row, activity, event_key).await?)
+    } else {
+        None
+    };
+    if let Some(evidence) = &native_evidence
+        && let Some(message) = evidence.source_message.as_deref()
+        && let Some(result) = Box::pin(thread_follow::inbound_impl(
+            state,
+            row,
+            &json!({"conversation":{"type":kind}}),
+            message,
+            text,
+            event_key,
+            true,
+        ))
+        .await?
+    {
+        *thread_reply = true;
+        return Ok(result);
+    }
+    let receiver_known = if row.platform == "discord" {
+        row.gateway_bot_id
             .as_deref()
-            .is_some_and(|id| id.starts_with("ou_") && id.len() > 3);
+            .is_some_and(crate::services::discord_gateway::valid_message_id)
+    } else {
+        !matches!(canonical_platform(&row.platform), "lark" | "feishu")
+            || row
+                .gateway_bot_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("ou_") && id.len() > 3)
+    };
     if receiver_known
         && crate::services::channel_thread_service::gateway::candidate(row, activity)
         && let Some(result) = Box::pin(thread_follow::gateway_inbound(
@@ -4344,7 +4574,9 @@ async fn gateway_inbound(
     // Only legacy admission implies addressing. A gateway may already have
     // accepted broader thread admission before its acknowledgement is stored.
     // Versioned facts must use explicit evidence even during that window.
-    let addressed = if !human {
+    let addressed = if let Some(evidence) = &native_evidence {
+        Some(evidence.addressed)
+    } else if !human {
         Some(activity["kind"]["mentions_bot"] == true)
     } else {
         Some(
@@ -4352,6 +4584,7 @@ async fn gateway_inbound(
                 || (receiver_known && activity["kind"]["mentions_bot"] == true)
                 || (receiver_known
                     && human
+                    && row.platform != "discord"
                     && row.gateway_groups.as_deref() != Some("all")
                     && activity["thread"].is_null()
                     && !row
@@ -4467,6 +4700,9 @@ pub async fn deliver_to(
         let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
             return Ok(());
         };
+        if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
+            return Err(AppError::NotFound("Native reply source unavailable".into()));
+        }
         let mut reply = bounded_reply(text);
         if let Some(plan) = images
             && let Some(turn) = row.active_turn.as_ref()
@@ -4497,6 +4733,9 @@ pub async fn deliver_to(
         }
         if reply.trim().is_empty() {
             return Ok(());
+        }
+        if channel.gateway_source.is_some() {
+            return native_responses::send_update(state, &channel, origin, &row.id, &reply).await;
         }
         // A chat from before its bot moved to the gateway has no gateway
         // reference yet: it is answered through NyxID's relay, as before.
@@ -5476,5 +5715,24 @@ mod future_size_tests {
             composition < 1024,
             "Responses composition future grew to {composition} bytes"
         );
+    }
+}
+
+#[path = "nyxbot_native_discord.rs"]
+mod native_discord;
+#[path = "nyxbot_native_responses.rs"]
+pub(crate) mod native_responses;
+
+fn native_callback(state: &AppState, row: &NyxbotChannel, relay: String) -> String {
+    if row.gateway_source.is_some() {
+        // This receiver requires transport=direct and refuses native traffic;
+        // native sources never receive the route callback credential.
+        format!(
+            "{}/api/v1/nyxbot/relay/{}",
+            state.config.base_url.trim_end_matches('/'),
+            row.id
+        )
+    } else {
+        relay
     }
 }

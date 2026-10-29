@@ -26,7 +26,8 @@ The dashboard has dark and light themes (`html.theme-dark` / `html.theme-light`,
 | Token | Dark | Light | Use |
 |---|---|---|---|
 | `bg-background` | `#17171A` | `#F4F4F5` | Page canvas and header |
-| `bg-sidebar` | `#141416` | `#F4F4F5` | Sidebar (light: same tone as the canvas, separated by its border) |
+| `bg-sidebar` | `#1C1C1F` | `#FFFFFF` | Assistant window surface: the sidebar column and the gutter around the content slab (light: the card white). The assistant content area is one `bg-background` slab (`rounded-2xl`, inset 8px, `shadow-sm`) with no divider lines; chat and the machine column share the slab side by side, flush, with nothing drawn between them |
+| `bg-sidebar-hover` | `#27272A` | `#F6F6F6` | Opaque sidebar row hover (`bg-overlay` over `bg-sidebar`), so avatar and status-dot rings can match the hovered row |
 | `bg-card` / `bg-popover` | `#222225` | `#FFFFFF` | Elevated content (cards carry `shadow-sm`) |
 | `bg-muted` | `#2C2C30` | `#F4F4F5` | Neutral fills, chips |
 | `text-foreground` | `#EFEFF1` | `#18181B` | Headings, primary text |
@@ -76,13 +77,15 @@ Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`)
 | 10px | Section labels (uppercase, tracking 1.5px), badge text, smallest overline text |
 | 11px | Timestamps, stat descriptions, tertiary text, status labels, pagination counters |
 | 12px | Body text, button text, nav items, table cells, input/select text, dropdown items, detail row values, breadcrumbs, page descriptions |
-| 13px | Sidebar nav items, card body text, `DetailSection` headers, mobile-card primary text |
+| 13px | Sidebar nav items, card body text, `DetailSection` headers, standard mobile-card primary text |
 | 14px | Long-form welcome/marketing copy (e.g. onboarding takeover body, mobile nav items) |
-| 15px | Dialog titles, card headings ("Shortcuts", "Getting started"), wizard step titles |
+| 15px | Dialog titles, card headings ("Shortcuts", "Getting started"), mobile Activity service titles, wizard step titles |
 | 22px | Page titles on mobile (auto-scales to 28px at `sm`), `text-lg` mid-page section headings (`channel-bots`, `org-detail`) |
 | 28px | Page titles on `sm+` (`PageHeader`, `font-bold`, `letter-spacing: -0.03em`); dashboard greeting |
 
 > **Off-scale sizes in use** (not endorsed; reconcile when touching the file): `text-2xl` on `StatCard` values in `developer-apps.tsx`; `text-22 font-bold` on node-detail metric values; `text-3xl md:text-5xl font-normal` on the `developer-app-detail` not-found heading; `text-base` on `ApprovalSetupWizard` `CardTitle`; `text-9` badges on `channel-conversation-detail`. New code should snap to the scale above.
+
+Mobile Activity cards lead with the service name at 15px; the action and URL use secondary text at 12px. Service names may wrap to two lines.
 
 ## Components
 
@@ -518,6 +521,8 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 | 2026-07-31 | Pre-answer loader is three dots lighting in turn (supersedes the Newton's cradle) | The cradle it replaces was legible as a cradle — 7px swings, asymmetric gravity easing, a brightness handoff modelling kinetic energy, and an exit sweep that read each ball's live transform so it kept flying the way the impulse was already travelling. That was the problem: a loader is furniture in front of an answer and this one asked to be watched. Now **three** 6px dots on an 11px pitch (a 28px group, within 2px of the pack it replaces, so nothing around it re-flows). The 5px gap is nearly a full dot of air: these are three marks taking turns, not a chain in contact. Over a 1400ms period each dot is above rest for the first 30% of its own run (420ms, peaking at 196ms) and the stagger is **280ms — two thirds of the pulse**, peaks land 280ms apart at 196/476/756ms and each dot is back at rest 140ms before its neighbour peaks, so **at every peak the other two are at rest**. The only overlap is a 140ms tail where one decays and the next rises through roughly the same value — a handover, not a chord. The **pulse width** is the load-bearing number: the first attempt held each dot above rest for half its run (700ms) against a 180ms stagger, and at the middle dot's peak both neighbours sat near 0.82 — all three lit, a glow rather than a wave. Narrowing the pulse is what makes the peaks exclusive; widening the stagger to match is what spreads the relay over enough of the period to leave a rest gap after it. The relay ends at 980ms and the group rests together for the remaining 420ms — a breath, not the stall that reads as a dead turn. Contrast is unchanged and still load-bearing — `muted-foreground` cycling 65%→100%, so a resting dot clears 3:1 in both themes (3.8:1 dark, 3.2:1 light). The exit fades the **group**, not the dots: compounding the parent's opacity leaves each dot as bright as it was and still pulsing as it dissolves, where a per-dot exit would interpolate from the flat resting opacity and snap a dot caught at its peak dark for a frame. `StreamingDots` still pins the last measured box and drops it out of flow first, so the answer moves up immediately instead of waiting out the fade. Reduced motion keeps the synchronised 65%→85% breathe. |
 | 2026-07-31 | The assistant composer holds focus by default | Arriving at the chat, opening a conversation, and finishing a turn all leave the caret in the composer — it is the only thing anyone opens this screen to use. Focus has one unconditional trigger and three conditional ones. Unconditional: an explicit `focusRequest` counter the page bumps from the sidebar row, New Chat, and deleting the conversation you were in. That takes focus outright, including off the sidebar row just clicked, because that click IS the request. Conditional (each requires focus to still be parked on the body, so nothing anyone is holding is taken): a `draftKey` that moves without a request — browser Back/Forward, canonical-id repair, confirmed-stale cleanup, the first send migrating off a draft thread; and a turn ending, which additionally restores only focus the turn itself took (the composer is read for focus during the render that flips `active`, before the commit disables the field). Parked focus is not by itself evidence that nobody is reading — scrolling, selecting answer text and a screen reader's virtual cursor all leave `activeElement` on the body — so from the moment a send starts (not from `active` — a first send can sit in `sending` for seconds) the composer watches for `pointerdown`/`keydown`/`wheel`/`touchstart` outside itself and drops any focus it was holding for you once you have moved on. That watch only exists while a turn runs, so the parked test stands alone for the automatic `draftKey` moves — acceptable because those are canonical-id repair and stale-route cleanup, which land moments after a conversation opens rather than at an arbitrary time. A request that lands while the field is disabled is held until the turn hands it back, and dropped if you move on first. Touch devices opt out entirely (`(pointer: coarse)`): raising the on-screen keyboard over half the screen is the wrong default when opening a conversation to read it is the common case. Known gap: the shell's home logo is a plain `Link`, so clicking it from a conversation leaves focus on the logo in browsers that focus links on click. |
 | 2026-10-15 | Message timestamps name the date and zone inline (supersedes the `HH:MM` stamp in the 2026-07-22 chat-layout decision) | Every user message, reply, NyxBot instruction and group message shows its stored instant through the shared `MessageTime` (`components/assistant/message-time.tsx`): JetBrains Mono 11px `text-text-tertiary`, formatted with the reader's own locale and time zone and always naming the date, year and zone (`Oct 15, 2026, 3:40 AM GMT+8`), so messages from different days, or either side of a clock change, never read alike. Everything is inline; there is no tooltip. A reply's time ends its feedback line, and a user message's sits under its bubble. Both are revealed on hover or focus within the message (`group/message`) and always shown on devices without hover. Group agent replies keep the time in their header, always visible. A streaming reply shows none until it settles, and a missing or invalid instant renders nothing. |
+| 2026-10-28 | Message timestamps show the day and month; reply feedback asks after the vote (supersedes the inline label of the 2026-10-15 timestamp decision) | `MessageTime` now shows only the local day and month (`27 Oct`), adding the year outside the reader's current year (`27 Oct 2025`), in the surrounding sans `text-11 text-text-tertiary` instead of JetBrains Mono. English readers always get day-first order; other languages keep their own (`10月27日`). The full date, time and zone moves to the native `title`, so it is still one hover away. Placement and reveal rules are unchanged. A reply's feedback line is copy, thumbs up, thumbs down and the time, with no Comment button. A vote saves at once and opens a standard `Dialog` (`md:max-w-md`; full screen on mobile like every dialog) from `components/assistant/reply-feedback.tsx`, shared by chats and groups, modelled on Claude's feedback dialog: title `Give positive feedback` or `Give negative feedback`, a description asking what the reader liked or what went wrong, `h-8 rounded-full text-12 font-medium` reason pills (a `hairline-strong` ring at rest; chosen pills gain a leading check, a `nyx-secondary-400` ring and a `/15` tint of it), a `Details (optional)` `Textarea`, and Cancel (`outline`) beside Submit (`primary`). Up offers Useful, Accurate and Easy to understand; down offers Not useful, Not accurate, Bad response and Hard to understand. Submit stores `Reasons, in offered order — details`, closes the dialog and confirms with a `Thanks for the feedback.` toast; an empty Submit just closes, since the vote is already saved. Cmd/Ctrl+Enter submits from the details field. Cancel, Escape, the close button or the overlay keep the vote; a failed Submit keeps the dialog and its text open with an error. Clicking the chosen thumb again withdraws the vote. |
+| 2026-10-29 | User chat bubble shape and editable colors | Supersedes the bubble fill and corners in the 2026-07-22 chat-layout decision: user messages in individual and group chats share three 18px corners and a tighter 4px bottom-right corner (pt on native). On web, dedicated `chat-bubble` and `chat-bubble-foreground` colors are editable per theme in Settings → Display with a live preview and a 4.5:1 text contrast check. Native Display offers device-saved Gray, Lavender, and Graphite light-mode palettes with a live preview; each palette meets 4.5:1 for text, including author, recipient, date, and copy controls. Light defaults to neutral gray `#E0E0E5` with `#18181B` text; dark defaults to `#2C2C30` with `#EFEFF1` text. |
 
 ## Portaled overlay layers
 
@@ -530,3 +535,127 @@ Tooltips use at least 1000 and stay above their parent. Embedded raw Radix modal
 must provide their content layer to descendants. Avoid per-instance z-index
 classes on these primitives; date pickers and comboboxes inherit through their
 Popover/Select surface.
+
+### Native assistant workspace
+
+The React Native workspace has a base sidebar and an opaque content slab. Home,
+chats and workspace pages push horizontally inside that slab. Only Settings,
+account pages and QR/terminal quick actions use the retained pull-up surface. See
+[the complete native route inventory](mobile/docs/NATIVE_WORKSPACE_ROUTES.md).
+
+- The sidebar uses sentence-case headings and Quick actions above Workspace.
+  Workspace contains Automations, Machines, Plugins, Activity (live pending count)
+  and Create new agent; no coming-soon destinations. Activity shows Incoming
+  followed by date-grouped History, with Active grants as a secondary page.
+  Logo and the pinned Chat pill open Home. The Settings gear and Quick actions
+  present above the current sidebar/slab without changing its offset or scroll.
+  Their dismissal restores that exact state. Root selection fades the old content
+  out over 120ms, swaps with no inner stack animation, and waits for the new page's
+  layout and paint. It then fades the new content in over 180ms while closing the
+  opaque slab in a single 300ms ease-out. Only the 24pt root edge reveals it;
+  only the exposed slab sliver closes it. Finger releases spring; reduced motion
+  has no travel. The pinned controls have a measured bottom content spacer.
+- Drawer top is the window's safe-area top plus 10pt. Top corners are 24pt; the
+  centered 36×4pt handle has a 44pt drag region. A dedicated translucent scrim
+  stays fixed over retained chat and fades independently while the panel slides.
+  Sidebar and content headers share a 60pt row below the same safe-area inset.
+  Page and Settings titles are centered across the full header, with equal control
+  columns, 18pt type, one line and a 1.25 scaling cap. Chat identity keeps its avatar
+  and name alignment. Close is a circular 44pt target. Only pages pushed within a
+  sheet add Back; directly opened QR, Terminal or account pages are local roots.
+  Sidebar accessibility follows the settled UI endpoint; cancelled or zero-distance
+  gestures release its focus ownership and restore the content at offset zero.
+  Forms retain async dirty/pending guards across every dismissal path. Reduced
+  motion removes stack travel and springs. No fake home indicator or native rail.
+- Home is an explicit primary-chat state, reached from the navigation logo/Chats,
+  bare `/assistant`, or app start without a restored chat. New chat with NyxBot
+  shows the same normal empty chat as a specialist: identity header, intro and
+  composer. Compose actions preserve the viewed agent and start empty. Each
+  thread keeps its own in-memory text/attachment draft when visiting Home or
+  another thread; Home has a separate NyxBot composer.
+- Native private-user messages have neutral card fill, a 1pt border, 38pt leading
+  inset and corners 12/12/3/12. Private chat omits redundant “You”; group speakers,
+  real specialist attribution, orchestration, updates, via and guidance remain.
+  Native reply footers show only an icon Copy action and a local day/month date,
+  8pt apart and 8pt below the body. Reply feedback votes are omitted on native by
+  user decision (2026-10-28); full timestamps remain accessible on long press.
+  Assistant prose stays unboxed. All chat composers share a filled 26pt pill:
+  full-width text sits above a toolbar with Attach, optional mentions, dictation
+  and a trailing Send/Stop circle inside a 44pt target. Attach offers Camera,
+  Photos and Files through their native pickers. Dictation requires review before text is
+  inserted into the draft and never sends a message automatically. Chat pages
+  use an edge-to-edge transcript viewport within the system safe area, so its
+  scroll indicator sits at the window edge. The centered transcript content
+  retains 12pt horizontal padding and the configured column maximum; composers
+  retain their own 12pt margins and pages keep 4pt bottom padding. The navigation account footer absorbs its bottom clearance into
+  the safe-area inset rather than adding a second padded strip. The one-row
+  private header stays compact; group name, ownership context and settings
+  share one header, with member details retained.
+- Chat Details, History and Working context are nested pages in the content slab.
+  History shares the cursor-paged Recents browser, filtered to the current agent.
+  Title edits, deletion and context reset retain dirty/critical-write guards.
+  The agent/permissions/options and recipients/connections pickers remain task-local
+  transient choices, alongside media preview and voice conversation.
+- Native permissions controls contain Full access, Auto and Ask every time only,
+  with the effective agent override shown read-only. Chat and agent settings use
+  the server default without a native selector or per-turn override. Voice automatically uses an available server default, without a source selector. This is the user's deliberate native scope (2026-10-28).
+- Native Automations is display-only: configured tasks, source/schedule, target,
+  confirmation policy, read-only status and paged run history with exact thread
+  links. It issues GET requests only. Creation, changes and execution belong to
+  NyxBot; no native editor, preferences, toggle, invoke, delete or webhook setup.
+- Reply activity/receipts and prose have a 16pt gap. Ordinary Markdown blocks have
+  12pt sibling spacing; headings have 20pt (h1) or 16pt above and 8pt below, without
+  start/end margins. Horizontally scrolling tables include the transcript's 12pt
+  trailing inset. Private, live and crew replies share the same layout.
+- Native skills are read-only except explicit version pinning and “Remove from
+  agent”. “Use latest (version)” resolves the newest supported package and pins
+  its exact version/hash; no floating latest contract exists. Editing belongs to
+  NyxBot (“To change this skill, ask NyxBot.”). Owner publication decision cards
+  retain their reviewed files and guarded approve/decline actions, without an editor.
+- Settings → Display stores chat layout on this device with AsyncStorage. Column
+  maximum defaults to 758pt, clamps to actual space, and is adjustable only on
+  windows at least 600pt wide (360–1200pt range). Composer maximum defaults to the
+  existing native 120pt (80–320pt preference range) and caps against available
+  keyboard/window space, reserving transcript space down to a 44pt input. It
+  grows with content; the setting never forces blank height. Reset changes only
+  these layout values. Web storage and width/index behavior are unchanged.
+- Settings preserves system text scaling. At narrow effective widths, identity,
+  status, label/value and switch rows stack so long text can wrap within cards.
+  Live system text-size changes refresh Settings and Display label measurements
+  while retaining the page, scroll position and control state.
+  Avatar initials retain enough space at the selected text size. Display step
+  controls use fixed-size icons in labelled 44pt targets while labels and values
+  continue to scale; the controls can wrap onto another line.
+- Navigation, transcript, multiline input and horizontal attachment, recipient
+  and member strips show fades only at measured overflowing edges. Top/start cues are gentler.
+  Fades ignore pointer/accessibility input and disappear at revealed edges.
+  Transcript measurement calls the existing follow handlers first and retains
+  their drag/momentum behavior and anchors.
+- Mobile muted/tertiary tokens were corrected across their shared consumers:
+  dark `#8b839f`/`#827a96`, light `#746981` for both. Light status and tinted-brand
+  text were darkened. These affect timestamps, metadata, placeholders, section
+  labels and icon affordances throughout native management/chat; they no longer
+  rely on faint text to express secondary hierarchy. Primary branding and web
+  tokens are unchanged. Text colors have at least 4.5:1 against the native
+  base/card/cardSoft surfaces; essential drawer/composer controls meet 3:1.
+
+Native support remains portrait iPhone on iOS and Android phone, with wide
+Android windows as a secondary layout. Eligible private chats expose a
+voice-conversation mode in the trailing composer button when the server enables
+`assistant:voice`: an empty composer shows the waveform, text or attachments
+show Send, and an active reply shows Stop. Dictation streams microphone audio to
+the server for review before insertion, matching the web’s private-chat scope.
+Crew chats retain the keyboard’s own dictation.
+
+The native Machines drawer supports personal machines and organization machines
+the signed-in person administers. It includes inventory, read-only local
+capability and isolation details, guarded owner policy and update actions,
+saved-login metadata and removal, activity, and revisioned per-agent machine
+access. Context changes open the exact owner action card for review. Managed
+and hosted setup, saved-login creation, and external API-key/OAuth grants use
+web handoffs. Desktop entries from machine detail and private-chat tool cards
+open a full-screen route with machine, conversation, context and display
+selectors preserved. The viewer requires native privacy protection and a
+compatible server; live-frame, performance and app-switcher verification remain
+release gates. This describes mobile behavior only. iPad, additional
+orientations and RN-web remain outside native support.

@@ -1,3 +1,4 @@
+import { ShareAgentDialog, SharedAgentMemory, SharedAgentProfile, SharedConsentCards } from "./shared-agent-controls";
 import { AgentSkills } from "./agent-skills";
 import { AgentConnections } from "./agent-connections";
 import { AgentLearningReview } from "./agent-learning-review";
@@ -5,7 +6,7 @@ import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
@@ -220,6 +221,7 @@ export function AgentDetailsSheet({
   readonly onDeleted: () => void;
 }) {
   const detail = useNyxBotAgent(agentId, open);
+  const returnFocus = useRef<HTMLElement | null>(null);
   const agent = detail.data?.agent;
   const loadedAgentId = agent?.id;
   const requestMode = useNyxBotSettings(open).data?.specialist_access_requests;
@@ -234,7 +236,20 @@ export function AgentDetailsSheet({
   }, [open, tab, loadedAgentId]);
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
+      <SheetContent
+        className="w-full overflow-y-auto sm:max-w-lg"
+        onOpenAutoFocus={() => {
+          returnFocus.current = document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
+        }}
+        onCloseAutoFocus={(event) => {
+          if (returnFocus.current?.isConnected) {
+            event.preventDefault();
+            returnFocus.current.focus({ preventScroll: true });
+          }
+        }}
+      >
         <SheetHeader className="space-y-1.5 pr-6">
           <SheetTitle>Agent details</SheetTitle>
           <SheetDescription>
@@ -294,9 +309,15 @@ export function AgentDetailsSheet({
                 description={
                   agent.owner_kind === "org"
                     ? `${agent.owner_name ?? agent.owner_id} · Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
-                    : "Personal agent"
+                    : agent.share_role ? `Shared by ${agent.owner_name ?? agent.owner_id}. Your role: ${agent.share_role}. Your chats and notes stay private.` : "Personal agent"
                 }
               />
+              <ShareAgentDialog agent={agent} />
+              {agent.share_role ? <>
+                <SharedAgentProfile key={`${agent.id}:${agent.persona}:${agent.description}`} agent={agent} />
+                <SharedAgentMemory agent={agent} />
+                <SharedConsentCards agentId={agent.id} />
+              </> : <>
               <ProfileForm
                 key={[
                   agent.id, agent.name, agent.description, agent.display_name, agent.persona,
@@ -339,6 +360,7 @@ export function AgentDetailsSheet({
               {agent.kind === "specialist" && agent.can_maintain !== false ? (
                 <Lifecycle agent={agent} onDeleted={onDeleted} />
               ) : null}
+              </>}
             </>
           ) : null}
         </div>
@@ -724,6 +746,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       {agent.can_maintain !== false ? (
         <>
           <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
+          {agent.owner_kind !== "org" ? <AgentOperationScopes agentId={agent.id} disabled={readOnly} guests /> : null}
           <MachineCapabilities agentId={agent.id} agent={agent} disabled={readOnly} />
         </>
       ) : null}

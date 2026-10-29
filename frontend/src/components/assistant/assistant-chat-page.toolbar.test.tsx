@@ -1,3 +1,4 @@
+import { voicePreferences } from "@/test/voice-fixture";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -22,7 +23,10 @@ const state = vi.hoisted(() => ({
   mode: "nyxmode" as NyxAgentAccessMode,
   override: null as NyxAgentAccessMode | null,
   staleCard: false,
+  agentLoaded: true,
+  desktop: true,
   voice: false,
+  savedVoice: true,
   voiceMounts: 0,
   voiceEnds: 0,
 }));
@@ -51,11 +55,12 @@ vi.mock("@tanstack/react-router", async (original) => ({
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: (name: string) => name === "assistant:voice" && state.voice,
 }));
+vi.mock("@/hooks/use-media-query", () => ({ useMediaQuery: () => state.desktop }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
-  useNyxBotAgents: () => ({ data: { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } }),
-  selectedAgentOf: (rows: unknown[]) => rows[0],
-  nyxBotOf: (rows: unknown[]) => rows[0],
-  useNyxBotSettings: () => ({ data: { access_mode: state.mode } }),
+  useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } : undefined }),
+  selectedAgentOf: (rows?: unknown[]) => rows?.[0],
+  nyxBotOf: (rows?: unknown[]) => rows?.[0],
+  useNyxBotSettings: () => ({ data: { access_mode: state.mode, voice: state.savedVoice ? voicePreferences : null } }),
   useUpdateNyxBotSettings: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useNyxAgentModels: () => ({ data: [{ id: "nyxagent/chat", label: "chat", available: true }], isPending: false }),
   useChangeNyxAgentModel: () => ({ isPending: false, mutateAsync: vi.fn() }),
@@ -69,19 +74,20 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
   send: vi.fn(), stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
-  getConversation: (id?: string) => id ? conversation : undefined,
+  getConversation: (id?: string) => id && state.agentLoaded ? conversation : undefined,
   capabilities: () => Promise.resolve({ steer: null }),
 } }));
-vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
+vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children, contentTitle }: { children: ReactNode; contentTitle?: boolean }) => <main data-content-title={Boolean(contentTitle)}>{children}</main> }));
 vi.mock("./assistant-engine-sidebar", () => ({ AssistantEngineSidebar: () => null }));
 vi.mock("./nyxbot-agent-panels", () => ({
-  ThreadHeader: ({ controls }: { controls?: ReactNode }) => <header data-testid="thread-header">{controls}</header>,
-  TeamStrip: () => null, PendingEventsNote: () => null, WaitingNote: () => null, ChannelBadge: () => null,
+  ThreadPanels: ({ children }: { children: ReactNode }) => <>{children}</>,
+  ThreadHeader: ({ controls, title, loading }: { controls?: ReactNode; title?: string; loading?: boolean }) => <header data-testid="thread-header" data-title={title} data-loading={loading}>{controls}</header>,
+  PendingEventsNote: () => null, WaitingNote: () => null, ChannelBadge: () => null,
 }));
 vi.mock("./nyxbot-agent-details", () => ({ AgentDetailsSheet: () => null }));
 vi.mock("./nyxbot-home", () => ({ NyxBotHome: () => <div>Home</div> }));
 vi.mock("./working-context-panel", () => ({ WorkingContextPanel: () => null }));
-vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null }));
+vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null, MachinePane: () => null, MachinePaneToggle: () => null }));
 vi.mock("./chat-message", () => ({ ChatMessageList: ({ session, renderMessage }: {
   session?: { messages: { id: string }[] }; renderMessage?: (message: { id: string }) => ReactNode;
 }) => session?.messages.filter((message) => message.id.startsWith("nyxagent-acknowledgement:"))
@@ -102,6 +108,7 @@ beforeEach(() => {
     },
   });
   state.voice = false;
+  state.savedVoice = true;
   state.voiceMounts = 0;
   state.voiceEnds = 0;
   state.search = {};
@@ -110,11 +117,37 @@ beforeEach(() => {
   state.mode = "nyxmode";
   state.override = null;
   state.staleCard = false;
+  state.agentLoaded = true;
+  state.desktop = true;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
 function mount() {
   return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
+it.each([
+  { search: { draft: true }, desktop: true },
+  { search: { c: conversation.id }, desktop: true },
+  { search: { draft: true }, desktop: false },
+  { search: { c: conversation.id }, desktop: false },
+])("keeps one title owner before and after thread identity resolves: %j", ({ search, desktop }) => {
+  state.search = search;
+  state.desktop = desktop;
+  state.agentLoaded = false;
+  const view = mount();
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-loading", "true");
+  if (desktop) expect(screen.getByTestId("thread-header")).toHaveAttribute("data-title", "Thread");
+  else expect(screen.getByTestId("thread-header")).not.toHaveAttribute("data-title");
+  state.streaming = true;
+  view.rerender(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
+  expect(screen.getByTestId("thread-header")).toBeInTheDocument();
+  state.agentLoaded = true;
+  view.rerender(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-loading", "false");
+  expect(screen.getAllByTestId("thread-header")).toHaveLength(1);
+});
 it.each([{}, { draft: true }, { draft: true, agent: agent.id }])("puts combined settings in the home/draft composer %j", (search) => {
   state.search = search; const view = mount();
   const controls = view.container.querySelector("[data-composer-footer]") as HTMLElement;
@@ -177,20 +210,21 @@ vi.mock("./lazy-voice-panel", async () => {
       panelId,
       onViewChange,
       onClose,
+      settingsOnly,
     }: {
       threadId: string;
       panelId: string;
-      onViewChange: (view: unknown) => void;
+      onViewChange?: (view: unknown) => void;
+      settingsOnly?: boolean;
       onClose: () => void;
     }) => {
       useEffect(() => {
+        if (settingsOnly) return;
         state.voiceMounts++;
-        return () => {
-          state.voiceEnds++;
-        };
-      }, []);
+        return () => { state.voiceEnds++; };
+      }, [settingsOnly]);
       useEffect(() => {
-        onViewChange({
+        onViewChange?.({
           threadId,
           panelId,
           actorId: useAuthStore.getState().user?.id,
@@ -199,6 +233,7 @@ vi.mock("./lazy-voice-panel", async () => {
           activity: { input: 0.2, output: 0, bands: [], playbackMs: 0 },
         });
       }, [threadId, panelId, onViewChange]);
+      if (settingsOnly) return <section aria-label="Mock voice settings"><button onClick={onClose}>Close settings fixture</button></section>;
       return (
         <section aria-label="Mock voice session">
           <button onClick={onClose}>Close voice fixture</button>
@@ -284,4 +319,15 @@ it("parent keeps one mounted call on repeated opens and clears media across clos
     </QueryClientProvider>,
   );
   expect(state.voiceEnds).toBe(4);
+});
+
+it("first voice use opens account settings without capture or a call", async () => {
+  state.voice = true;
+  state.savedVoice = false;
+  useAuthStore.setState({ user: { id: "first-voice-owner" } as NonNullable<ReturnType<typeof useAuthStore.getState>["user"]> });
+  render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Open voice call" }));
+  expect(await screen.findByLabelText("Mock voice settings")).toBeInTheDocument();
+  expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  expect(state.voiceMounts).toBe(0);
 });

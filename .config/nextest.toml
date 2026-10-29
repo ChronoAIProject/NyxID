@@ -35,6 +35,17 @@ run-wrapper = "telegram-personal-journey-stack"
 filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot) | test(=handlers::assistant_nyxagent::tests::capacity_retry_after_never_extends_trigger_grace_deadline) | test(=handlers::assistant_nyxagent::tests::expired_or_nearly_expired_run_grace_preserves_dispatch_and_response_bounds) | test(=handlers::assistant_nyxagent::tests::lost_session_rebinds_with_recap_and_same_turn_id)"
 threads-required = "num-cpus"
 
+# These migration tests observe real MongoDB lease renewal, publication, and
+# cancellation within bounded observation windows. Reserve runner test slots
+# so unrelated fixture work cannot consume those windows.
+[[profile.ci.overrides]]
+filter = """
+test(=services::platform_entry_migration::tests::owned_lease_is_renewed_during_an_operation_longer_than_its_initial_lifetime) |
+test(=services::platform_entry_migration::tests::publication_heartbeat_overlap_converges_on_committed_ready) |
+test(=services::platform_entry_migration::tests::ownership_loss_cancels_inflight_operation_and_cannot_retire_or_publish_ready)
+"""
+threads-required = "num-cpus"
+
 # Stream-bound tests use 400ms/500ms deadlines and one measures settlement
 # against a four-second ceiling. They need the same isolation as the recovery
 # tests above so unrelated database setup/drop work cannot consume those bounds.
@@ -55,7 +66,7 @@ threads-required = "num-cpus"
 # MongoDB fixture churn cannot turn their healthy-admission preconditions into
 # intentional fail-closed drops. Keep the real deadlines and all assertions.
 [[profile.ci.overrides]]
-filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients) | test(=services::analytics_dispatch_service::tests::retained_uncertainty_is_bounded_without_expiring_proof_and_accepted_rows_are_removed)"
+filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients) | test(=services::analytics_dispatch_service::tests::retained_uncertainty_is_bounded_without_expiring_proof_and_accepted_rows_are_removed) | test(=services::analytics_dispatch_service::tests::active_uncertain_cap_repair_resumes_capture_without_granting_erasure_drain)"
 threads-required = "num-cpus"
 
 # Mounted admission requires live OAuth authority before testing flag denial.

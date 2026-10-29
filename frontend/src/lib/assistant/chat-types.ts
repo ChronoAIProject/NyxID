@@ -44,7 +44,7 @@ export interface ChatMessage {
   readonly capacityWaitDeadline?: string | null;
   readonly channelDelivery?: { readonly status: string; readonly heard_prefix_chars?: number | null; readonly heard_prefix_matches_sent: boolean } | null;
   readonly turnMetadata?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null } | null;
-  readonly errorDetail?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null; readonly upstreamCode?: string | null; readonly stage: string; readonly httpStatus?: number | null; readonly upstreamRequestId?: string | null; readonly responseId?: string | null; readonly continuations: number; readonly turnId: string; readonly occurredAt?: string } | null;
+  readonly errorDetail?: { readonly failureReason?: import("@/schemas/assistant-nyxagent").NyxAgentFailureReason | null; readonly attempts?: number | null; readonly capacityWaitMs?: number | null; readonly upstreamCode?: string | null; readonly stage: string; readonly httpStatus?: number | null; readonly upstreamRequestId?: string | null; readonly responseId?: string | null; readonly continuations: number; readonly turnId: string; readonly occurredAt?: string } | null;
   readonly errorCode?: string | null;
   readonly events?: RuntimeEvent[];
   readonly pendingApproval?: RuntimeToolApprovalRequestInfo;
@@ -58,6 +58,12 @@ export interface ChatMessage {
   readonly via?: string | null;
   readonly activityTotal?: number;
   readonly turnStatus?: import("./turn-status").TurnStatus | null;
+  /** Settled permission decisions and automatic receipts of this reply's turn. */
+  readonly decisions?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement[];
+  /** Who started the turn this message opens (`trigger` for an automation). */
+  readonly origin?: string | null;
+  /** The automation behind an automation-started message. */
+  readonly automation?: { readonly triggerId: string; readonly runId: string; readonly label: string } | null;
 }
 
 export interface ChatImage {

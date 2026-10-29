@@ -166,7 +166,7 @@ pub(crate) fn assertion(
 fn verify_assertion(state: &AppState, raw: &str, scope: &str, body: &[u8]) -> AppResult<Value> {
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
     validation.set_audience(&[AUDIENCE]);
-    validation.set_issuer(&[&state.config.jwt_issuer]);
+    validation.set_issuer(&state.config.accepted_jwt_issuers());
     validation.leeway = 0;
     let data = jsonwebtoken::decode::<Assertion>(
         raw,

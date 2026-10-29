@@ -17,6 +17,7 @@ pub mod api_key_scope_service;
 pub mod api_key_validation;
 pub mod approval_policy;
 pub mod approval_service;
+pub mod approved_sign_in_policy;
 pub mod assistant_action_execution_service;
 pub mod assistant_action_receipts;
 pub mod assistant_agent_learning;
@@ -235,6 +236,8 @@ pub mod service_account_service;
 pub mod service_endpoint_service;
 pub mod service_pool_health_service;
 pub mod service_pool_service;
+pub mod shared_agent_consent;
+pub mod shared_agent_service;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;
 pub mod sse_parser;
@@ -298,6 +301,7 @@ pub mod assistant_service_execution;
 pub mod assistant_settings_service;
 pub(crate) mod assistant_ssh_session;
 pub mod assistant_steering;
+pub mod assistant_task_status;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
 pub mod channel_image_audience;
@@ -365,6 +369,8 @@ pub mod service_pool_routing;
 
 #[cfg(test)]
 mod agent_operation_scope_tests;
+#[cfg(test)]
+mod guest_access_tests;
 pub mod permission_policy_service;
 
 pub mod agent_skill_service;
@@ -515,3 +521,11 @@ pub mod telegram_manager_registry;
 
 pub(crate) mod nyxbot_channel_continuity_service;
 pub(crate) mod nyxbot_gateway_release_service;
+
+pub mod discord_gateway;
+pub mod domain_alias_service;
+#[cfg(test)]
+mod shared_agent_tests;
+
+pub(crate) mod nyxbot_gateway_source;
+pub(crate) mod nyxbot_response_recovery;

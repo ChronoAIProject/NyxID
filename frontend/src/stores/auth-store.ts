@@ -15,10 +15,23 @@ import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 const MFA_REQUIRED_ERROR_CODE = 2002;
 
 function clearAccountLocalState(): void {
-  useServiceCardView.setState({ accountId: undefined, filters: undefined, expanded: [], savedViewId: undefined });
+  useServiceCardView.setState({
+    accountId: undefined,
+    filters: undefined,
+    expanded: [],
+    savedViewId: undefined,
+  });
   useAssistantContextStore.getState().clear();
   useAssistantDraftStore.getState().clear();
   useAssistantWireLogStore.getState().reset();
+}
+
+function clearAccountIdentity(): void {
+  // Reset attribution before publishing the cleared account state.
+  telemetryReset();
+  useConsentStore.getState().bindAccount(null);
+  clearAccountLocalState();
+  transitionAssistantIdentity(null);
 }
 
 function applyIdentityTransition(
@@ -28,7 +41,12 @@ function applyIdentityTransition(
   useConsentStore.getState().bindAccount(nextUser?.id ?? null);
   if (previousUser?.id === nextUser?.id) return;
   telemetryReset();
-  useServiceCardView.setState({ accountId: nextUser?.id, filters: undefined, expanded: [], savedViewId: undefined });
+  useServiceCardView.setState({
+    accountId: nextUser?.id,
+    filters: undefined,
+    expanded: [],
+    savedViewId: undefined,
+  });
   if (previousUser !== null) clearAccountLocalState();
   transitionAssistantIdentity(nextUser?.id ?? null);
 }
@@ -49,7 +67,12 @@ interface AuthState {
 interface AuthActions {
   readonly login: (email: string, password: string) => Promise<LoginResult>;
   readonly logout: () => Promise<void>;
-  readonly checkAuth: (options?: { ephemeral?: boolean; requireSession?: boolean }) => Promise<void>;
+  readonly checkAuth: (options?: {
+    ephemeral?: boolean;
+    requireSession?: boolean;
+    /** QR session handoff: clear the unconfirmed identity and fence restoration. */
+    isCurrent?: () => boolean;
+  }) => Promise<boolean>;
   readonly setUser: (user: User | null) => void;
   readonly setMfaRequired: (required: boolean, token: string | null) => void;
   readonly clearMfaState: () => void;
@@ -101,11 +124,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     try {
       await api.post<void>("/auth/logout");
     } finally {
-      // Clear local analytics identity and pending admissions before state wipe.
-      telemetryReset();
-      useConsentStore.getState().bindAccount(null);
-      clearAccountLocalState();
-      transitionAssistantIdentity(null);
+      clearAccountIdentity();
       set({
         user: null,
         isAuthenticated: false,
@@ -115,43 +134,74 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  checkAuth: async ({ ephemeral = false, requireSession = false } = {}): Promise<void> => {
-    set({ isLoading: true });
+  checkAuth: async ({
+    ephemeral = false,
+    requireSession = false,
+    isCurrent,
+  } = {}): Promise<boolean> => {
+    const authorityGuard = isCurrent
+      ? () => {
+          if (!isCurrent()) throw new Error("Profile restoration cancelled");
+        }
+      : undefined;
+    if (isCurrent && !isCurrent()) return false;
+    // Scoped QR restoration owns its loading UI and may be cancelled on unmount.
+    if (isCurrent) {
+      // The delivered cookie may belong to a different account. No old identity
+      // is authoritative while its replacement profile is still unconfirmed.
+      clearAccountIdentity();
+      set({ user: null, isAuthenticated: false });
+    } else {
+      set({ isLoading: true });
+    }
     try {
-      const user = ephemeral
-        ? await apiClient<User>("/users/me", { preserveSessionOn401: true })
-        : await api.get<User>("/users/me");
+      const user =
+        ephemeral || authorityGuard
+          ? await apiClient<User>("/users/me", {
+              preserveSessionOn401: ephemeral,
+              authorityGuard,
+            })
+          : await api.get<User>("/users/me");
+      authorityGuard?.();
       applyIdentityTransition(get().user, user);
-      set({ user, isAuthenticated: true, isLoading: false });
-      // Bind explicit events to the restored account; no anonymous/pageview
-      // collection occurs. The relay authenticates admission and dispatch.
+      set({
+        user,
+        isAuthenticated: true,
+        ...(!isCurrent && { isLoading: false }),
+        mfaRequired: false,
+        mfaToken: null,
+      });
+      // Bind explicit events to the freshly restored account.
       if (!ephemeral) telemetryIdentify(user.id);
+      return true;
     } catch (error) {
+      // Scoped failures retain pending MFA and leave global loading untouched.
+      if (isCurrent) {
+        if (requireSession) throw error;
+        return false;
+      }
       if (error instanceof ApiError && error.status === 401) {
         // Session expired / server rejected — this is a sign-out path
         // and must reset the telemetry identity before we wipe state
         // so no later event retains the former account.
         if (!ephemeral) {
-          telemetryReset();
-          useConsentStore.getState().bindAccount(null);
-          clearAccountLocalState();
+          clearAccountIdentity();
+        } else {
+          transitionAssistantIdentity(null);
         }
-        transitionAssistantIdentity(null);
         set({ user: null, isAuthenticated: false, isLoading: false });
       } else {
         set({ isLoading: false });
       }
       if (requireSession) throw error;
+      return false;
     }
   },
 
   setUser: (user: User | null): void => {
     const previousUser = get().user;
     if (user === null) {
-      telemetryReset();
-      useConsentStore.getState().bindAccount(null);
-      clearAccountLocalState();
-      transitionAssistantIdentity(null);
+      clearAccountIdentity();
     } else {
       applyIdentityTransition(previousUser, user);
     }
