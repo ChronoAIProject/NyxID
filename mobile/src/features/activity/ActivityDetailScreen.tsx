@@ -1,9 +1,23 @@
+import { ServiceIcon } from "../../components/ServiceIcon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { capture } from "../../lib/telemetry";
-import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  AppState,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useFocusEffect } from "@react-navigation/native";
-import { onlineManager, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  onlineManager,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { ScreenContainer } from "../../components/ScreenContainer";
 
 import { FullScreenLoading } from "../../components/FullScreenLoading";
@@ -11,8 +25,8 @@ import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
 import { setActiveChallengeId } from "../../lib/notifications/pushNotifications";
 import { StatusBadge } from "../../components/StatusBadge";
 import { PrimaryButton } from "../../components/PrimaryButton";
+import { ApprovalEvidence } from "./ApprovalEvidence";
 import { mobileApi } from "../../lib/api/mobileApi";
-import { createIdempotencyKey } from "../../lib/api/idempotency";
 import {
   getChallengeActionState,
   getChallengeQueryErrorMessage,
@@ -23,7 +37,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { createFlowStyles } from "../../theme/flowStyles";
-import type { RootStackParamList } from "../../app/AppNavigator";
+import type { WorkspaceContentParamList } from "../../app/navigationTypes";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import {
   APPROVAL_BACKSTOP_POLL_INTERVAL_MS,
@@ -31,9 +45,18 @@ import {
   subscribeToApprovalRefreshSignals,
 } from "../../lib/notifications/approvalRefreshSignal";
 
-type Props = NativeStackScreenProps<RootStackParamList, "ActivityDetail">;
+type Props = NativeStackScreenProps<
+  WorkspaceContentParamList,
+  "ActivityDetail"
+>;
 
-function DetailRow({ label, value, isLast, valueColor, flowStyles }: {
+function DetailRow({
+  label,
+  value,
+  isLast,
+  valueColor,
+  flowStyles,
+}: {
   label: string;
   value: string;
   isLast?: boolean;
@@ -43,7 +66,12 @@ function DetailRow({ label, value, isLast, valueColor, flowStyles }: {
   return (
     <View style={isLast ? flowStyles.rowLast : flowStyles.row}>
       <Text style={flowStyles.rowLabel}>{label}</Text>
-      <Text style={[flowStyles.rowValue, valueColor ? { color: valueColor } : undefined]}>
+      <Text
+        style={[
+          flowStyles.rowValue,
+          valueColor ? { color: valueColor } : undefined,
+        ]}
+      >
         {value}
       </Text>
     </View>
@@ -59,6 +87,10 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const { isConnected } = useNetworkStatus();
   const [isLiveRefreshEnabled, setIsLiveRefreshEnabled] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const returnTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  useEffect(() => () => clearTimeout(returnTimer.current), []);
 
   // Same gate as ActivityScreen: suppress the in-app toast for the approval
   // that is already filling the screen.
@@ -178,7 +210,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       syncSubscription(AppState.currentState);
       const appStateSubscription = AppState.addEventListener(
         "change",
-        syncSubscription
+        syncSubscription,
       );
 
       return () => {
@@ -191,18 +223,42 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       queryClient,
       refreshDetailFromSignal,
       returnQueuedSignalToBus,
-    ])
+    ]),
   );
 
   // view->tap latency for `ui.mobile_decision_made`; starts when the
   // approval data first resolves on this screen.
   const viewedAtRef = useRef<number | null>(null);
   const viewedEmittedRef = useRef<string | null>(null);
+  const decided = useRef(false);
+  const decidable = useRef(false);
+  decidable.current = data?.status === "PENDING";
+  useEffect(
+    () => () => {
+      if (viewedAtRef.current != null && decidable.current && !decided.current)
+        capture({
+          name: "ui.mobile_dialog_abandoned",
+          props: {
+            dialog_id: "approval_detail",
+            final_step: 1,
+            duration_ms: Math.max(0, Date.now() - viewedAtRef.current),
+          },
+        });
+    },
+    [],
+  );
   useEffect(() => {
     if (!data) return;
     if (viewedEmittedRef.current === data.id) return;
     viewedEmittedRef.current = data.id;
     viewedAtRef.current = Date.now();
+    capture({
+      name: "ui.mobile_dialog_opened",
+      props: {
+        dialog_id: "approval_detail",
+        entry_point: route.params.entryPoint ?? "deep_link",
+      },
+    });
     capture({
       name: "mobile.approval_viewed",
       props: {
@@ -211,7 +267,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
         mode: data.approval_mode,
       },
     });
-  }, [data]);
+  }, [data, route.params.entryPoint]);
 
   const settingsQuery = useQuery({
     queryKey: ["notifications", "settings"],
@@ -220,10 +276,10 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
 
   const decideMutation = useMutation({
     mutationFn: async (decision: "APPROVE" | "DENY") => {
-      const durationSec = decision === "APPROVE"
-        ? (settingsQuery.data?.grant_expiry_days ?? 30) * 86400
-        : undefined;
-      const idempotencyKey = createIdempotencyKey("decision", challengeId);
+      const durationSec =
+        decision === "APPROVE"
+          ? (settingsQuery.data?.grant_expiry_days ?? 30) * 86400
+          : undefined;
       return mobileApi.submitDecision(challengeId, decision, durationSec);
     },
     onMutate: () => {
@@ -231,10 +287,12 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       // time) but DEFER the emit to onSuccess so failures don't
       // overcount decisions.
       const openedAt = viewedAtRef.current;
-      const decisionMs = openedAt != null ? Math.max(0, Date.now() - openedAt) : 0;
+      const decisionMs =
+        openedAt != null ? Math.max(0, Date.now() - openedAt) : 0;
       return { decisionMs };
     },
     onSuccess: (_, decision, context) => {
+      decided.current = true;
       capture({
         name: "ui.mobile_decision_made",
         props: {
@@ -245,10 +303,20 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       });
       void queryClient.invalidateQueries({ queryKey: ["challenges"] });
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
-      void queryClient.invalidateQueries({ queryKey: ["challenge", challengeId] });
-      setToast({ message: decision === "APPROVE" ? "Approved" : "Denied", kind: "success" });
-      setTimeout(() => {
-        navigation.replace("Activity");
+      void queryClient.invalidateQueries({
+        queryKey: ["challenge", challengeId],
+      });
+      setToast({
+        message: decision === "APPROVE" ? "Approved" : "Denied",
+        kind: "success",
+      });
+      returnTimer.current = setTimeout(() => {
+        if (!navigation.isFocused()) return;
+        if (navigation.canGoBack()) {
+          navigation.goBack();
+        } else {
+          navigation.replace("Activity");
+        }
       }, 600);
     },
     onError: (err) => {
@@ -256,8 +324,20 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
     },
   });
 
+  useWorkspaceBack({
+    active: false,
+    defaultRole: "back",
+    disabled: decideMutation.isPending,
+    onBack: navigation.goBack,
+  });
+
   if (isLoading) {
-    return <FullScreenLoading title="Loading detail..." subtitle="Fetching challenge information" />;
+    return (
+      <FullScreenLoading
+        title="Loading detail..."
+        subtitle="Fetching challenge information"
+      />
+    );
   }
 
   if (isError || !data) {
@@ -265,9 +345,15 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       <ScreenContainer>
         <View style={styles.errorWrap}>
           <Text style={styles.errorTitle}>Challenge Unavailable</Text>
-          <Text style={styles.errorMsg}>{getChallengeQueryErrorMessage(error)}</Text>
+          <Text style={styles.errorMsg}>
+            {getChallengeQueryErrorMessage(error)}
+          </Text>
           <View style={styles.errorActions}>
-            <PrimaryButton label="Back" kind="ghost" onPress={() => navigation.goBack()} />
+            <PrimaryButton
+              label="Back"
+              kind="ghost"
+              onPress={() => navigation.goBack()}
+            />
             <PrimaryButton label="Retry" onPress={() => refetch()} />
           </View>
         </View>
@@ -276,31 +362,31 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   }
 
   const actionState = getChallengeActionState(data);
-  const grantDurationLabel = formatGrantDuration(settingsQuery.data?.grant_expiry_days);
-  const riskColorMap = { high: colors.riskHigh.text, medium: colors.riskMedium.text, low: colors.riskLow.text };
+  const grantDurationLabel = formatGrantDuration(
+    settingsQuery.data?.grant_expiry_days,
+  );
+  const riskColorMap = {
+    high: colors.riskHigh.text,
+    medium: colors.riskMedium.text,
+    low: colors.riskLow.text,
+    unknown: colors.textSecondary,
+  };
   const riskColor = riskColorMap[data.risk_level];
   const isGrantMode = data.approval_mode === "grant";
 
   return (
     <ScreenContainer>
-      <ScrollView style={flowStyles.content} contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl }]}>
-        <Pressable
-          onPress={() => {
-            capture({
-              name: "ui.mobile_nav_target_opened",
-              props: { target: "Activity", source: "back" },
-            });
-            navigation.goBack();
-          }}
-          style={styles.backBtn}
-        >
-          <Text style={styles.backText}>{"\u2190"} Back to Activity</Text>
-        </Pressable>
-
-        <Text style={styles.screenTitle}>Approval Detail</Text>
+      <ScrollView
+        style={flowStyles.content}
+        contentContainerStyle={[
+          flowStyles.scrollContent,
+          { paddingHorizontal: spacing.xxl },
+        ]}
+      >
         {isGrantMode && (
           <Text style={styles.screenSub}>
-            Review this request before creating reusable access for {grantDurationLabel}.
+            Review this request before creating reusable access for{" "}
+            {grantDurationLabel}.
           </Text>
         )}
         {data.from_org_policy ? (
@@ -310,13 +396,46 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
         ) : null}
 
         <View style={styles.detailCard}>
-          <Text style={flowStyles.cardTitle}>Request Context</Text>
-          <DetailRow label="Action" value={data.action} flowStyles={flowStyles} />
-          <DetailRow label="Resource" value={data.resource} flowStyles={flowStyles} />
-          <DetailRow label="Client" value={data.request_context.client} flowStyles={flowStyles} />
-          <DetailRow label="Risk Level" value={data.risk_level.charAt(0).toUpperCase() + data.risk_level.slice(1)} valueColor={riskColor} flowStyles={flowStyles} />
-          <DetailRow label="Status" value={actionState.statusLabel} valueColor={colors.warning} flowStyles={flowStyles} />
-          {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} flowStyles={flowStyles} />}
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <ServiceIcon slug={data.service_slug} size="md" />
+            <Text style={flowStyles.cardTitle}>Request Context</Text>
+          </View>
+          <DetailRow
+            label="Action"
+            value={data.action}
+            flowStyles={flowStyles}
+          />
+          <DetailRow
+            label="Resource"
+            value={data.resource}
+            flowStyles={flowStyles}
+          />
+          <DetailRow
+            label="Client"
+            value={data.request_context.client}
+            flowStyles={flowStyles}
+          />
+          <DetailRow
+            label="Risk Level"
+            value={
+              data.risk_level.charAt(0).toUpperCase() + data.risk_level.slice(1)
+            }
+            valueColor={riskColor}
+            flowStyles={flowStyles}
+          />
+          <DetailRow
+            label="Status"
+            value={actionState.statusLabel}
+            valueColor={colors.warning}
+            flowStyles={flowStyles}
+          />
+          {isGrantMode && (
+            <DetailRow
+              label="Grant Duration"
+              value={grantDurationLabel}
+              flowStyles={flowStyles}
+            />
+          )}
           {data.from_org_policy ? (
             <DetailRow
               label="Org"
@@ -324,7 +443,13 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
               flowStyles={flowStyles}
             />
           ) : null}
-          <DetailRow label="Location" value={data.request_context.location} isLast flowStyles={flowStyles} />
+          <DetailRow
+            label="Requester"
+            value={data.request_context.requester}
+            isLast
+            flowStyles={flowStyles}
+          />
+          <ApprovalEvidence challenge={data} />
         </View>
 
         {actionState.reason ? (
@@ -354,66 +479,67 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   );
 }
 
-const createStyles = (c: ThemeColors) => StyleSheet.create({
-  backBtn: {
-    paddingVertical: spacing.xs,
-  },
-  backText: {
-    ...typeScale.caption,
-    color: c.textMuted,
-  },
-  screenTitle: {
-    ...typeScale.pageHeader,
-    color: c.textPrimary,
-  },
-  screenSub: {
-    ...typeScale.label,
-    color: c.textSecondary,
-  },
-  orgContext: {
-    ...typeScale.overline,
-    color: c.textSecondary,
-    letterSpacing: 1.5,
-  },
-  // DESIGN.md §Banners & callouts: rounded-xl warning callout, theme-aware tint.
-  stateNotice: {
-    borderRadius: radius.lg,
-    backgroundColor: c.warningTone.bg,
-    borderWidth: 1,
-    borderColor: c.warningTone.border,
-    padding: spacing.lg,
-  },
-  stateNoticeText: {
-    ...typeScale.label,
-    color: c.warningTone.text,
-  },
-  // DESIGN.md §DetailSection: rounded-xl + 50%-opacity chrome border.
-  detailCard: {
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: c.borderSoft,
-    backgroundColor: c.card,
-    padding: spacing.xxl,
-    gap: spacing.md,
-  },
-  errorWrap: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: spacing.xxl,
-    gap: spacing.lg,
-  },
-  errorTitle: {
-    ...typeScale.h2,
-    color: c.textPrimary,
-  },
-  errorMsg: {
-    ...typeScale.description,
-    color: c.textSecondary,
-    textAlign: "center",
-  },
-  errorActions: {
-    flexDirection: "row",
-    gap: spacing.md,
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    backBtn: {
+      paddingVertical: spacing.xs,
+    },
+    backText: {
+      ...typeScale.caption,
+      color: c.textMuted,
+    },
+    screenTitle: {
+      ...typeScale.pageHeader,
+      color: c.textPrimary,
+    },
+    screenSub: {
+      ...typeScale.label,
+      color: c.textSecondary,
+    },
+    orgContext: {
+      ...typeScale.overline,
+      color: c.textSecondary,
+      letterSpacing: 1.5,
+    },
+    // DESIGN.md §Banners & callouts: rounded-xl warning callout, theme-aware tint.
+    stateNotice: {
+      borderRadius: radius.lg,
+      backgroundColor: c.warningTone.bg,
+      borderWidth: 1,
+      borderColor: c.warningTone.border,
+      padding: spacing.lg,
+    },
+    stateNoticeText: {
+      ...typeScale.label,
+      color: c.warningTone.text,
+    },
+    // DESIGN.md §DetailSection: rounded-xl + 50%-opacity chrome border.
+    detailCard: {
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      backgroundColor: c.card,
+      padding: spacing.xxl,
+      gap: spacing.md,
+    },
+    errorWrap: {
+      flex: 1,
+      justifyContent: "center",
+      alignItems: "center",
+      paddingHorizontal: spacing.xxl,
+      gap: spacing.lg,
+    },
+    errorTitle: {
+      ...typeScale.h2,
+      color: c.textPrimary,
+    },
+    errorMsg: {
+      ...typeScale.description,
+      color: c.textSecondary,
+      textAlign: "center",
+    },
+    errorActions: {
+      flexDirection: "row",
+      gap: spacing.md,
+    },
+  });

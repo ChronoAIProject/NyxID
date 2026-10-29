@@ -182,3 +182,16 @@ pub(super) fn normalize(
     inbound.thread_id = facts.native_thread_id.clone();
     Ok(Some((inbound, facts)))
 }
+
+/// Reuse the socket verifier for authenticated REST evidence without exposing
+/// the socket protocol's internal failure type to provider handlers.
+pub(crate) fn authenticated_facts(
+    bot: &ChannelBot,
+    event: &Value,
+    channel: &Value,
+) -> Option<ChannelThreadFacts> {
+    normalize(bot, event, channel)
+        .ok()
+        .flatten()
+        .map(|(_, facts)| facts)
+}

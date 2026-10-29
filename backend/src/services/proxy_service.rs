@@ -1833,11 +1833,19 @@ async fn lookup_service_pool_member(
 
 #[derive(Clone, Copy)]
 pub struct ProxyExecutionContext<'a> {
+    shared_access: Option<&'a super::shared_agent_service::RequestAccess>,
     pub connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     pub platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 }
 
 impl<'a> ProxyExecutionContext<'a> {
+    pub fn with_assistant_access(
+        mut self,
+        access: Option<&'a super::org_agent_service::RequestAccess>,
+    ) -> Self {
+        self.shared_access = access.and_then(|a| a.shared());
+        self
+    }
     pub const fn new(
         connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
         platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
@@ -1845,12 +1853,14 @@ impl<'a> ProxyExecutionContext<'a> {
         Self {
             connection_expiry_notifier,
             platform_user_rate_limit,
+            shared_access: None,
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct ProxyCredentialResolution<'a> {
+    shared_access: Option<&'a super::shared_agent_service::RequestAccess>,
     connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
     materialize_credentials: bool,
@@ -1860,6 +1870,7 @@ struct ProxyCredentialResolution<'a> {
 impl<'a> ProxyCredentialResolution<'a> {
     fn materialize(context: ProxyExecutionContext<'a>) -> Self {
         Self {
+            shared_access: context.shared_access,
             connection_expiry_notifier: context.connection_expiry_notifier,
             platform_user_rate_limit: context.platform_user_rate_limit,
             materialize_credentials: true,
@@ -1869,6 +1880,7 @@ impl<'a> ProxyCredentialResolution<'a> {
 
     fn read_only_snapshot() -> Self {
         Self {
+            shared_access: None,
             connection_expiry_notifier: None,
             platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(
             ),
@@ -2502,21 +2514,31 @@ async fn resolve_proxy_target_by_user_service_id_with_mode(
         }
 
         // Access gate: resolve the actor's relationship to the service owner.
-        let access =
+        let shared = credential_resolution.shared_access;
+        if shared.is_some_and(|a| a.actor() != actor_user_id || !a.allows_resolution(&svc)) {
+            return Err(AppError::Forbidden(
+                "Shared connection authority mismatch".into(),
+            ));
+        }
+        let access = if shared.is_some() {
+            crate::services::org_service::OwnerAccess::Forbidden
+        } else {
             crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id)
-                .await?;
-        let allowed = match &access {
-            crate::services::org_service::OwnerAccess::Direct => true,
-            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
-                access.allows_resource(&svc.id)
-            }
-            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-                role.can_proxy()
-                    && admin_only_allows_role(&svc, *role)
-                    && access.allows_resource(&svc.id)
-            }
-            crate::services::org_service::OwnerAccess::Forbidden => false,
+                .await?
         };
+        let allowed = shared.is_some()
+            || match &access {
+                crate::services::org_service::OwnerAccess::Direct => true,
+                crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+                    access.allows_resource(&svc.id)
+                }
+                crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                    role.can_proxy()
+                        && admin_only_allows_role(&svc, *role)
+                        && access.allows_resource(&svc.id)
+                }
+                crate::services::org_service::OwnerAccess::Forbidden => false,
+            };
         if !allowed {
             return Err(AppError::OrgRoleInsufficient(
                 "you do not have proxy access to this service".to_string(),
@@ -2524,7 +2546,7 @@ async fn resolve_proxy_target_by_user_service_id_with_mode(
         }
 
         // Build the org_routing context if the service is org-owned.
-        let org_routing = if svc.user_id != actor_user_id {
+        let org_routing = if shared.is_none() && svc.user_id != actor_user_id {
             // The service belongs to an org; build the routing context from
             // the OwnerAccess that we already resolved above. We know the
             // access is at least AsOrgAdmin or AsOrgMember (Viewer was
@@ -2758,6 +2780,7 @@ pub async fn find_approval_resolution_hint_by_user_service_id(
     user_service_id: &str,
     expected_slug: Option<&str>,
     expected_catalog_service_id: Option<&str>,
+    shared_access: Option<&super::shared_agent_service::RequestAccess>,
 ) -> AppResult<Option<ApprovalResolutionHint>> {
     let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
         Some(svc) => svc,
@@ -2783,19 +2806,24 @@ pub async fn find_approval_resolution_hint_by_user_service_id(
         }
     }
 
-    let access =
-        crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id).await?;
-    let allowed = match &access {
-        crate::services::org_service::OwnerAccess::Direct => true,
-        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
-            access.allows_resource(&svc.id)
+    let allowed = if let Some(shared) = shared_access {
+        shared.actor() == actor_user_id && shared.allows_resolution(&svc)
+    } else {
+        let access =
+            crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id)
+                .await?;
+        match &access {
+            crate::services::org_service::OwnerAccess::Direct => true,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+                access.allows_resource(&svc.id)
+            }
+            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                role.can_proxy()
+                    && admin_only_allows_role(&svc, *role)
+                    && access.allows_resource(&svc.id)
+            }
+            crate::services::org_service::OwnerAccess::Forbidden => false,
         }
-        crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-            role.can_proxy()
-                && admin_only_allows_role(&svc, *role)
-                && access.allows_resource(&svc.id)
-        }
-        crate::services::org_service::OwnerAccess::Forbidden => false,
     };
     if !allowed {
         return Err(AppError::OrgRoleInsufficient(
@@ -3091,9 +3119,23 @@ async fn finish_resolution(
         } else {
             box_resolution_future(|| super::platform_key_service::effective_auth(db, &catalog_service)).await?
         };
-        let actor = EffectiveActor::from_user_id(effective_owner_id);
+        // Shared owner connections use the owner's platform grant for
+        // credential authorization, while rate limiting remains attributed to
+        // the acting person. Actor-owned same-catalog alternatives authorize
+        // against the actor's own grant.
+        let platform_actor = credential_resolution
+            .shared_access
+            .map_or(effective_owner_id, |a| a.actor());
+        let credential_actor = credential_resolution
+            .shared_access
+            .filter(|access| user_service.user_id == access.owner())
+            .map_or(platform_actor, |_| effective_owner_id);
+        let actor = EffectiveActor::from_user_id(credential_actor);
         let authorized = if no_auth {
-            box_resolution_future(|| super::platform_key_service::require(db, &catalog_service, effective_owner_id)).await?;
+            box_resolution_future(|| {
+                super::platform_key_service::require(db, &catalog_service, credential_actor)
+            })
+            .await?;
             None
         } else {
             Some(box_resolution_future(|| authorize_master_credential(db, &catalog_service, &actor)).await?)
@@ -3103,7 +3145,7 @@ async fn finish_resolution(
                 db,
                 platform_user_rate_limit,
                 &catalog_service.id,
-                &actor.user_id,
+                platform_actor,
             )
             .await?;
             decrypt_master_credential_string(encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?, &authorized).await?
@@ -4818,20 +4860,84 @@ async fn forward_request_with_egress_guard_inner(
         }
     }
 
+    // Finish all fallible local request/proof preparation before the one-way
+    // model dispatch claim. Repeatable revalidation never consumes that claim.
+    let mut request = request.build()?;
+    if let Some(proof) = resource_proof {
+        proof
+            .attach(&mut request)
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
     if let Some(guard) = egress_guard {
         Box::pin(guard.revalidate())
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(proof) = resource_proof {
-        let mut request = request.build()?;
-        proof
-            .attach(&mut request)
+    let mut observer = if let Some(guard) = egress_guard {
+        guard
+            .claim_model_dispatch()
             .await
-            .map_err(ForwardRequestError::PreDispatchRejected)?;
-        no_redirect_http_client().execute(request).await?
+            .map_err(ForwardRequestError::PreDispatchRejected)?
     } else {
-        request.send().await?
+        None
+    };
+    // Passive Read must preserve the selected client's existing redirect
+    // behavior. Only an actual known no-redirect sender can certify its output;
+    // final URL equality cannot detect A -> B -> A redirect histories.
+    let known_no_redirect = resource_proof.is_some()
+        || target.target_id.is_some()
+        || target.auth_method == "github_git"
+        || target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        || std::ptr::eq(client, no_redirect_http_client());
+    let redirect_probe = observer
+        .as_ref()
+        .and_then(|observer| observer.redirect_probe(client));
+    if observer
+        .as_ref()
+        .is_some_and(|observer| !observer.requires_no_redirect())
+        && !known_no_redirect
+        && redirect_probe.is_none()
+        && let Some(passive) = observer.take()
+    {
+        // The successful live-authority claim already persisted an
+        // incomplete passive intent (or found durable ineligibility).
+        // Losing this retirement write cannot resurrect an older receipt.
+        let _ = passive.disable_observation().await;
+    }
+    // Cancellation, panic or any transport error after the CAS leaves the
+    // durable Dispatched tombstone intact. Nothing here resets it to Prepared.
+    let response = if resource_proof.is_some()
+        || observer
+            .as_ref()
+            .is_some_and(|observer| observer.requires_no_redirect())
+    {
+        // Enforce this at the common send boundary, including LLM gateway
+        // callers whose ordinary client follows redirects. One dispatch claim
+        // must never permit a second request through a 307/308 response.
+        no_redirect_http_client().execute(request).await?
+    } else if let Some(probe) = redirect_probe {
+        // The consuming probe builds and polls this exact client's execute
+        // future. Evidence exists only after it returns; cancellation/errors
+        // leave the passive record incomplete. Preserve every policy action.
+        let (response, direct) = probe.execute(request).await?;
+        if !direct && let Some(passive) = observer.take() {
+            // Provider sends have already happened. Even if this best-effort
+            // retirement cannot persist, the BEFORE-send Dispatched record
+            // stays incomplete and cannot certify compact history. Return the
+            // ordinary redirect outcome without mislabeling it pre-dispatch.
+            let _ = passive.disable_observation().await;
+        }
+        response
+    } else {
+        client.execute(request).await?
+    };
+    let response = if let Some(observer) = observer {
+        observer
+            .wrap(response)
+            .map_err(|_| ForwardRequestError::OutcomeUnknown)?
+    } else {
+        response
     };
 
     // Cache successful billing-API responses so a follow-up request

@@ -86,7 +86,7 @@ pub(super) async fn gateway_inbound(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn inbound_impl(
+pub(super) async fn inbound_impl(
     state: &AppState,
     row: &NyxbotChannel,
     payload: &Value,
@@ -499,6 +499,7 @@ async fn inbound_impl(
         return Ok(Some(Inbound::Silent));
     }
     let origin = ChannelOrigin {
+        native_event_id: None,
         nyxbot_channel_id: row.id.clone(),
         partition: child.partition.clone(),
         platform: row.platform.clone(),
@@ -512,7 +513,11 @@ async fn inbound_impl(
         .db
         .collection::<NyxbotEvent>(EVENTS)
         .update_one(
-            doc! {"channel_id":&row.id,"event_id":message},
+            if row.gateway_source.is_some() {
+                doc! {"channel_id":&row.id,"_id":event_key}
+            } else {
+                doc! {"channel_id":&row.id,"event_id":message}
+            },
             doc! {"$set":{"resolved_thread_id":&child.id,"resolved_conversation_id":conversation}},
         )
         .await?;
@@ -525,7 +530,7 @@ async fn inbound_impl(
         )
         .await;
     }
-    if gateway {
+    if gateway && row.gateway_source.is_none() {
         // Reconcile admission before starting work, so a failed management
         // request cannot discard an already-started turn receiver.
         let _ = chats::sync_gateway_groups(state, row, true).await?;
@@ -649,6 +654,9 @@ pub(crate) async fn send(
     images: Option<super::images::ImageTurn<'_>>,
 ) -> AppResult<()> {
     let channel = follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?;
+    if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
+        return Err(follow::not_found());
+    }
     let mut text = bounded_reply(text);
     if let Some(images) = images {
         let child = follow::validate_delivery(&state.db, owner, origin, conversation).await?;
@@ -682,6 +690,11 @@ pub(crate) async fn send(
     }
     if text.trim().is_empty() {
         return Ok(());
+    }
+    if channel.gateway_source.is_some() {
+        follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        return super::native_responses::send_update(state, &channel, origin, conversation, &text)
+            .await;
     }
     if threads::gateway::negotiated(&channel) {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
@@ -788,6 +801,9 @@ pub(super) async fn send_bound_reply(
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
     Box::pin(async move {
+        if channel.gateway_source.is_some() || origin.native_event_id.is_some() {
+            return Err(AppError::ChannelPlatformSendUnsupported);
+        }
         let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
         let adapter = adapter(state, &bot)?;
         let token = crate::services::channel_credentials::resolve_bot_token(

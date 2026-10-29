@@ -374,6 +374,28 @@ impl<'a> HttpEgressGuard<'a> {
             Ok(())
         })
     }
+
+    /// An irreversible dispatch claim, deliberately separate from repeatable
+    /// authority revalidation and called only at the concrete HTTP send edge.
+    pub(crate) async fn claim_model_dispatch(
+        &self,
+    ) -> AppResult<Option<crate::services::assistant_model_control::CompletionObserver>> {
+        if let EgressAuthority::Assistant(guard) = &self.authority
+            && let Some(control) = &guard.admission.model_control
+        {
+            if guard.route.is_some_and(|route| route.is_some()) {
+                if !control.requires_no_redirect() {
+                    control.disable_observation().await?;
+                    return Ok(None);
+                }
+                return Err(AppError::Conflict(
+                    "Model control requires direct server transport".into(),
+                ));
+            }
+            return control.claim().await.map(Some);
+        }
+        Ok(None)
+    }
 }
 
 impl AssistantEgressGuard<'_> {

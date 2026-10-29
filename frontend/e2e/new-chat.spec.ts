@@ -45,7 +45,7 @@ test("a first send stays continuous through the canonical id transition", async 
   await observeTurnContinuity(page, message);
   await sendMessage(page, message);
 
-  const echoedMessage = thread(page).getByText(message, { exact: true });
+  const echoedMessage = page.locator("[data-chat-transcript]").getByText(message, { exact: true });
   await expect(echoedMessage).toHaveCount(1, { timeout: 1_000 });
   await expect(composerInput(page)).toHaveText("");
   await expect(page).toHaveURL(/c=nyxid-chat-mock-/, { timeout: 2_000 });
@@ -190,10 +190,10 @@ test("switching away from a canonicalized new chat and back keeps both transcrip
       exact: false,
     }),
   ).toBeVisible();
-  await expect(thread(page).getByText(message, { exact: true })).toHaveCount(0);
+  await expect(page.locator("[data-chat-transcript]").getByText(message, { exact: true })).toHaveCount(0);
 
   await conversationRow(page, message).click();
-  await expect(thread(page).getByText(message, { exact: true })).toHaveCount(1);
+  await expect(page.locator("[data-chat-transcript]").getByText(message, { exact: true })).toHaveCount(1);
   await expect(
     thread(page).getByText(SCRIPTED_REPLY_START, { exact: false }),
   ).toBeVisible();

@@ -131,6 +131,7 @@ describe("feature flag catalog", () => {
       AGENT_LEARNING: "assistant:agent-learning",
       SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
       ORG_AGENTS: "assistant:org-agents",
+      SHARED_AGENTS: "assistant:shared-agents",
       BILLING: "experimental:billing",
       REMOTE_MACHINES: "experimental:remote-machines",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",

@@ -1,5 +1,6 @@
 import { AssistantAccountPanel } from "./assistant-account-panel";
 import { useAssistantViewport } from "@/hooks/use-assistant-viewport";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { ThreadTitle } from "@/components/assistant/thread-title";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
@@ -27,6 +28,7 @@ export function AssistantShell({
   headerActions,
   onRenameTitle,
   titleKey,
+  contentTitle = false,
   resizableContent = false,
   aside,
   asidePercent,
@@ -38,6 +40,8 @@ export function AssistantShell({
   readonly headerActions?: ReactNode;
   readonly onRenameTitle?: (title: string) => Promise<void>;
   readonly titleKey?: string;
+  /** The content owns the visible title and rename control at every width. */
+  readonly contentTitle?: boolean;
   readonly resizableContent?: boolean;
   /** A column docked to the right of the content (the machine column); wide screens only. */
   readonly aside?: ReactNode;
@@ -48,6 +52,10 @@ export function AssistantShell({
   readonly children: ReactNode;
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const desktop = useMediaQuery("(min-width: 768px)");
+  const shellTitle = contentTitle ? null : onRenameTitle ? (
+    <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
+  ) : <h1 className="truncate text-15 font-semibold text-foreground" title={title}>{title}</h1>;
   const viewportRef = useAssistantViewport();
   useScrollFades(viewportRef);
   const savedSidebarWidth = useThemeStore((s) => s.sidebarWidths.assistant);
@@ -126,12 +134,9 @@ export function AssistantShell({
               <Menu className="h-4 w-4" />
             </button>
             <div className="min-w-0 flex-1 truncate text-12 text-muted-foreground">
-              {onRenameTitle ? (
-                <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} />
-              ) : (
-                title
-              )}
+              {!desktop ? shellTitle : null}
             </div>
+            {!desktop ? headerActions : null}
             <AssistantSearchButton onOpen={openSearch} />
           </header>
 
@@ -151,7 +156,7 @@ export function AssistantShell({
                   </Link>
                   <SidebarToggle hidden onToggle={() => setSidebarHidden(false)} />
                   <AssistantSearchButton onOpen={openSearch} />
-                  {headerActions}
+                  {desktop ? headerActions : null}
                 </div>
                 <SidebarRailContext value>
                   <div className="min-h-0 w-full flex-1">{sidebar}</div>
@@ -166,7 +171,7 @@ export function AssistantShell({
                   <Link to="/assistant" search={{}} aria-label="Assistant home" className="mr-auto">
                     <NyxidLogo className="h-5 w-auto" />
                   </Link>
-                  {headerActions}
+                  {desktop ? headerActions : null}
                   <AssistantSearchButton onOpen={openSearch} />
                   <SidebarToggle hidden={false} onToggle={() => setSidebarHidden(true)} />
                 </div>
@@ -182,12 +187,15 @@ export function AssistantShell({
                 its sidebar-facing corners are rounded. */}
             <div className="relative flex min-w-0 flex-1 md:mt-3 md:mb-2">
             <main className="flex min-w-0 flex-1 overflow-hidden bg-background md:rounded-l-2xl md:shadow-sm">
-              <div className="h-full min-w-0 flex-1 overflow-hidden">
+              <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+                {desktop && shellTitle ? <div className="shrink-0 px-6 pt-3 pb-2">{shellTitle}</div> : null}
+                <div className="min-h-0 flex-1">
                 {resizableContent ? (
                   <ChatGripSlotContext value={gripSlot}>
                     <ChatContentLayout>{children}</ChatContentLayout>
                   </ChatGripSlotContext>
                 ) : children}
+                </div>
               </div>
               {aside ? (
                 // Shares the content slab with the chat; no divider between them.

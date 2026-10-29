@@ -548,9 +548,10 @@ def _reusable_job_ids_from_analysis(
             # A leaf disabled by static inputs (e.g. the ordinary-only billing
             # smoke under coverage) is listed by GitHub as skipped. Accept it
             # only with that exact name and a ``skipped`` conclusion.
+            skipped = {f"{prefix}{name}" for name in spec.skipped_names}
             unexpected -= {
                 name for name in unexpected
-                if name in spec.skipped_names and by_name[name].get("conclusion") == "skipped"
+                if name in skipped and by_name[name].get("conclusion") == "skipped"
             }
             if unexpected:
                 raise WorkflowIdentityError("api_unexpected_reusable_job")

@@ -7,6 +7,19 @@ pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
 pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 pub const LINK_CODE_TTL_HOURS: i64 = 24;
 
+/// Verified native source identity. Absent on all legacy/relay connections.
+/// Credentials remain in the bot's existing encrypted credential store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GatewaySource {
+    Discord {
+        bot_id: String,
+    },
+    /// A newer source remains readable during a rolling deployment, but never executable.
+    #[serde(other)]
+    Unsupported,
+}
+
 /// Negotiated transport metadata, never provider references or message bodies.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -37,6 +50,15 @@ pub struct GatewayBotMentionSupport {
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    #[serde(default)]
+    pub gateway_source: Option<GatewaySource>,
+    /// `preparing` admits provider binding only; `ready` permits native turns.
+    #[serde(default)]
+    pub gateway_native_phase: Option<String>,
+    #[serde(default)]
+    pub gateway_native_activation: Option<String>,
+    #[serde(default)]
+    pub gateway_native_delivery: Option<String>,
     #[serde(default)]
     pub gateway_bot_mentions: GatewayBotMentionSupport,
     #[serde(default)]

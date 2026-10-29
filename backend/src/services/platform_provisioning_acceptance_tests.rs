@@ -515,7 +515,7 @@ async fn platform_onboarding_independent_native_claim_unlink_before_registration
         upstream: f.server.uri(),
         entered: Arc::new(Notify::new()),
         resume: Arc::new(Notify::new()),
-        http: f.state.http_client.clone(),
+        http: f.state.http_client.as_client().clone(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

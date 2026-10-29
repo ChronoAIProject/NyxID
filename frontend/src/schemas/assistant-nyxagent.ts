@@ -445,6 +445,7 @@ export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
 export const assistantAgentSchema = z.object({
+  share_role: z.enum(["manager", "user"]).nullable().optional(),
   owner_id: z.string().optional(),
   owner_name: z.string().nullable().optional(),
   owner_kind: z.enum(["person", "org"]).optional(),

@@ -1448,6 +1448,7 @@ async fn approval_target(
         user_service_id,
         Some(&service.service_slug),
         None,
+        None,
     )
     .await?
     .ok_or_else(|| AppError::NotFound("exact_user_service_not_found".to_string()))?;

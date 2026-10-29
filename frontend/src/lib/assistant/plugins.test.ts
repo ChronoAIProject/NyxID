@@ -89,7 +89,7 @@ describe("deriveConnectorItems", () => {
     expect(added[0]?.description).toBe("GPT models.");
   });
 
-  it("does not expose an auto-connected endpoint in fallback copy", () => {
+  it("hides automatic custom connections", () => {
     const { added } = deriveConnectorItems(
       [
         makeKey({
@@ -102,8 +102,33 @@ describe("deriveConnectorItems", () => {
       [],
     );
 
-    expect(added[0]?.description).toBe("Connected through the NyxID proxy.");
-    expect(added[0]?.description).not.toContain("platform.internal.example");
+    expect(added).toEqual([]);
+  });
+
+  it("hides an automatic catalog connection from both sections", () => {
+    const { added, available } = deriveConnectorItems(
+      [makeKey({ auto_connected: true })],
+      [makeEntry({})],
+    );
+
+    expect(added).toEqual([]);
+    expect(available).toEqual([]);
+  });
+
+  it("counts and manages only manual connections when a service also has automatic ones", () => {
+    const { added, available } = deriveConnectorItems(
+      [
+        makeKey({ id: "automatic", auto_connected: true, is_active: true }),
+        makeKey({ id: "manual", auto_connected: false, is_active: false }),
+      ],
+      [makeEntry({})],
+    );
+
+    expect(added).toHaveLength(1);
+    expect(added[0]?.manageKeyIds).toEqual(["manual"]);
+    expect(added[0]?.meta).toBe("api key");
+    expect(added[0]?.disabled).toBe(true);
+    expect(available).toEqual([]);
   });
 
   it("keeps a disabled connection in Added, flagged, rather than offering Connect", () => {

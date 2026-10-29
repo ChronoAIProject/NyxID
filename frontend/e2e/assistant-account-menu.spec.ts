@@ -670,9 +670,10 @@ test("a panel survives unresolved draft adoption and the completed chat stays mo
   await expect.poll(() => new URL(page.url()).searchParams.get("c")).toMatch(/^nyxa-/);
   expect(new URL(page.url()).searchParams.get("panel")).toBe("settings");
   await expect(panel).toBeVisible();
-  await expect(page.getByRole("main", { includeHidden: true }).getByText("A delayed draft", { exact: true })).toBeAttached();
+  const transcript = page.locator("[data-chat-transcript]");
+  await expect(transcript.getByText("A delayed draft", { exact: true })).toBeAttached();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("main", { includeHidden: true }).getByText("A delayed draft", { exact: true })).toBeVisible();
+  await expect(transcript.getByText("A delayed draft", { exact: true })).toBeVisible();
   await expect(stopButton(page)).not.toBeVisible();
   await expect(page.locator("[data-composer-textbox]")).toBeEnabled();
 });

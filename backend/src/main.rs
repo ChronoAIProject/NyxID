@@ -92,7 +92,7 @@ pub struct AppState {
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
-    pub http_client: reqwest::Client,
+    pub http_client: services::assistant_model_control::HttpClient,
     /// Pre-computed JWK for the JWKS endpoint
     pub jwk_json: serde_json::Value,
     /// MongoDB-authoritative MCP session and notification store
@@ -781,11 +781,13 @@ async fn server_main() {
     // Create a shared reqwest client for connection reuse.
     // Use connect_timeout (not global timeout) so SSE streaming responses
     // from LLM services are not killed after 30 seconds.
-    let http_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .build()
-        .expect("Failed to create HTTP client");
+    let http_client = services::assistant_model_control::HttpClient::observed(
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(90)),
+        services::telegram_new_api::app_redirect_policy(),
+    )
+    .expect("Failed to create HTTP client");
 
     // Create MCP session store with MongoDB persistence
     let mcp_sessions = Arc::new(McpSessionStore::with_db_options(
@@ -802,7 +804,7 @@ async fn server_main() {
     }
 
     // Create JWKS cache for external provider token verification
-    let jwks_cache = Arc::new(JwksCache::new(http_client.clone()));
+    let jwks_cache = Arc::new(JwksCache::new(http_client.as_client().clone()));
 
     // Create node WebSocket connection manager
     let node_ws_manager = Arc::new(NodeWsManager::new(
@@ -862,7 +864,7 @@ async fn server_main() {
         db.clone(),
         node_ws_manager.clone(),
         replica_identity.clone(),
-        http_client.clone(),
+        http_client.as_client().clone(),
         internal_auth,
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size),
         std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
@@ -947,14 +949,14 @@ async fn server_main() {
         .expect("Failed to load platform broker policy");
     let developer_webhook_dispatcher = Arc::new(
         services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-            http_client.clone(),
+            http_client.as_client().clone(),
             encryption_keys.clone(),
         ),
     );
     services::channel_bot_health::install_failure_notifier(
         services::channel_bot_health::ChannelBotFailureNotifier::new(
             Arc::new(config.clone()),
-            http_client.clone(),
+            http_client.as_client().clone(),
             fcm_auth.clone(),
             apns_auth.clone(),
         ),
@@ -962,7 +964,7 @@ async fn server_main() {
     let connection_expiry_notifier = Arc::new(
         services::connection_expiry_service::ConnectionExpiryNotifier::new(
             Arc::new(config.clone()),
-            http_client.clone(),
+            http_client.as_client().clone(),
             fcm_auth.clone(),
             apns_auth.clone(),
             Some(developer_webhook_dispatcher.clone()),
@@ -1401,7 +1403,7 @@ async fn server_main() {
     // Spawn background task to expire timed-out approval requests
     let db_for_expiry = state.db.clone();
     let config_for_expiry = state.config.clone();
-    let http_for_expiry = state.http_client.clone();
+    let http_for_expiry = state.http_client.as_client().clone();
     let fcm_for_expiry = state.fcm_auth.clone();
     let apns_for_expiry = state.apns_auth.clone();
     let telemetry_for_expiry = state.telemetry.clone();
@@ -1550,7 +1552,7 @@ async fn server_main() {
 
         // Periodically verify the webhook is healthy and re-register if needed.
         // Telegram can silently drop webhooks after sustained delivery failures.
-        let wh_http = state.http_client.clone();
+        let wh_http = state.http_client.as_client().clone();
         let wh_token = bot_token.clone();
         let wh_url = webhook_url.clone();
         let wh_secret = webhook_secret.clone();

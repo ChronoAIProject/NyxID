@@ -40,8 +40,12 @@ unchanged.
    chats and chat apps (the user's correction, modelled on Muse and Grok Bot).
 7. Nothing that works today breaks, in particular calling NyxID services.
 
-Non-goals for this release: specialists messaging each other, group chats of
-several agents, routines/scheduled triggers, and cross-user agents.
+Original 0.31.0 non-goals included specialists messaging each other, multi-agent
+groups, routines/scheduled triggers and cross-user agents. Groups, handoffs and
+automations are documented below; cross-user sharing and multi-person groups are
+specified in [Shared agents and multi-person groups](12-shared-agents-and-groups.md).
+Phase 1 shared-agent support is implemented behind the default-off
+`assistant:shared-agents` flag; multi-person groups remain Phase 2.
 
 ## 3. What exists today and constrains the design
 

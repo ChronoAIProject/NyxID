@@ -37,12 +37,8 @@ pub(super) async fn verified_unavailable(
     if let Some(id) = service.node_id.as_deref() {
         let key =
             crate::services::key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
-        let access = crate::services::org_agent_service::resolve_key_access(
-            db,
-            &key.user_id,
-            key.assistant_agent_owner_id.as_deref(),
-        )
-        .await?;
+        let access =
+            crate::services::org_agent_service::resolve_credential_access(db, &key).await?;
         let (all, allowed) =
             crate::services::org_agent_service::key_nodes(db, &key, access.as_deref()).await?;
         let owner =

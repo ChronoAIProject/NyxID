@@ -1,4 +1,5 @@
 import { useConnectionDown } from "@/hooks/use-connection-down";
+import { SharedConsentCards } from "./shared-agent-controls";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { PreparedMicrophone } from "@/lib/microphone-capture";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
@@ -10,7 +11,7 @@ import { ConversationMachineDesktops, MachinePane, MachinePaneToggle } from "./m
 import { useConversationDesktops } from "@/hooks/use-machines";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useMachinePaneStore } from "@/stores/machine-pane-store";
-import { ReviewCardTarget } from "./review-card-target";
+import { ReviewCardNavigation, ReviewCardTarget } from "./review-card-target";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
 import {
@@ -116,15 +117,18 @@ export function NyxAgentAssistantEntry({
   conversationId,
   retry,
   checkRecovery,
+  selectedDecisionId,
 }: {
   readonly message: import("@/lib/assistant/chat-types").ChatMessage;
   readonly conversationId: string | undefined;
   readonly retry: (messageId: string) => Promise<void>;
   readonly checkRecovery: (messageId: string) => Promise<unknown>;
+  readonly selectedDecisionId?: string;
 }) {
   return (
     <ChatMessageEntry
       message={message}
+      selectedDecisionId={selectedDecisionId}
       conversationId={conversationId}
       feedbackEnabled
       onRetry={message.status === "error" && message.recovery?.status === "available"
@@ -550,7 +554,7 @@ export function NyxAgentAssistantChatPage() {
 }
 
 function NyxAgentThreadPage() {
-  const voiceEnabled = useFeature("assistant:voice");
+  const voiceFlagEnabled = useFeature("assistant:voice");
   const nyxBotSettings = useNyxBotSettings();
   const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
   const [voiceBinding, setVoiceBinding] = useState<{
@@ -713,6 +717,7 @@ function NyxAgentThreadPage() {
   // The open thread's agent, else the agent in the URL, else NyxBot.
   const threadAgent = nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
   const selectedAgent = selectedAgentOf(agents.data?.agents, threadAgent?.id, search.agent);
+  const voiceEnabled = voiceFlagEnabled && !selectedAgent?.share_role;
   // Names the exact linked agent even when it is not in the list.
   const linkedDetails = Boolean(search.details || search.proposal);
   const openDetailsAgentId =
@@ -845,6 +850,7 @@ function NyxAgentThreadPage() {
   // them per thread.
   const machineConversation = showHome ? "" : (chat.session.conversationId ?? "");
   const desktops = useConversationDesktops(machineConversation, chat.isStreaming);
+  const desktop = useMediaQuery("(min-width: 768px)");
   const wideScreen = useMediaQuery("(min-width: 1024px)");
   const machineHidden = useMachinePaneStore((state) => state.hidden.includes(machineConversation));
   const setMachineHidden = useMachinePaneStore((state) => state.setHidden);
@@ -910,17 +916,18 @@ function NyxAgentThreadPage() {
     chat.error ??
     (requestError?.scope === errorScope ? requestError.message : undefined) ??
     turnError;
-  const threadPanels = headerAgent && !showHome ? (
+  const threadPanels = !showHome ? (
     <ThreadPanels>
       <ThreadHeader
-        name={agentName}
+        name={headerAgent ? agentName : "Loading agent…"}
         handle={headerNamed ? agentHandle(headerNamed) : undefined}
-        kind={headerAgent.kind}
-        agentId={headerAgent.id}
+        kind={headerAgent?.kind ?? "nyxbot"}
+        loading={!headerAgent}
+        agentId={headerAgent?.id}
         destroyed={destroyed}
         channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
-        onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
-        title={selectedId ? chat.session.title : undefined}
+        onOpenDetails={headerAgent ? () => setDetailsAgentId(headerAgent.id) : undefined}
+        title={desktop ? chat.session.title : undefined}
         titleKey={selectedId}
         onRenameTitle={
           selectedId && !destroyed
@@ -958,6 +965,7 @@ function NyxAgentThreadPage() {
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
       title={showHome ? "Home" : chat.session.title}
+      contentTitle={desktop}
       titleKey={selectedId}
       onRenameTitle={
         selectedId && !destroyed
@@ -975,6 +983,7 @@ function NyxAgentThreadPage() {
         />
       }
     >
+      <ReviewCardNavigation selectionKey={`${user?.id}:${selectedId ?? "draft"}:${search.card ?? ""}`}>
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {threadPanels}
         <AgentDetailsSheet
@@ -1094,6 +1103,7 @@ function NyxAgentThreadPage() {
                 if (message.role === "assistant") {
                   return (
                     <NyxAgentAssistantEntry
+                      selectedDecisionId={search.card}
                       message={
                         turnError && message.id === lastReply?.id
                           ? {
@@ -1206,6 +1216,7 @@ function NyxAgentThreadPage() {
             docked
             message={connectionDown && dockedError?.startsWith("Connection interrupted") ? undefined : dockedError}
           />
+          {selectedAgent?.share_role && selectedId ? <div className="mx-auto max-h-64 max-w-3xl overflow-y-auto px-4"><SharedConsentCards agentId={selectedAgent.id} conversationId={selectedId} /></div> : null}
           <NyxAgentComposer
             onVoiceSettings={voiceEnabled && !destroyed && !channelPlatform ? () => setVoiceSettingsOpen(true) : undefined}
             onVoicePrepare={() => {
@@ -1327,6 +1338,7 @@ function NyxAgentThreadPage() {
           />
         </div>
       </div>
+      </ReviewCardNavigation>
     </AssistantShell>
   );
 }

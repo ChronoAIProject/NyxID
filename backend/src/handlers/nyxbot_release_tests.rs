@@ -2840,3 +2840,132 @@ async fn domain_alias_saved_gateway_issuer_accepts_overlap_but_never_destination
     );
     upstream.abort();
 }
+
+#[tokio::test]
+async fn release_native_discord_crash_and_old_replica_delete_preserve_drain_boundary() {
+    let (state, mut row, _, server, upstream) = fixture("release_native_discord_drain").await;
+    row.platform = "discord".into();
+    row.gateway_source = Some(crate::models::nyxbot_channel::GatewaySource::Discord {
+        bot_id: "100".into(),
+    });
+    row.gateway_native_phase = Some("preparing".into());
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    let reserved = reserve(&state, &row).await;
+    release::dispatch(&state.db, &reserved).await.unwrap();
+    release::record_ack(&state.db, &reserved, "cmaeg1.ch.remote", 1)
+        .await
+        .unwrap();
+    expire(&state, &reserved.id).await;
+    release::retire_attempt(&state, &reserved.id, ReleaseReason::StaleSetup)
+        .await
+        .unwrap();
+    assert!(
+        !crate::services::discord_gateway::transport::relay_allowed(&state.db, &row.channel_bot_id)
+            .await
+            .unwrap()
+    );
+    let mut remote = remote(&reserved, 1);
+    remote["definition"]["sources"] = json!([{"type":"discord","bot_id":"100","intents":37377}]);
+    Mock::given(method("GET"))
+        .and(path(format!("/channel-records/{}", reserved.id)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    // An old retirement writer cannot serialize the additive source field.
+    state
+        .db
+        .collection::<bson::Document>(RELEASES)
+        .update_one(
+            doc! {"_id":&reserved.id},
+            doc! {"$unset":{"gateway_source":""}},
+        )
+        .await
+        .unwrap();
+    assert!(!execute(&state, &reserved.id).await);
+    release::settle_native_drains(&state.db).await.unwrap();
+    assert!(
+        !crate::services::discord_gateway::transport::relay_allowed(&state.db, &row.channel_bot_id)
+            .await
+            .unwrap()
+    );
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/channel-records/{}", reserved.id)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    assert!(execute(&state, &reserved.id).await);
+    release::settle_native_drains(&state.db).await.unwrap();
+    assert!(
+        !crate::services::discord_gateway::transport::relay_allowed(&state.db, &row.channel_bot_id)
+            .await
+            .unwrap()
+    );
+    let guard = state
+        .db
+        .collection::<bson::Document>(RELEASES)
+        .find_one(doc! {"native_drain_for":&reserved.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(guard.get_datetime("native_not_before").is_ok());
+    assert_eq!(guard.get_str("state").unwrap(), "review_required");
+    // Old flag-off writers leave additive fields behind when they swap to
+    // direct. The retained guard must still block ingress, then clear only its
+    // own obsolete native source so the relay's async/media paths work again.
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"transport":"direct","status":"active",
+            "gateway_source":bson::to_bson(&row.gateway_source).unwrap(),
+            "gateway_native_phase":"ready","gateway_native_activation":"selected"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        !crate::services::discord_gateway::transport::relay_allowed(&state.db, &row.channel_bot_id)
+            .await
+            .unwrap()
+    );
+    state.db.collection::<Release>(RELEASES).update_one(doc! {"_id":guard.get_str("_id").unwrap()},doc! {"$set":{"native_not_before":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1))}}).await.unwrap();
+    release::settle_native_drains(&state.db).await.unwrap();
+    assert!(
+        crate::services::discord_gateway::transport::relay_allowed(&state.db, &row.channel_bot_id)
+            .await
+            .unwrap()
+    );
+    let restored = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert!(restored.gateway_source.is_none());
+    assert!(restored.gateway_native_phase.is_none());
+    assert_eq!(
+        restored.gateway_native_activation.as_deref(),
+        Some("relay_ready")
+    );
+    release::settle_native_drains(&state.db).await.unwrap();
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "DELETE")
+            .count(),
+        1
+    );
+    upstream.abort();
+}

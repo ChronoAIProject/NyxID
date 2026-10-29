@@ -1911,6 +1911,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/wallet",
             get(handlers::billing::get_wallet).post(handlers::billing::provision_wallet),
         )
+        .route("/wallet/view", get(handlers::billing::view_wallet))
         .route("/topup", post(handlers::billing::create_topup))
         .route("/topups", get(handlers::billing::list_topups))
         .route("/bill", get(handlers::billing::get_bill))
@@ -2486,6 +2487,29 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     ));
     let assistant_routes = Router::new()
         .route(
+            "/model-control/v1/tool-prepare",
+            post(handlers::assistant_model_control::tool_prepare)
+                .layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .route(
+            "/model-control/v1/tool-status",
+            post(handlers::assistant_model_control::tool_status)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/model-control/v1/verify",
+            post(handlers::assistant_model_control::verify).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/model-control/v1/prepare",
+            post(handlers::assistant_model_control::prepare)
+                .layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
+        .route(
+            "/model-control/v1/status",
+            post(handlers::assistant_model_control::status).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
             "/nyxagent/invocations/{key}",
             get(handlers::assistant_invocations::show),
         )
@@ -2577,6 +2601,29 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/skills/catalog",
             get(handlers::agent_skills::catalog),
+        )
+        .route(
+            "/nyxagent/agents/{id}/consents",
+            get(handlers::assistant_sharing::consents),
+        )
+        .route(
+            "/nyxagent/shared-consents/{id}",
+            axum::routing::post(handlers::assistant_sharing::decide_consent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/sharing",
+            get(handlers::assistant_sharing::get).put(handlers::assistant_sharing::update),
+        )
+        .route(
+            "/nyxagent/agents/{id}/private-notes",
+            get(handlers::assistant_sharing::private_notes)
+                .put(handlers::assistant_sharing::update_notes)
+                .delete(handlers::assistant_sharing::delete_notes),
+        )
+        .route(
+            "/nyxagent/agents/{id}/shared-memory",
+            get(handlers::assistant_sharing::memory)
+                .put(handlers::assistant_sharing::update_memory),
         )
         .route(
             "/nyxagent/agents/{id}/skills",
@@ -3115,6 +3162,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::telegram_new::launch),
         )
         .route(
+            "/channel-bots/telegram-new/requests/{id}/creation-link",
+            post(handlers::telegram_new::creation_link),
+        )
+        .route(
             "/channel-bots/telegram-new/requests/{id}/connect",
             post(handlers::telegram_new::connect),
         )
@@ -3468,6 +3519,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     get(handlers::nyxbot::get_event_context),
                 )
                 .route("/responses", post(handlers::nyxbot::responses_with_runtime))
+                .route("/responses/{response_id}", get(handlers::nyxbot::native_responses::snapshot))
+                .route("/responses/{response_id}/events", get(handlers::nyxbot::native_responses::events))
                 .route("/relay/{channel_id}", post(handlers::nyxbot::relay_callback))
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )

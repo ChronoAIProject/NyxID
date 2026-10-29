@@ -1941,6 +1941,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         gcp_kms_key_name_previous: None,
         instance_name: "test-backend".to_string(),
         security_rollout: Default::default(),
+        assistant_model_control_v1_enabled: false,
         internal_bind_addr: "127.0.0.1:3002".to_string(),
         internal_advertise_url: "http://127.0.0.1:3002".to_string(),
         internal_dispatch_hmac_key: None,
@@ -2145,7 +2146,10 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
 
 /// Build an `AppState` with a caller-provided config for pure handler tests.
 pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .redirect(crate::services::telegram_new_api::app_redirect_policy())
+        .build()
+        .unwrap();
     let jwt_keys = cached_test_jwt_keys();
     let billing = Arc::new(crate::services::billing::BillingService::new(
         db.clone(),
@@ -2200,7 +2204,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
-        http_client: http_client.clone(),
+        http_client: crate::services::assistant_model_control::HttpClient::unobserved(
+            http_client.clone(),
+        ),
         jwk_json: serde_json::json!({}),
         mcp_sessions: Arc::new(McpSessionStore::new()),
         jwks_cache: Arc::new(JwksCache::new(http_client.clone())),

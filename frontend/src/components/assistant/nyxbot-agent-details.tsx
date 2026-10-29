@@ -1,3 +1,4 @@
+import { ShareAgentDialog, SharedAgentMemory, SharedAgentProfile, SharedConsentCards } from "./shared-agent-controls";
 import { AgentSkills } from "./agent-skills";
 import { AgentConnections } from "./agent-connections";
 import { AgentLearningReview } from "./agent-learning-review";
@@ -308,9 +309,15 @@ export function AgentDetailsSheet({
                 description={
                   agent.owner_kind === "org"
                     ? `${agent.owner_name ?? agent.owner_id} · Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
-                    : "Personal agent"
+                    : agent.share_role ? `Shared by ${agent.owner_name ?? agent.owner_id}. Your role: ${agent.share_role}. Your chats and notes stay private.` : "Personal agent"
                 }
               />
+              <ShareAgentDialog agent={agent} />
+              {agent.share_role ? <>
+                <SharedAgentProfile key={`${agent.id}:${agent.persona}:${agent.description}`} agent={agent} />
+                <SharedAgentMemory agent={agent} />
+                <SharedConsentCards agentId={agent.id} />
+              </> : <>
               <ProfileForm
                 key={[
                   agent.id, agent.name, agent.description, agent.display_name, agent.persona,
@@ -353,6 +360,7 @@ export function AgentDetailsSheet({
               {agent.kind === "specialist" && agent.can_maintain !== false ? (
                 <Lifecycle agent={agent} onDeleted={onDeleted} />
               ) : null}
+              </>}
             </>
           ) : null}
         </div>

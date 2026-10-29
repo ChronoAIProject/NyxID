@@ -309,6 +309,27 @@ pub async fn evaluate_for_chat(
     Option<super::assistant_acknowledgement_service::AutoAllowed>,
 )> {
     use super::assistant_acknowledgement_service as acks;
+    if chat.is_some_and(|c| {
+        c.org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .is_some_and(|a| service_owner == a.owner() && actor != service_owner)
+    }) {
+        let owner_policy = resolve_org_aware_approval(
+            db,
+            service_owner,
+            service_owner,
+            service_id,
+            descriptor,
+            auto_connected,
+        )
+        .await?;
+        if owner_policy.required || owner_policy.effect == ApprovalEffect::Deny {
+            return Err(AppError::Forbidden(
+                "Shared agents cannot request or use the owner's approvals".into(),
+            ));
+        }
+    }
     let outcome = evaluate_and_check(
         db,
         actor,

@@ -265,6 +265,7 @@ impl AsyncContinuation {
             refusal: None,
             automatic: None,
             admission: Some(Admission {
+                shared_permit: None,
                 connection: connection.into(),
                 binding,
                 execution: Some(execution_digest(target)),
@@ -277,6 +278,7 @@ impl AsyncContinuation {
                 summary: "Async operation continuation".into(),
                 job_id: None,
                 async_continuation: Some(self.clone()),
+                model_control: None,
                 chat: chat.clone(),
             }),
         })

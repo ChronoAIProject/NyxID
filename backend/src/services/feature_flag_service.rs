@@ -178,6 +178,13 @@ const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+pub const SHARED_AGENTS_FLAG_KEY: &str = "assistant:shared-agents";
+const SHARED_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SHARED_AGENTS_FLAG_KEY,
+    description: "Allows personal specialist sharing after all replicas enforce shared authority and consent.",
+    default_enabled: false,
+};
+
 const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: "assistant:org-agents",
     description: "Allows organization specialist creation after all replicas enforce live member authority.",
@@ -344,6 +351,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
@@ -385,6 +393,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
@@ -791,7 +800,7 @@ pub fn resolve_personal_from_overrides(
     )
 }
 
-fn resolve_personal_definitions<'a>(
+pub(crate) fn resolve_personal_definitions<'a>(
     definitions: impl IntoIterator<Item = (&'a str, bool, Option<&'a str>)>,
     platform: &[FeatureFlagOverride],
     org_rows: &[FeatureFlagOverride],
@@ -2890,6 +2899,7 @@ mod tests {
                 "assistant:machine-contexts",
                 "assistant:agent-learning",
                 "assistant:org-agents",
+                "assistant:shared-agents",
                 "assistant:voice",
                 "assistant:voice-openai-platform",
                 "assistant:voice-grok",
