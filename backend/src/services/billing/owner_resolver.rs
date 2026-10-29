@@ -25,6 +25,32 @@ impl BillingOwnerResolver {
         Self { db }
     }
 
+    /// Caller-pays is exclusive to a server-resolved shared-agent lane.
+    /// Owner, org member and guest executions retain their existing rules.
+    pub async fn resolve_for_assistant_execution(
+        &self,
+        principal: &str,
+        resource_owner: &str,
+        credential_class: CredentialClass,
+        access: Option<&crate::services::org_agent_service::RequestAccess>,
+    ) -> AppResult<ResolvedBillingOwner> {
+        if let Some(shared) = access.and_then(|a| a.shared()) {
+            if shared.actor() != principal
+                || (resource_owner != shared.owner() && resource_owner != principal)
+            {
+                return Err(AppError::Forbidden(
+                    "Shared billing authority mismatch".into(),
+                ));
+            }
+            return Ok(ResolvedBillingOwner {
+                owner_id: principal.into(),
+                pays: PaysFrom::Personal,
+            });
+        }
+        self.resolve_for_execution(principal, resource_owner, credential_class)
+            .await
+    }
+
     /// Resolve the payer for an already-authorized resource operation.
     ///
     /// `resource_owner_id` must come from the resolved resource, never from

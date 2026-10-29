@@ -2,6 +2,7 @@ mod bills;
 mod operations;
 mod taxes;
 mod usage;
+mod wallet_view;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

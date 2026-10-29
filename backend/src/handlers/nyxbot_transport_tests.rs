@@ -108,6 +108,66 @@ async fn due(state: &AppState, id: &str) {
         .unwrap();
 }
 
+async fn native_discord_identity(
+    state: &AppState,
+    row: &NyxbotChannel,
+) -> (
+    wiremock::MockServer,
+    native_tests::NativeDiscordFixtureGuard,
+) {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, path},
+    };
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let token = state
+        .encryption_keys
+        .encrypt(b"test-discord-token")
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.channel_bot_id},
+            doc! {"$set":{"platform_bot_id":"100","bot_token_encrypted":bson::Binary {
+                subtype:bson::spec::BinarySubtype::Generic,bytes:token,
+            }}},
+        )
+        .await
+        .unwrap();
+    let http = MockServer::start().await;
+    crate::services::nyxbot_gateway_source::TEST_DISCORD_BASES
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), http.uri());
+    Mock::given(path("/users/@me"))
+        .and(header("authorization", "Bot test-discord-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"100","bot":true})))
+        .mount(&http)
+        .await;
+    (
+        http,
+        native_tests::NativeDiscordFixtureGuard(row.channel_bot_id.clone()),
+    )
+}
+
+async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
+    use crate::services::{
+        discord_gateway::transport::relay_allowed,
+        nyxbot_gateway_release_service::settle_native_drains,
+    };
+    assert!(!relay_allowed(&state.db, &row.channel_bot_id).await.unwrap());
+    settle_native_drains(&state.db).await.unwrap();
+    assert!(!relay_allowed(&state.db, &row.channel_bot_id).await.unwrap());
+    let changed = state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+        .update_many(doc! {"channel_id":&row.id,"native_drain_for":{"$exists":true},"native_not_before":{"$type":"date"}},
+            doc! {"$set":{"native_not_before":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1))}}).await.unwrap();
+    assert_eq!(changed.modified_count, 1);
+    settle_native_drains(&state.db).await.unwrap();
+    assert!(relay_allowed(&state.db, &row.channel_bot_id).await.unwrap());
+}
+
 #[tokio::test]
 async fn org_gateway_flags_resolve_for_linking_admin_and_live_org_membership() {
     for org_override in [false, true] {
@@ -666,6 +726,7 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
             .await
             .unwrap();
         before = load_channel(&state, OWNER, &before.id).await.unwrap();
+        let (_discord, _discord_guard) = native_discord_identity(&state, &before).await;
         let direct_partition = chats::direct_partition("200", "7", None);
         let dm = chats::record_chat_with_relay(
             &state,
@@ -781,16 +842,7 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
             )
             .await;
             assert_eq!(ensured.status(), StatusCode::OK);
-            let mut body = event("/start", "7", "discord-dm");
-            let context = &mut body["event_context"];
-            context["channel_id"] = json!(on.gateway_channel_id);
-            context["activity"]
-                .as_object_mut()
-                .unwrap()
-                .remove("telegram_input");
-            context["activity"]["source"] =
-                json!({"type":"nyxid_relay","platform":"discord","route_id":on.route_id});
-            context["activity"]["conversation"] = json!({"id":"200","kind":"private"});
+            let body = native_tests::native_event(&on, "500", "/start");
             let response = body_text(respond(&state, &raw, &body, "discord-dm").await).await;
             assert!(response.contains("Hi, I'm"), "{response}");
             let adopted = state
@@ -830,16 +882,21 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
             );
         }
         assert!(calls.lock().await.iter().any(|c| c.0 == "DELETE"));
+        complete_native_drain(&state, &before).await;
         gateway.abort();
         agent.abort();
     }
 }
 
 #[tokio::test]
-async fn discord_definitive_create_refusal_keeps_relay_usable_without_uncertain_cleanup() {
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+async fn discord_definitive_create_refusal_restores_relay_after_bounded_drain() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
     let (mut state, _, agent) = setup("discord_create_refusal").await;
     let before = linked(&state, None, "discord").await;
+    let (_discord, _discord_guard) = native_discord_identity(&state, &before).await;
     let server = MockServer::start().await;
     state.config.jwt_issuer = "http://localhost:3001".into();
     let mut service = crate::models::downstream_service::test_helpers::dummy_service();
@@ -853,6 +910,12 @@ async fn discord_definitive_create_refusal_keeps_relay_usable_without_uncertain_
         .insert_one(service)
         .await
         .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/channel-capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"relay_authoring":{
+            "native_discord_writes_enabled":true,"native_discord_auto_activation_enabled":true,"multi_consumer_writes_enabled":true,
+        }})))
+        .mount(&server).await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(400).set_body_json(json!({"code":"invalid_request"})))
         .mount(&server)
@@ -875,12 +938,22 @@ async fn discord_definitive_create_refusal_keeps_relay_usable_without_uncertain_
     let release = state
         .db
         .collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
-        .find_one(doc! {"channel_id":&before.id})
+        .find_one(doc! {"channel_id":&before.id,"native_drain_for":{"$exists":false}})
         .await
         .unwrap()
         .unwrap();
     assert_eq!(release.get_str("state"), Ok("settled"));
     assert_eq!(release.get_str("resolution"), Ok("not_created"));
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .count(),
+        1
+    );
+    assert!(requests.iter().all(|r| r.method.as_str() != "DELETE"));
+    complete_native_drain(&state, &before).await;
     agent.abort();
 }

@@ -300,6 +300,7 @@ pub fn call<'a>(
                     | Operation::JobCancel
             ) || (matches!(operation, Operation::Computer | Operation::Browser)
                 && !read_only),
+            delegation: false,
         };
         let floor = job_plan
             .as_ref()

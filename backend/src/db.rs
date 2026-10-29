@@ -2983,6 +2983,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     ensure_feature_flag_indexes(db).await?;
+    crate::services::shared_agent_service::ensure_indexes(db).await?;
 
     // ── org_invites ──
     let org_invites = db.collection::<Document>("org_invites");

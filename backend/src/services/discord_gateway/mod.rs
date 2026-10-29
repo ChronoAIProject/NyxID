@@ -1,7 +1,7 @@
 //! Default-off Discord Gateway ingress. A renewable, database-time lease owns
 //! each socket; metadata admission and status/checkpoint writes contend on its
 //! exact fence. The socket is dropped before releasing ownership.
-mod facts;
+pub(crate) mod facts;
 pub(crate) use facts::snowflake as valid_message_id;
 mod protocol;
 #[cfg(test)]

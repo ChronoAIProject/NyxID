@@ -125,7 +125,8 @@ async fn verify_resolved_projected_inner(
         crate::services::proxy_service::ProxyExecutionContext::new(
             None,
             crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
-        ),
+        )
+        .with_assistant_access(chat.org_agent_access.as_deref()),
     )
     .await?
     .ok_or_else(|| AppError::NotFound("Service connection unavailable".into()))?;
@@ -265,6 +266,16 @@ async fn check_http_projected_inner(
     headers: &axum::http::HeaderMap,
     projection: &HttpProjection,
 ) -> AppResult<Decision> {
+    if auth
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && id.is_none()
+    {
+        return Err(AppError::Forbidden(
+            "Shared execution requires an exact service connection".into(),
+        ));
+    }
     if let Some(chat) = auth.assistant_chat.as_deref()
         && !chat.turn_live
         && let Some(owner) = owner
@@ -345,6 +356,18 @@ async fn check_http_projected_inner(
             .ok_or_else(|| AppError::Conflict("Service pool unavailable".into()))?;
         operation["pool_revision"] = json!(row.config_revision);
     }
+    if method_override
+        && chat
+            .org_agent_access
+            .as_ref()
+            .is_some_and(|a| a.shared().is_some())
+    {
+        return Err(AppError::Forbidden(
+            "Shared calls cannot override HTTP methods".into(),
+        ));
+    }
+    // Shared turns run as the acting person. The owner-only guest model route
+    // is deliberately selected only by `guest_inference` above.
     let model_transport = !chat.guest && generation;
     let legacy_inference = model_transport && (!chat.turn_live || !stateless);
     if legacy_inference {

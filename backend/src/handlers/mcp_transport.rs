@@ -953,13 +953,12 @@ async fn authenticate_mcp_or_public(
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
                 let user_id = verify_user_active(state, user_id).await?;
-                let org_agent_access = crate::services::org_agent_service::resolve_key_access(
-                    &state.db,
-                    &user_id,
-                    api_key.assistant_agent_owner_id.as_deref(),
-                )
-                .await
-                .map_err(axum::response::IntoResponse::into_response)?;
+                let org_agent_access =
+                    crate::services::org_agent_service::resolve_credential_access(
+                        &state.db, &api_key,
+                    )
+                    .await
+                    .map_err(axum::response::IntoResponse::into_response)?;
                 crate::services::org_group_service::validate_key(
                     &state.db,
                     &api_key,
@@ -979,6 +978,13 @@ async fn authenticate_mcp_or_public(
                 } else {
                     None
                 };
+                if org_agent_access
+                    .as_ref()
+                    .is_some_and(|a| a.shared().is_some())
+                    && chat.as_ref().is_none_or(|c| !c.turn_live || c.turn_stopped)
+                {
+                    return Err(mcp_401(&state.config.base_url));
+                }
                 // Platform grants are meaningful only for assistant chat keys.
                 let platform_grants = if chat.is_some() {
                     api_key.allowed_platform_service_ids.clone()
@@ -1032,10 +1038,16 @@ async fn authenticate_mcp_or_public(
                         .await
                         .map_err(axum::response::IntoResponse::into_response)?,
                     allowed_platform_service_ids: platform_grants,
-                    org_agent_access,
+                    org_agent_access: org_agent_access.clone(),
                     assistant_group_id: api_key.assistant_group_id.clone(),
                     assistant_agent_owner_id: api_key.assistant_agent_owner_id.clone(),
-                    assistant_operation_scopes: api_key.assistant_operation_scopes.clone(),
+                    assistant_operation_scopes: org_agent_access
+                        .as_ref()
+                        .and_then(|a| a.shared())
+                        .map_or_else(
+                            || api_key.assistant_operation_scopes.clone(),
+                            |a| a.operation_scopes(),
+                        ),
                     allowed_node_ids,
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
@@ -2249,6 +2261,9 @@ async fn handle_tools_list(
                 tool["title"] = annotations["title"].clone();
                 tool["annotations"] = annotations;
             }
+            if let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services) {
+                annotate_shared_connection(auth, service, &mut tool);
+            }
             tool
         })
         .collect();
@@ -2697,6 +2712,7 @@ async fn dispatch_tools_call(
             class,
             read_only: false,
             destructive: class == acks::OwnerActionClass::Destructive,
+            delegation: false,
         };
         let gate = async {
             match acks::confirmation_needed(&state.db, chat, facts, false).await? {
@@ -3517,6 +3533,7 @@ async fn authorize_mcp_tool_operation(
         &state.db,
         &auth.effective_approval_owner_user_id(),
         service,
+        auth.org_agent_access.as_deref().and_then(|a| a.shared()),
     )
     .await
     .map_err(|e| {
@@ -3721,6 +3738,34 @@ fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> 
     }
 }
 
+fn annotate_shared_connection(
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    value: &mut serde_json::Value,
+) {
+    if let Some(metadata) = auth
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .and_then(|access| access.discovery_metadata(&service.service_id))
+    {
+        value["shared_connection"] = metadata;
+        value["owner_kind"] = "personal".into();
+    }
+}
+
+fn chat_access_hint(auth: &McpAuthContext) -> &'static str {
+    if auth
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+    {
+        "Shared connections have exact identities. owner_shared uses only the owner's explicitly shared access. actor_personal requires the person's connection consent; call to present their private card and await their decision. Ordinary action confirmations also apply. Never retry against a different account after a refusal, Skip or unavailable credential."
+    } else {
+        CHAT_ACCESS_HINT
+    }
+}
+
 async fn chat_service_gate(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3809,6 +3854,50 @@ async fn guest_service_refusal(
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
     use crate::models::assistant_agent::GuestAccess;
+    if let Some(shared) = auth
+        .chat
+        .as_ref()
+        .and_then(|c| c.org_agent_access.as_ref())
+        .and_then(|a| a.shared())
+    {
+        let service_id = match &service.source {
+            mcp_service::McpToolSource::UserManaged {
+                user_service_id, ..
+            } => user_service_id.as_str(),
+            _ => &service.service_id,
+        };
+        if let Some(connection) = shared.connections().get(service_id) {
+            if connection.user_id == shared.owner() {
+                let effects = mcp_service::operation_effects(
+                    prepared.method(),
+                    service
+                        .durable_endpoint_metadata
+                        .get(&endpoint.endpoint_id)
+                        .copied()
+                        .unwrap_or_default(),
+                );
+                if prepared.carries_method_override()
+                    || !crate::services::shared_agent_service::permits(
+                        shared.level(service_id),
+                        effects,
+                    )
+                {
+                    return Some(tool_result(
+                        request_id,
+                        "The owner's shared access does not permit this operation",
+                        true,
+                    ));
+                }
+            }
+        } else {
+            return Some(tool_result(
+                request_id,
+                "Shared connection unavailable",
+                true,
+            ));
+        }
+        return None;
+    }
     let chat = auth.chat.as_ref().filter(|chat| chat.guest)?;
     let Ok(agent) =
         crate::services::assistant_team_service::agent(&state.db, &chat.user_id, &chat.agent_id)
@@ -3981,6 +4070,7 @@ async fn webhook_service_gate(
         class: acks::service_action_class(read_only, destructive),
         read_only,
         destructive,
+        delegation: false,
     };
     let summary = format!(
         "{} {} on {}",
@@ -4918,6 +5008,7 @@ async fn handle_meta_search(
                 if auth.chat.is_some() {
                     value["chat_access"] = serde_json::json!(chat_access(auth, service));
                 }
+                annotate_shared_connection(auth, service, &mut value);
             } else {
                 value["executable"] = serde_json::json!(true);
                 value["preference_rank"] = serde_json::Value::Null;
@@ -4933,7 +5024,7 @@ async fn handle_meta_search(
             Pass the tool name and arguments as shown in the match results. At equal relevance, connections of the same service follow the owner's agent order in their original slots. preference_rank is relative to that service; executable reports current credential and routing availability.",
     });
     if auth.chat.is_some() {
-        response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+        response_json["chat_access_hint"] = serde_json::json!(chat_access_hint(auth));
     }
 
     let text = if auth.chat.is_some() {
@@ -5040,9 +5131,10 @@ async fn handle_meta_list_connected(
                 .find(|service| row["service_id"] == service.service_id)
             {
                 row["chat_access"] = serde_json::json!(chat_access(auth, service));
+                annotate_shared_connection(auth, service, row);
             }
         }
-        result["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+        result["chat_access_hint"] = serde_json::json!(chat_access_hint(auth));
     }
     let text = serde_json::to_string_pretty(&result).unwrap_or_default();
     tool_result(request_id, &text, false)
@@ -7742,6 +7834,7 @@ mod tests {
             &db,
             &auth.effective_approval_owner_user_id(),
             &svc,
+            None,
         )
         .await
         .unwrap();

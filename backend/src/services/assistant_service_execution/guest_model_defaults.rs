@@ -23,6 +23,9 @@ pub(super) async fn matches(
     target: &crate::services::proxy_service::ProxyTarget,
     operation: &Value,
 ) -> AppResult<bool> {
+    if super::guest_model::is_shared_chat(chat) {
+        return Ok(false);
+    }
     let Some(configured) = ROUTES.get(profile) else {
         return Ok(false);
     };

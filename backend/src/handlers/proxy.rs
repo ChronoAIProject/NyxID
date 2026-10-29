@@ -427,6 +427,27 @@ struct PreResolved {
     is_auto_connected: bool,
 }
 
+/// Return the persisted owner of an exact UserService for a shared turn.
+/// Shared discovery exposes both the owner's connection and the actor's own
+/// same-catalog connection; the execution preflight must scope later
+/// `get_user_service` and approval lookups to whichever row was selected.
+fn resolved_user_service_owner(
+    auth_user: &AuthUser,
+    actor_user_id: &str,
+    resolved: &proxy_service::UserServiceResolution,
+) -> String {
+    if let Some(shared) = auth_user.org_agent_access.as_ref().and_then(|a| a.shared())
+        && let Some(service) = shared.connections().get(&resolved.user_service_id)
+    {
+        return service.user_id.clone();
+    }
+    resolved
+        .org_routing
+        .as_ref()
+        .map(|routing| routing.org_user_id.clone())
+        .unwrap_or_else(|| actor_user_id.to_owned())
+}
+
 #[derive(Clone, Debug, Default)]
 struct ConnectionUsageStats {
     frames_in: i64,
@@ -919,7 +940,8 @@ pub(crate) async fn proxy_request_inner(
             proxy_service::ProxyExecutionContext::new(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
-            ),
+            )
+            .with_assistant_access(auth_user.org_agent_access.as_deref()),
         ))
         .await?
         {
@@ -942,6 +964,8 @@ pub(crate) async fn proxy_request_inner(
                     resolved.pool_selection.as_ref(),
                 );
             }
+            let effective_owner_id =
+                resolved_user_service_owner(auth_user, &user_id_str, &resolved);
             return Box::pin(execute_proxy_inner(
                 state,
                 auth_user,
@@ -957,11 +981,7 @@ pub(crate) async fn proxy_request_inner(
                     master_credential: resolved.master_credential,
                     require_identity_assertion: false,
                     credential_source: resolved.credential_source,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
+                    effective_owner_id,
                     billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
@@ -2224,7 +2244,8 @@ async fn proxy_request_by_selected_member(
                 proxy_service::ProxyExecutionContext::new(
                     Some(&state.connection_expiry_notifier),
                     state.platform_user_rate_limit,
-                ),
+                )
+                .with_assistant_access(auth_user.org_agent_access.as_deref()),
             )
         })
         .await?
@@ -2279,6 +2300,7 @@ async fn proxy_request_by_selected_member(
                 resolved.pool_selection.as_ref(),
             );
         }
+        let effective_owner_id = resolved_user_service_owner(auth_user, &user_id_str, &resolved);
         return box_proxy_future(|| {
             execute_proxy_inner(
                 state,
@@ -2295,11 +2317,7 @@ async fn proxy_request_by_selected_member(
                     master_credential: resolved.master_credential,
                     require_identity_assertion: false,
                     credential_source: resolved.credential_source,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
+                    effective_owner_id,
                     billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
@@ -2585,6 +2603,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
                 resolved.pool_selection.as_ref(),
             );
         }
+        let effective_owner_id = resolved_user_service_owner(auth_user, &user_id_str, &resolved);
         return box_proxy_future(|| {
             execute_proxy_inner(
                 state,
@@ -2601,11 +2620,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
                     master_credential: resolved.master_credential,
                     require_identity_assertion: false,
                     credential_source: resolved.credential_source,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
+                    effective_owner_id,
                     billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
@@ -2999,6 +3014,7 @@ async fn preflight_proxy_deny_before_resolution(
                 user_service_id,
                 slug,
                 catalog_service_id,
+                auth_user.org_agent_access.as_ref().and_then(|a| a.shared()),
             ),
         )
         .await?
@@ -4042,6 +4058,21 @@ async fn execute_resolved_proxy_inner<'a>(
         })
         .await?;
     }
+    if auth_user
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && crate::services::mcp_service::http_carries_method_override(
+            request.method().as_str(),
+            request.headers(),
+            request.uri().query(),
+            &[],
+        )
+    {
+        return Err(AppError::Forbidden(
+            "Shared calls cannot override HTTP methods".into(),
+        ));
+    }
     let operation_target_id = target.service.id.clone();
     let (operation_scope_id, operation_catalog_id) =
         crate::services::agent_operation_scope_service::execution_identity(
@@ -4114,6 +4145,16 @@ async fn execute_resolved_proxy_inner<'a>(
         audit_service::AuditActor::from_auth_user(auth_user),
         &target,
     );
+    if auth_user
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && (is_ws_upgrade_request(&request) || request.method() == Method::CONNECT)
+    {
+        return Err(AppError::Forbidden(
+            "Shared agents require HTTP request execution".into(),
+        ));
+    }
     if is_ws_upgrade_request(&request) {
         crate::services::destination_routing::reject_websocket(&target)?;
     }
@@ -4168,10 +4209,11 @@ async fn execute_resolved_proxy_inner<'a>(
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_assistant_execution(
             &billing_resolution_user_id,
             billing_resource_owner_id,
             credential_class,
+            auth_user.org_agent_access.as_deref(),
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
@@ -4766,7 +4808,8 @@ async fn execute_resolved_proxy_inner<'a>(
                 proxy_service::ProxyExecutionContext::new(
                     Some(&state.connection_expiry_notifier),
                     state.platform_user_rate_limit,
-                ),
+                )
+                .with_assistant_access(auth_user.org_agent_access.as_deref()),
             )
         })
         .await?

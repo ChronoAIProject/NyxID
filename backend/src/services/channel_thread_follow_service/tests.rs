@@ -46,6 +46,7 @@ fn child(selection: Selection) -> (NyxbotThread, ThreadTurnBinding) {
 }
 fn origin(child: &NyxbotThread, b: ThreadTurnBinding) -> ChannelOrigin {
     ChannelOrigin {
+        native_event_id: None,
         nyxbot_channel_id: "link".into(),
         partition: child.partition.clone(),
         platform: "telegram".into(),

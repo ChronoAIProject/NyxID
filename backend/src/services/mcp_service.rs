@@ -106,6 +106,7 @@ impl McpBillingRouteContextBuilder {
     #[allow(clippy::too_many_arguments)]
     async fn build(
         self,
+        access: Option<&super::org_agent_service::RequestAccess>,
         billing: &crate::services::billing::BillingService,
         actor_user_id: &str,
         billing_principal_user_id: &str,
@@ -126,10 +127,11 @@ impl McpBillingRouteContextBuilder {
         });
         let billing_owner = billing
             .owner_resolver()
-            .resolve_for_execution(
+            .resolve_for_assistant_execution(
                 billing_principal_user_id,
                 &self.effective_owner_id,
                 credential_class,
+                access,
             )
             .await?;
         let node_intent = match node_route {
@@ -871,7 +873,7 @@ impl ServiceScope<'_> {
                 &service.source,
                 McpToolSource::UserManaged {
                     effective_owner_id, ..
-                } if effective_owner_id == access.owner()
+                } if access.shared().map_or_else(|| effective_owner_id == access.owner(), |shared| shared.connections().contains_key(&service.service_id))
             ),
         }
     }
@@ -888,7 +890,8 @@ impl ServiceScope<'_> {
             ServiceScope::Unrestricted | ServiceScope::Preferring(_) => true,
             ServiceScope::Allowed(ids) => ids.iter().any(|id| id == &service.id),
             ServiceScope::Organization { access } => {
-                service.user_id == access.owner() && access.allows_service(service)
+                access.allows_service(service)
+                    && (access.shared().is_some() || service.user_id == access.owner())
             }
         }
     }
@@ -1671,8 +1674,26 @@ async fn load_user_tools_with_grants(
             recommended_skill_refs,
             skills_revision,
             service_id: us.id.clone(),
-            service_name: endpoint_label.to_string(),
-            service_slug: us.slug.clone(),
+            service_name: match service_scope {
+                ServiceScope::Organization { access } if access.shared().is_some() => format!(
+                    "{} ({})",
+                    endpoint_label,
+                    if us.user_id == user_id {
+                        "your connection; consent required"
+                    } else {
+                        "owner's shared connection"
+                    }
+                ),
+                _ => endpoint_label.to_string(),
+            },
+            // A shared tool name permanently identifies one connection. Never
+            // let a same-slug actor connection shadow the owner's or vice versa.
+            service_slug: match service_scope {
+                ServiceScope::Organization { access } if access.shared().is_some() => {
+                    format!("shared_{}", us.id.replace('-', ""))
+                }
+                _ => us.slug.clone(),
+            },
             description: None,
             service_category: "user_service".to_string(),
             endpoints: published.endpoints,
@@ -2089,7 +2110,11 @@ async fn load_callable_user_services(
     // -- Org-shared services --
     let mut org_services: Vec<(UserService, String)> = Vec::new(); // (service, org_user_id)
     if let ServiceScope::Organization { access } = service_scope {
-        let org_svcs: Vec<UserService> =
+        let org_svcs: Vec<UserService> = if let Some(shared) = access.shared() {
+            let mut connections: Vec<_> = shared.connections().values().cloned().collect();
+            connections.sort_by(|a, b| a.id.cmp(&b.id));
+            connections
+        } else {
             crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
                 .find(doc! {
                     "user_id": access.owner(),
@@ -2098,13 +2123,15 @@ async fn load_callable_user_services(
                 })
                 .await?
                 .try_collect()
-                .await?;
+                .await?
+        };
         for svc in org_svcs {
             if access.allows_service(&svc) {
                 if let Some(ak_id) = &svc.api_key_id {
                     all_api_key_ids.push(ak_id.clone());
                 }
-                org_services.push((svc, access.owner().to_string()));
+                let owner = svc.user_id.clone();
+                org_services.push((svc, owner));
             }
         }
     } else {
@@ -2256,6 +2283,14 @@ async fn load_callable_user_services(
         service_has_dispatchable_route.insert(svc.id.clone(), any_dispatchable);
     }
 
+    // A shared catalog may contain the owner's explicitly shared platform
+    // connection and an actor-owned account connection. Platform ACLs must be
+    // checked against the connection owner in this lane; using the actor for
+    // the owner's row would make a valid owner grant disappear from discovery.
+    let shared_principal = match service_scope {
+        ServiceScope::Organization { access } if access.shared().is_some() => Some(user_id),
+        _ => None,
+    };
     // Resolve authority and credential state before slug collisions. A
     // temporarily unavailable preferred connection still owns its slug.
     let mut candidates = Vec::new();
@@ -2272,11 +2307,19 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info =
-            match platform_credential_classification(&us, &catalog_map, providers, grants) {
-                Some(info) => info,
-                None => classify_credential(&us, &active_key_map, has_route),
-            };
+        let platform_principal = shared_principal
+            .map(|_| us.user_id.as_str())
+            .unwrap_or(&us.user_id);
+        let cred_info = match platform_credential_classification(
+            &us,
+            platform_principal,
+            &catalog_map,
+            providers,
+            grants,
+        ) {
+            Some(info) => info,
+            None => classify_credential(&us, &active_key_map, has_route),
+        };
         candidates.push(ResolvedUserService {
             service: us,
             effective_owner_id: user_id.to_string(),
@@ -2297,11 +2340,19 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info =
-            match platform_credential_classification(&us, &catalog_map, providers, grants) {
-                Some(info) => info,
-                None => classify_credential(&us, &active_key_map, has_route),
-            };
+        let platform_principal = shared_principal
+            .map(|_| us.user_id.as_str())
+            .unwrap_or(&us.user_id);
+        let cred_info = match platform_credential_classification(
+            &us,
+            platform_principal,
+            &catalog_map,
+            providers,
+            grants,
+        ) {
+            Some(info) => info,
+            None => classify_credential(&us, &active_key_map, has_route),
+        };
         candidates.push(ResolvedUserService {
             service: us,
             effective_owner_id: org_user_id,
@@ -2340,6 +2391,7 @@ struct CredentialClassification {
 /// credential. No-auth services are always executable.
 fn platform_credential_classification(
     service: &UserService,
+    principal: &str,
     catalogs: &HashMap<&str, &DownstreamService>,
     providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
     grants: &crate::services::platform_key_service::OwnerGrants,
@@ -2361,7 +2413,7 @@ fn platform_credential_classification(
                         .provider_config_id
                         .as_ref()
                         .and_then(|id| providers.get(id)),
-                    &service.user_id,
+                    principal,
                     grants,
                 )
         });
@@ -2454,6 +2506,9 @@ fn select_slug_winner_indices(
     service_scope: ServiceScope<'_>,
     actor: &str,
 ) -> HashSet<usize> {
+    if matches!(service_scope, ServiceScope::Organization { access } if access.shared().is_some()) {
+        return (0..candidates.len()).collect();
+    }
     let mut winners: HashMap<String, (usize, (usize, usize))> = HashMap::new();
     for (index, candidate) in candidates.iter().enumerate() {
         let priority = (
@@ -4702,22 +4757,36 @@ fn resolve_tool_target(
                 ));
             }
             McpToolSource::UserManaged {
-                user_service_id, ..
+                user_service_id,
+                catalog_service_id,
+                ..
             } => {
+                // Shared tools intentionally expose an exact connection alias
+                // (`shared_<user-service-id>`) so same-slug owner and actor
+                // connections cannot shadow one another.  That display slug
+                // is not the persisted UserService slug and must not be used
+                // as the route identity during execution.  The exact ID is
+                // already authoritative; retain the catalog check when one
+                // exists and only apply the slug check on ordinary MCP paths.
+                let shared = exec_ctx
+                    .org_agent_access
+                    .and_then(|access| access.shared())
+                    .is_some();
                 let mut resolution = proxy_service::resolve_proxy_target_by_user_service_id(
                     db,
                     encryption_keys,
                     user_id,
                     user_service_id,
-                    Some(&service.service_slug),
-                    None,
+                    (!shared).then_some(service.service_slug.as_str()),
+                    catalog_service_id.as_deref(),
                     proxy_service::ProxyExecutionContext::new(
                         Some(connection_expiry_notifier),
                         crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
                             config.platform_service_rate_limit_per_second,
                             config.platform_service_rate_limit_burst,
                         ),
-                    ),
+                    )
+                    .with_assistant_access(exec_ctx.org_agent_access),
                 )
                 .await?
                 .ok_or_else(|| {
@@ -4840,6 +4909,17 @@ fn resolve_tool_target(
                         billing_principal_user_id,
                         &resolution,
                     );
+                if exec_ctx
+                    .org_agent_access
+                    .is_some_and(|a| a.shared().is_some())
+                    && let McpToolSource::UserManaged {
+                        effective_owner_id, ..
+                    } = &service.source
+                {
+                    billing_context_builder
+                        .effective_owner_id
+                        .clone_from(effective_owner_id);
+                }
                 if agent_override {
                     billing_context_builder.credential_class_override =
                         Some(CredentialClass::AgentOverrideUserOwned);
@@ -5884,6 +5964,7 @@ async fn execute_tool_resolved_inner(
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
             .build(
+                exec_ctx.org_agent_access,
                 billing.as_ref(),
                 user_id,
                 billing_principal_user_id,
@@ -5930,6 +6011,7 @@ async fn execute_tool_resolved_inner(
             &billing_ctx.billing_request_id,
             billing_ctx.credential_class,
         );
+        request_audit.assistant(assistant_chat.as_ref());
         if super::telnyx_platform_service::contract(&target.service).is_some() {
             if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
                 return Err(AppError::BadRequest(
@@ -14212,6 +14294,7 @@ mod tests {
             let ctx =
                 McpBillingRouteContextBuilder::from_user_service_resolution("actor", &resolution)
                     .build(
+                        None,
                         &billing,
                         "actor",
                         "actor",
@@ -14244,6 +14327,7 @@ mod tests {
         let billing_ctx =
             McpBillingRouteContextBuilder::from_user_service_resolution("actor", &resolution)
                 .build(
+                    None,
                     &billing,
                     "actor",
                     "actor",
@@ -14295,6 +14379,7 @@ mod tests {
             &resolution,
         )
         .build(
+            None,
             &billing,
             &actor_user_id,
             &actor_user_id,
@@ -14344,6 +14429,7 @@ mod tests {
             }
             let ctx = builder
                 .build(
+                    None,
                     &billing,
                     &actor_user_id,
                     &actor_user_id,
@@ -14382,6 +14468,7 @@ mod tests {
 
         let billing_ctx = McpBillingRouteContextBuilder::for_platform_service("owner")
             .build(
+                None,
                 &billing,
                 "service-account",
                 "owner",

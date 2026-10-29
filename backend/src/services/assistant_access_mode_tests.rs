@@ -3,14 +3,20 @@
 use super::{
     assistant_acknowledgement_service as acks,
     assistant_authority_tests::{Fixture, connected, orchestrator_fixture, ordinary_key},
-    assistant_settings_service as settings,
+    assistant_settings_service as settings, assistant_team_service as team,
+    feature_flag_service as flags, shared_agent_service as sharing,
 };
 use crate::models::{
     assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
+    assistant_agent::GuestAccess,
     assistant_settings::AccessMode,
+    assistant_sharing::{ShareRole, ShareSubject},
+    user::UserType,
 };
+use crate::test_utils::test_user;
 use mongodb::bson::{self, doc};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 async fn set_mode(f: &Fixture, mode: AccessMode) {
     settings::update(
@@ -54,6 +60,85 @@ async fn allow(f: &Fixture, refusal: &Value) -> String {
         .await
         .unwrap();
     id
+}
+
+fn email_audience(email: &str) -> Value {
+    json!({"subject_kind": "person", "email": email, "role": "user"})
+}
+
+async fn sharing_agent(f: &Fixture) -> (String, String, String) {
+    flags::set_platform_override(
+        &f.state.db,
+        sharing::FLAG,
+        &flags::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let outsider = Uuid::new_v4().to_string();
+    let mut user = test_user(&outsider, UserType::Person);
+    user.display_name = Some("Alice Example".into());
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(user)
+        .await
+        .unwrap();
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "shared-calendar",
+        "https://calendar.example",
+    )
+    .await;
+    let (agent, _) = team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "shared-researcher".into(),
+            description: "Shared researcher".into(),
+            display_name: Some("Team Researcher".into()),
+            persona: None,
+            targets: team::GrantTargets {
+                service_ids: vec![service.clone()],
+                ..Default::default()
+            },
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    sharing::update(
+        &f.state.db,
+        &f.owner,
+        &agent.id,
+        sharing::SharingUpdate {
+            expected_version: 0,
+            enabled: true,
+            audience: Vec::new(),
+            shared_access: Default::default(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    (agent.id, outsider, service)
 }
 
 #[tokio::test]
@@ -134,6 +219,218 @@ async fn account_tools_follow_each_access_mode_with_risk_on_the_card() {
         .unwrap();
     assert_eq!(card.confirmation.unwrap().risk, "change");
     assert_eq!(card.summary, "Disable connected service 'matrix'");
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sharing_delegation_floor_requires_owner_card_in_every_mode() {
+    let f = orchestrator_fixture("mode_sharing_delegation_floor").await;
+    for mode in [
+        AccessMode::Autopilot,
+        AccessMode::Nyxmode,
+        AccessMode::AskEveryTime,
+    ] {
+        set_mode(&f, mode).await;
+        let gate = acks::confirmation_needed(
+            &f.state.db,
+            &f.chat,
+            acks::ActionFacts::delegation(acks::OwnerActionClass::Sensitive),
+            false,
+        )
+        .await
+        .unwrap();
+        let need = gate.ask().expect("delegation always asks");
+        assert!(need.delegation);
+        assert_eq!(need.mode, Some(mode));
+        assert!(gate.auto_allowed().is_none());
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sharing_widening_cards_bind_policy_while_full_access_narrowing_stays_automatic() {
+    let f = orchestrator_fixture("mode_sharing_widening").await;
+    let (agent, alice, service) = sharing_agent(&f).await;
+    let widening = |expected_version: i64, audience: Value| {
+        json!({
+            "agent": agent.clone(),
+            "sharing": {
+                "expected_version": expected_version,
+                "enabled": true,
+                "audience": audience,
+                "shared_access": {service.clone(): "all"}
+            }
+        })
+    };
+    let alice_audience = json!([{
+        "subject_kind": "person",
+        "email": format!("{}@example.com", alice),
+        "role": "user"
+    }]);
+
+    // Full access still raises a human card for account delegation.
+    set_mode(&f, AccessMode::Autopilot).await;
+    assert!(
+        flags::resolve_personal_features(&f.state.db, &f.owner)
+            .await
+            .unwrap()
+            .iter()
+            .any(|key| key == flags::NYXAGENT_ENGINE_FLAG_KEY)
+    );
+    let (card, is_error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__set_agent_sharing",
+        &widening(1, alice_audience.clone()),
+    )
+    .await;
+    assert!(is_error);
+    assert_eq!(card["error"], "acknowledgement_required", "card={card}");
+    assert!(
+        card["summary"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("{}@example.com", alice))
+    );
+    assert!(!card["summary"].as_str().unwrap().contains("Alice Example"));
+    assert!(
+        card["summary"]
+            .as_str()
+            .unwrap()
+            .contains("shared-calendar [new, level=all]")
+    );
+    let current_agent = team::agent(&f.state.db, &f.owner, &agent).await.unwrap();
+    assert_eq!(
+        sharing::policy(&f.state.db, &current_agent)
+            .await
+            .unwrap()
+            .version,
+        1
+    );
+    let card_id = allow(&f, &card).await;
+    let mut approved = widening(1, alice_audience.clone());
+    approved["acknowledgement_id"] = card_id.into();
+    crate::services::assistant_nyxagent::require_enabled(&f.state.db, &f.owner)
+        .await
+        .unwrap();
+    let (done, is_error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__set_agent_sharing",
+        &approved,
+    )
+    .await;
+    assert!(!is_error, "approved sharing returned {done}");
+    let current_agent = team::agent(&f.state.db, &f.owner, &agent).await.unwrap();
+    assert_eq!(
+        sharing::policy(&f.state.db, &current_agent)
+            .await
+            .unwrap()
+            .version,
+        2
+    );
+
+    // The card is bound to the old write version. A direct intervening save
+    // makes its retry a conflict and cannot replay the stale proposal.
+    let bob = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&bob, UserType::Person))
+        .await
+        .unwrap();
+    let stale_args = widening(
+        2,
+        json!([
+            {"subject_kind":"person", "subject_id": alice, "role":"user"},
+            {"subject_kind":"person", "email": format!("{}@example.com", bob), "role":"user"}
+        ]),
+    );
+    let (stale_card, stale_error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__set_agent_sharing",
+        &stale_args,
+    )
+    .await;
+    assert!(stale_error);
+    let stale_id = allow(&f, &stale_card).await;
+    sharing::update(
+        &f.state.db,
+        &f.owner,
+        &agent,
+        sharing::SharingUpdate {
+            expected_version: 2,
+            enabled: true,
+            audience: vec![
+                sharing::Audience {
+                    subject_kind: ShareSubject::Person,
+                    subject_id: alice.clone(),
+                    role: ShareRole::User,
+                },
+                serde_json::from_value(email_audience(&format!("{}@example.com", bob))).unwrap(),
+            ],
+            shared_access: [(service.clone(), GuestAccess::All)].into_iter().collect(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let mut stale_retry = stale_args;
+    stale_retry["acknowledgement_id"] = stale_id.into();
+    let (conflict, conflict_error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__set_agent_sharing",
+        &stale_retry,
+    )
+    .await;
+    assert!(conflict_error);
+    assert_eq!(conflict["error"], "conflict");
+
+    // Full-access narrowing remains the ordinary Sensitive auto-allow path.
+    let narrowing = json!({
+        "agent": agent,
+        "sharing": {
+            "expected_version": 3,
+            "enabled": false,
+            "audience": [],
+            "shared_access": {}
+        }
+    });
+    let (done, is_error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__set_agent_sharing",
+        &narrowing,
+    )
+    .await;
+    assert!(!is_error, "narrowing returned {done}");
+    let receipt = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find_one(doc! {"tool_name":"nyxid__set_agent_sharing", "status":"allowed", "decided_by":"access_mode"})
+        .await
+        .unwrap();
+    assert!(
+        receipt.is_some(),
+        "full-access narrowing should leave a receipt"
+    );
+
+    // Auto and Ask keep their existing Sensitive behavior for widening.
+    for mode in [AccessMode::Nyxmode, AccessMode::AskEveryTime] {
+        set_mode(&f, mode).await;
+        let (value, is_error) = crate::handlers::assistant_team::execute_tool(
+            &f.state,
+            &f.chat,
+            "nyxid__set_agent_sharing",
+            &widening(4, alice_audience.clone()),
+        )
+        .await;
+        assert!(is_error);
+        assert_eq!(value["error"], "acknowledgement_required");
+    }
     f.state.db.drop().await.unwrap();
 }
 

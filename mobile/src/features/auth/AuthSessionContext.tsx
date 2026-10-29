@@ -1,5 +1,7 @@
 import { createContext, PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
+import { useQueryClient } from "@tanstack/react-query";
+import { advanceAuthEpoch } from "../../lib/auth/authEpoch";
 import {
   clearStoredAuthSession,
   authSessionGeneration,
@@ -38,6 +40,7 @@ type AuthSessionContextValue = {
 const AuthSessionContext = createContext<AuthSessionContextValue | null>(null);
 
 export function AuthSessionProvider({ children }: PropsWithChildren) {
+  const queryClient = useQueryClient();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
   const isSigningOutRef = useRef(false);
@@ -45,6 +48,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   const performSignOut = useCallback(async () => {
     if (isSigningOutRef.current) return;
     isSigningOutRef.current = true;
+    advanceAuthEpoch();
     const expectedGeneration = authSessionGeneration();
     telemetryReset();
     try {
@@ -63,11 +67,14 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       telemetryReset();
       if (authSessionGeneration() !== expectedGeneration) return;
       await clearStoredAuthSession();
-      if (authSessionGeneration() === expectedGeneration + 1) setIsAuthenticated(false);
+      if (authSessionGeneration() === expectedGeneration + 1) {
+        queryClient.clear();
+        setIsAuthenticated(false);
+      }
     } finally {
       isSigningOutRef.current = false;
     }
-  }, []);
+  }, [queryClient]);
 
   // Register the HTTP-layer session invalidation hook so that a 401
   // after failed refresh triggers a full sign-out (React state + storage
@@ -165,6 +172,9 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
   const value = useMemo<AuthSessionContextValue>(() => {
     const signInWithSession = async (session: StoredAuthSession) => {
+      advanceAuthEpoch();
+      await queryClient.cancelQueries();
+      queryClient.clear();
       await persistAuthSession(session);
       const expectedGeneration = authSessionGeneration();
 
@@ -213,7 +223,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       signInWithSession,
       signOut: performSignOut,
     };
-  }, [isAuthenticated, isRestoring, performSignOut]);
+  }, [isAuthenticated, isRestoring, performSignOut, queryClient]);
 
   return <AuthSessionContext.Provider value={value}>{children}</AuthSessionContext.Provider>;
 }

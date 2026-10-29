@@ -33,6 +33,7 @@ import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { AccessModeSwitcher } from "@/components/assistant/nyxbot-access-controls";
 import { Button } from "@/components/ui/button";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
@@ -140,6 +141,7 @@ export function GroupMessageRow({
     parentId: groupId,
     messageId: message.id,
     initialVote: message.feedback?.vote,
+    initialComment: message.feedback?.comment,
   });
   if (message.role === "notice") {
     return (
@@ -162,10 +164,10 @@ export function GroupMessageRow({
   if (message.role === "user") {
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
-        <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
-          {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
+        <UserMessageBubble className="max-w-[78%]">
+          {message.author ? <p className="mb-1 text-11 font-medium">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
-            <p className="mb-1 text-11 text-muted-foreground">
+            <p className="mb-1 text-11">
               {recipientLine(message.recipient_agent_ids, members)}
             </p>
           ) : null}
@@ -184,7 +186,7 @@ export function GroupMessageRow({
               }}
             />
           ))}
-        </div>
+        </UserMessageBubble>
         <div className="flex items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
@@ -452,22 +454,22 @@ function GroupHeader({
   onOpenAgent,
   onOpenSettings,
 }: {
-  readonly group: AssistantGroup;
+  readonly group?: AssistantGroup;
   readonly onOpenAgent: (agentId: string) => void;
   readonly onOpenSettings: () => void;
 }) {
-  const lead = group.members.find(
+  const lead = group?.members.find(
     (member) => member.id === group.lead_agent_id,
   );
-  const working = group.working_agent_ids.length;
+  const working = group?.working_agent_ids.length ?? 0;
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <ThreadPanels>
       <div className="space-y-1.5">
         <HeaderBar>
-          <HeaderItem className="min-w-0">
+          <HeaderItem className="flex h-7 min-w-0 items-center">
             <h2 className={cn("truncate font-semibold text-foreground", compact ? "text-11" : "text-13")}>
-              {group.name}
+              {group?.name ?? "Loading group…"}
             </h2>
           </HeaderItem>
           <HeaderItem
@@ -476,7 +478,7 @@ function GroupHeader({
             className={cn("flex shrink-0 items-center", compact ? "gap-0.5" : "gap-1")}
           >
             <TooltipProvider delayDuration={200}>
-              {group.members.map((member) => (
+              {group?.members.map((member) => (
                 <MemberButton
                   key={member.id}
                   member={member}
@@ -495,7 +497,7 @@ function GroupHeader({
               {working} working
             </HeaderItem>
           ) : null}
-          <HeaderItem className="ml-auto">
+          {group ? <HeaderItem className="ml-auto">
             <Button
               size="sm"
               variant="ghost"
@@ -507,11 +509,11 @@ function GroupHeader({
               <Settings2 aria-hidden="true" />
               <span className={compact ? "sr-only" : undefined}>Settings</span>
             </Button>
-          </HeaderItem>
+          </HeaderItem> : null}
         </HeaderBar>
         {compact ? null : (
           <p className="text-11 text-text-tertiary">
-            {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.
+            {group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
           </p>
         )}
       </div>
@@ -789,6 +791,7 @@ export function NyxAgentGroupPage({
     <AssistantShell
       resizableContent
       title={group?.name ?? "Group"}
+      contentTitle
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
@@ -802,13 +805,15 @@ export function NyxAgentGroupPage({
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         <AssistantErrorNotice message={transcript.error ? `Could not open this group. ${transcript.error.message}` : requestError?.owner === user?.id ? requestError?.message : undefined} />
+        {group || !transcript.error ? (
+          <GroupHeader
+            group={group}
+            onOpenAgent={setDetailsAgentId}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+        ) : null}
         {group ? (
           <>
-            <GroupHeader
-              group={group}
-              onOpenAgent={setDetailsAgentId}
-              onOpenSettings={() => setSettingsOpen(true)}
-            />
             <AssistantLinkModalHost>
               <GroupTranscript
                 group={group}

@@ -265,6 +265,7 @@ impl AsyncContinuation {
             refusal: None,
             automatic: None,
             admission: Some(Admission {
+                shared_permit: None,
                 connection: connection.into(),
                 binding,
                 execution: Some(execution_digest(target)),

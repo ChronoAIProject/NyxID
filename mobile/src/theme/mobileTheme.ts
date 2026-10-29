@@ -1,7 +1,8 @@
 // NyxID design system tokens — mobile adaptation.
 //
 // Source of truth: DESIGN.md at repo root.
-// Web (Tailwind/CSS) and mobile (StyleSheet) share the same hex values.
+// Web and mobile share semantic roles; native text tones account for the
+// native base/card backgrounds and accessibility contrast.
 // Layout-only tokens that don't apply to mobile (sidebar widths, top-bar
 // height, right-panel width) are intentionally not represented here.
 
@@ -14,10 +15,12 @@
 export type ToneTriple = { bg: string; text: string; border: string };
 
 export type ThemeColors = {
+  sidebarBase: string;   // stationary sidebar behind the elevated content slab
   bg: string;            // main background (spec: base)
   card: string;          // elevated content (spec: surface/card)
-  cardSoft: string;      // darkest layer (spec: sidebar)
+  cardSoft: string;      // neutral inset surface
   border: string;        // default card borders + dividers
+  controlBorder: string; // essential control boundaries, at least 3:1
   borderSoft: string;    // subtle dividers within cards
   textPrimary: string;   // headings, important text (warm off-white)
   textSecondary: string; // body text, descriptions
@@ -58,6 +61,12 @@ export type ThemeColors = {
   fabBorder: string;
   overlayBg: string;
   handleBg: string;
+  sheetScrim: string;
+  /** Hairline on the drawer's rounded top edge, separating it from the dimmed chat. */
+  sheetEdge: string;
+  /** Filled chat composer surface and its faint outline. */
+  composerBg: string;
+  composerBorder: string;
   navActive: string;     // active nav row background — neutral white/black alpha, NEVER purple-tinted
   shadowColor: string;
   /**
@@ -81,10 +90,10 @@ const PRIMARY = "#9775fa";        // warm violet (NOT the AI-default Tailwind vi
 const PRIMARY_LIGHT = "#c4b5fd";  // logo wordmark, light text on accent
 const PRIMARY_DEEP = "#7c5ce0";   // pressed states
 
-// ── nyx-gradient-vivid (frontend/src/app.css: linear-gradient(to right, #A672FB 0%, #5E00F5 100%)) ──
-const GRADIENT_START = "#A672FB";
+// Native CTA gradient deepens the web light stop so white labels meet AA.
+const GRADIENT_START = "#8752CC";
 const GRADIENT_END = "#5E00F5";
-const GRADIENT_START_PRESSED = "#8C5AE0";
+const GRADIENT_START_PRESSED = "#7541BD";
 const GRADIENT_END_PRESSED = "#4A00C2";
 
 // ── Semantic status (DESIGN.md §Color → Semantic Status, dark theme hexes) ──
@@ -94,24 +103,26 @@ const DANGER_DARK = "#f87171";
 const INFO_DARK = "#60a5fa";
 
 // ── Semantic status — light theme equivalents (saturated for white surfaces) ──
-const SUCCESS_LIGHT = "#10B981";
-const WARNING_LIGHT = "#D97706";
-const DANGER_LIGHT = "#DC2626";
-const INFO_LIGHT = "#3B82F6";
+const SUCCESS_LIGHT = "#08734d";
+const WARNING_LIGHT = "#875300";
+const DANGER_LIGHT = "#b91c1c";
+const INFO_LIGHT = "#205ab4";
 
 export const darkColors: ThemeColors = {
-  // 3-layer depth — sidebar / base / surface
-  bg: "#07060e",
-  card: "#0c0b14",
-  cardSoft: "#06060b",
+  // Stationary sidebar is darker than the elevated content slab.
+  sidebarBase: "#0C0C0E",
+  bg: "#17171A",
+  card: "#222225",
+  cardSoft: "#1C1C1F",
   // Borders
-  border: "#1c1828",
-  borderSoft: "rgba(255, 255, 255, 0.05)",
+  border: "#414148",
+  controlBorder: "#80808A",
+  borderSoft: "rgba(255, 255, 255, 0.14)",
   // 4-level text hierarchy
-  textPrimary: "#e8e4f0",
-  textSecondary: "#9e96b0",
-  textMuted: "#7a7490",
-  textTertiary: "#4a4460",
+  textPrimary: "#EFEFF1",
+  textSecondary: "#BABAC1",
+  textMuted: "#95959F",
+  textTertiary: "#95959F",
   // Semantic
   success: SUCCESS_DARK,
   successSoft: "rgba(52, 211, 153, 0.18)",
@@ -119,11 +130,11 @@ export const darkColors: ThemeColors = {
   infoSoft: "rgba(96, 165, 250, 0.18)",
   warning: WARNING_DARK,
   warningSoft: "rgba(245, 158, 11, 0.18)",
-  danger: DANGER_DARK,
+  danger: "#FCA5A5",
   dangerSoft: "#fca5a5",
   dangerSoftBg: "rgba(248, 113, 113, 0.10)",
   // Brand
-  primary: PRIMARY,
+  primary: "#C6B3FC",
   primaryDim: PRIMARY_DEEP,
   primaryLight: PRIMARY_LIGHT,
   primaryGlow: "rgba(151, 117, 250, 0.12)",
@@ -135,11 +146,15 @@ export const darkColors: ThemeColors = {
   gradientEndPressed: GRADIENT_END_PRESSED,
   onPrimary: "#FFFFFF",
   // Ghost / interactive chrome — DESIGN.md: neutral white-alpha, NOT purple-tinted.
-  ghostBg: "rgba(255, 255, 255, 0.03)",
-  ghostText: "#e8e4f0",
-  fabBg: "rgba(7, 6, 14, 1)",
+  ghostBg: "rgba(255, 255, 255, 0.05)",
+  ghostText: "#EFEFF1",
+  fabBg: "#17171A",
   fabBorder: "rgba(151, 117, 250, 0.35)",
   overlayBg: "#000",
+  sheetScrim: "rgba(0,0,0,0.5)",
+  sheetEdge: "rgba(255, 255, 255, 0.16)",
+  composerBg: "#2C2C30",
+  composerBorder: "rgba(255, 255, 255, 0.06)",
   handleBg: "rgba(255, 255, 255, 0.15)",
   // DESIGN.md §Usage Rules: "Hover stays neutral (bg-white/[0.03] / bg-white/[0.06])".
   navActive: "rgba(255, 255, 255, 0.06)",
@@ -156,15 +171,17 @@ export const darkColors: ThemeColors = {
 };
 
 export const lightColors: ThemeColors = {
-  bg: "#F8F7FC",
+  sidebarBase: "#F4F4F5",
+  bg: "#FFFFFF",
   card: "#FFFFFF",
-  cardSoft: "#F3F2F8",
-  border: "#DDD9E8",
-  borderSoft: "#ECEAF3",
-  textPrimary: "#1A1730",
-  textSecondary: "#5E5875",
-  textMuted: "#8F88AB",
-  textTertiary: "#A8A0BC",
+  cardSoft: "#FFFFFF",
+  border: "#C4C4CA",
+  controlBorder: "#85858D",
+  borderSoft: "rgba(0, 0, 0, 0.20)",
+  textPrimary: "#18181B",
+  textSecondary: "#3F3F46",
+  textMuted: "#5B5B63",
+  textTertiary: "#5B5B63",
   success: SUCCESS_LIGHT,
   successSoft: "rgba(16, 185, 129, 0.18)",
   info: INFO_LIGHT,
@@ -174,36 +191,63 @@ export const lightColors: ThemeColors = {
   danger: DANGER_LIGHT,
   dangerSoft: DANGER_LIGHT,
   dangerSoftBg: "rgba(220, 38, 38, 0.06)",
-  primary: PRIMARY,
-  primaryDim: PRIMARY_DEEP,
+  primary: "#7049C6",
+  primaryDim: "#6240B0",
   primaryLight: PRIMARY_LIGHT,
   primaryGlow: "rgba(151, 117, 250, 0.08)",
-  // On light, use the saturated brand purple as text — the pale wordmark hex
-  // disappears on a white card behind a 15% purple tint.
-  primaryOnTint: PRIMARY,
+  // Native light text deepens the brand hue to meet AA on white and tints.
+  primaryOnTint: "#6d45b5",
   gradientStart: GRADIENT_START,
   gradientEnd: GRADIENT_END,
   gradientStartPressed: GRADIENT_START_PRESSED,
   gradientEndPressed: GRADIENT_END_PRESSED,
   onPrimary: "#FFFFFF",
-  ghostBg: "rgba(0, 0, 0, 0.03)",
-  ghostText: PRIMARY,
-  fabBg: "rgba(80, 78, 93, 1)",
+  ghostBg: "rgba(0, 0, 0, 0.035)",
+  ghostText: "#6d45b5",
+  fabBg: "#3F3F46",
   fabBorder: "rgba(151, 117, 250, 0.35)",
   overlayBg: "rgba(0, 0, 0, 0.3)",
+  sheetScrim: "rgba(0,0,0,0.24)",
+  sheetEdge: "rgba(0, 0, 0, 0.20)",
+  composerBg: "#FFFFFF",
+  composerBorder: "#C4C4CA",
   handleBg: "rgba(0, 0, 0, 0.12)",
   // DESIGN.md §Usage Rules: idle/hover stays neutral. Light-mode = black-alpha,
   // matching the web pattern of `bg-black/[0.06]` on hover surfaces.
   navActive: "rgba(0, 0, 0, 0.06)",
-  shadowColor: "rgba(30, 20, 60, 0.15)",
+  shadowColor: "rgba(0, 0, 0, 0.15)",
   successTone: { bg: "rgba(16, 185, 129, 0.10)", text: SUCCESS_LIGHT, border: "rgba(16, 185, 129, 0.30)" },
   warningTone: { bg: "rgba(217, 119, 6, 0.10)",  text: WARNING_LIGHT, border: "rgba(217, 119, 6, 0.30)" },
   dangerTone:  { bg: "rgba(220, 38, 38, 0.08)",  text: DANGER_LIGHT,  border: "rgba(220, 38, 38, 0.25)" },
   infoTone:    { bg: "rgba(59, 130, 246, 0.10)", text: INFO_LIGHT,    border: "rgba(59, 130, 246, 0.30)" },
-  primaryTone: { bg: "rgba(151, 117, 250, 0.12)", text: PRIMARY, border: "rgba(151, 117, 250, 0.30)" },
+  primaryTone: { bg: "rgba(151, 117, 250, 0.12)", text: "#6d45b5", border: "rgba(151, 117, 250, 0.30)" },
   riskHigh:   { bg: "rgba(220, 38, 38, 0.08)",  text: DANGER_LIGHT,  border: "rgba(220, 38, 38, 0.20)" },
   riskMedium: { bg: "rgba(217, 119, 6, 0.08)",  text: WARNING_LIGHT, border: "rgba(217, 119, 6, 0.20)" },
   riskLow:    { bg: "rgba(16, 185, 129, 0.08)", text: SUCCESS_LIGHT, border: "rgba(16, 185, 129, 0.20)" },
+};
+
+/**
+ * Drawer palette: one elevation above the chat it covers. Dark mode cannot rely
+ * on the scrim because the chat is already near-black, so the drawer surface,
+ * its cards and its quieter text tones all step up together.
+ */
+export const darkSheetColors: ThemeColors = {
+  ...darkColors,
+  bg: "#1C1C1F",
+  card: "#222225",
+  cardSoft: "#2C2C30",
+  border: "#414148",
+  borderSoft: "rgba(255, 255, 255, 0.07)",
+  textMuted: "#A0A0A9",
+  textTertiary: "#A0A0A9",
+  navActive: "rgba(255, 255, 255, 0.08)",
+};
+
+export const lightSheetColors: ThemeColors = {
+  ...lightColors,
+  bg: "#FFFFFF",
+  card: "#F4F4F5",
+  cardSoft: "#FFFFFF",
 };
 
 /** @deprecated Use `useTheme()` from ThemeContext instead. */

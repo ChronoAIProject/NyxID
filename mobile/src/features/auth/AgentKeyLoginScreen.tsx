@@ -1,5 +1,6 @@
 import { useMfaStepUp } from "./useMfaStepUp";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import {
   KeyboardAvoidingView,
   Platform,
@@ -10,13 +11,18 @@ import {
   View,
 } from "react-native";
 import { ChevronLeft } from "lucide-react-native";
-import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import type { RootStackParamList } from "../../app/AppNavigator";
+import type { SheetScreenProps } from "../../app/navigationTypes";
+import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { PrimaryButton } from "../../components/PrimaryButton";
+import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSelectionField";
 import { useTheme } from "../../theme/ThemeContext";
 import { agentKeyLoginApi } from "../../lib/api/agentKeyLoginApi";
-import { loginCodeApi, type IssuedLoginCode, type LoginCodeGrant } from "../../lib/api/loginCodeApi";
+import {
+  loginCodeApi,
+  type IssuedLoginCode,
+  type LoginCodeGrant,
+} from "../../lib/api/loginCodeApi";
 import { LoginCodeStatusView } from "./LoginCodeStatusView";
 import {
   agentKeyApproveSchema,
@@ -53,7 +59,7 @@ import {
   permissionRows,
 } from "./agentKeyLoginModel";
 
-type Props = NativeStackScreenProps<RootStackParamList, "AgentKeyLogin">;
+type Props = SheetScreenProps<"AgentKeyLogin">;
 type Step =
   | "code"
   | "review"
@@ -66,10 +72,14 @@ type Step =
   | "expired";
 
 export function AgentKeyLoginScreen({ navigation, route }: Props) {
+  const inWorkspaceSheet = Boolean(useWorkspaceSheet());
   const flow = route.params?.flow ?? "agent-key";
   const mint = route.params?.mint ?? false;
   const [issued, setIssued] = useState<IssuedLoginCode | null>(null);
-  const clearIssuedCode = useCallback(() => setIssued((value) => value?.code ? { ...value, code: "" } : value), []);
+  const clearIssuedCode = useCallback(
+    () => setIssued((value) => (value?.code ? { ...value, code: "" } : value)),
+    [],
+  );
   const { colors } = useTheme();
   const styles = useMemo(() => createDeviceLoginStyles(colors), [colors]);
   const { isAuthenticated } = useAuthSession();
@@ -88,14 +98,25 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
   const [now, setNow] = useState(Date.now);
   const [pending, setPending] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const stepUp = useMfaStepUp(
+    `${flow}:${mint}:${code}:${isAuthenticated}:${step}`,
+  );
+  useWorkspaceBack({
+    active: inWorkspaceSheet && scanning,
+    disabled: pending || stepUp.busy,
+    defaultRole: "back",
+    options: { headerShown: inWorkspaceSheet },
+    label: "Back to login",
+    onBack: () => setScanning(false),
+  });
   const [error, setError] = useState<string | null>(null);
-  const stepUp = useMfaStepUp(`${flow}:${mint}:${code}:${isAuthenticated}:${step}`);
   const lastAction = useRef(0);
   const generation = useRef(0);
-  const previousMode = useRef({flow, mint});
+  const previousMode = useRef({ flow, mint });
   useEffect(() => {
-    const modeChanged = previousMode.current.flow !== flow || previousMode.current.mint !== mint;
-    previousMode.current = {flow, mint};
+    const modeChanged =
+      previousMode.current.flow !== flow || previousMode.current.mint !== mint;
+    previousMode.current = { flow, mint };
     if (route.params?.user_code === undefined && !modeChanged) return;
     generation.current += 1;
     setIssued(null);
@@ -113,7 +134,12 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       generation.current += 1;
     };
   }, [route.params?.user_code, flow, mint]);
-  useEffect(() => () => { generation.current += 1; }, []);
+  useEffect(
+    () => () => {
+      generation.current += 1;
+    },
+    [],
+  );
   const remaining =
     deadline === null ? null : secondsUntilDeviceLoginDeadline(deadline, now);
   const expired = remaining === 0;
@@ -142,7 +168,8 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     return () => clearInterval(timer);
   }, [deadline, pending, finish]);
   async function act(action: () => Promise<void>, verifiedRetry = false) {
-    if (pending || (!verifiedRetry && Date.now() - lastAction.current < 750)) return;
+    if (pending || (!verifiedRetry && Date.now() - lastAction.current < 750))
+      return;
     lastAction.current = Date.now();
     setPending(true);
     setError(null);
@@ -177,7 +204,9 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
   async function loadOptions() {
     if (expired) return;
     const current = generation.current;
-    const result = mint ? await loginCodeApi.options() : await agentKeyLoginApi.options(code, flow);
+    const result = mint
+      ? await loginCodeApi.options()
+      : await agentKeyLoginApi.options(code, flow);
     if (current === generation.current) {
       setOptions(result);
       setStep("options");
@@ -187,8 +216,14 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     if (expired) return;
     const current = generation.current;
     if (mint) {
-      if (accept && selection) await createCode({auth_kind: "agent_key", selection,
-        ...(credentialExpiry ? {credential_expires_at: credentialExpiry} : {})});
+      if (accept && selection)
+        await createCode({
+          auth_kind: "agent_key",
+          selection,
+          ...(credentialExpiry
+            ? { credential_expires_at: credentialExpiry }
+            : {}),
+        });
       else setStep("review");
       return;
     }
@@ -215,13 +250,19 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     const result = await loginCodeApi.mint(grant);
     if (current === generation.current) setIssued(result);
   }
-  const back = () =>
-    navigation.canGoBack()
-      ? navigation.goBack()
-      : navigation.navigate(isAuthenticated ? "Activity" : "Auth");
+  const back = () => {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else if (isAuthenticated) {
+      navigation.dispatch(workspaceNavigateAction("Activity"));
+    } else {
+      navigation.navigate("Auth");
+    }
+  };
   if (scanning)
     return (
       <DeviceCodeScanner
+        showHeader={!inWorkspaceSheet}
         onCancel={() => setScanning(false)}
         onManualEntry={() => setScanning(false)}
         onCode={(value, kind) => {
@@ -257,7 +298,21 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       )
     : null;
   if (stepUp.prompt) {
-    return <ScreenContainer><ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">{stepUp.prompt}</ScrollView></ScreenContainer>;
+    return (
+      <ScreenContainer>
+        <KeyboardAvoidingView
+          style={styles.fill}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <ScrollView
+            contentContainerStyle={styles.content}
+            keyboardShouldPersistTaps="handled"
+          >
+            {stepUp.prompt}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </ScreenContainer>
+    );
   }
   return (
     <ScreenContainer>
@@ -269,20 +324,35 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
           contentContainerStyle={[styles.content, { gap: 16 }]}
           keyboardShouldPersistTaps="handled"
         >
-          <View style={styles.screenHeader}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Back"
-              onPress={back}
-              style={styles.headerBackButton}
-            >
-              <ChevronLeft size={24} color={colors.textPrimary} />
-            </Pressable>
-            <Text style={styles.title}>{mint ? "One-time login code" : "Agent Key login"}</Text>
-          </View>
-          {issued ? <LoginCodeStatusView issued={issued} onClearCode={clearIssuedCode} onNew={() => {
-            setIssued(null); setStep("review"); setSelection(null); setSummary(null); setOptions(null); setCredentialExpiry("");
-          }} /> : terminal ? (
+          {!inWorkspaceSheet && (
+            <View style={styles.screenHeader}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Back"
+                onPress={back}
+                style={styles.headerBackButton}
+              >
+                <ChevronLeft size={24} color={colors.textPrimary} />
+              </Pressable>
+              <Text style={styles.title}>
+                {mint ? "One-time login code" : "Agent Key login"}
+              </Text>
+            </View>
+          )}
+          {issued ? (
+            <LoginCodeStatusView
+              issued={issued}
+              onClearCode={clearIssuedCode}
+              onNew={() => {
+                setIssued(null);
+                setStep("review");
+                setSelection(null);
+                setSummary(null);
+                setOptions(null);
+                setCredentialExpiry("");
+              }}
+            />
+          ) : terminal ? (
             <View style={styles.inputSection}>
               <Text style={styles.terminalTitle}>
                 {step === "approved"
@@ -332,7 +402,8 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     styles={styles}
                   />
                   <Text style={styles.cautionText}>
-                    Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match.
+                    Confirm this matches the code shown on the requesting device
+                    or terminal. Reject if it does not match.
                   </Text>
                   {origin && (
                     <DetailRow
@@ -387,7 +458,10 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                 </Text>
               )}
               {step === "review" &&
-                (isAuthenticated && (mint || flow === "agent-key" || preview?.supports_grant_choice === true) ? (
+                (isAuthenticated &&
+                (mint ||
+                  flow === "agent-key" ||
+                  preview?.supports_grant_choice === true) ? (
                   <PrimaryButton
                     label="Choose an Agent Key"
                     disabled={pending || expired}
@@ -398,39 +472,85 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     label="Sign in on this phone"
                     onPress={() => navigation.navigate("Auth")}
                   />
-                ) : <PrimaryButton label="Review account login" onPress={() => navigation.navigate("DeviceLogin", {user_code: code})} />)}
-              {mint && step === "review" && isAuthenticated && <>
-                <Text style={styles.cautionText}>Anyone with this code can redeem the selected access once, within five minutes. Restricted Agent Key access is recommended.</Text>
-                <PrimaryButton label="Full account session" kind="ghost" disabled={pending} onPress={() => setStep("account")} />
-              </>}
-              {step === "account" && <View style={styles.inputSection}>
-                <Text style={styles.inputLabel}>Confirm full account access</Text>
-                <Text style={styles.cautionText}>This code grants access to your account, services, credentials, and organization permissions. The session can refresh until it expires or you revoke it.</Text>
-                <PrimaryButton label="Generate account login code" disabled={pending} onPress={() => void act(() => createCode({auth_kind: "account_session"}))} />
-                <PrimaryButton label="Back" kind="ghost" disabled={pending} onPress={() => setStep("review")} />
-              </View>}
+                ) : (
+                  <PrimaryButton
+                    label="Review account login"
+                    onPress={() =>
+                      navigation.navigate("DeviceLogin", { user_code: code })
+                    }
+                  />
+                ))}
+              {mint && step === "review" && isAuthenticated && (
+                <>
+                  <Text style={styles.cautionText}>
+                    Anyone with this code can redeem the selected access once,
+                    within five minutes. Restricted Agent Key access is
+                    recommended.
+                  </Text>
+                  <PrimaryButton
+                    label="Full account session"
+                    kind="ghost"
+                    disabled={pending}
+                    onPress={() => setStep("account")}
+                  />
+                </>
+              )}
+              {step === "account" && (
+                <View style={styles.inputSection}>
+                  <Text style={styles.inputLabel}>
+                    Confirm full account access
+                  </Text>
+                  <Text style={styles.cautionText}>
+                    This code grants access to your account, services,
+                    credentials, and organization permissions. The session can
+                    refresh until it expires or you revoke it.
+                  </Text>
+                  <PrimaryButton
+                    label="Generate account login code"
+                    disabled={pending}
+                    onPress={() =>
+                      void act(() =>
+                        createCode({ auth_kind: "account_session" }),
+                      )
+                    }
+                  />
+                  <PrimaryButton
+                    label="Back"
+                    kind="ghost"
+                    disabled={pending}
+                    onPress={() => setStep("review")}
+                  />
+                </View>
+              )}
               {step === "options" && options && (
                 <View style={styles.inputSection}>
-                  {options.keys.map((key) => (
-                    <View key={key.id} style={styles.inputSection}>
-                      {permissions(key)}
-                      <PrimaryButton
-                        label={`Choose ${key.name}`}
-                        kind="ghost"
-                        disabled={pending || expired}
-                        onPress={() =>
-                          void act(async () => {
-                            setSelection({
-                              kind: "existing",
-                              api_key_id: key.id,
-                            });
-                            setSummary(key);
-                            setStep("confirm");
-                          })
-                        }
-                      />
-                    </View>
-                  ))}
+                  <WorkspaceSelectionField
+                    label="Agent Key"
+                    title="Choose an Agent Key"
+                    description="Choose a key to review its full effective permissions before approving."
+                    placeholder="Select an existing key"
+                    confirmLabel="Review permissions"
+                    options={options.keys.map((key) => ({
+                      value: key.id,
+                      label: key.name,
+                      description: `${key.owner_name} · ${key.scopes} · ${key.key_prefix}${key.expires_at ? ` · Expires ${new Date(key.expires_at).toLocaleDateString()}` : " · No expiry"}`,
+                      searchText: `${key.id} ${key.owner_id} ${key.platform ?? ""}`,
+                    }))}
+                    value={[]}
+                    summary={
+                      selection?.kind === "existing" ? summary?.name : undefined
+                    }
+                    disabled={pending || expired}
+                    scopeKey={`${flow}:${mint}:${code}`}
+                    onChange={([id]) => {
+                      if (pending || expired) return;
+                      const key = options.keys.find((item) => item.id === id);
+                      if (!key) return;
+                      setSelection({ kind: "existing", api_key_id: key.id });
+                      setSummary(key);
+                      setStep("confirm");
+                    }}
+                  />
                   <PrimaryButton
                     label="Create a new key"
                     disabled={pending || expired}

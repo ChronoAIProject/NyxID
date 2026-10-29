@@ -10,6 +10,8 @@ import type {
 
 const post = vi.fn();
 let group: AssistantGroup;
+let groupLoaded = true;
+let groupError: Error | null = null;
 
 vi.mock("@/components/assistant/blocks/tool-image", () => ({
   ToolImage: ({ image }: { image: { endpoint: string; label: string } }) => (
@@ -30,15 +32,15 @@ vi.mock("@/hooks/use-approvals", () => ({
 }));
 vi.mock("@/hooks/use-nyxbot-groups", () => ({
   useNyxBotGroupMessages: () => ({
-    data: { group, messages: [], pending_actions: [], before_seq: null },
-    error: null,
+    data: groupLoaded ? { group, messages: [], pending_actions: [], before_seq: null } : undefined,
+    error: groupError,
     post: { mutateAsync: post, isPending: false },
     refetch: vi.fn(),
     loadOlder: vi.fn(),
   }),
 }));
 vi.mock("@/components/assistant/assistant-shell", () => ({
-  AssistantShell: ({ children }: { children: ReactNode }) => <>{children}</>,
+  AssistantShell: ({ children, contentTitle }: { children: ReactNode; contentTitle?: boolean }) => <main data-content-title={Boolean(contentTitle)}>{children}</main>,
 }));
 vi.mock("@/components/assistant/assistant-link-modals", () => ({
   AssistantLinkModalHost: ({ children }: { children: ReactNode }) => (
@@ -141,9 +143,36 @@ async function send() {
 
 describe("group recipient pills", () => {
   beforeEach(() => {
+    groupLoaded = true;
+    groupError = null;
     post.mockReset();
     post.mockResolvedValue({});
     group = makeGroup([NYXBOT]);
+  });
+
+  it("replaces the loading group header with recovery when loading fails", () => {
+    groupLoaded = false;
+    groupError = new Error("Group is unavailable");
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not open this group");
+    expect(screen.getByRole("button", { name: "Back to home" })).toBeVisible();
+    expect(screen.queryByText("Loading group…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading members…")).not.toBeInTheDocument();
+  });
+
+  it("keeps one group header while its identity loads", () => {
+    groupLoaded = false;
+    const view = render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
+    const panels = view.container.querySelector("[data-chat-thread-panels]");
+    expect(panels).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Loading group…" })).toBeVisible();
+    groupLoaded = true;
+    view.rerender(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(view.container.querySelectorAll("[data-chat-thread-panels]")).toHaveLength(1);
+    expect(view.container.querySelector("[data-chat-thread-panels]")).toBe(panels);
+    expect(screen.getByRole("heading", { name: "Launch" })).toBeVisible();
+    expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
   });
 
   it("seeds the pills from the group's default recipients on load", () => {
@@ -286,6 +315,7 @@ describe("delivered message recipients", () => {
     expect(
       screen.getByText("to researcher, retired, a removed agent"),
     ).toBeInTheDocument();
+    expect(screen.getByText("to researcher, retired, a removed agent").parentElement).toHaveClass("bg-chat-bubble", "text-chat-bubble-foreground");
     expect(screen.queryByText(new RegExp(RESEARCHER))).toBeNull();
   });
 });

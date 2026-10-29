@@ -21,3 +21,7 @@ credentials/*
 ios/build/
 ios/Pods/
 ios/.xcode.env.local
+
+# Local manual QA reports, screenshots and verification artifacts
+/docs/RN_*_QA.md
+/docs/qa/

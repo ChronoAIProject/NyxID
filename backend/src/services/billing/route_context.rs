@@ -506,6 +506,48 @@ mod tests {
     }
 
     #[test]
+    fn shared_recipient_never_uses_guest_owner_payer_override() {
+        use crate::services::assistant_acknowledgement_service::ChatAuthority;
+        let chat = ChatAuthority {
+            channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
+            platform_thread: false,
+            platform_origin: None,
+            org_agent_access: None,
+            turn_id: Some("turn".into()),
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "thread".into(),
+            user_id: "recipient-1".into(),
+            api_key_id: "api-key-1".into(),
+            role: crate::models::assistant_conversation::AgentRole::Subagent,
+            agent_id: "agent".into(),
+            agent_name: "specialist".into(),
+            guest: false,
+            confirmation_policy: None,
+            report_to: None,
+            with_nyxbot: false,
+        };
+        for ingress in [
+            BillingIngress::Proxy,
+            BillingIngress::LlmGateway,
+            BillingIngress::LlmProvider,
+            BillingIngress::Mcp,
+        ] {
+            let mut context = context_for(CredentialClass::UserOwned);
+            context.ingress = ingress;
+            assert_eq!(
+                context.with_assistant_payer(Some(&chat)).billing_owner_id,
+                "owner-1",
+                "shared recipients must use the resolver's caller payer"
+            );
+        }
+    }
+
+    #[test]
     fn nyxbot_provenance_uses_trusted_context_and_keeps_orchestration_separate() {
         for (verified, parent, execution, expected) in [
             (true, false, true, "model"),

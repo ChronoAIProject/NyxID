@@ -20,16 +20,62 @@ pub async fn bind_in_session(
 ) -> AppResult<()> {
     let bound = db
         .collection::<bson::Document>(EVENTS)
-        .update_one(
-            doc! {"_id": event, "user_id": owner, "status": {"$in": ["running", "resuming", "queued"]},
-            "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1},
-            doc! {"$set": {"conversation_id": conversation, "turn_id": turn}},
+        .find_one_and_update(
+            doc! {"_id":event,"user_id":owner,"status":{"$in":["running","resuming","queued"]},
+            "turn_id":bson::Bson::Null,"media.interrupted":{"$ne":true},"delivery.version":1},
+            doc! {"$set":{"conversation_id":conversation,"turn_id":turn}},
         )
-        .session(session)
-        .await?;
-    if bound.matched_count != 1 {
-        return Err(AppError::Conflict("Channel event already admitted".into()));
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
+    let replay = bound
+        .get_document("delivery")
+        .ok()
+        .and_then(|d| d.get_str("state").ok())
+        == Some("replay");
+    bind_response(db, session, event, owner, conversation, replay).await
+}
+
+async fn bind_response(
+    db: &Database,
+    session: &mut ClientSession,
+    event: &str,
+    owner: &str,
+    conversation: &str,
+    replay: bool,
+) -> AppResult<()> {
+    if !replay {
+        return Ok(());
     }
+    use crate::models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse};
+    let response = db
+        .collection::<GatewayResponse>(RESPONSES)
+        .find_one(doc! {"event_key":event,"user_id":owner,
+        "terminal":false,"expires_at":{"$gt":bson::DateTime::now()}})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Native response authority changed".into()))?;
+    let live = db
+        .collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&response.channel_id,"user_id":owner,"binding_id":&response.binding_id,
+            "transport":"gateway","status":"active","gateway_native_phase":"ready"},
+            doc! {"$inc":{"native_admission_revision":1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if live.matched_count != 1 {
+        return Err(AppError::Forbidden(
+            "Native source authority changed".into(),
+        ));
+    }
+    db.collection::<GatewayResponse>(RESPONSES)
+        .update_one(
+            doc! {"_id":&response.id},
+            doc! {"$set":{"conversation_id":conversation}},
+        )
+        .session(&mut *session)
+        .await?;
     Ok(())
 }
 
@@ -249,6 +295,12 @@ pub(crate) async fn enqueue_in_session(
         super::channel_thread_follow_service::admit_turn(db, owner, origin, conversation, session)
             .await?;
     }
+    let replay = db
+        .collection::<bson::Document>(EVENTS)
+        .find_one(doc! {"_id":&source,"delivery.state":"replay"})
+        .session(&mut *session)
+        .await?
+        .is_some();
     let accepted = db
         .collection::<bson::Document>(EVENTS)
         .update_one(
@@ -257,13 +309,14 @@ pub(crate) async fn enqueue_in_session(
                 "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1,
             },
             doc! {"$set": {"status": "queued", "conversation_id": &conversation,
-            "turn_id": bson::Bson::Null, "delivery.state": "pending"}},
+            "turn_id": bson::Bson::Null, "delivery.state": if replay {"replay"} else {"pending"}}},
         )
         .session(&mut *session)
         .await?;
     if accepted.matched_count != 1 {
         return Err(AppError::Conflict("Channel event already admitted".into()));
     }
+    bind_response(db, session, &source, owner, conversation, replay).await?;
     // Validate the source while it is queued/unbound in this
     // transaction, before binding a coalesced active destination.
     if queued_origin_in_session(db, owner, conversation, &source, session)
@@ -327,7 +380,7 @@ pub async fn queued_origin_in_session(
         .find_one(doc! {
             "_id": source, "user_id": owner, "conversation_id": conversation,
             "status": "queued", "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1,
-            "delivery.guest": false, "delivery.state": "pending",
+            "delivery.guest": false, "delivery.state": {"$in":["pending","replay"]},
             "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())},
         })
         .session(&mut *session)
@@ -624,7 +677,18 @@ async fn target_in_session(
     else {
         return Ok(None);
     };
-    let own_chat = row.channel.as_ref() == Some(origin);
+    let own_chat = row.channel.as_ref().is_some_and(|saved| {
+        saved == origin
+            || (super::nyxbot_gateway_source::ready(&channel)
+                && saved.nyxbot_channel_id == origin.nyxbot_channel_id
+                && saved.partition == origin.partition
+                && saved.platform == origin.platform
+                && saved.thread == origin.thread)
+    });
+    // Native origins also retain a per-message reply identity. That identity
+    // must not split one guild chat into separate conversations, or invalidate
+    // older accepted answers when a later message advances the origin. Replay
+    // and native sends independently verify their exact source event/binding.
     let private_home = thread.kind.as_deref() == Some("private")
         && thread.owner_chat
         && row.group_id.is_none()

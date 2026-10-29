@@ -106,6 +106,8 @@
   --color-hairline-strong: rgba(255, 255, 255, 0.15);
   --color-overlay: rgba(255, 255, 255, 0.03);
   --color-overlay-strong: rgba(255, 255, 255, 0.06);
+  --color-chat-bubble: #2C2C30;
+  --color-chat-bubble-foreground: #EFEFF1;
 
   /* ── Radius ── (px, not rem: only text follows the user's text size) */
   --radius-sm: 6px;
@@ -211,6 +213,8 @@ html.theme-light {
   --color-hairline-strong: rgba(0, 0, 0, 0.34);
   --color-overlay: rgba(0, 0, 0, 0.035);
   --color-overlay-strong: rgba(0, 0, 0, 0.06);
+  --color-chat-bubble: #E0E0E5;
+  --color-chat-bubble-foreground: #18181B;
 }
 
 /* Dark theme for themed surfaces. Lifted off near-black so surfaces, borders
@@ -249,6 +253,8 @@ html.theme-dark {
   --color-hairline-strong: rgba(255, 255, 255, 0.24);
   --color-overlay: rgba(255, 255, 255, 0.05);
   --color-overlay-strong: rgba(255, 255, 255, 0.095);
+  --color-chat-bubble: #2C2C30;
+  --color-chat-bubble-foreground: #EFEFF1;
 }
 
 /* Helper-class light variants — these effects were authored as white-on-dark

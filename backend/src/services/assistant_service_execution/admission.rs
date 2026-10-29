@@ -4,6 +4,7 @@ use super::*;
 /// It is deliberately not deserializable from HTTP headers or MCP arguments.
 #[derive(Clone)]
 pub struct Admission {
+    pub(super) shared_permit: Option<crate::services::shared_agent_consent::Permit>,
     pub(super) connection: String,
     pub(super) binding: String,
     pub(super) execution: Option<String>,
@@ -114,22 +115,59 @@ impl Admission {
             crate::services::user_service_service::find_user_service_by_id(db, connection)
                 .await?
                 .ok_or_else(|| AppError::NotFound("Service unavailable".into()))?;
-        let access = crate::services::org_service::resolve_owner_access(
-            db,
-            &self.chat.user_id,
-            &service.user_id,
-        )
-        .await?;
-        let eligible = match &access {
-            crate::services::org_service::OwnerAccess::Direct
-            | crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => true,
-            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-                role.can_proxy() && !service.admin_only
+        if let Some(original) = self.chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
+            if self.job_id.is_some()
+                || self.async_continuation.is_some()
+                || self.native_execution.is_some()
+            {
+                return Err(AppError::Forbidden(
+                    "Shared connections require foreground HTTP execution".into(),
+                ));
             }
-            crate::services::org_service::OwnerAccess::Forbidden => false,
-        };
-        if !eligible || !access.allows_resource(connection) {
-            return Err(AppError::Forbidden("Service access revoked".into()));
+            let access = crate::services::shared_agent_service::require(
+                db,
+                &self.chat.user_id,
+                original.agent(),
+            )
+            .await?;
+            let model = matches!(
+                self.operation_identity["kind"].as_str(),
+                Some("raw_inference" | "legacy_inference")
+            ) && access.allows_model_connection(&service);
+            if !(access.allows_connection(&service) || model)
+                || access.revision() != original.revision()
+                || crate::services::shared_agent_consent::behavior(&access)
+                    != crate::services::shared_agent_consent::behavior(original)
+            {
+                return Err(AppError::Forbidden(
+                    "Shared service authority changed".into(),
+                ));
+            }
+            if service.user_id == self.chat.user_id {
+                self.shared_permit
+                    .as_ref()
+                    .ok_or_else(|| AppError::Forbidden("Connection consent required".into()))?
+                    .revalidate(db, &access, &self.chat.user_id)
+                    .await?;
+            }
+        } else {
+            let access = crate::services::org_service::resolve_owner_access(
+                db,
+                &self.chat.user_id,
+                &service.user_id,
+            )
+            .await?;
+            let eligible = match &access {
+                crate::services::org_service::OwnerAccess::Direct
+                | crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => true,
+                crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                    role.can_proxy() && !service.admin_only
+                }
+                crate::services::org_service::OwnerAccess::Forbidden => false,
+            };
+            if !eligible || !access.allows_resource(connection) {
+                return Err(AppError::Forbidden("Service access revoked".into()));
+            }
         }
         if self.connection != connection
             || self.binding != connection_binding(db, connection, &self.api_key_id).await?
