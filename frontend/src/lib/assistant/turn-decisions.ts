@@ -65,12 +65,16 @@ export function decisionSummary(counts: DecisionCounts): string[] {
 /** Identical decisions (same verdict, same action) collapse into one line. */
 export function groupDecisions(
   rows: readonly Decision[],
+  selectedId?: string,
 ): { readonly row: Decision; readonly count: number }[] {
   const groups = new Map<string, { row: Decision; count: number }>();
   for (const row of rows) {
     const key = `${decisionLabel(row)}\u0000${decisionText(row)}\u0000${row.reason ?? ""}`;
     const group = groups.get(key);
-    if (group) group.count += 1;
+    if (group) {
+      group.count += 1;
+      if (row.id === selectedId) group.row = row;
+    }
     else groups.set(key, { row, count: 1 });
   }
   return [...groups.values()];

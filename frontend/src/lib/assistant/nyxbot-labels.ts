@@ -89,21 +89,25 @@ const EVENT_HEADER = /^NyxID events[^:\n]*:\s*/;
 
 /**
  * The individual notices of a server-authored `event` message. The server
- * writes one `- ` line per event, but an event's text may itself span lines
- * (a specialist's multi-line reply excerpt), so a new notice starts only at a
- * top-level `- ` line outside an open quote; the server swaps double quotes
- * inside quoted text for single ones, so an odd count means still inside.
+ * indents continuation lines, leaving unindented `- ` lines as boundaries.
+ * Old rows use quote balancing, with known event openers recovering from
+ * excerpts whose closing quote was truncated by the server.
  * Text without the events header (an automation's instruction) is one notice.
  */
 export function eventNotices(text: string): string[] {
   if (!EVENT_HEADER.test(text)) return [text.trim()];
+  const indented = text.match(EVENT_HEADER)?.[0].includes("continuation lines are indented");
   const notices: string[] = [];
-  for (const line of text.replace(EVENT_HEADER, "").split("\n")) {
+  const lines = text.replace(EVENT_HEADER, "").split("\n");
+  let remainingQuotes = (lines.join("\n").match(/"/g) ?? []).length;
+  for (const line of lines) {
     const current = notices.at(-1);
     const insideQuote = current !== undefined && (current.match(/"/g)?.length ?? 0) % 2 === 1;
-    if (/^- /.test(line) && !insideQuote) notices.push(line.slice(2).trim());
+    const knownEvent = /^- (?:Specialist |The user |NyxBot |Asynchronous service operation|Skill |The owner |The \S+ channel bot )/.test(line);
+    if (/^- /.test(line) && (indented || !insideQuote || (knownEvent && remainingQuotes === 0))) notices.push(line.slice(2).trim());
     else if (current === undefined) notices.push(line.replace(/^\s*-\s+/, "").trim());
-    else notices[notices.length - 1] = `${current}\n${line}`;
+    else notices[notices.length - 1] = `${current}\n${indented ? line.replace(/^ {2}/, "") : line}`;
+    remainingQuotes -= (line.match(/"/g) ?? []).length;
   }
   const kept = notices.map((notice) => notice.trim()).filter(Boolean);
   return kept.length ? kept : [text.trim()];

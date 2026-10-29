@@ -16,13 +16,17 @@ test("the sidebar hides to a rail of destinations and agents, and comes back", a
   }
   await expect(rail.getByRole("button", { name: "Create new agent" })).toBeVisible();
 
-  // Hovering an agent lists its chats; picking one opens it.
+  // Hover never opens chat lists; clicking an agent opens its popover.
   await rail.getByRole("button", { name: /^researcher/ }).hover();
   const chats = page.getByRole("list", { name: "researcher chats" });
+  await expect(chats).not.toBeVisible();
+  await rail.getByRole("button", { name: /^researcher/ }).click();
   await expect(chats).toBeVisible();
-  await rail.getByRole("button", { name: /^NyxBot/ }).first().hover();
+  await page.keyboard.press("Escape");
+  await rail.getByRole("button", { name: /^NyxBot/ }).first().click();
   const nyxbotChats = page.getByRole("list", { name: "NyxBot chats" });
   await expect(nyxbotChats.getByRole("button", { name: "Use GitHub" })).toBeVisible();
+  await page.keyboard.press("Escape");
 
   // Search and the account menu stay reachable.
   await expect(page.getByRole("button", { name: "Search", exact: true })).toBeVisible();

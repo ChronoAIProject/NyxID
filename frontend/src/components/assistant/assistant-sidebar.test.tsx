@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { SidebarRailContext } from "./sidebar-rail-context";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
@@ -65,6 +66,26 @@ const SECOND_CONVERSATION: Conversation = {
   created_at: "2026-07-19T00:00:00.000Z",
   last_message_at: "2026-07-19T00:05:00.000Z",
 };
+
+it("keeps legacy New chat and previous chats in the rail, opening only on click", async () => {
+  const user = userEvent.setup();
+  const onNewChat = vi.fn();
+  const onSelect = vi.fn();
+  render(<TooltipProvider><SidebarRailContext value>
+    <AssistantSidebar conversations={[CONVERSATION, SECOND_CONVERSATION]} activeConversationId={CONVERSATION.id} onNewChat={onNewChat} onSelect={onSelect} onDelete={vi.fn()} />
+  </SidebarRailContext></TooltipProvider>);
+  await user.click(screen.getByRole("button", { name: "New chat" }));
+  expect(onNewChat).toHaveBeenCalledOnce();
+  const previous = screen.getByRole("button", { name: "Previous chats" });
+  await user.hover(previous);
+  expect(screen.queryByRole("list", { name: "Previous chats" })).not.toBeInTheDocument();
+  await user.click(previous);
+  const list = screen.getByRole("list", { name: "Previous chats" });
+  expect(within(list).getByRole("button", { name: CONVERSATION.title })).toHaveAttribute("aria-current", "page");
+  await user.click(within(list).getByRole("button", { name: SECOND_CONVERSATION.title }));
+  expect(onSelect).toHaveBeenCalledWith(SECOND_CONVERSATION.id);
+  expect(screen.queryByRole("list", { name: "Previous chats" })).not.toBeInTheDocument();
+});
 
 const USER: User = {
   id: "user-1",
