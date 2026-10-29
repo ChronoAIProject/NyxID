@@ -10,6 +10,7 @@ The first Web-to-RN increment and remaining migration work are documented in [RN
 - **Connects services.** Browse the catalog, connect supported API-key, token-exchange, OAuth, or platform-key services, and manage existing connections under the server's permissions.
 - **Manages agents.** Create personal specialists, edit authorized profiles and grants, manage memory, and open agent conversations.
 - **Reviews approvals.** Receive push notifications, scan login QR codes, inspect the server's tool arguments and expiry, approve or deny requests, and revoke granted permissions.
+- **Customizes chat appearance.** Settings → Display offers Gray, Lavender, and Graphite light-mode bubbles with a live preview. The choice is saved on the device and applies to individual, specialist, and group chats, including messages being sent. User bubbles share three 18pt corners and a 4pt bottom-right corner.
 - **Manages account security.** Edit profile information, revoke sessions, set up TOTP, and sign in with a password and authenticator code.
 - **Stays signed in securely.** Tokens persist in OS-secure storage through `expo-secure-store`; refresh and account changes fence stale responses and queued credential writes.
 

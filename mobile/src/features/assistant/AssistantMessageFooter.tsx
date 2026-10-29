@@ -8,9 +8,11 @@ import { messageTime } from "./messageTime";
 export function AssistantMessageTime({
   value,
   beforeCopy = false,
+  foreground,
 }: {
   value?: string | number | null;
   beforeCopy?: boolean;
+  foreground?: string;
 }) {
   const { colors } = useTheme();
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -37,7 +39,7 @@ export function AssistantMessageTime({
       }}
       style={styles.timeTarget}
     >
-      <Text style={[styles.time, { color: colors.textMuted }]}>
+      <Text style={[styles.time, { color: foreground ?? colors.textMuted }]}>
         {time.short}
       </Text>
     </Pressable>
@@ -49,13 +51,15 @@ export function AssistantMessageFooter({
   text,
   timestamp,
   user,
+  foreground,
 }: {
   text: string;
   timestamp?: string | number | null;
   user?: boolean;
+  foreground?: string;
 }) {
-  const copy = <AssistantCopyButton text={text} afterDate={user} />;
-  const time = <AssistantMessageTime value={timestamp} beforeCopy={user} />;
+  const copy = <AssistantCopyButton text={text} afterDate={user} foreground={foreground} />;
+  const time = <AssistantMessageTime value={timestamp} beforeCopy={user} foreground={foreground} />;
   return (
     <View style={[styles.row, user && styles.userRow]}>
       {user ? time : copy}

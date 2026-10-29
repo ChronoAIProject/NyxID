@@ -48,6 +48,7 @@ function setup(width = 402, fontScale = 3.12) {
     },
     "lucide-react-native": { Minus: "Minus", Plus: "Plus" },
     "../../components/DynamicTypeText": dynamicText,
+    "./ChatBubbleSettings": { ChatBubbleSettings: "ChatBubbleSettings" },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "./ChatLayoutContext": {
       useChatLayout: () => ({

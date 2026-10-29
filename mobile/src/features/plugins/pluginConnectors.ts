@@ -119,7 +119,7 @@ function addedItem(
   ].join(" / ");
   const count = `${connections.length} ${connections.length === 1 ? "connection" : "connections"}`;
   const endpointDescription =
-    !first.auto_connected && first.endpoint_url
+    first.endpoint_url
       ? `Connected through the NyxID proxy (${first.endpoint_url}).`
       : "Connected through the NyxID proxy.";
   return {
@@ -152,16 +152,19 @@ function addedItem(
   };
 }
 
-/** Mirrors Web Plugins: join the canonical catalog slug, keep every credential,
- * and leave disabled connections in Added so Connect does not create duplicates. */
+/** Group manual connections by catalog slug; all connected slugs stay out of Discover. */
 export function deriveConnectorItems(
   connections: readonly ServiceConnection[],
   catalog: readonly CatalogEntry[],
 ): ConnectorItems {
   const catalogBySlug = new Map(catalog.map((entry) => [entry.slug, entry]));
+  const connectedSlugs = new Set(
+    connections.map((connection) => connection.catalog_service_slug).filter(Boolean),
+  );
   const bySlug = new Map<string, ServiceConnection[]>();
   const custom: ServiceConnection[] = [];
   for (const connection of connections) {
+    if (connection.auto_connected) continue;
     const slug = connection.catalog_service_slug;
     if (slug) {
       const group = bySlug.get(slug) ?? [];
@@ -179,7 +182,7 @@ export function deriveConnectorItems(
       ),
     ],
     available: catalog
-      .filter((entry) => !bySlug.has(entry.slug))
+      .filter((entry) => !connectedSlugs.has(entry.slug))
       .map((entry) => ({
         id: `catalog:${entry.slug}`,
         name: entry.name,
