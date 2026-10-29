@@ -44,6 +44,7 @@ console.log(`[build-ios] APP_ENV=${APP_ENV}`);
 console.log(`[build-ios] API URL:            ${r.apiBaseUrl}`);
 console.log(`[build-ios] Frontend URL:       ${r.frontendUrl}`);
 console.log(`[build-ios] Legal URL:          ${r.legalBaseUrl}`);
+console.log(`[build-ios] New domains:        ${r.newApiBaseUrl ? `${r.newApiBaseUrl} (selected at launch by mobile:new-domains)` : "not configured"}`);
 console.log(`[build-ios] iOS bundle ID:      ${r.iosBundleId}`);
 console.log(`[build-ios] iOS build number:   ${r.iosBuildNumber}`);
 console.log(`[build-ios] APPLE_TEAM_ID:      ${APPLE_TEAM_ID}`);

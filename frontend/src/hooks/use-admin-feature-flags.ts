@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { isGlobalOnlyFlag } from "@/lib/feature-flags";
 import type {
   AdminFeatureFlagListResponse,
   CreateFeatureFlagRequest,
@@ -105,7 +105,7 @@ export function useSetAdminFeatureFlag() {
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       void queryClient.invalidateQueries({ queryKey: ["orgs"] });
       void queryClient.invalidateQueries({ queryKey: ["user"] });
-      if (flagKey === FEATURE_FLAG.INVITATION_CODE)
+      if (isGlobalOnlyFlag(flagKey))
         void queryClient.invalidateQueries({ queryKey: ["public-config"] });
     },
   });
@@ -191,7 +191,7 @@ export function useClearAdminFeatureFlag() {
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       void queryClient.invalidateQueries({ queryKey: ["orgs"] });
       void queryClient.invalidateQueries({ queryKey: ["user"] });
-      if (flagKey === FEATURE_FLAG.INVITATION_CODE)
+      if (isGlobalOnlyFlag(flagKey))
         void queryClient.invalidateQueries({ queryKey: ["public-config"] });
     },
   });

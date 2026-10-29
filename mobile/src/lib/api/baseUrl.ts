@@ -1,12 +1,6 @@
-function resolveApiBaseUrl(configuredUrl: string | undefined): string {
-  const normalized = (configuredUrl ?? "").trim().replace(/\/+$/, "");
-  return normalized.endsWith("/mobile")
-    ? normalized.slice(0, -"/mobile".length)
-    : normalized;
-}
+import { NYXID_API_BASE_URL } from "../domains";
 
-export const NYXID_API_BASE_URL = resolveApiBaseUrl(process.env.EXPO_PUBLIC_API_BASE_URL);
-
+/** The active API base, selected once per launch (see `lib/domains.ts`). */
 export function getApiBaseUrl(): string {
   if (!NYXID_API_BASE_URL) {
     throw new Error("API base URL is not configured. Set the mobile build's API_BASE_URL.");

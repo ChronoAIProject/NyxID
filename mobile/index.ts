@@ -1,8 +1,7 @@
 import { registerRootComponent } from "expo";
 import { bootstrapNotificationInfrastructure } from "./src/lib/notifications/pushNotifications";
-import App from "./src/app/App";
+import AppRoot from "./src/app/AppRoot";
 
 bootstrapNotificationInfrastructure();
 
-registerRootComponent(App);
-
+registerRootComponent(AppRoot);

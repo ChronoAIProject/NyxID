@@ -1,3 +1,5 @@
+import { CONFIGURED_DOMAIN_SETS } from "./domains";
+
 /**
  * True when running a local development build (pnpm run ios / pnpm run android).
  * False for release builds (build:ios, build:ios:testflight, EAS).
@@ -7,14 +9,20 @@
 export const IS_DEV_BUILD = process.env.EXPO_PUBLIC_DEV_MODE === "true";
 
 /**
- * Trusted URL inputs embedded by app.config.ts. The device-login QR parser
- * consumes these values directly so a scanned URL can never choose its own
- * backend or expand the set of accepted frontend origins.
+ * Trusted URL inputs embedded by app.config.ts. The active set is selected at
+ * launch (see `lib/domains.ts`). The device-login QR parser trusts every
+ * embedded set, so a scanned URL can never choose its own backend or expand
+ * the set of accepted frontend origins.
  */
-export { NYXID_API_BASE_URL } from "./api/baseUrl";
-export const NYXID_FRONTEND_URL = process.env.EXPO_PUBLIC_FRONTEND_URL ?? "";
-// Fixed build-time trust for web QR codes during the production domain rollout.
-export const NYXID_LEGACY_FRONTEND_URL = process.env.EXPO_PUBLIC_LEGACY_FRONTEND_URL ?? "";
+export {
+  NYXID_API_BASE_URL,
+  NYXID_FRONTEND_URL,
+  NYXID_LEGAL_BASE_URL,
+} from "./domains";
+export const NYXID_TRUSTED_API_BASE_URLS: readonly string[] =
+  CONFIGURED_DOMAIN_SETS.map((set) => set.apiBaseUrl);
+export const NYXID_TRUSTED_FRONTEND_URLS: readonly string[] =
+  CONFIGURED_DOMAIN_SETS.map((set) => set.frontendUrl);
 export const NYXID_UNIVERSAL_LINK_HOST =
   process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST ?? "";
 export const NYXID_APP_SCHEME = process.env.EXPO_PUBLIC_APP_SCHEME ?? "nyxid";
