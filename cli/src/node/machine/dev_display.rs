@@ -43,22 +43,27 @@ impl Server {
         // supervisor has CHOWN but no DAC override: keep display authority in
         // a supervisor-owned sibling behind the protected role gate instead.
         let separated = identity.sandbox.is_some();
-        let (directory, owner, directory_mode, authority_mode) = if separated {
-            let directory = identity
-                .home
-                .parent()
-                .context("context_role_missing")?
-                .join("display");
-            browser::protected_runtime_parent(&directory)?;
-            (directory, unsafe { libc::geteuid() }, 0o750, 0o640)
-        } else {
-            (
-                identity.home.join(".nyxid-dev-display"),
-                identity.uid,
-                0o700,
-                0o600,
-            )
-        };
+        let supervisor = unsafe { libc::geteuid() };
+        let (directory, owner, directory_mode, authority_mode) =
+            if separated || supervisor != identity.uid {
+                let parent = identity.home.parent().context("context_role_missing")?;
+                let directory = if separated {
+                    parent.join("display")
+                } else {
+                    // A root supervisor must not repair through a worker-owned
+                    // HOME. Keep the private display under its protected parent.
+                    parent.join(format!(".nyxid-dev-display-{}", identity.uid))
+                };
+                browser::protected_runtime_parent(&directory)?;
+                (directory, supervisor, 0o750, 0o640)
+            } else {
+                (
+                    identity.home.join(".nyxid-dev-display"),
+                    identity.uid,
+                    0o700,
+                    0o600,
+                )
+            };
         browser::runtime_directory(&directory, owner, identity.gid, directory_mode)?;
         let authority = directory.join("Xauthority");
         // A wildcard record lets Xvfb choose an unused display atomically through
@@ -170,6 +175,45 @@ mod tests {
         os::unix::fs::{MetadataExt, PermissionsExt},
         sync::Arc,
     };
+
+    #[tokio::test]
+    #[ignore = "requires a complete disposable hosted image with the fixed four capabilities and Localhost profile"]
+    async fn legacy_display_uses_the_protected_parent_of_worker_home() {
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let parent = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o711)).unwrap();
+        let mut identity = Identity::resolve(Some("devbrowser")).unwrap();
+        identity.home = parent.path().join("home");
+        fs::create_dir(&identity.home).unwrap();
+        fs::set_permissions(&identity.home, fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::chown(&identity.home, Some(identity.uid), Some(identity.gid)).unwrap();
+        assert_eq!(
+            fs::File::open(&identity.home).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let display = Server::launch(&identity).await.unwrap();
+        assert!(display.authority.starts_with(parent.path()));
+        assert!(!display.authority.starts_with(&identity.home));
+        let authority = fs::metadata(&display.authority).unwrap();
+        assert_eq!(
+            (authority.uid(), authority.gid(), authority.mode() & 0o777),
+            (0, identity.gid, 0o640)
+        );
+        let mut check = Command::new("xdpyinfo");
+        identity.prepare(&mut check).unwrap();
+        let status = check
+            .env("DISPLAY", &display.name)
+            .env("XAUTHORITY", &display.authority)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        let home = fs::metadata(&identity.home).unwrap();
+        assert_eq!((home.uid(), home.mode() & 0o777), (identity.uid, 0o700));
+        std::os::unix::fs::chown(&identity.home, Some(0), Some(0)).unwrap();
+    }
 
     #[tokio::test]
     #[ignore = "requires a complete disposable hosted image with the fixed four capabilities and Localhost profile"]

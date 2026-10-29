@@ -6,18 +6,129 @@ use super::{
     context_runtime::{Store, protect_legacy_browser_home, protect_legacy_roots},
     cua, files,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use nyxid_machine::authority::Authority;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc, time::Instant};
 
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(super) struct Stage(pub &'static str);
+/// Secret-free context preparation metadata. The underlying anyhow chain is
+/// intentionally not exposed to the caller; only these fixed labels may cross
+/// the machine diagnostic boundary.
+#[derive(Debug, Clone)]
+pub(super) struct PreparationFailure {
+    pub(super) stage: &'static str,
+    pub(super) reason: &'static str,
+    pub(super) elapsed_ms: u64,
+    pub(super) correlation_id: String,
+    pub(super) generation: u64,
+}
+
+impl PreparationFailure {
+    pub(super) fn new(
+        stage: &'static str,
+        reason: &'static str,
+        elapsed_ms: u64,
+        correlation_id: &str,
+        generation: u64,
+    ) -> Self {
+        Self {
+            stage,
+            reason,
+            elapsed_ms,
+            correlation_id: correlation_id.to_owned(),
+            generation,
+        }
+    }
+}
+
+impl fmt::Display for PreparationFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+
+impl std::error::Error for PreparationFailure {}
+
+pub(super) fn stage_reason(stage: &str) -> &'static str {
+    match stage {
+        "authority" => "context_authority_invalid",
+        "binding" => "hosted_context_binding_required",
+        "identity" => "context_identity_mismatch",
+        "generation" => "context_generation_quarantined",
+        "capability" => "context_backend_unavailable",
+        "custody" => "node_custody_unverified",
+        "legacy_roots" => "legacy_roots_unavailable",
+        "legacy_browser_home" => "legacy_browser_home_unavailable",
+        "allocation_store" => "context_store_unavailable",
+        "provision_users" => "context_user_provision_failed",
+        "reap_secure" => "context_secure_reap_failed",
+        "reap_developer" => "context_developer_reap_failed",
+        "workspace_probe" => "workspace_probe_failed",
+        "native_policy" => "native_browser_policy_failed",
+        "browser_resources" => "browser_resources_unavailable",
+        "context_runtime" => "context_runtime_unavailable",
+        "context_connect" => "context_node_offline",
+        _ => "context_preparation_failed",
+    }
+}
+
+fn support_failure_stage(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("node_custody_unverified") => "custody",
+        _ => "capability",
+    }
+}
+
+pub(super) fn failure_diagnostic(error: &anyhow::Error) -> Option<&PreparationFailure> {
+    error.downcast_ref::<PreparationFailure>()
+}
 
 pub(super) fn failure_stage(error: &anyhow::Error) -> &'static str {
-    error
-        .downcast_ref::<Stage>()
-        .map_or("context_preparation", |stage| stage.0)
+    failure_diagnostic(error).map_or("context_preparation", |failure| failure.stage)
+}
+
+pub(super) fn failure_reason(error: &anyhow::Error) -> &'static str {
+    failure_diagnostic(error).map_or("context_preparation_failed", |failure| failure.reason)
+}
+
+fn annotate<T>(
+    result: Result<T>,
+    stage: &'static str,
+    started: Instant,
+    authority: &Authority,
+) -> Result<T> {
+    let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    tracing::debug!(
+        stage,
+        reason = if result.is_ok() { "stage_ready" } else { stage_reason(stage) },
+        elapsed_ms,
+        correlation_id = %authority.context_id,
+        generation = authority.generation,
+        initialized = result.is_ok(),
+        "context preparation stage"
+    );
+    result.map_err(|error| {
+        error.context(PreparationFailure::new(
+            stage,
+            stage_reason(stage),
+            elapsed_ms,
+            &authority.context_id,
+            authority.generation,
+        ))
+    })
+}
+
+fn preparation_error(
+    stage: &'static str,
+    authority: &Authority,
+    started: Instant,
+) -> anyhow::Error {
+    anyhow::Error::new(PreparationFailure::new(
+        stage,
+        stage_reason(stage),
+        started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        &authority.context_id,
+        authority.generation,
+    ))
 }
 
 #[derive(Default)]
@@ -156,30 +267,29 @@ impl Runtime {
         Ok(())
     }
     pub(super) async fn context_instance(&self, authority: &Authority) -> Result<Arc<Runtime>> {
-        ensure!(
-            authority.mode == "separated" && authority.require_v2,
-            "context_authority_invalid"
-        );
+        let started = Instant::now();
+        if authority.mode != "separated" || !authority.require_v2 {
+            return Err(preparation_error("authority", authority, started));
+        }
         let mut contexts = self.contexts.lock().await;
-        ensure!(
-            self.managed_binding.get().is_none()
-                || contexts.store.as_ref().is_some_and(Store::is_hosted),
-            "hosted_context_binding_required"
-        );
+        if self.managed_binding.get().is_some()
+            && !contexts.store.as_ref().is_some_and(Store::is_hosted)
+        {
+            return Err(preparation_error("binding", authority, started));
+        }
         if let Some(runtime) = contexts.runtimes.get(&authority.context_id) {
             let binding = runtime
                 .context_binding
                 .as_ref()
-                .context("context_binding_missing")?;
-            ensure!(
-                nyxid_machine::context::Binding::from(binding)
-                    == nyxid_machine::context::Binding::from(authority),
-                "context_identity_mismatch"
-            );
-            ensure!(
-                authority.generation >= binding.generation,
-                "context_generation_quarantined"
-            );
+                .ok_or_else(|| preparation_error("binding", authority, Instant::now()))?;
+            if nyxid_machine::context::Binding::from(binding)
+                != nyxid_machine::context::Binding::from(authority)
+            {
+                return Err(preparation_error("identity", authority, Instant::now()));
+            }
+            if authority.generation < binding.generation {
+                return Err(preparation_error("generation", authority, Instant::now()));
+            }
             if authority.generation == binding.generation {
                 return Ok(runtime.clone());
             }
@@ -196,12 +306,25 @@ impl Runtime {
             runtime.dev_browser.lock().await.take();
             runtime.desktop.session.lock().await.take();
             runtime.dev_desktop.session.lock().await.take();
-            self.kill_context_uid(runtime.browser_identity.uid).await?;
+            let stage_started = Instant::now();
+            annotate(
+                self.kill_context_uid(runtime.browser_identity.uid).await,
+                "reap_secure",
+                stage_started,
+                authority,
+            )?;
             if let Some(dev) = &runtime.dev_identity {
-                self.kill_context_uid(dev.uid).await?;
+                let stage_started = Instant::now();
+                annotate(
+                    self.kill_context_uid(dev.uid).await,
+                    "reap_developer",
+                    stage_started,
+                    authority,
+                )?;
             }
             contexts.runtimes.remove(&authority.context_id);
         }
+        let support_started = Instant::now();
         #[cfg(test)]
         let support = match &contexts.test_evidence {
             Some(evidence) => evidence.support(),
@@ -209,7 +332,14 @@ impl Runtime {
         };
         #[cfg(not(test))]
         let support = self.context_support().await;
-        ensure!(support.available, "context_backend_unavailable");
+        if !support.available {
+            return Err(preparation_error(
+                support_failure_stage(support.reason.as_deref()),
+                authority,
+                support_started,
+            ));
+        }
+        annotate(Ok(()), "capability", support_started, authority)?;
         let directory = self.status_directory.clone();
         let node = self.node_id.clone();
         let mut roots = self.config.roots.clone();
@@ -224,64 +354,109 @@ impl Runtime {
         let a = authority.clone();
         let store = contexts.store.take();
         let (store, prepared) = tokio::task::spawn_blocking(move || -> Result<_> {
-            protect_legacy_roots(&roots, &legacy).context(Stage("legacy_roots"))?;
+            let stage_started = Instant::now();
+            annotate(
+                protect_legacy_roots(&roots, &legacy),
+                "legacy_roots",
+                stage_started,
+                &a,
+            )?;
             for browser in browsers.into_iter().flatten() {
-                protect_legacy_browser_home(&browser).context(Stage("legacy_browser_home"))?;
+                let stage_started = Instant::now();
+                annotate(
+                    protect_legacy_browser_home(&browser),
+                    "legacy_browser_home",
+                    stage_started,
+                    &a,
+                )?;
             }
             let mut store = match store {
                 Some(s) => s,
-                None => Store::open(&directory, &node).context(Stage("allocation_store"))?,
+                None => {
+                    let stage_started = Instant::now();
+                    annotate(
+                        Store::open(&directory, &node),
+                        "allocation_store",
+                        stage_started,
+                        &a,
+                    )?
+                }
             };
-            let result = store.provision(&a).context(Stage("provision_users"));
-            Ok((store, result))
+            let stage_started = Instant::now();
+            let prepared = annotate(store.provision(&a), "provision_users", stage_started, &a);
+            Ok((store, prepared))
         })
-        .await??;
+        .await
+        .map_err(|_| preparation_error("provision_users", authority, started))??;
         contexts.store = Some(store);
         let mut context = prepared?;
         // Reap survivors from a daemon restart before opening the same durable
         // generation. These UIDs are exclusively owned by this context journal.
-        self.kill_context_uid(context.secure.uid)
-            .await
-            .context(Stage("reap_secure"))?;
-        self.kill_context_uid(context.dev.uid)
-            .await
-            .context(Stage("reap_developer"))?;
-        context
+        let stage_started = Instant::now();
+        annotate(
+            self.kill_context_uid(context.secure.uid).await,
+            "reap_secure",
+            stage_started,
+            authority,
+        )?;
+        let stage_started = Instant::now();
+        annotate(
+            self.kill_context_uid(context.dev.uid).await,
+            "reap_developer",
+            stage_started,
+            authority,
+        )?;
+        let sandbox = context
             .command
             .sandbox
             .as_ref()
-            .context("context_sandbox_missing")?
-            .probe(&context.command)
-            .await
-            .context(Stage("workspace_probe"))?;
+            .ok_or_else(|| preparation_error("workspace_probe", authority, Instant::now()))?;
+        let probe_started = Instant::now();
+        annotate(
+            sandbox.probe(&context.command).await,
+            "workspace_probe",
+            probe_started,
+            authority,
+        )?;
         let dev_policy = self
             .dev_identity
             .as_ref()
-            .context("context_dev_user_missing")?;
+            .ok_or_else(|| preparation_error("browser_resources", authority, Instant::now()))?;
         if !self
             .config
             .managed_browser
             .as_ref()
             .is_some_and(|c| c.container)
         {
-            super::context_policy::prepare(
-                std::path::Path::new("/"),
-                super::browser_layout::Layout::detect(
-                    &self
-                        .config
-                        .managed_browser
-                        .as_ref()
-                        .context("managed browser missing")?
-                        .binary,
-                )?,
-                context.dev.uid,
-            )
-            .context(Stage("native_policy"))?;
+            let managed_browser = self
+                .config
+                .managed_browser
+                .as_ref()
+                .ok_or_else(|| preparation_error("native_policy", authority, Instant::now()))?;
+            let stage_started = Instant::now();
+            let layout = annotate(
+                super::browser_layout::Layout::detect(&managed_browser.binary),
+                "native_policy",
+                stage_started,
+                authority,
+            )?;
+            let stage_started = Instant::now();
+            annotate(
+                super::context_policy::prepare(std::path::Path::new("/"), layout, context.dev.uid),
+                "native_policy",
+                stage_started,
+                authority,
+            )?;
         }
-        let resources = context
-            .browsers(self.browser_identity.gid, dev_policy.gid)
-            .await
-            .context(Stage("browser_resources"))?;
+        let stage_started = Instant::now();
+        let resources = annotate(
+            context
+                .browsers(self.browser_identity.gid, dev_policy.gid)
+                .await,
+            "browser_resources",
+            stage_started,
+            authority,
+        )?;
         let mut config = self.config.clone();
         config.agent_user = Some(context.command.name.clone());
         config.browser_user = Some(context.secure.name.clone());
@@ -290,28 +465,46 @@ impl Runtime {
         let managed = config
             .managed_browser
             .as_mut()
-            .context("context_browser_missing")?;
+            .ok_or_else(|| preparation_error("context_runtime", authority, Instant::now()))?;
         managed.data_dir = context
             .secure
             .home
             .parent()
-            .context("context_role_missing")?
+            .ok_or_else(|| preparation_error("context_runtime", authority, Instant::now()))?
             .to_owned();
         let state = context
             .browser_root
             .parent()
-            .context("context_root_missing")?
+            .ok_or_else(|| preparation_error("context_runtime", authority, Instant::now()))?
             .join("node");
-        super::browser::runtime_directory(&state, 0, 0, 0o700)?;
-        let mut runtime =
-            Runtime::new(&config, &self.node_id, &state).context(Stage("context_runtime"))?;
-        let target = Arc::get_mut(&mut runtime).context("context_runtime_unavailable")?;
+        let stage_started = Instant::now();
+        annotate(
+            super::browser::runtime_directory(&state, 0, 0, 0o700),
+            "context_runtime",
+            stage_started,
+            authority,
+        )?;
+        let stage_started = Instant::now();
+        let mut runtime = annotate(
+            Runtime::new(&config, &self.node_id, &state),
+            "context_runtime",
+            stage_started,
+            authority,
+        )?;
+        let target = Arc::get_mut(&mut runtime)
+            .ok_or_else(|| preparation_error("context_runtime", authority, Instant::now()))?;
         target.custody = Arc::new(self.custody.for_context());
         target.runtime_id = self.runtime_id.clone();
         target.identity = context.command;
         target.browser_identity = context.secure;
         target.dev_identity = Some(context.dev);
-        target.roots = files::Roots::new(&config.roots, &self.excluded)?;
+        let stage_started = Instant::now();
+        target.roots = annotate(
+            files::Roots::new(&config.roots, &self.excluded),
+            "context_runtime",
+            stage_started,
+            authority,
+        )?;
         target.jobs = self.jobs.clone();
         target.operation_receipts = self.operation_receipts.clone();
         target.upgrading = self.upgrading.clone();
@@ -338,8 +531,14 @@ impl Runtime {
         if let Some(gateway) = self.gateway.get() {
             let _ = target.gateway.set(gateway.clone());
         }
+        let stage_started = Instant::now();
         target.refresh_custody().await;
-        target.require_custody()?;
+        annotate(
+            target.require_custody(),
+            "custody",
+            stage_started,
+            authority,
+        )?;
         // Child runtime cannot create a nested context; only this parent routes.
         let sender = self
             .desktop
@@ -347,12 +546,18 @@ impl Runtime {
             .lock()
             .await
             .clone()
-            .context("context_node_offline")?;
+            .ok_or_else(|| preparation_error("context_connect", authority, Instant::now()))?;
         let secret = self.desktop_secret.lock().await;
-        runtime
-            .connect(sender, secret.as_deref().context("context_node_offline")?)
-            .await
-            .context(Stage("context_connect"))?;
+        let secret = secret
+            .as_deref()
+            .ok_or_else(|| preparation_error("context_connect", authority, Instant::now()))?;
+        let stage_started = Instant::now();
+        annotate(
+            runtime.connect(sender, secret).await,
+            "context_connect",
+            stage_started,
+            authority,
+        )?;
         contexts
             .runtimes
             .insert(authority.context_id.clone(), runtime.clone());

@@ -9,6 +9,10 @@ import { machineAccessFixture, offCapabilities } from "@/test/machine-access-fix
 import type { User } from "@/types/api";
 import { MachineCapabilities } from "./machine-capabilities";
 
+vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-machines", () => ({ useRemoteMachines: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-saved-logins", () => ({ useSavedLogins: () => ({ data: [] }) }));
+
 const agents = {
   agents: [],
   limits: {

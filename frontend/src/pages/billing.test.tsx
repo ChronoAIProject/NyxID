@@ -178,6 +178,8 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       "active",
     );
     expect(screen.getByText("95 credits")).toBeVisible();
+    expect(screen.queryByText("Machine runtime", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review machine runtime" })).not.toBeInTheDocument();
     expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: "View breakdown" }),

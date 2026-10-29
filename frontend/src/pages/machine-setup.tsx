@@ -1,3 +1,4 @@
+import { MachineCapabilityChoices } from "@/components/shared/machine-create-fields";
 import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import { RemoteMachineCreate } from "@/components/machines/remote-machine-create";
 import { MachineSeparationSupport } from "@/components/shared/machine-isolation";
@@ -48,15 +49,10 @@ import {
   type MachineSetup,
 } from "@/schemas/machines";
 
-const labels = {
-  shell: "Commands — run code and use connected services",
-  files: "Files — read, edit and move files in workspace roots",
-  browser: "Browser — use the managed browser",
-  computer: "Computer — operate the desktop and browser",
-};
 const states: Record<string, string> = {
   review: "Review your choices",
-  selection_required: "Connected, but machine access requires an owner separation choice. Review Assistant → Machines, or rerun setup with an explicit choice.",
+  selection_required:
+    "Connected, but machine access requires an owner separation choice. Review Assistant → Machines, or rerun setup with an explicit choice.",
   waiting: "Waiting for the machine to connect…",
   approved: "Approved. Waiting for the machine…",
   connected: "Connected. NyxBot can verify the machine and continue.",
@@ -129,7 +125,11 @@ export function MachineSetupPage() {
     issuing ||
     Boolean(command) ||
     Boolean(setup.data && setup.data.status !== "review");
-  async function submit(choices: MachineChoices) {
+  async function submit(values: MachineChoices) {
+    const choices: MachineChoices = {
+      ...values,
+      machine_assignment: "membership_only",
+    };
     setError(undefined);
     setIssuing(true);
     try {
@@ -170,31 +170,31 @@ export function MachineSetupPage() {
   }
   return (
     <div
-      className="ph-no-capture max-w-2xl space-y-6"
+      className="ph-no-capture mx-auto max-w-2xl space-y-4"
       data-private="true"
       data-ph-no-capture
     >
+      <Button asChild variant="ghost" size="sm" className="-ml-2">
+        <Link to="/assistant/machines">Back to Machines</Link>
+      </Button>
       <PageHeader
-        title="Add a machine"
+        title={hosted ? "Create remote machine" : "Add a machine"}
         description={
           hosted
-            ? "Configure a personal NyxID hosted machine and review its billing and data policies."
+            ? "A personal workspace hosted by NyxID, ready for your agents."
             : "Review the choices, then run one command on the machine."
         }
       />
-      {hosted ? (
-        <p className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-12 text-muted-foreground">
-          Agents can run code and access this Machine’s workspace. Prompt
-          injection is possible. All authorized clients share the OS and
-          workspace; file roots do not isolate shell commands.
-        </p>
-      ) : (
-        <SetupSafety />
-      )}
+      {!hosted && <SetupSafety />}
       <Tabs
         value={hosted ? "hosted" : where}
         onValueChange={(value) => {
           setHosted(value === "hosted");
+          if (value === "hosted")
+            form.setValue("owner_id", undefined, {
+              shouldDirty: false,
+              shouldTouch: false,
+            });
           if (value !== "hosted")
             form.setValue("where", value as MachineChoices["where"]);
         }}
@@ -230,10 +230,14 @@ export function MachineSetupPage() {
       </Tabs>
       {hosted ? (
         <RemoteMachineCreate
-          onCreated={(machineId, operationId, specialistId) =>
+          allowPaidCreation={false}
+          onCreated={(machineId, _operationId, specialistId) =>
             void navigate({
               to: "/assistant/machines",
-              search: { machine: machineId, operation: operationId, agent: specialistId ?? undefined },
+              search: {
+                machine: machineId,
+                agent: specialistId ?? undefined,
+              },
             })
           }
         />
@@ -271,57 +275,93 @@ export function MachineSetupPage() {
                 </FormItem>
               )}
             />
-            <FormField control={form.control} name="separation" render={({ field }) => <FormItem>
-              <FormLabel>Agent separation</FormLabel>
-              <Select value={field.value ?? "automatic"} disabled={locked} onValueChange={value => {
-                // The hidden select can emit an empty value during reset.
-                // Preserve the reviewed choice until a valid option is selected.
-                if (!["automatic", "require_separated", "shared_legacy"].includes(value)) return;
-                field.onChange(value);
-                form.setValue("legacy_warning_acknowledged", false);
-              }}>
-                <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
-                <SelectContent>
-                  <SelectItem value="automatic">Automatic — require confirmed supported separation</SelectItem>
-                  <SelectItem value="require_separated">Require separated workspaces and browsers</SelectItem>
-                  <SelectItem value="shared_legacy">Explicit shared legacy access</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-12 text-muted-foreground">Automatic and required refuse when the real host probes cannot confirm support. macOS and browserless nodes need an informed legacy choice or a supported Linux host.</p>
-              {where !== "docker" ? <p className="text-12 text-muted-foreground">On Linux, provision distinct OS users by running the generated setup command with sudo and --separate-users. Separation also needs a managed browser; enable Browser only if you want to grant that capability. The command preserves your selected capabilities.</p> : null}
-              <FormMessage />
-            </FormItem>} />
-            {form.watch("separation") === "shared_legacy" && <div className="space-y-2 rounded-lg border p-3 text-12">
-              <p>{SHARED_LEGACY_WARNING}</p>
-              <label className="flex items-start gap-2"><Checkbox disabled={locked} checked={form.watch("legacy_warning_acknowledged") === true} onCheckedChange={value => form.setValue("legacy_warning_acknowledged", value === true)} />I explicitly accept shared legacy access and this warning.</label>
-              <FormField control={form.control} name="legacy_warning_acknowledged" render={() => <FormMessage />} />
-            </div>}
-            <fieldset disabled={locked} className="space-y-3">
-              <legend className="mb-2 text-12 font-medium">
-                Enable on this machine
-              </legend>
-              {(["shell", "files", "browser", "computer"] as const).map(
-                (capability) => (
-                  <label
-                    key={capability}
-                    className="flex items-center gap-2 text-12"
+            <FormField
+              control={form.control}
+              name="separation"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Agent separation</FormLabel>
+                  <Select
+                    value={field.value ?? "automatic"}
+                    disabled={locked}
+                    onValueChange={(value) => {
+                      // The hidden select can emit an empty value during reset.
+                      // Preserve the reviewed choice until a valid option is selected.
+                      if (
+                        ![
+                          "automatic",
+                          "require_separated",
+                          "shared_legacy",
+                        ].includes(value)
+                      )
+                        return;
+                      field.onChange(value);
+                      form.setValue("legacy_warning_acknowledged", false);
+                    }}
                   >
-                    <Checkbox
-                      checked={capabilities.includes(capability)}
-                      onCheckedChange={(checked) =>
-                        form.setValue(
-                          "capabilities",
-                          checked
-                            ? [...capabilities, capability]
-                            : capabilities.filter((c) => c !== capability),
-                        )
-                      }
-                    />
-                    {labels[capability]}
-                  </label>
-                ),
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="automatic">
+                        Automatic — require confirmed supported separation
+                      </SelectItem>
+                      <SelectItem value="require_separated">
+                        Require separated workspaces and browsers
+                      </SelectItem>
+                      <SelectItem value="shared_legacy">
+                        Explicit shared legacy access
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-12 text-muted-foreground">
+                    Automatic and required refuse when the real host probes
+                    cannot confirm support. macOS and browserless nodes need an
+                    informed legacy choice or a supported Linux host.
+                  </p>
+                  {where !== "docker" ? (
+                    <p className="text-12 text-muted-foreground">
+                      On Linux, provision distinct OS users by running the
+                      generated setup command with sudo and --separate-users.
+                      Separation also needs a managed browser; enable Browser
+                      only if you want to grant that capability. The command
+                      preserves your selected capabilities.
+                    </p>
+                  ) : null}
+                  <FormMessage />
+                </FormItem>
               )}
-            </fieldset>
+            />
+            {form.watch("separation") === "shared_legacy" && (
+              <div className="space-y-2 rounded-lg border p-3 text-12">
+                <p>{SHARED_LEGACY_WARNING}</p>
+                <label className="flex items-start gap-2">
+                  <Checkbox
+                    disabled={locked}
+                    checked={form.watch("legacy_warning_acknowledged") === true}
+                    onCheckedChange={(value) =>
+                      form.setValue(
+                        "legacy_warning_acknowledged",
+                        value === true,
+                      )
+                    }
+                  />
+                  I explicitly accept shared legacy access and this warning.
+                </label>
+                <FormField
+                  control={form.control}
+                  name="legacy_warning_acknowledged"
+                  render={() => <FormMessage />}
+                />
+              </div>
+            )}
+            <MachineCapabilityChoices
+              value={capabilities}
+              disabled={locked}
+              onChange={(next) => form.setValue("capabilities", next)}
+            />
             <FormField
               control={form.control}
               name="grant_to"
@@ -574,15 +614,28 @@ function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
       role="status"
       className="space-y-2 rounded-xl border border-border p-4 text-12"
     >
-      <p>{states[setup.status] ?? "Waiting for setup…"}</p>
-      {setup.status === "selection_required" && <><p>{setup.selection_reason}</p><Link to="/assistant/machines">Review machine separation</Link></>}
+      <p>
+        {setup.status === "connected" &&
+        setup.choices.machine_assignment === "membership_only"
+          ? "Connected. New Specialist assignments have no tools or saved-login access. Review access before running tools."
+          : (states[setup.status] ?? "Waiting for setup…")}
+      </p>
+      {setup.status === "selection_required" && (
+        <>
+          <p>{setup.selection_reason}</p>
+          <Link to="/assistant/machines">Review machine separation</Link>
+        </>
+      )}
       {setup.machine ? (
-        <><p>
-          Enabled:{" "}
-          {(["shell", "files", "browser", "computer"] as const)
-            .filter((c) => setup.machine?.[c])
-            .join(", ")}
-        </p><MachineSeparationSupport machine={setup.machine} /></>
+        <>
+          <p>
+            Enabled:{" "}
+            {(["shell", "files", "browser", "computer"] as const)
+              .filter((c) => setup.machine?.[c])
+              .join(", ")}
+          </p>
+          <MachineSeparationSupport machine={setup.machine} />
+        </>
       ) : null}
       {setup.conversation_id ? (
         <Link to="/assistant" search={{ c: setup.conversation_id }}>

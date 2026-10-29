@@ -60,7 +60,7 @@ export const nyxBotApi = {
   async updateAgent(id: string, body: AssistantAgentUpdate) {
     await assistantJson(agentPath(id), { method: "PATCH", body });
   },
-  /** Replaces a specialist's grants. */
+  /** Replaces grants or changes exactly one Machine membership. */
   async setGrants(id: string, body: AssistantAgentGrantsRequest, authorityGuard?: () => void) {
     await assistantJson(`${agentPath(id)}/grants`, { method: "PUT", body, authorityGuard });
   },

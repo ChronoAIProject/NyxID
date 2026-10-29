@@ -5,7 +5,11 @@ export const REMOTE_MACHINE_PROFILE = "remote-machine";
 export const REMOTE_MACHINE_POLICY = "remote-machine-mvp";
 export const REMOTE_MACHINE_DATA_POLICY = "remote-machine-data";
 export const REMOTE_MACHINE_SEPARATION_POLICY = "remote-machine-separation-v1";
-export const machineSeparationChoiceSchema = z.enum(["automatic", "require_separated", "shared_legacy"]);
+export const machineSeparationChoiceSchema = z.enum([
+  "automatic",
+  "require_separated",
+  "shared_legacy",
+]);
 
 // This is the server's current authenticated-runtime projection. Its revision
 // is independent of Agent assignments and Machine lifecycle revisions.
@@ -92,7 +96,28 @@ export const remoteMachinePolicySchema = z.object({
   job_output_bytes: z.number().int().positive(),
   machine_output_cache_bytes: z.number().int().positive(),
 });
+// Strict allowlist for the optional owner-only presentation. Unknown fields never enter Query.
+export const remoteMachinePresentationSchema = z.object({
+  agent_version: z.string().nullable(),
+  os: z.string().nullable(),
+  arch: z.string().nullable(),
+  roots: z.array(z.string()),
+  capabilities: z.array(z.enum(["shell", "files", "browser", "computer"])),
+  commands_isolated: z.boolean().nullable(),
+  browser_isolated: z.boolean(),
+  separation_support: z.boolean().nullable(),
+  owner_confirmation: z.enum(["none", "changes", "all"]).nullable(),
+  allow_single_user_saved_logins: z.boolean().nullable(),
+  computer_mode: z.enum(["standard", "unrestricted"]),
+  cua_version: z.string().nullable(),
+  connected: z.boolean(),
+  desktop_ready: z.boolean(),
+  historical: z.boolean(),
+  configuration_current: z.boolean(),
+  last_reported_at: machineTimeSchema.nullable(),
+});
 export const remoteMachineSchema = z.object({
+  presentation: remoteMachinePresentationSchema.nullable().optional(),
   node_id: machineIdSchema,
   name: remoteMachineNameSchema,
   capabilities: remoteMachineCapabilitiesSchema,
@@ -100,8 +125,13 @@ export const remoteMachineSchema = z.object({
   separation_policy_version: z.literal(REMOTE_MACHINE_SEPARATION_POLICY),
   machine_configuration: machineConfigurationSchema,
   specialist_id: machineIdSchema.nullable(),
-  specialist_assignment_state: z
-    .enum(["none", "pending", "assigned", "not_assigned", "failed"]),
+  specialist_assignment_state: z.enum([
+    "none",
+    "pending",
+    "assigned",
+    "not_assigned",
+    "failed",
+  ]),
   specialist_assignment_error: z
     .literal("specialist_assignment_unavailable")
     .nullable(),
@@ -308,7 +338,9 @@ export const remoteMachineCreateRequestSchema = z
   .strictObject({
     ...remoteMachineHostedConfigurationSchema.shape,
     separation_policy_version: z.literal(REMOTE_MACHINE_SEPARATION_POLICY),
-    acknowledge_separation: z.boolean().refine(Boolean, "Review and accept the selected separation policy."),
+    acknowledge_separation: z
+      .boolean()
+      .refine(Boolean, "Review and accept the selected separation policy."),
     profile_version: z
       .literal(REMOTE_MACHINE_PROFILE)
       .default(REMOTE_MACHINE_PROFILE),
@@ -728,28 +760,43 @@ export type RemoteMachineConfirmationDecision = z.infer<
   typeof remoteMachineConfirmationDecisionSchema
 >;
 
-export const machineChoicesSchema = z.object({
-  separation: z.enum(["automatic", "require_separated", "shared_legacy"]).nullish(),
-  legacy_warning_acknowledged: z.boolean().optional(),
-  owner_id: z.string().uuid().nullable().optional(),
-  name: z
-    .string()
-    .min(1)
-    .max(64)
-    .regex(/^[a-z0-9-]+$/, "Use lowercase letters, numbers and hyphens"),
-  where: z.enum(["this_computer", "vm", "docker"]),
-  capabilities: z
-    .array(z.enum(["shell", "files", "browser", "computer"]))
-    .min(1)
-    .max(4),
-  grant_to: z.string().nullable(),
-  automatic_updates: z.boolean().nullable().optional(),
-}).refine((choices) => choices.separation !== "shared_legacy" || choices.legacy_warning_acknowledged === true, {
-  path: ["legacy_warning_acknowledged"], message: "Acknowledge the shared legacy warning before continuing",
-});
+export const machineChoicesSchema = z
+  .object({
+    machine_assignment: z.literal("membership_only").nullish(),
+    separation: z
+      .enum(["automatic", "require_separated", "shared_legacy"])
+      .nullish(),
+    legacy_warning_acknowledged: z.boolean().optional(),
+    owner_id: z.string().uuid().nullable().optional(),
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9-]+$/, "Use lowercase letters, numbers and hyphens"),
+    where: z.enum(["this_computer", "vm", "docker"]),
+    capabilities: z
+      .array(z.enum(["shell", "files", "browser", "computer"]))
+      .min(1)
+      .max(4),
+    grant_to: z.string().nullable(),
+    automatic_updates: z.boolean().nullable().optional(),
+  })
+  .refine(
+    (choices) =>
+      choices.separation !== "shared_legacy" ||
+      choices.legacy_warning_acknowledged === true,
+    {
+      path: ["legacy_warning_acknowledged"],
+      message: "Acknowledge the shared legacy warning before continuing",
+    },
+  );
 export type MachineChoices = z.infer<typeof machineChoicesSchema>;
 export interface MachineProfile {
-  separation_choice?: "automatic" | "require_separated" | "shared_legacy" | null;
+  separation_choice?:
+    | "automatic"
+    | "require_separated"
+    | "shared_legacy"
+    | null;
   separation_evidence?: {
     version: number;
     os: string;
@@ -799,13 +846,18 @@ export function machineSeparationSupport(machine: MachineProfile) {
   const evidence = machine.separation_evidence;
   const unavailable = (reason: string) => ({ available: false, reason });
   if (!evidence) return unavailable("separated_capabilities_not_reported");
-  if (evidence.version !== 4) return unavailable("separated_probe_version_unsupported");
+  if (evidence.version !== 4)
+    return unavailable("separated_probe_version_unsupported");
   if (evidence.os !== "linux") return unavailable("separated_requires_linux");
   if (evidence.browser_sandbox_unobservable_in_container === true)
     return unavailable("separated_browser_sandbox_unobservable_in_container");
-  if (evidence.managed_browser_policy === false) return unavailable("separated_browser_policy_not_effective");
+  if (evidence.managed_browser_policy === false)
+    return unavailable("separated_browser_policy_not_effective");
   if (evidence.probe_timed_out) return unavailable("separated_probe_timeout");
-  if (!Number.isInteger(evidence.landlock_abi) || (evidence.landlock_abi ?? 0) < 6)
+  if (
+    !Number.isInteger(evidence.landlock_abi) ||
+    (evidence.landlock_abi ?? 0) < 6
+  )
     return unavailable("separated_requires_landlock_abi_6");
   for (const [observed, reason] of [
     [evidence.separate_users, "separated_requires_separate_users"],
@@ -813,10 +865,14 @@ export function machineSeparationSupport(machine: MachineProfile) {
     [evidence.command_seccomp, "separated_seccomp_probe_failed"],
     [evidence.landlock_enforced, "separated_landlock_probe_failed"],
     [evidence.managed_browser_policy, "separated_browser_policy_not_effective"],
-    [evidence.managed_browser_sandbox, "separated_browser_sandbox_probe_failed"],
+    [
+      evidence.managed_browser_sandbox,
+      "separated_browser_sandbox_probe_failed",
+    ],
   ] as const) {
     if (observed === false) return unavailable(reason);
-    if (observed !== true) return unavailable("separated_probe_evidence_incomplete");
+    if (observed !== true)
+      return unavailable("separated_probe_evidence_incomplete");
   }
   if (evidence.credential_custody !== true)
     return unavailable("node_custody_unverified");
@@ -840,7 +896,8 @@ export const MACHINE_SAFETY =
   "Recommended: use the machine container or a VM set up with --separate-users. Agents act with that OS user's full access, and prompt injection is possible. Workspace roots constrain file tools and working directories; shell commands can access anything that user can.";
 export const SINGLE_USER_SHELL_WARNING =
   "Not isolated: agent commands can read this node's stored credentials, signing secret and node token, including its config and local credential store. File-tool workspace limits do not constrain the shell. You may proceed; prefer the machine container or a VM set up with --separate-users.";
-export const SHARED_LEGACY_WARNING = "Shared legacy access gives agent commands the full access of their OS user. A misbehaving or prompt-injected agent may read node tokens, signing secrets and stored credentials accessible to that user, including the node config and local credential store. Workspace roots constrain file tools and working directories, not the shell. Supported separated contexts still share the host kernel and retain kernel-exploit and supervisor-compromise risks; they are not a VM boundary. Use a separate machine container or VM per agent for stronger isolation; containers also share their host kernel.";
+export const SHARED_LEGACY_WARNING =
+  "Shared legacy access gives agent commands the full access of their OS user. A misbehaving or prompt-injected agent may read node tokens, signing secrets and stored credentials accessible to that user, including the node config and local credential store. Workspace roots constrain file tools and working directories, not the shell. Supported separated contexts still share the host kernel and retain kernel-exploit and supervisor-compromise risks; they are not a VM boundary. Use a separate machine container or VM per agent for stronger isolation; containers also share their host kernel.";
 export const SINGLE_USER_WARNING =
   "Agent commands run as the same user as the browser on this machine. A misbehaving or prompt-injected agent could read what is typed. Use the machine container or a VM with separate browser and agent users for better isolation.";
 
@@ -859,8 +916,14 @@ export function machineSetupCommand(
   if (!/^nyx_nreg_[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid setup credential");
   const selection = choices.separation ?? "automatic";
-  if (!["automatic", "require_separated", "shared_legacy"].includes(selection) || (selection === "shared_legacy" && choices.legacy_warning_acknowledged !== true))
-    throw new Error("Review and explicitly acknowledge the machine separation choice");
+  if (
+    !["automatic", "require_separated", "shared_legacy"].includes(selection) ||
+    (selection === "shared_legacy" &&
+      choices.legacy_warning_acknowledged !== true)
+  )
+    throw new Error(
+      "Review and explicitly acknowledge the machine separation choice",
+    );
   const cliSelection = selection.replaceAll("_", "-");
   const args = choices.capabilities
     .map((capability) => `--${capability}`)

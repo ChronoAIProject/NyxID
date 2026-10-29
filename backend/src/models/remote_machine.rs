@@ -443,6 +443,8 @@ pub struct SafeMachineProfileView {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SafeManagedMachineView {
+    #[serde(default)]
+    pub presentation: Option<SafeMachinePresentationView>,
     pub node_id: String,
     pub name: String,
     pub capabilities: Vec<String>,
@@ -475,6 +477,29 @@ pub struct SafeManagedMachineView {
     pub funded_until: Option<DateTime<Utc>>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Read-only owner presentation. Deliberately not a Node or MachineProfile:
+/// runtime identities, connection routing, credentials and leases stay private.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SafeMachinePresentationView {
+    pub agent_version: Option<String>,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+    pub roots: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub commands_isolated: Option<bool>,
+    pub browser_isolated: bool,
+    pub separation_support: Option<bool>,
+    pub owner_confirmation: Option<nyxid_machine::Confirmation>,
+    pub allow_single_user_saved_logins: Option<bool>,
+    pub computer_mode: nyxid_machine::ComputerMode,
+    pub cua_version: Option<String>,
+    pub connected: bool,
+    pub desktop_ready: bool,
+    pub historical: bool,
+    pub configuration_current: bool,
+    pub last_reported_at: Option<DateTime<Utc>>,
 }
 
 /// An authenticated WSS observation, never an owner consent or Agent ACK.

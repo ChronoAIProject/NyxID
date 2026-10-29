@@ -1437,6 +1437,14 @@ async fn manager_ready_requires_native_running_and_current_wss_with_fixed_capabi
     crate::services::remote_machine_native::activate(&f.db, &bound)
         .await
         .unwrap();
+    let admitted = current(&f).await;
+    let repeated_admission = crate::services::remote_machine_native::activate(&f.db, &admitted)
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated_admission.revision, admitted.revision,
+        "repeated Ready admission must not invalidate an unchanged owner review"
+    );
     assert_ne!(current(&f).await.resource_state, ResourceState::Ready);
     let delivery_id = uuid::Uuid::new_v4().to_string();
     lifecycle::accept_bootstrap_delivery(
@@ -1547,6 +1555,94 @@ async fn manager_ready_requires_native_running_and_current_wss_with_fixed_capabi
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn unchanged_native_observation_preserves_reviewed_lifecycle_revision() {
+    let f = fixture("mgr_observation_review_revision").await;
+    let bound = bind_runtime(&f).await;
+    mount_bound_resources(&f, &bound, false).await;
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &bound.node_id},
+            doc! {"$set": {"resource_state": "ready", "writer_admitted": true}},
+        )
+        .await
+        .unwrap();
+
+    f.manager.observe(&current(&f).await).await.unwrap();
+    let reviewed = current(&f).await;
+    f.manager.observe(&reviewed).await.unwrap();
+    let observed = current(&f).await;
+    assert_eq!(
+        observed.revision, reviewed.revision,
+        "an unchanged native observation must not invalidate an owner review"
+    );
+
+    let accepted = action_request(&f, &reviewed, LifecycleAction::Delete).await;
+    assert_eq!(accepted.resource_state, ResourceState::Deleting);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn material_native_observation_change_invalidates_reviewed_lifecycle_revision() {
+    let f = fixture("mgr_observation_material_revision").await;
+    let bound = bind_runtime(&f).await;
+    mount_bound_resources(&f, &bound, false).await;
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &bound.node_id},
+            doc! {"$set": {"resource_state": "ready", "writer_admitted": true}},
+        )
+        .await
+        .unwrap();
+    f.manager.observe(&current(&f).await).await.unwrap();
+    let reviewed = current(&f).await;
+
+    f.server.reset().await;
+    let uid = reviewed.sandbox_uid.as_deref().unwrap();
+    let mut changed = sandbox(&reviewed, uid);
+    changed["metadata"]["generation"] = json!(2);
+    for condition in changed["status"]["conditions"].as_array_mut().unwrap() {
+        condition["observedGeneration"] = json!(2);
+    }
+    Mock::given(method("GET"))
+        .and(path(sandbox_path(&reviewed)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(changed))
+        .mount(&f.server)
+        .await;
+    mount_owned_resources(&f, &reviewed, false).await;
+
+    f.manager.observe(&reviewed).await.unwrap();
+    let changed_revision = current(&f).await;
+    assert!(changed_revision.revision > reviewed.revision);
+    let error = lifecycle::request_action(
+        &f.db,
+        lifecycle::LifecycleRequest {
+            owner_id: reviewed.owner_id.clone(),
+            machine_id: reviewed.node_id.clone(),
+            action: LifecycleAction::Delete,
+            expected_revision: Some(reviewed.revision),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            request_body: json!({
+                "action": "delete",
+                "revision": reviewed.revision,
+                "policy_version": crate::models::remote_machine::POLICY_VERSION,
+                "data_policy_version": crate::models::remote_machine::DATA_POLICY_VERSION,
+                "acknowledge_shared_environment": true,
+                "acknowledge_data_loss": true
+            }),
+            now: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("managed_machine_revision_conflict")
+    );
+    f.db.drop().await.unwrap();
 }
 
 async fn action_request(

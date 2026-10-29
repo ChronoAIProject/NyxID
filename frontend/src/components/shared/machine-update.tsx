@@ -102,12 +102,13 @@ export function MachineUpdate({
                   : "Run once on the computer running Docker. No pairing token needed."}
               </p>
               <label className="block space-y-1">
-                Docker container name
+                Target Docker container name
                 <Input
                   value={container}
                   onChange={(event) => setContainer(event.target.value)}
                 />
               </label>
+              <p>This only generates the Updater installation command for the named container; it does not rename an existing Docker container.</p>
               {command ? (
                 <CopyableField
                   label={legacy ? "Replace updater on the Docker host" : "Run on the Docker host"}

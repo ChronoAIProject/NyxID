@@ -93,3 +93,18 @@ it("leaves missing and unknown configuration observations unconfirmed", () => {
     screen.queryByText("Environment mode applied"),
   ).not.toBeInTheDocument();
 });
+
+it("treats ordinary Self-hosted configuration as inapplicable without inventing environment application", () => {
+  const { rerender } = render(<MachineApplicationStatus authorizationApplied environmentApplied={false} configuration={null} configurationApplicability="not_applicable" />);
+  expect(screen.queryByText(/Hosted configuration evidence/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Environment mode applied")).not.toBeInTheDocument();
+  expect(screen.getByText(/Environment mode application is not confirmed/)).toBeVisible();
+  rerender(<MachineApplicationStatus authorizationApplied environmentApplied configuration={null} configurationApplicability="not_applicable" />);
+  expect(screen.getByText("Environment mode applied")).toBeVisible();
+});
+it("keeps missing Remote configuration and stale reviewed generations unconfirmed", () => {
+  render(<MachineApplicationStatus authorizationApplied environmentApplied configuration={null} configurationApplicability="hosted" target={machineContextReviewFixture.machine_configuration_target} />);
+  expect(screen.getByText(/not reported for this Remote machine/)).toBeVisible();
+  expect(screen.getByText(/differs from the reviewed target/)).toBeVisible();
+  expect(screen.queryByText("Environment mode applied")).not.toBeInTheDocument();
+});

@@ -3,10 +3,10 @@ kind: Namespace
 metadata:
   name: nyxid-machine
   labels:
-    # The protected root supervisor needs CHOWN/SETUID/SETGID/KILL to drop
-    # commands to agent and stop them. The fixed admission policy narrows the
-    # baseline profile; command descendants are non-root with no_new_privs.
-    pod-security.kubernetes.io/enforce: baseline
+    # Docker-default NET_RAW is outside PSA baseline. The exact Sandbox
+    # admission policy still rejects privileged/host-namespace workloads and
+    # fixes capabilities; non-root workers retain their own no_new_privs.
+    pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
     nyxid.dev/managed: "true"

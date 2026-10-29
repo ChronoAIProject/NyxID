@@ -1021,6 +1021,7 @@ async fn machine_setup_pairing_races_delivery_hashes_and_expiry() {
         &f.owner,
         Some(&f.row.id),
         Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -1078,6 +1079,7 @@ async fn machine_page_setup_grant_is_atomic_and_never_restored_on_reconnect() {
         &f.owner,
         None,
         crate::models::machine_setup::Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -1146,6 +1148,7 @@ async fn machine_watch_settlement_queues_exactly_one_durable_secret_free_event()
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -1383,6 +1386,7 @@ async fn machine_setup_change_stream_wakes_thread_without_sweep() {
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -1908,6 +1912,7 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -1946,6 +1951,7 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -2102,6 +2108,7 @@ async fn machine_setup_missing_selection_is_actionable_and_grants_nothing() {
         &f.owner,
         None,
         crate::models::machine_setup::Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -2164,6 +2171,7 @@ async fn machine_setup_chat_watch_settles_selection_required_once() {
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,

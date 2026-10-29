@@ -91,6 +91,72 @@ const intentSchema = z
   .strict();
 export type RemoteMachineIntent = z.infer<typeof intentSchema>;
 
+const acceptedIntentSchema = intentSchema.extend({
+  operationId: z.string().min(1),
+  action: z.enum(["pause", "resume", "delete"]),
+  observedRevision: z.number().int().nonnegative().optional(),
+  currentObservation: z.object({
+    operationId: z.string().min(1).nullable(),
+    revision: z.number().int().nonnegative(),
+  }).strict().optional(),
+}).strict();
+export type AcceptedRemoteMachineIntent = z.infer<typeof acceptedIntentSchema>;
+export const REMOTE_MACHINE_ACCEPTED_EVENT = "nyxid:remote-machine-accepted";
+
+function acceptedStorageKey(ownerId: string, machineId: string) {
+  return `${storageKey(ownerId, machineId)}:accepted`;
+}
+
+export function remoteMachineAcceptedSnapshot(ownerId: string, machineId: string) {
+  return sessionStorage.getItem(acceptedStorageKey(ownerId, machineId));
+}
+
+export function parseAcceptedRemoteMachineIntent(raw: string | null) {
+  if (!raw) return null;
+  const accepted = acceptedIntentSchema.parse(JSON.parse(raw));
+  if (accepted.body.action !== accepted.action)
+    throw new Error("The accepted machine request does not match its action.");
+  return accepted;
+}
+
+/** Transfer the exact reviewed request to a response receipt before clearing it. */
+export function acceptRemoteMachineIntent(
+  ownerId: string,
+  machineId: string,
+  action: AcceptedRemoteMachineIntent["action"],
+  idempotencyKey: string,
+  operationId: string,
+) {
+  const scope = `${machineId}:${action}`;
+  const intent = readRemoteMachineIntent(ownerId, scope);
+  if (!intent || intent.idempotencyKey !== idempotencyKey) return;
+  const accepted = acceptedIntentSchema.parse({ ...intent, action, operationId });
+  if (accepted.body.action !== action)
+    throw new Error("The accepted machine request does not match its action.");
+  sessionStorage.setItem(acceptedStorageKey(ownerId, machineId), JSON.stringify(accepted));
+  clearRemoteMachineIntent(ownerId, scope, idempotencyKey);
+  window.dispatchEvent(new Event(REMOTE_MACHINE_ACCEPTED_EVENT));
+}
+
+/** Retain the highest real current observation independently of the request. */
+export function observeAcceptedRemoteMachineIntent(
+  ownerId: string,
+  machineId: string,
+  operationId: string | null,
+  revision: number,
+) {
+  const accepted = parseAcceptedRemoteMachineIntent(remoteMachineAcceptedSnapshot(ownerId, machineId));
+  if (!accepted) return;
+  const highest = accepted.currentObservation?.revision ?? accepted.observedRevision ?? accepted.body.expected_revision ?? -1;
+  if (revision <= highest) return;
+  sessionStorage.setItem(acceptedStorageKey(ownerId, machineId), JSON.stringify({
+    ...accepted,
+    ...(operationId === accepted.operationId ? { observedRevision: revision } : {}),
+    currentObservation: { operationId, revision },
+  }));
+  window.dispatchEvent(new Event(REMOTE_MACHINE_ACCEPTED_EVENT));
+}
+
 function storageKey(ownerId: string, scope: string) {
   if (!ownerId || !scope)
     throw new Error("Sign in before managing a remote machine.");

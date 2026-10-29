@@ -1991,6 +1991,32 @@ pub fn spawn(state: crate::AppState) {
     });
 }
 
+// Gate-local metadata only; never include configuration, arguments or error text.
+fn execution_denied(
+    node: &crate::models::node::Node,
+    machine: Option<&ManagedMachine>,
+    reason: &'static str,
+) -> AppError {
+    let error = AppError::MachineNotAllowed;
+    tracing::warn!(
+        stage = "managed_execution_read_gate",
+        reason,
+        error_code = error.error_code(),
+        node_id = %node.id,
+        runtime_id = node.machine.as_ref().map(|profile| profile.runtime_id.as_str()).filter(|id| uuid::Uuid::parse_str(id).is_ok()),
+        runtime_generation = machine.map(|machine| machine.runtime_generation),
+        credential_epoch = machine.map(|machine| machine.credential_epoch),
+        owner_matches = machine.map(|machine| machine.owner_id == node.user_id),
+        node_active = node.is_active,
+        node_online = node.status == crate::models::node::NodeStatus::Online,
+        resource_ready = machine.map(|machine| machine.resource_state == ResourceState::Ready),
+        authorization_active = machine.map(|machine| machine.authorization_state == crate::models::remote_machine::AuthorizationState::Active),
+        writer_admitted = machine.map(|machine| machine.writer_admitted),
+        "Managed Machine execution admission denied"
+    );
+    error
+}
+
 /// Self-hosted calls keep their existing query budget. Managed calls additionally
 /// enforce the live manager fence before owner-turn execution or lease renewal.
 pub async fn require_execution(db: &Database, node: &crate::models::node::Node) -> AppResult<()> {
@@ -2004,11 +2030,15 @@ pub async fn require_execution(db: &Database, node: &crate::models::node::Node) 
     }
     let machine = lifecycle::managed_machine_for_node(db, &node.id)
         .await?
-        .ok_or(AppError::MachineNotAllowed)?;
+        .ok_or_else(|| execution_denied(node, None, "managed_machine_missing"))?;
     if super::remote_machine_configuration::configuration_view(&machine, Some(node)).state
         != "applied"
     {
-        return Err(AppError::MachineNotAllowed);
+        return Err(execution_denied(
+            node,
+            Some(&machine),
+            "configuration_not_applied",
+        ));
     }
     if !lifecycle::runtime_fence_allows_writer(
         db,
@@ -2019,11 +2049,19 @@ pub async fn require_execution(db: &Database, node: &crate::models::node::Node) 
     )
     .await?
     {
-        return Err(AppError::MachineNotAllowed);
+        return Err(execution_denied(
+            node,
+            Some(&machine),
+            "runtime_writer_fence_rejected",
+        ));
     }
     let eligible = lifecycle::entitlement(db, &node.user_id).await?;
     if !eligible.eligible {
-        return Err(AppError::MachineNotAllowed);
+        return Err(execution_denied(
+            node,
+            Some(&machine),
+            "owner_entitlement_ineligible",
+        ));
     }
     Ok(())
 }

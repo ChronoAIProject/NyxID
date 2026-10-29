@@ -10,6 +10,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { MachinePairPage, MachineSetupPage } from "./machine-setup";
 import userEvent from "@testing-library/user-event";
 import { useAuthStore } from "@/stores/auth-store";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import {
   remoteMachineFixture,
   remoteMachinePlatformFixture,
@@ -26,12 +27,21 @@ const mock = vi.hoisted(() => ({
   createRemote: vi.fn(),
   setup: undefined as unknown,
   search: {} as Record<string, string>,
-  agents: [] as Array<{ id: string; name: string; kind: "specialist"; status: "idle"; owner_id: string; owner_kind: "person" }>,
+  agents: [] as Array<{
+    id: string;
+    name: string;
+    kind: "specialist";
+    status: "idle";
+    owner_id: string;
+    owner_kind: "person";
+  }>,
 }));
 vi.mock("@tanstack/react-router", () => ({
   useSearch: () => mock.search,
   useNavigate: () => mock.navigate,
-  Link: ({ children }: { children: React.ReactNode }) => <a href="/assistant/machines">{children}</a>,
+  Link: ({ children }: { children: React.ReactNode }) => (
+    <a href="/assistant/machines">{children}</a>
+  ),
 }));
 vi.mock("@/components/shared/org-scope-select", () => ({
   OrgScopeSelect: () => <span>Personal account</span>,
@@ -53,6 +63,12 @@ vi.mock("@/hooks/use-billing", () => ({
   }),
 }));
 vi.mock("@/hooks/use-machines", () => ({
+  useRemoteMachines: () => ({
+    data: [],
+    discoveryComplete: true,
+    refetch: vi.fn(async () => ({ data: [] })),
+  }),
+  useRemoteMachine: () => ({ data: undefined }),
   useRemoteMachineEntitlement: () => ({
     data: {
       eligible: true,
@@ -105,7 +121,12 @@ const choices = {
 it("shows one reviewed command only on the private setup page and removes it when connected", async () => {
   const client = new QueryClient();
   mock.search = { setup: "intent" };
-  mock.setup = { id: "intent", choices, status: "review" };
+  mock.setup = {
+    id: "intent",
+    choices,
+    status: "review",
+    conversation_id: "nyxa-prefilled-chat",
+  };
   const token = `nyx_nreg_${"a".repeat(64)}`;
   mock.issue.mockResolvedValue({ token });
   const view = render(
@@ -123,6 +144,7 @@ it("shows one reviewed command only on the private setup page and removes it whe
   await waitFor(() =>
     expect(mock.issue).toHaveBeenCalledWith("intent", {
       ...choices,
+      machine_assignment: "membership_only",
       automatic_updates: true,
     }),
   );
@@ -178,6 +200,31 @@ it("pairing shows machine details and requires explicit recognition before appro
     }),
   );
 });
+it.each([true, false])(
+  "connected setup describes the recorded membership-only contract: %s",
+  (membershipOnly) => {
+    mock.search = { setup: "connected-setup" };
+    mock.setup = {
+      id: "connected-setup",
+      choices: {
+        ...choices,
+        ...(membershipOnly ? { machine_assignment: "membership_only" } : {}),
+      },
+      status: "connected",
+    };
+    render(<MachineSetupPage />);
+    const status = screen.getByRole("status");
+    if (membershipOnly) {
+      expect(status).toHaveTextContent("no tools or saved-login access");
+      expect(status).toHaveTextContent("Review access before running tools");
+      expect(status).not.toHaveTextContent("NyxBot can verify");
+    } else {
+      expect(status).toHaveTextContent(
+        "Connected. NyxBot can verify the machine and continue.",
+      );
+    }
+  },
+);
 it("quotes setup credentials and URLs, installs the CLI if missing and preserves chosen capabilities", () => {
   const token = `nyx_nreg_${"b".repeat(64)}`;
   const host = machineSetupCommand(
@@ -212,66 +259,100 @@ it("renders a browser-only setup without broad computer access", () => {
   expect(command).not.toContain("--shell");
 });
 
-it.each([null, "specialist-1"])("creates from the fourth hosted option and focuses the selected membership-only Specialist %s", async specialist => {
-  useAuthStore.setState({
-    user: {
-      ...useAuthStore.getState().user!,
-      id: "owner",
-      capabilities: { enabled_features: ["experimental:remote-machines"] },
-    },
-    isAuthenticated: true,
-    isLoading: false,
-  });
-  mock.search = { where: "hosted" };
-  mock.agents = [{ id: "specialist-1", name: "Researcher", kind: "specialist", status: "idle", owner_id: "owner", owner_kind: "person" }];
-  mock.createRemote.mockResolvedValue({
-    machine: { ...remoteMachineFixture, name: "my-remote-machine" },
-    operation: { id: "operation-1" },
-  });
-  render(<MachineSetupPage />);
-  expect(screen.getAllByRole("tab")).toHaveLength(4);
-  expect(screen.getByRole("tab", { name: "NyxID hosted" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  expect(
-    screen.getByRole("form", { name: "NyxID hosted machine configuration" }),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "Create my setup command" }),
-  ).not.toBeInTheDocument();
-  expect(screen.queryByText(/Run on your machine/)).not.toBeInTheDocument();
-  expect(
-    screen.queryByText(/Docker command downloads/),
-  ).not.toBeInTheDocument();
-  if (specialist) {
-    await userEvent.click(screen.getByRole("combobox", { name: "Select a specialist for this machine" }));
-    await userEvent.click(screen.getByRole("option", { name: "Researcher" }));
-  }
-  await userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }),
-  );
-  await userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
-  );
-  await userEvent.click(
-    screen.getByRole("button", { name: "Create free remote machine" }),
-  );
-  await waitFor(() => expect(mock.createRemote).toHaveBeenCalledTimes(1));
-  expect(mock.createRemote.mock.calls[0]![0].body).toMatchObject({
-    name: "my-remote-machine",
-    capabilities: ["files", "shell"],
-    specialist_id: specialist,
-    separation_choice: "automatic",
-    separation_policy_version: "remote-machine-separation-v1",
-    acknowledge_separation: true,
-  });
-  expect(mock.navigate).toHaveBeenCalledWith({
-    to: "/assistant/machines",
-    search: { machine: "machine-1", operation: "operation-1", agent: specialist ?? undefined },
-  });
-  expect(mock.issue).not.toHaveBeenCalled();
-});
+it.each([null, "specialist-1"])(
+  "creates from the fourth hosted option and focuses the selected membership-only Specialist %s",
+  async (specialist) => {
+    useAuthStore.setState({
+      user: {
+        ...useAuthStore.getState().user!,
+        id: "owner",
+        capabilities: { enabled_features: ["experimental:remote-machines"] },
+      },
+      isAuthenticated: true,
+      isLoading: false,
+    });
+    mock.search = { where: "hosted" };
+    mock.agents = [
+      {
+        id: "specialist-1",
+        name: "Researcher",
+        kind: "specialist",
+        status: "idle",
+        owner_id: "owner",
+        owner_kind: "person",
+      },
+    ];
+    mock.createRemote.mockResolvedValue({
+      machine: { ...remoteMachineFixture, name: "my-remote-machine" },
+      operation: { id: "operation-1" },
+    });
+    render(<MachineSetupPage />);
+    expect(screen.getAllByRole("tab")).toHaveLength(4);
+    expect(screen.getByRole("tab", { name: "NyxID hosted" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      screen.getByRole("form", { name: "NyxID hosted machine configuration" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Create my setup command" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Run on your machine/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Docker command downloads/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Review paid creation" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Account wallet available/),
+    ).not.toBeInTheDocument();
+    if (specialist) {
+      await userEvent.click(
+        screen.getByRole("combobox", {
+          name: "Select a specialist for this machine",
+        }),
+      );
+      await userEvent.click(screen.getByRole("option", { name: "Researcher" }));
+    }
+    await userEvent.click(
+      screen.getByRole("checkbox", {
+        name: /I accept the selected Agent separation/,
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Create free remote machine" }),
+    );
+    await waitFor(() => expect(mock.createRemote).toHaveBeenCalledTimes(1));
+    expect(mock.createRemote.mock.calls[0]![0].body).toMatchObject({
+      name: "my-remote-machine",
+      capabilities: ["files", "shell"],
+      specialist_id: specialist,
+      separation_choice: "automatic",
+      separation_policy_version: "remote-machine-separation-v1",
+      acknowledge_separation: true,
+      free_slot: true,
+    });
+    expect(mock.createRemote.mock.calls[0]![0].body).not.toHaveProperty(
+      "quote_id",
+    );
+    expect(mock.createRemote.mock.calls[0]![0].body).not.toHaveProperty(
+      "accept_account_balance",
+    );
+    expect(mock.navigate).toHaveBeenCalledWith({
+      to: "/assistant/machines",
+      search: {
+        machine: "machine-1",
+        agent: specialist ?? undefined,
+      },
+    });
+    expect(mock.issue).not.toHaveBeenCalled();
+  },
+);
 it.each(["This computer", "Remote VM", "Docker"])(
   "preserves the %s command setup on the actual four-option page",
   async (mode) => {
@@ -344,88 +425,298 @@ it.each(["absent", "off", "loading"])(
 it("shows actionable separation selection when the node reports no owner choice", () => {
   const client = new QueryClient();
   mock.search = { setup: "intent" };
-  mock.setup = { id: "intent", choices, status: "selection_required", selection_reason: "Upgrade the old node or explicitly choose legacy.", machine: null };
-  render(<QueryClientProvider client={client}><MachineSetupPage /></QueryClientProvider>);
-  expect(screen.getByText(/machine access requires an owner separation choice/)).toBeInTheDocument();
-  expect(screen.getByText("Upgrade the old node or explicitly choose legacy.")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Review machine separation" })).toBeInTheDocument();
+  mock.setup = {
+    id: "intent",
+    choices,
+    status: "selection_required",
+    selection_reason: "Upgrade the old node or explicitly choose legacy.",
+    machine: null,
+  };
+  render(
+    <QueryClientProvider client={client}>
+      <MachineSetupPage />
+    </QueryClientProvider>,
+  );
+  expect(
+    screen.getByText(/machine access requires an owner separation choice/),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText("Upgrade the old node or explicitly choose legacy."),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("link", { name: "Review machine separation" }),
+  ).toBeInTheDocument();
 });
 
-it.each((["vm", "docker"] as const).flatMap(where => [
-  { where, selection: "automatic", label: "Automatic — require confirmed supported separation", flag: "automatic" },
-  { where, selection: "require_separated", label: "Require separated workspaces and browsers", flag: "require-separated" },
-  { where, selection: "shared_legacy", label: "Explicit shared legacy access", flag: "shared-legacy" },
-]))("carries $selection through review into the issued $where command", async ({ where, selection, label, flag }) => {
-  mock.search = { setup: "intent" };
-  mock.setup = { id: "intent", choices: { ...choices, where }, status: "review" };
-  mock.issue.mockResolvedValue({ token: `nyx_nreg_${"b".repeat(64)}` });
-  render(<MachineSetupPage />);
-  const user = userEvent.setup();
-  await user.click(screen.getByRole("combobox", { name: "Agent separation" }));
-  await user.click(screen.getByRole("option", { name: label }));
-  if (selection === "shared_legacy") {
-    expect(screen.getByText(SHARED_LEGACY_WARNING)).toBeVisible();
-    await user.click(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ }));
-  }
-  await user.click(screen.getByRole("button", { name: "Create my setup command" }));
-  await waitFor(() => expect(mock.issue).toHaveBeenCalledWith("intent", expect.objectContaining({ separation: selection, where })));
-  const command = await screen.findByText(where === "docker" ? /docker run -d/ : /node setup --separation/);
-  expect(command).toHaveTextContent(where === "docker" ? `NYXID_MACHINE_SEPARATION=${flag}` : `--separation '${flag}'`);
-  if (selection !== "shared_legacy") expect(command).not.toHaveTextContent("shared-legacy");
-});
+it.each(
+  (["vm", "docker"] as const).flatMap((where) => [
+    {
+      where,
+      selection: "automatic",
+      label: "Automatic — require confirmed supported separation",
+      flag: "automatic",
+    },
+    {
+      where,
+      selection: "require_separated",
+      label: "Require separated workspaces and browsers",
+      flag: "require-separated",
+    },
+    {
+      where,
+      selection: "shared_legacy",
+      label: "Explicit shared legacy access",
+      flag: "shared-legacy",
+    },
+  ]),
+)(
+  "carries $selection through review into the issued $where command",
+  async ({ where, selection, label, flag }) => {
+    mock.search = { setup: "intent" };
+    mock.setup = {
+      id: "intent",
+      choices: { ...choices, where },
+      status: "review",
+    };
+    mock.issue.mockResolvedValue({ token: `nyx_nreg_${"b".repeat(64)}` });
+    render(<MachineSetupPage />);
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("combobox", { name: "Agent separation" }),
+    );
+    await user.click(screen.getByRole("option", { name: label }));
+    if (selection === "shared_legacy") {
+      expect(screen.getByText(SHARED_LEGACY_WARNING)).toBeVisible();
+      await user.click(
+        screen.getByRole("checkbox", {
+          name: /I explicitly accept shared legacy/,
+        }),
+      );
+    }
+    await user.click(
+      screen.getByRole("button", { name: "Create my setup command" }),
+    );
+    await waitFor(() =>
+      expect(mock.issue).toHaveBeenCalledWith(
+        "intent",
+        expect.objectContaining({ separation: selection, where }),
+      ),
+    );
+    const command = await screen.findByText(
+      where === "docker" ? /docker run -d/ : /node setup --separation/,
+    );
+    expect(command).toHaveTextContent(
+      where === "docker"
+        ? `NYXID_MACHINE_SEPARATION=${flag}`
+        : `--separation '${flag}'`,
+    );
+    if (selection !== "shared_legacy")
+      expect(command).not.toHaveTextContent("shared-legacy");
+  },
+);
 
 it("requires fresh legacy acknowledgement when reviewing a previously selected setup", async () => {
   mock.search = { setup: "intent" };
-  mock.setup = { id: "intent", choices: { ...choices, separation: "shared_legacy", legacy_warning_acknowledged: true }, status: "review" };
+  mock.setup = {
+    id: "intent",
+    choices: {
+      ...choices,
+      separation: "shared_legacy",
+      legacy_warning_acknowledged: true,
+    },
+    status: "review",
+  };
   mock.issue.mockResolvedValue({ token: `nyx_nreg_${"b".repeat(64)}` });
   render(<MachineSetupPage />);
-  await waitFor(() => expect(screen.getByRole("combobox", { name: "Agent separation" })).toHaveTextContent("Explicit shared legacy access"));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("combobox", { name: "Agent separation" }),
+    ).toHaveTextContent("Explicit shared legacy access"),
+  );
   expect(await screen.findByText(SHARED_LEGACY_WARNING)).toBeVisible();
-  const consent = screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ });
+  const consent = screen.getByRole("checkbox", {
+    name: /I explicitly accept shared legacy/,
+  });
   expect(consent).not.toBeChecked();
-  fireEvent.click(screen.getByRole("button", { name: "Create my setup command" }));
-  expect(await screen.findByText("Acknowledge the shared legacy warning before continuing")).toBeVisible();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Create my setup command" }),
+  );
+  expect(
+    await screen.findByText(
+      "Acknowledge the shared legacy warning before continuing",
+    ),
+  ).toBeVisible();
   expect(mock.issue).not.toHaveBeenCalled();
   fireEvent.click(consent);
-  fireEvent.click(screen.getByRole("button", { name: "Create my setup command" }));
-  await waitFor(() => expect(mock.issue).toHaveBeenCalledWith("intent", expect.objectContaining({ separation: "shared_legacy", legacy_warning_acknowledged: true })));
-  expect(await screen.findByText(/docker run -d/)).toHaveTextContent("NYXID_MACHINE_SEPARATION=shared-legacy");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Create my setup command" }),
+  );
+  await waitFor(() =>
+    expect(mock.issue).toHaveBeenCalledWith(
+      "intent",
+      expect.objectContaining({
+        separation: "shared_legacy",
+        legacy_warning_acknowledged: true,
+      }),
+    ),
+  );
+  expect(await screen.findByText(/docker run -d/)).toHaveTextContent(
+    "NYXID_MACHINE_SEPARATION=shared-legacy",
+  );
 });
 
 it("reviews an old omitted choice as automatic and clears legacy consent when the mode changes", async () => {
   mock.search = { setup: "intent" };
-  mock.setup = { id: "intent", choices: { ...choices, separation: null }, status: "review" };
+  mock.setup = {
+    id: "intent",
+    choices: { ...choices, separation: null },
+    status: "review",
+  };
   mock.issue.mockResolvedValue({ token: `nyx_nreg_${"b".repeat(64)}` });
   render(<MachineSetupPage />);
   const user = userEvent.setup();
   const mode = screen.getByRole("combobox", { name: "Agent separation" });
   expect(mode).toHaveTextContent("Automatic");
   await user.click(mode);
-  await user.click(screen.getByRole("option", { name: "Explicit shared legacy access" }));
-  await user.click(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ }));
+  await user.click(
+    screen.getByRole("option", { name: "Explicit shared legacy access" }),
+  );
+  await user.click(
+    screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ }),
+  );
   await user.click(mode);
   await user.click(screen.getByRole("option", { name: /Automatic —/ }));
   await user.click(mode);
-  await user.click(screen.getByRole("option", { name: "Explicit shared legacy access" }));
-  expect(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ })).not.toBeChecked();
+  await user.click(
+    screen.getByRole("option", { name: "Explicit shared legacy access" }),
+  );
+  expect(
+    screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ }),
+  ).not.toBeChecked();
   await user.click(mode);
   await user.click(screen.getByRole("option", { name: /Automatic —/ }));
-  await user.click(screen.getByRole("button", { name: "Create my setup command" }));
-  await waitFor(() => expect(mock.issue).toHaveBeenCalledWith("intent", expect.objectContaining({ separation: "automatic", legacy_warning_acknowledged: false })));
-  expect(await screen.findByText(/docker run -d/)).toHaveTextContent("NYXID_MACHINE_SEPARATION=automatic");
+  await user.click(
+    screen.getByRole("button", { name: "Create my setup command" }),
+  );
+  await waitFor(() =>
+    expect(mock.issue).toHaveBeenCalledWith(
+      "intent",
+      expect.objectContaining({
+        separation: "automatic",
+        legacy_warning_acknowledged: false,
+      }),
+    ),
+  );
+  expect(await screen.findByText(/docker run -d/)).toHaveTextContent(
+    "NYXID_MACHINE_SEPARATION=automatic",
+  );
 });
 
 it.each([
   [undefined, "Separation support unknown"],
   [{ version: 4, os: "macos" }, "Separation prerequisites not met"],
-  [{ version: 3, os: "linux", landlock_abi: 8, separate_users: true, managed_browser_configured: true, command_seccomp: true, landlock_enforced: true, managed_browser_sandbox: true, managed_browser_policy: true }, "Separation support unknown"],
-  [{ version: 4, os: "linux", landlock_abi: 8, separate_users: true, managed_browser_configured: true, command_seccomp: true, landlock_enforced: true, managed_browser_sandbox: true, managed_browser_policy: true }, "Separation prerequisites not met"],
-  [{ version: 4, os: "linux", landlock_abi: 8, separate_users: true, managed_browser_configured: true, command_seccomp: true, landlock_enforced: true, managed_browser_sandbox: true, managed_browser_policy: true, credential_custody: true }, "Separation support confirmed"],
-] as const)("shows the observed support after connection (%j)", (separation_evidence, label) => {
-  mock.setup = { id: "intent", choices, status: "connected", machine: {
-    shell: true, files: true, authority_versions: [2], separation_evidence,
-    separated: { available: true, landlock_abi: 8, reason: null },
-  } };
-  render(<MachineSetupPage />);
-  expect(screen.getByText(label)).toBeVisible();
-});
+  [
+    {
+      version: 3,
+      os: "linux",
+      landlock_abi: 8,
+      separate_users: true,
+      managed_browser_configured: true,
+      command_seccomp: true,
+      landlock_enforced: true,
+      managed_browser_sandbox: true,
+      managed_browser_policy: true,
+    },
+    "Separation support unknown",
+  ],
+  [
+    {
+      version: 4,
+      os: "linux",
+      landlock_abi: 8,
+      separate_users: true,
+      managed_browser_configured: true,
+      command_seccomp: true,
+      landlock_enforced: true,
+      managed_browser_sandbox: true,
+      managed_browser_policy: true,
+    },
+    "Separation prerequisites not met",
+  ],
+  [
+    {
+      version: 4,
+      os: "linux",
+      landlock_abi: 8,
+      separate_users: true,
+      managed_browser_configured: true,
+      command_seccomp: true,
+      landlock_enforced: true,
+      managed_browser_sandbox: true,
+      managed_browser_policy: true,
+      credential_custody: true,
+    },
+    "Separation support confirmed",
+  ],
+] as const)(
+  "shows the observed support after connection (%j)",
+  (separation_evidence, label) => {
+    mock.setup = {
+      id: "intent",
+      choices,
+      status: "connected",
+      machine: {
+        shell: true,
+        files: true,
+        authority_versions: [2],
+        separation_evidence,
+        separated: { available: true, landlock_abi: 8, reason: null },
+      },
+    };
+    render(<MachineSetupPage />);
+    expect(screen.getByText(label)).toBeVisible();
+  },
+);
+
+it.each([false, true])(
+  "stamps membership-only intent on page-only create and mint with editing %s",
+  async (editing) => {
+    const previous = useAuthStore.getState().user;
+    useAuthStore.setState({
+      user: {
+        ...previous!,
+        id: "owner",
+        capabilities: {
+          enabled_features: editing ? [FEATURE_FLAG.MACHINE_CAPABILITIES] : [],
+        },
+      },
+    });
+    mock.create.mockResolvedValue({ id: "new-intent" });
+    mock.issue.mockResolvedValue({ token: `nyx_nreg_${"c".repeat(64)}` });
+    const client = new QueryClient();
+    try {
+      render(
+        <QueryClientProvider client={client}>
+          <MachineSetupPage />
+        </QueryClientProvider>,
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Create my setup command" }),
+      );
+      await waitFor(() =>
+        expect(mock.create).toHaveBeenCalledWith(
+          expect.objectContaining({ machine_assignment: "membership_only" }),
+        ),
+      );
+      await waitFor(() =>
+        expect(mock.issue).toHaveBeenCalledWith(
+          "new-intent",
+          expect.objectContaining({ machine_assignment: "membership_only" }),
+        ),
+      );
+    } finally {
+      useAuthStore.setState({ user: previous });
+      client.clear();
+    }
+  },
+);

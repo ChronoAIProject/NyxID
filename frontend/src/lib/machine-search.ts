@@ -2,12 +2,17 @@ import { parseAutomationSearch } from "@/lib/automation-search";
 
 export function parseMachinesSearch(search: Record<string, unknown>): {
   tab?: "logins";
+  activity?: "tools" | "events";
   machine?: string;
   operation?: string;
   confirmation?: string;
   agent?: string;
 } {
   return {
+    activity:
+      search.activity === "tools" || search.activity === "events"
+        ? search.activity
+        : undefined,
     tab: search.tab === "logins" ? ("logins" as const) : undefined,
     ...(typeof search.machine === "string" &&
     /^[a-zA-Z0-9-]{1,128}$/.test(search.machine)
@@ -21,8 +26,10 @@ export function parseMachinesSearch(search: Record<string, unknown>): {
     /^[a-zA-Z0-9-]{1,128}$/.test(search.confirmation)
       ? { confirmation: search.confirmation }
       : {}),
-    ...(typeof search.agent === "string" && /^[a-zA-Z0-9-]{1,128}$/.test(search.agent)
-      ? { agent: search.agent } : {}),
+    ...(typeof search.agent === "string" &&
+    /^[a-zA-Z0-9-]{1,128}$/.test(search.agent)
+      ? { agent: search.agent }
+      : {}),
   };
 }
 

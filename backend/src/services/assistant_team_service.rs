@@ -1002,7 +1002,18 @@ pub async fn create_specialist_for(
     owner: &str,
     request: CreateRequest,
 ) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
-    create_specialist_inner(db, keys, actor, owner, request, None, None).await
+    create_specialist_for_with_machine_assignment(db, keys, actor, owner, request, None).await
+}
+
+pub async fn create_specialist_for_with_machine_assignment(
+    db: &Database,
+    keys: &std::sync::Arc<EncryptionKeys>,
+    actor: &str,
+    owner: &str,
+    request: CreateRequest,
+    intent: Option<crate::models::machine_access::AssignmentIntent>,
+) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
+    create_specialist_inner(db, keys, actor, owner, request, None, None, intent).await
 }
 
 pub(crate) async fn create_approved_specialist(
@@ -1037,6 +1048,7 @@ pub(crate) async fn create_approved_specialist(
         request,
         Some(authority),
         Some(job),
+        None,
     )
     .await
 }
@@ -1049,6 +1061,7 @@ async fn create_specialist_inner(
     request: CreateRequest,
     authority: Option<&crate::models::platform_installation::SetupStepAuthority>,
     claimed_step: Option<&crate::models::platform_installation::SetupStepJob>,
+    intent: Option<crate::models::machine_access::AssignmentIntent>,
 ) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
     if actor != owner {
         super::org_agent_service::require_creation_enabled(db, actor).await?;
@@ -1137,11 +1150,12 @@ async fn create_specialist_inner(
         skills_revision: 0,
         skill_metadata: BTreeMap::new(),
         machine_access: Some(Box::new(crate::models::machine_access::Policy {
-            assignments: Box::pin(super::machine_access_service::new_assignments(
+            assignments: Box::pin(super::machine_access_service::new_assignments_with_intent(
                 db,
                 actor,
                 &machine_node_ids,
                 1,
+                intent,
             ))
             .await?,
             ..Default::default()
@@ -1519,6 +1533,10 @@ pub async fn set_agent_policy(
 /// change keeps levels only for granted services, and none for the default.
 #[derive(Clone, Debug)]
 pub enum GrantChange {
+    Membership {
+        node_id: String,
+        assigned: bool,
+    },
     Machine {
         base: Box<GrantChange>,
         machines: Option<Vec<String>>,
@@ -1589,6 +1607,7 @@ impl GrantChange {
                 grants.account_read &= !remove.account_read;
             }
             Self::Guests(levels) => guests.extend(levels.clone()),
+            Self::Membership { .. } => {}
             Self::Machine { .. } => unreachable!("handled above"),
         }
         // A service granted anew starts at the default level, whatever an
@@ -1601,7 +1620,7 @@ impl GrantChange {
             .collect();
         let named: HashSet<&String> = match self {
             Self::Replace { guests: levels, .. } | Self::Guests(levels) => levels.keys().collect(),
-            Self::Add(_) | Self::Remove(_) => HashSet::new(),
+            Self::Add(_) | Self::Remove(_) | Self::Membership { .. } => HashSet::new(),
             Self::Machine { .. } => unreachable!("handled above"),
         };
         guests.retain(|id, _| before.contains(id) || named.contains(id));
@@ -1682,6 +1701,24 @@ pub async fn apply_grants_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    // Resolve the delta against the live transaction row, never a UI snapshot.
+    let membership = matches!(change, GrantChange::Membership { .. });
+    let delta;
+    let change = if let GrantChange::Membership { node_id, assigned } = change {
+        delta = GrantChange::Machine {
+            base: Box::new(GrantChange::Add(Default::default())),
+            machines: Some(vec![node_id.clone()]),
+            logins: None,
+            mode: if *assigned {
+                MachineGrantMode::Add
+            } else {
+                MachineGrantMode::Remove
+            },
+        };
+        &delta
+    } else {
+        change
+    };
     let previous_machines = agent.machine_node_ids.clone();
     let previous_logins = agent.saved_login_ids.clone();
     if let GrantChange::Machine {
@@ -1717,14 +1754,18 @@ pub async fn apply_grants_in_session(
     }
     if matches!(change, GrantChange::Machine { .. }) {
         let logins_changed = previous_logins != agent.saved_login_ids;
-        Box::pin(super::machine_access_service::membership_changed(
-            db,
-            owner,
-            &mut agent,
-            &previous_machines,
-            logins_changed,
-            session,
-        ))
+        Box::pin(
+            super::machine_access_service::membership_changed_with_intent(
+                db,
+                owner,
+                &mut agent,
+                &previous_machines,
+                logins_changed,
+                membership
+                    .then_some(crate::models::machine_access::AssignmentIntent::MembershipOnly),
+                session,
+            ),
+        )
         .await?;
     }
     let (grants, guest_access) = change.apply(&agent.grants, &agent.guest_access);

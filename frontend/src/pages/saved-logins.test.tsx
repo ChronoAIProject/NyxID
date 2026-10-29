@@ -107,3 +107,16 @@ it("shows a validation message for each invalid origin line", async () => {
   expect(screen.getByText(/^Line 3:/)).toBeInTheDocument();
   expect(mock.save).not.toHaveBeenCalled();
 });
+
+it("keeps saved-login metadata read-only and exposes only full replacement", () => {
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <SavedLoginsPage />
+    </QueryClientProvider>,
+  );
+  expect(
+    screen.queryByRole("button", { name: "Edit Website" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("Save login details")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Replace" })).toBeInTheDocument();
+});

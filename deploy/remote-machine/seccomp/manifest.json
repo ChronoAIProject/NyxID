@@ -4,10 +4,20 @@
     "arm64"
   ],
   "capabilities": [
+    "CAP_AUDIT_WRITE",
     "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_FOWNER",
+    "CAP_FSETID",
     "CAP_KILL",
+    "CAP_MKNOD",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_RAW",
+    "CAP_SETFCAP",
     "CAP_SETGID",
-    "CAP_SETUID"
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_CHROOT"
   ],
   "localhost_profile": "nyxid/remote-machine-v1-6acea1f600d901e9056e85581c3e8be63f61ad8a14357e477cf9cff51519a451.json",
   "minimum_kernel": "4.8",

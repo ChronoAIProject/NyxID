@@ -18,6 +18,9 @@ import {
   useMachineAccess,
   useSetMachineAccess,
 } from "@/hooks/use-machine-access";
+import { useNodes } from "@/hooks/use-nodes";
+import { useRemoteMachines } from "@/hooks/use-machines";
+import { useSavedLogins } from "@/hooks/use-saved-logins";
 import { MachineAuthorizationStatus } from "./machine-authorization-status";
 import { MachineContextReview } from "./machine-context-review";
 import { MachineApplicationStatus } from "./machine-application-status";
@@ -38,12 +41,21 @@ export function MachineCapabilities({
   disabled = false,
 }: {
   readonly agentId: string;
-  readonly agent?: Pick<AssistantAgent, "kind" | "machines">;
+  readonly agent?: Pick<AssistantAgent, "kind" | "machines"> & Partial<Pick<AssistantAgent, "logins">>;
   readonly disabled?: boolean;
 }) {
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
   const contextsEnabled = useFeature(FEATURE_FLAG.MACHINE_CONTEXTS);
   const query = useMachineAccess(agentId, !disabled);
+  const nodes = useNodes();
+  const remoteMachines = useRemoteMachines();
+  const savedLogins = useSavedLogins("all");
+  const availableLogins = savedLogins.data?.map((login) => ({
+    id: login.id,
+    label: login.label,
+    username_hint: login.username_hint,
+    eligible: agent?.kind === "nyxbot" || Boolean(agent?.logins?.includes(login.id)),
+  }));
   if (!enabled && !contextsEnabled && !query.data?.length) return null;
   return (
     <section aria-label="Machine capabilities" className="space-y-3">
@@ -58,6 +70,9 @@ export function MachineCapabilities({
           Could not refresh machine capabilities. Displayed status may be out of
           date.
         </p>
+      ) : null}
+      {nodes.isError || remoteMachines.isError ? (
+        <p role="alert" className="text-12 text-destructive">Could not refresh Machine policy metadata. Saved login restrictions are retained; dependent changes wait for current policy.</p>
       ) : null}
       {query.isPending ? (
         <p role="status" className="text-12 text-muted-foreground">
@@ -79,10 +94,25 @@ export function MachineCapabilities({
       >
         Refresh machine status
       </Button>
-      {query.data?.map((machine) => (
-        <MachineCapabilityForm
+      {query.data?.map((machine) => {
+        const remote = remoteMachines.data?.find((row) => row.node_id === machine.node_id);
+        const node = nodes.data?.find((row) => row.id === machine.node_id);
+        const configurationApplicability = remote || machine.machine_configuration || node?.metadata?.provisioning_source === "remote_machine"
+          ? "hosted"
+          : node
+            ? "not_applicable"
+            : "unknown";
+        const currentMachine = remote
+          ? { ...machine, machine_configuration: remote.machine_configuration }
+          : machine;
+        const sharedLoginsAllowed = remoteMachines.isError || nodes.isError
+          ? null
+          : remote
+            ? remote.presentation?.allow_single_user_saved_logins ?? null
+            : node?.allow_single_user_saved_logins ?? null;
+        return <MachineCapabilityForm
           key={`${agentId}:${machine.node_id}`}
-          machine={machine}
+          machine={currentMachine}
           agentId={agentId}
           membership={
             agent
@@ -96,8 +126,12 @@ export function MachineCapabilities({
           disabled={disabled || Boolean(query.error)}
           capabilityEditing={enabled}
           contextEnabled={contextsEnabled}
+          availableLogins={availableLogins}
+          savedLoginsState={savedLogins.isError ? "error" : savedLogins.isPending ? "loading" : "ready"}
+          sharedLoginsAllowed={sharedLoginsAllowed}
+          configurationApplicability={configurationApplicability}
         />
-      ))}
+      })}
     </section>
   );
 }
@@ -111,6 +145,10 @@ export function MachineCapabilityForm({
   contextEnabled = false,
   onSaveError,
   onSaveSuccess,
+  availableLogins,
+  sharedLoginsAllowed = null,
+  savedLoginsState = "ready",
+  configurationApplicability = "unknown",
 }: {
   readonly machine: MachineAccess;
   readonly agentId: string;
@@ -120,6 +158,15 @@ export function MachineCapabilityForm({
   readonly contextEnabled?: boolean;
   readonly onSaveError?: () => void;
   readonly onSaveSuccess?: () => void;
+  readonly availableLogins?: readonly {
+    id: string;
+    label: string;
+    username_hint: string;
+    eligible: boolean;
+  }[];
+  readonly sharedLoginsAllowed?: boolean | null;
+  readonly savedLoginsState?: "ready" | "loading" | "error";
+  readonly configurationApplicability?: "hosted" | "not_applicable" | "unknown";
 }) {
   const mutation = useSetMachineAccess(agentId);
   const descriptionId = useId();
@@ -236,18 +283,33 @@ export function MachineCapabilityForm({
         </p>
       ) : null}
       <MachineAuthorizationStatus machine={machine} />
-      <MachineApplicationStatus authorizationApplied={machine.authorization_applied}
-        environmentApplied={machine.environment_applied} configuration={machine.machine_configuration} />
-      {machine.availability_reason ? <p role="status" className="text-12 text-warning">
-        Agent tools unavailable: {({
-          machine_selection_required: "owner environment selection required",
-          no_tools_granted: "no tools granted; this can be an intentional all-off policy",
-          machine_offline: "machine is offline",
-          separated_context_unavailable: "separated support is unavailable; execution is refused without shared fallback",
-          authority_application_pending: "Agent authority application is pending",
-          machine_configuration_pending: "current hosted configuration evidence is pending",
-        } as Record<string, string>)[machine.availability_reason] ?? machine.availability_reason.replaceAll("_", " ")}
-      </p> : null}
+      <MachineApplicationStatus
+        authorizationApplied={machine.authorization_applied}
+        environmentApplied={machine.environment_applied}
+        configuration={machine.machine_configuration}
+        configurationApplicability={configurationApplicability}
+      />
+      {machine.availability_reason ? (
+        <p role="status" className="text-12 text-warning">
+          Agent tools unavailable:{" "}
+          {(
+            {
+              machine_selection_required:
+                "owner environment selection required",
+              no_tools_granted:
+                "no tools granted; this can be an intentional all-off policy",
+              machine_offline: "machine is offline",
+              separated_context_unavailable:
+                "separated support is unavailable; execution is refused without shared fallback",
+              authority_application_pending:
+                "Agent authority application is pending",
+              machine_configuration_pending:
+                "current hosted configuration evidence is pending",
+            } as Record<string, string>
+          )[machine.availability_reason] ??
+            machine.availability_reason.replaceAll("_", " ")}
+        </p>
+      ) : null}
       <MachineSeparationSupport
         support={machine.separated}
         setupNote={machine.separated_setup_note}
@@ -268,6 +330,7 @@ export function MachineCapabilityForm({
         contextEnabled={contextEnabled}
         disabled={disabled || mutation.isPending}
         unsavedCapabilities={form.formState.isDirty}
+        configurationApplicability={configurationApplicability}
       />
       <fieldset
         disabled={capabilityDisabled}
@@ -295,6 +358,7 @@ export function MachineCapabilityForm({
                     if (key === "browser" && value !== true) {
                       form.setValue("capabilities.computer", false);
                       form.setValue("capabilities.developer_browser", false);
+                      form.setValue("saved_login_ids", []);
                     }
                   }}
                 />
@@ -312,6 +376,81 @@ export function MachineCapabilityForm({
           );
         })}
       </fieldset>
+      {(availableLogins || savedLoginsState !== "ready") && (
+        <fieldset
+          className="space-y-3"
+          disabled={
+            capabilityDisabled ||
+            savedLoginsState !== "ready" ||
+            !caps.browser ||
+            (machine.mode !== "separated" && !sharedLoginsAllowed)
+          }
+        >
+          <legend className="mb-2 font-medium">Saved login access</legend>
+          <p className="text-muted-foreground">
+            Choose from this assistant’s existing login grants. Logins are used
+            only in the secure browser.
+          </p>
+          {!caps.browser && <p>Enable Browser to select saved logins.</p>}
+          {machine.mode !== "separated" && sharedLoginsAllowed !== true && (
+            <p>
+              {sharedLoginsAllowed === null
+                ? "Shared-session Saved Login policy is not reported. Existing grants are retained while policy is unavailable."
+                : "Saved logins are unavailable in shared sessions under the current machine policy. Existing grants are retained."}
+            </p>
+          )}
+          {savedLoginsState !== "ready" && (
+            <p role={savedLoginsState === "error" ? "alert" : "status"}>
+              {savedLoginsState === "error" ? "Saved logins could not be refreshed." : "Loading saved logins…"} Existing Machine login restrictions are retained.
+            </p>
+          )}
+          <p className="text-muted-foreground">
+            {machine.saved_login_ids === null
+              ? "Machine login scope: all account-granted logins."
+              : machine.saved_login_ids.length
+                ? `Machine login scope: ${machine.saved_login_ids.length} explicit login IDs.`
+                : "Machine login scope: no saved logins."}
+          </p>
+          {machine.saved_login_ids?.filter((id) => !availableLogins?.some((login) => login.id === id)).map((id) => (
+            <p key={id} className="text-muted-foreground">Retained login ID: {id} (metadata unavailable)</p>
+          ))}
+          {availableLogins?.map((login) => (
+            <label
+              key={login.id}
+              className="flex items-start gap-2.5 rounded-lg border border-border p-3"
+            >
+              <Checkbox
+                aria-label={`Allow ${login.label}`}
+                disabled={!login.eligible || savedLoginsState !== "ready"}
+                checked={
+                  form.watch("saved_login_ids")?.includes(login.id) ??
+                  login.eligible
+                }
+                onCheckedChange={(v) => {
+                  const previous =
+                    form.getValues("saved_login_ids") ??
+                    availableLogins!
+                      .filter((item) => item.eligible)
+                      .map((item) => item.id);
+                  form.setValue(
+                    "saved_login_ids",
+                    v === true
+                      ? [...new Set([...previous, login.id])]
+                      : previous.filter((id) => id !== login.id),
+                  );
+                }}
+              />
+              <span>
+                {login.label}
+                <span className="block text-11 text-muted-foreground">
+                  {login.username_hint}
+                  {!login.eligible && " · Not granted to this assistant"}
+                </span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+      )}
       <details className="text-12 text-muted-foreground">
         <summary className="cursor-pointer">
           What these permissions mean

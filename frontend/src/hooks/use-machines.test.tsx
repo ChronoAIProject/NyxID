@@ -8,6 +8,7 @@ import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
+import { acceptRemoteMachineIntent, getRemoteMachineIntent, parseAcceptedRemoteMachineIntent, remoteMachineAcceptedSnapshot } from "@/lib/remote-machine-intent";
 import {
   remoteMachineFixture,
   remoteMachineOperationFixture,
@@ -18,6 +19,7 @@ import {
   useCreateRemoteMachine,
   useRemoteMachineQuote,
   useRemoteMachineEntitlement,
+  useRemoteMachineOperation,
   useRemoteMachineAction,
   useRetryRemoteMachineDelete,
   useRemoteMachineJobs,
@@ -66,6 +68,7 @@ function makeClient() {
 }
 
 beforeEach(() => {
+  sessionStorage.clear();
   transport.mockReset();
   vi.stubGlobal("fetch", transport);
   useAuthStore.setState({
@@ -76,6 +79,31 @@ beforeEach(() => {
     isAuthenticated: true,
     isLoading: false,
   });
+});
+
+it.each([
+  { action: "pause" as const, expected_revision: 4 },
+  { action: "resume" as const, expected_revision: 4, policy_version: "remote-machine-mvp" as const, data_policy_version: "remote-machine-data" as const, acknowledge_shared_environment: true },
+  { action: "delete" as const, expected_revision: 4, data_policy_version: "remote-machine-data" as const, acknowledge_data_loss: true },
+  { action: "resume" as const, expected_revision: 4, quote_id: "paid-quote", accept_account_balance: true, policy_version: "remote-machine-mvp" as const, data_policy_version: "remote-machine-data" as const, acknowledge_shared_environment: true },
+])("retains accepted $action after its submitting view unmounts", async (body) => {
+  const intent = getRemoteMachineIntent("owner-one", `machine-1:${body.action}`, body);
+  let resolve!: (response: Response) => void;
+  transport.mockReturnValueOnce(new Promise<Response>((done) => { resolve = done; }));
+  const client = makeClient();
+  const view = renderHook(useRemoteMachineAction, { wrapper: wrapper(client) });
+  const response = view.result.current.mutateAsync({ machineId: "machine-1", body, idempotencyKey: intent.idempotencyKey });
+  view.unmount();
+  await act(async () => {
+    resolve(json({ operation: { ...remoteMachineOperationFixture, action: body.action, machine_id: "machine-1" } }));
+    await response;
+  });
+  expect(parseAcceptedRemoteMachineIntent(remoteMachineAcceptedSnapshot("owner-one", "machine-1"))).toMatchObject({ ...intent, action: body.action, operationId: remoteMachineOperationFixture.id });
+  expect(transport).toHaveBeenCalledTimes(1);
+  // Re-observing that acknowledgement cannot replace its reviewed request.
+  acceptRemoteMachineIntent("owner-one", "machine-1", body.action, intent.idempotencyKey, remoteMachineOperationFixture.id);
+  expect(parseAcceptedRemoteMachineIntent(remoteMachineAcceptedSnapshot("owner-one", "machine-1"))?.body).toEqual(intent.body);
+  client.clear();
 });
 
 it("manually resumes the original delete without new-machine admission or automatic HTTP retries", async () => {
@@ -208,6 +236,201 @@ it("does not cache a manual retry result after the human owner changes", async (
 });
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+it.each(["operation", "list disappearance"] as const)(
+  "refreshes the mounted owner list and entitlement after deletion finality observed by %s",
+  async (observation) => {
+    let finalized = false;
+    let entitlementReads = 0;
+    transport.mockImplementation(async (url) => {
+      if (String(url).includes("remote-machine-entitlement")) {
+        entitlementReads++;
+        return json({
+          eligible: true,
+          free_slot_available: finalized,
+          machine_id: finalized ? null : "machine-1",
+          reason: null,
+          policy_version: "remote-machine-mvp",
+          policy: remoteMachinePaidQuoteFixture.policy,
+        });
+      }
+      if (String(url).includes("remote-machine-operations/"))
+        return json({
+          operation: {
+            ...remoteMachineOperationFixture,
+            action: "delete",
+            state: finalized ? "succeeded" : "reconciling",
+          },
+        });
+      return json({
+        machines: finalized
+          ? []
+          : [{ ...remoteMachineFixture, resource_state: "deleting" }],
+        next_cursor: null,
+      });
+    });
+    const client = makeClient();
+    const otherOwnerKey = [
+      "remote-machine-entitlement",
+      "owner-two",
+      "remote-machine",
+    ];
+    client.setQueryData(otherOwnerKey, { free_slot_available: false });
+    const { result, unmount } = renderHook(
+      () => ({
+        machines: useRemoteMachines(),
+        entitlement: useRemoteMachineEntitlement(),
+        operation: useRemoteMachineOperation(
+          observation === "operation" ? "operation-1" : undefined,
+        ),
+      }),
+      { wrapper: wrapper(client) },
+    );
+    try {
+      await waitFor(() => {
+        expect(result.current.machines.data).toHaveLength(1);
+        expect(result.current.entitlement.data?.free_slot_available).toBe(
+          false,
+        );
+        if (observation === "operation")
+          expect(result.current.operation.data?.state).toBe("reconciling");
+      });
+      expect(entitlementReads).toBe(1);
+      finalized = true;
+      await act(async () => {
+        await (observation === "operation"
+          ? result.current.operation.refetch()
+          : result.current.machines.refetch());
+      });
+      await waitFor(() => {
+        expect(result.current.machines.data).toHaveLength(0);
+        expect(result.current.entitlement.data?.free_slot_available).toBe(true);
+      });
+      expect(entitlementReads).toBeGreaterThan(1);
+      expect(client.getQueryState(otherOwnerKey)?.isInvalidated).toBe(false);
+      expect(
+        transport.mock.calls.every(([, init]) => init?.method === "GET"),
+      ).toBe(true);
+    } finally {
+      unmount();
+      client.clear();
+    }
+  },
+);
+
+it("keeps entitlement unknown when its finality refresh fails instead of releasing the slot locally", async () => {
+  let finalized = false;
+  let entitlementReads = 0;
+  transport.mockImplementation(async (url) => {
+    if (String(url).includes("remote-machine-entitlement")) {
+      entitlementReads++;
+      return finalized
+        ? json({ message: "Entitlement unavailable" }, 503)
+        : json({
+            eligible: true,
+            free_slot_available: false,
+            machine_id: "machine-1",
+            reason: null,
+            policy_version: "remote-machine-mvp",
+            policy: remoteMachinePaidQuoteFixture.policy,
+          });
+    }
+    return json({
+      machines: finalized
+        ? []
+        : [{ ...remoteMachineFixture, resource_state: "deleting" }],
+      next_cursor: null,
+    });
+  });
+  const client = makeClient();
+  const { result, unmount } = renderHook(
+    () => ({
+      machines: useRemoteMachines(),
+      entitlement: useRemoteMachineEntitlement(),
+    }),
+    { wrapper: wrapper(client) },
+  );
+  try {
+    await waitFor(() => {
+      expect(result.current.machines.data).toHaveLength(1);
+      expect(result.current.entitlement.isSuccess).toBe(true);
+    });
+    finalized = true;
+    await act(async () => {
+      await result.current.machines.refetch();
+    });
+    await waitFor(() => expect(result.current.entitlement.isError).toBe(true));
+    expect(result.current.entitlement.data).toBeUndefined();
+    expect(entitlementReads).toBe(2);
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
+
+it("does not refresh either owner's entitlement from a late old-owner deletion result", async () => {
+  let resolveResponse!: (response: Response) => void;
+  transport.mockReturnValueOnce(
+    new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    }),
+  );
+  transport.mockImplementation(async () =>
+    json({
+      operation: {
+        ...remoteMachineOperationFixture,
+        action: "delete",
+        state: "reconciling",
+      },
+    }),
+  );
+  const client = makeClient();
+  const ownerKeys = ["owner-one", "owner-two"].map((owner) => [
+    "remote-machine-entitlement",
+    owner,
+    "remote-machine",
+  ]);
+  ownerKeys.forEach((key) =>
+    client.setQueryData(key, { free_slot_available: false }),
+  );
+  const { result, unmount } = renderHook(
+    () => useRemoteMachineOperation("operation-1"),
+    { wrapper: wrapper(client) },
+  );
+  try {
+    await waitFor(() => expect(transport).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      useAuthStore.setState({ user: { id: "owner-two" } as User });
+    });
+    await waitFor(() => expect(result.current.data?.state).toBe("reconciling"));
+    await act(async () => {
+      resolveResponse(
+        json({
+          operation: {
+            ...remoteMachineOperationFixture,
+            action: "delete",
+            state: "succeeded",
+          },
+        }),
+      );
+    });
+    await waitFor(() =>
+      expect(
+        client.getQueryState([
+          "remote-machine-operations",
+          "owner-one",
+          "operation-1",
+        ])?.status,
+      ).toBe("error"),
+    );
+    for (const key of ownerKeys)
+      expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+    expect(transport).toHaveBeenCalledTimes(2);
+  } finally {
+    unmount();
+    client.clear();
+  }
 });
 
 describe("Remote Machine owner HTTP hooks", () => {

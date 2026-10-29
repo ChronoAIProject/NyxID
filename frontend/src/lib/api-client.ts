@@ -254,9 +254,10 @@ export const api = {
   patch<T>(
     endpoint: string,
     body?: unknown,
-    options?: { signal?: AbortSignal },
+    options?: Pick<RequestOptions, "signal" | "authorityGuard">,
   ): Promise<T> {
     return apiClient<T>(endpoint, {
+      ...options,
       method: "PATCH",
       body,
       signal: options?.signal,

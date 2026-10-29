@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import secrets
+import shlex
 import signal
 import struct
 import subprocess
@@ -22,6 +23,7 @@ import time
 import uuid
 
 managed = True
+browser_recovery = os.environ.get("NYXID_SMOKE_BROWSER_RECOVERY")
 selected = sorted(os.environ.get("NYXID_SMOKE_CAPABILITIES", "shell,files").split(","))
 generation = int(os.environ.get("NYXID_SMOKE_GENERATION", "1"))
 retention_marker = os.environ.get("NYXID_SMOKE_RETENTION_MARKER")
@@ -46,7 +48,6 @@ ready = threading.Event()
 usage_ready = threading.Event()
 latest_usage = {}
 node_id = os.environ.get("NYXID_SMOKE_NODE_ID", str(uuid.uuid4()))
-initial_workspace_uid = pathlib.Path("/workspace").stat().st_uid
 registration = "nyx_nreg_" + secrets.token_hex(32)
 auth = "nyx_nauth_" + secrets.token_hex(32)
 signing = secrets.token_hex(32)
@@ -63,7 +64,9 @@ def compact(value):
     return json.dumps(value, separators=(",", ":")).encode()
 
 
-configuration = dict(version=2, revision=1, separation_choice="shared_legacy", capabilities=selected)
+configuration = dict(version=2, revision=1,
+    separation_choice="require_separated" if browser_recovery == "separated" else "shared_legacy",
+    capabilities=selected)
 configuration_digest = hashlib.sha256(b"nyxid-managed-configuration-v2\0" + compact(configuration)).hexdigest()
 configuration_report = dict(configuration=configuration, digest=configuration_digest, runtime_generation=generation)
 # Synthetic fixture authority, stable across the fixture's retained generations.
@@ -167,7 +170,7 @@ class LocalNodeServer(http.server.BaseHTTPRequestHandler):
             elif self.path == "/api/v1/machines/managed/bootstrap":
                 assert value["binding"] == binding
                 self.json_response(200, dict(binding=binding, sealed=seal(public), writer_admitted=True,
-                    server_url=f"ws://127.0.0.1:{self.server.server_port}/api/v1/nodes/ws"))
+                    server_url=f"{'wss://localhost' if browser_recovery else 'ws://127.0.0.1'}:{self.server.server_port}/api/v1/nodes/ws"))
                 observed["sealed_bootstrap"] = True
             else:
                 self.json_response(404, {})
@@ -224,16 +227,17 @@ class LocalNodeServer(http.server.BaseHTTPRequestHandler):
                         assert value["managed_runtime"] == binding
                         auth_count += 1
                         if auth_count == 1:
-                            assert pathlib.Path("/workspace").stat().st_uid == initial_workspace_uid
+                            assert pathlib.Path("/workspace").stat().st_uid == 0, 'workspace must be protected before WSS ACK'
                             response["managed_runtime"] = dict(binding, credential_epoch=generation + 1)
                             self.send_frame(response)
                             # The next successful attempt must still not have
                             # initialized workspace before the exact fence ack.
                             continue
-                        assert pathlib.Path("/workspace").stat().st_uid == initial_workspace_uid
+                        if not browser_recovery or auth_count == 2:
+                            assert pathlib.Path("/workspace").stat().st_uid == 0, 'workspace must remain protected before exact WSS ACK'
                         response["managed_runtime"] = binding
                         now_ms = time.time_ns() // 1_000_000
-                        window = dict(binding=binding, control_revision=1,
+                        window = dict(binding=binding, control_revision=auth_count - 1 if browser_recovery else 1,
                                       run_not_after_ms=now_ms + 240_000,
                                       issued_at_ms=now_ms)
                         signature = hmac.new(bytes.fromhex(signing),
@@ -293,14 +297,15 @@ owner = str(uuid.uuid4())
 context = str(uuid.uuid4())
 agent = str(uuid.uuid4())
 authority_revision = 1
+authority_generation = 1
 
 
 def make_authority(capabilities=None):
     caps = {name: name in selected for name in ("shell", "files", "browser", "computer")}
-    caps["developer_browser"] = False
+    caps["developer_browser"] = bool(browser_recovery)
     if capabilities is not None:
         caps = capabilities
-    return dict(require_v2=True, context_id=context, generation=1, mode="shared_legacy",
+    return dict(require_v2=True, context_id=context, generation=authority_generation, mode=browser_recovery or "shared_legacy",
         agent_id=agent, owner_id=owner, actor_id=owner, group_id=None,
         runtime_id=observed["runtime_id"], conversation_id=conversation, turn_id=turn,
         revision=authority_revision, lease_id=str(uuid.uuid4()), expires_at_ms=time.time_ns()//1_000_000+44_000,
@@ -347,6 +352,77 @@ def identity_check(uid):
         "assert not os.access('/var/run/nyxid-workload/token',4)"],
         preexec_fn=identity, capture_output=True)
     assert check.returncode == 0, "identity separation failed"
+
+
+def supervisor_permissions(pid=None):
+    status = dict(line.split(':', 1) for line in pathlib.Path('/proc', str(pid or os.getpid()), 'status').read_text().splitlines())
+    assert int(status['Uid'].split()[0]) == 0 and int(status['Gid'].split()[0]) == 0, 'supervisor must retain root UID/GID'
+    for field in ('CapEff', 'CapPrm', 'CapBnd'):
+        assert int(status[field], 16) == 0xa80425fb, 'supervisor Docker-default capabilities differ'
+    assert int(status['NoNewPrivs']) == 0, 'supervisor must allow privilege escalation'
+    assert not os.statvfs('/').f_flag & os.ST_RDONLY, 'supervisor root filesystem must be writable'
+    probe = pathlib.Path('/runtime-permissions-probe')
+    probe.write_text('supervisor write')
+    probe.unlink()
+    return dict(cap_eff=status['CapEff'].strip(), cap_bnd=status['CapBnd'].strip(),
+                no_new_privs=0, writable_root=True)
+
+
+def signed_development_probe(request):
+    script = r'''
+import ctypes,errno,json,os,pathlib,py_compile,subprocess
+print('probe:worker-security',flush=True)
+libc = ctypes.CDLL(None,use_errno=True)
+# Separated Landlock deliberately denies /proc/self/status. Observe this
+# signed worker through kernel APIs without granting additional filesystem access.
+class Header(ctypes.Structure):
+    _fields_ = [('version',ctypes.c_uint32),('pid',ctypes.c_int)]
+class Capabilities(ctypes.Structure):
+    _fields_ = [('effective',ctypes.c_uint32),('permitted',ctypes.c_uint32),('inheritable',ctypes.c_uint32)]
+header = Header(0x20080522,0)
+capabilities = (Capabilities*2)()
+assert libc.capget(ctypes.byref(header),capabilities) == 0
+assert os.geteuid() != 0 and os.getegid() != 0
+for row in capabilities:
+    assert row.effective == row.permitted == row.inheritable == 0
+assert libc.prctl(39,0,0,0,0) == 1 # PR_GET_NO_NEW_PRIVS
+assert libc.prctl(21,0,0,0,0) == 2 # PR_GET_SECCOMP: filter mode
+for path in ('/var/lib/nyxid-machine/node/config.toml','/var/run/nyxid-workload/token'):
+    assert not os.access(path,os.R_OK)
+for name,args in (('unshare',(0,)),('setns',(-1,0))):
+    ctypes.set_errno(0)
+    assert getattr(libc,name)(*args) == -1 and ctypes.get_errno() == errno.EPERM
+assert not os.access('/usr/local/bin',os.W_OK)
+print('probe:workspace',flush=True)
+project = pathlib.Path('development-permissions-smoke')
+project.mkdir(exist_ok=True)
+python = project/'hello.py'
+python.write_text("print('python-development-ok')\n")
+print('probe:python',flush=True)
+py_compile.compile(str(python),doraise=True)
+assert subprocess.check_output(['python3',str(python)],text=True).strip() == 'python-development-ok'
+javascript = project/'hello.js'
+print('probe:node',flush=True)
+javascript.write_text("console.log('node-development-ok');\n")
+subprocess.run(['node','--check',str(javascript)],check=True,capture_output=True)
+assert subprocess.check_output(['node',str(javascript)],text=True).strip() == 'node-development-ok'
+c = project/'hello.c'
+print('probe:c',flush=True)
+c.write_text('#include <stdio.h>\nint main(void) { puts("c-development-ok"); return 0; }\n')
+binary = project/'hello'
+subprocess.run(['cc',str(c),'-o',str(binary)],check=True,capture_output=True)
+assert subprocess.check_output([str(binary.resolve())],text=True).strip() == 'c-development-ok'
+print(json.dumps(dict(uid=os.geteuid(),gid=os.getegid(),cap_eff='0000000000000000',
+    cap_prm='0000000000000000',no_new_privs=1,seccomp_mode=2,
+    namespace_calls_refused=True,protected_identity_unreadable=True,
+    system_bin_unwritable=True,development=['python-bytecode-and-run','node-check-and-run','c-compile-and-run'])))
+'''
+    response = request('exec', dict(command='python3 -c ' + shlex.quote(script),
+        timeout_secs=30))
+    lines = response.get('stdout', '').splitlines()
+    stage = next((line for line in reversed(lines) if line.startswith('probe:')), 'no probe stage')
+    assert response.get('exit_code') == 0, 'signed development and worker permissions probe failed at ' + stage
+    return json.loads(lines[-1])
 
 
 def process_counts():
@@ -400,6 +476,8 @@ def run_cases():
     checks=run_checks
     assert ready.wait(150), "Node did not advertise capabilities"
     assert "fixture_error" not in observed, "local protocol fixture failed"
+    run_resources['supervisor_permissions'] = supervisor_permissions(int(pathlib.Path('/var/lib/nyxid-machine/node/node.pid').read_text()))
+    checks.append('docker_default_Node_supervisor_permissions_and_writable_root')
     assert prepare_count == 2 and auth_count >= 2
     assert observed.get("sealed_bootstrap"), "sealed bootstrap missing"
     assert versions.get('nyxid_node_agent_version') and versions['nyxid_cli'].endswith(versions['nyxid_node_agent_version']), 'bundled Node version does not match CLI version'
@@ -449,6 +527,8 @@ def run_cases():
         assert result.get('exit_code')==0 and result.get('stdout','').splitlines()[0]=='1000', 'signed command failed'
         assert versions['gh'] in result.get('stdout',''), 'gh not usable by signed command identity'
         checks.extend(['signed_command_as_agent','gh_executed_by_agent_without_bootstrap_credentials'])
+        run_resources['signed_worker_permissions'] = signed_development_probe(issue)
+        checks.append('signed_nonroot_worker_NNP_seccomp_and_python_node_c_development')
         denied=issue('exec',dict(command='true',timeout_secs=5),dict(shell=False,files=True,browser=False,computer=False,developer_browser=False))
         assert denied.get('error',{}).get('code')==12420, 'signed authority narrowing failed'
         checks.append('signed_authority_denial')
@@ -497,8 +577,10 @@ def run_cases():
     else:
         denied=issue('browser',dict(browser='secure',action='snapshot'))
         assert denied.get('error',{}).get('code') in (12400,12420)
-        assert not process_counts(), 'unselected desktop components started'
-        checks.append('browser_disabled_without_desktop_processes')
+        counts = process_counts()
+        assert counts.get('Xvfb') == 2 and counts.get('openbox') == 2, 'separated desktop infrastructure missing'
+        assert not counts.get('chromium') and not counts.get('cua-driver'), 'unselected browser workers started'
+        checks.append('browser_disabled_with_required_desktop_infrastructure')
     if 'computer' in selected:
         result=issue('computer',dict(tool='get_desktop_state',arguments={'max_image_dimension':640}))
         assert not result.get('error') and not result.get('isError')
@@ -630,6 +712,14 @@ def run_cases():
     result_path.write_text(json.dumps(payload,indent=2)+'\n')
     os.kill(1,signal.SIGTERM)
 
+
+if browser_recovery:
+    # The recovery fixture supervises a real production entrypoint so it can
+    # restart the Node in this disposable PID namespace without losing its
+    # independent WSS server. Ordinary image smokes still exec Tini as PID 1.
+    import runpy
+    runpy.run_path('/browser-recovery.py')['run'](globals())
+    raise SystemExit(0)
 
 assert os.getpid()==1, 'fixture must initially own PID 1 before execing production Tini'
 versions={}

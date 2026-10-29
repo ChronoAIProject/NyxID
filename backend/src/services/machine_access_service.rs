@@ -541,6 +541,29 @@ pub async fn new_assignments(
     Ok(assignments)
 }
 
+pub async fn new_assignments_with_intent(
+    db: &Database,
+    actor: &str,
+    nodes: &[String],
+    revision: i64,
+    intent: Option<model::AssignmentIntent>,
+) -> AppResult<std::collections::BTreeMap<String, Assignment>> {
+    let mut assignments = Box::pin(new_assignments(db, actor, nodes, revision)).await?;
+    if intent == Some(model::AssignmentIntent::MembershipOnly) {
+        for assignment in assignments.values_mut() {
+            initialize_membership(assignment);
+        }
+    }
+    Ok(assignments)
+}
+
+/// Authority for a new/re-added rollout membership never depends on feature flags.
+fn initialize_membership(assignment: &mut Assignment) {
+    assignment.capabilities = Capabilities::default();
+    assignment.saved_login_ids = Some(Vec::new());
+    assignment.legacy = false;
+}
+
 /// Materialize only missing NyxBot assignments, after the caller's live node ACL.
 /// Discovery supplies one authorized batch, so this never adds a per-row query.
 async fn legacy_nyxbot_assignments(
@@ -721,12 +744,25 @@ pub async fn authorize(
 /// Preserve existing policy; new selections follow the acting person's editor flag.
 /// Removed assignments retain a bounded all-off preference: a later Grants
 /// selection or implicit discovery must not resurrect revoked authority.
+#[cfg(test)]
 pub async fn membership_changed(
     db: &Database,
     actor: &str,
     agent: &mut AssistantAgent,
     before: &[String],
     logins_changed: bool,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    membership_changed_with_intent(db, actor, agent, before, logins_changed, None, session).await
+}
+
+pub async fn membership_changed_with_intent(
+    db: &Database,
+    actor: &str,
+    agent: &mut AssistantAgent,
+    before: &[String],
+    logins_changed: bool,
+    intent: Option<model::AssignmentIntent>,
     session: &mut ClientSession,
 ) -> AppResult<()> {
     let after = agent.machine_node_ids.clone();
@@ -786,9 +822,35 @@ pub async fn membership_changed(
             "Machine assignment history is full. At most 64 new choices, including removed assignments, may be retained. Reuse a previously selected machine or create another agent.".into(),
         ));
     }
-    policy
-        .assignments
-        .extend(Box::pin(new_assignments(db, actor, &added, policy.revision)).await?);
+    policy.assignments.extend(
+        Box::pin(new_assignments_with_intent(
+            db,
+            actor,
+            &added,
+            policy.revision,
+            intent,
+        ))
+        .await?,
+    );
+    if intent == Some(model::AssignmentIntent::MembershipOnly) {
+        // A retained tombstone is not an active assignment. Re-adding it starts
+        // empty while retaining mode, profile cleanup and revocation fences.
+        for node in agent
+            .machine_node_ids
+            .iter()
+            .filter(|node| !before.contains(node))
+        {
+            let assignment = policy
+                .assignments
+                .get_mut(node)
+                .expect("initialized assignment");
+            initialize_membership(assignment);
+            assignment.revision = policy.revision;
+            if !added.contains(node) {
+                enqueue(db, &agent.id, node, policy.revision, session).await?;
+            }
+        }
+    }
     enqueue_hosted_assignments(db, &agent.id, &added, policy.revision, session).await?;
     if logins_changed {
         db.collection::<Document>(model::CONTEXTS)

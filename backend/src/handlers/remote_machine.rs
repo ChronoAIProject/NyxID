@@ -578,10 +578,9 @@ pub async fn list(
         query.limit.unwrap_or(100),
     )
     .await?;
-    let mut views = Vec::with_capacity(page.machines.len());
-    for row in &page.machines {
-        views.push(crate::services::remote_machine_configuration::safe_view(&state.db, row).await?);
-    }
+    let views =
+        crate::services::remote_machine_configuration::safe_views(&state.db, &page.machines)
+            .await?;
     Ok(Json(MachineListResponse {
         machines: views,
         next_cursor: page.next_cursor,

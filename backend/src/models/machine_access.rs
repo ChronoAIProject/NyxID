@@ -12,6 +12,13 @@ pub const SEPARATION_CUTOVER: &str = "machine-separation-defaults-v1";
 pub const SEPARATION_COMPATIBILITY: &str = "machine_separation_compatibility";
 pub const SELECTION_REQUIRED: &str = "selection_required";
 
+/// Explicit rollout initialization; omission retains established legacy writers.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentIntent {
+    MembershipOnly,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Assignment {
     pub capabilities: Capabilities,

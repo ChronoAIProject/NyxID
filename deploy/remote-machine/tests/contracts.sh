@@ -56,8 +56,15 @@ PYROLE
 grep -F 'failurePolicy: Fail' "$root/admission.yaml" >/dev/null
 grep -F 'podTemplate.spec.automountServiceAccountToken == false' "$root/admission.yaml" >/dev/null
 grep -F 'parameterNotFoundAction: Deny' "$root/admission.yaml" >/dev/null
-grep -F "['CHOWN', 'SETUID', 'SETGID', 'KILL']" "$root/admission.yaml" >/dev/null
-grep -F 'pod-security.kubernetes.io/enforce: baseline' "$root/namespace.yaml" >/dev/null
+python3 - "$root" <<'PYCAPS'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+capabilities = json.loads((root / "../../machine/resources/docker-supervisor-capabilities.json").read_text())
+assert capabilities == sorted(set(capabilities)), "capabilities must be canonical"
+assert "c.securityContext.capabilities.add == " + repr(capabilities) in (root / "admission.yaml").read_text(), "admission capabilities drifted from the runtime baseline"
+PYCAPS
+grep -F 'pod-security.kubernetes.io/enforce: privileged' "$root/namespace.yaml" >/dev/null
 PYTHONDONTWRITEBYTECODE=1 python3 "$root/seccomp/export.py" --check
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s "$root/tests" -p seccomp_profile_test.py
 kubectl kustomize "$root" >/dev/null
@@ -141,6 +148,22 @@ func main(){
  }
  check:=func(name string,v object,want bool){checkWithOld(name,v,nil,want)}
  check("current actual renderer",fixture,true)
+ legacyRuntime:=clone(fixture)
+ delete(security(legacyRuntime),"privileged")
+ security(legacyRuntime)["allowPrivilegeEscalation"]=false
+ security(legacyRuntime)["readOnlyRootFilesystem"]=true
+ security(legacyRuntime)["capabilities"].(object)["add"]=[]any{"CHOWN","SETUID","SETGID","KILL"}
+ check("legacy permissions cannot create a new Machine",legacyRuntime,false)
+ legacySuspended:=clone(legacyRuntime);legacySuspended["spec"].(object)["operatingMode"]="Suspended"
+ checkWithOld("original legacy template can still be safely suspended",legacySuspended,legacyRuntime,true)
+ checkWithOld("suspended legacy template can be observed again",legacySuspended,legacySuspended,true)
+ checkWithOld("legacy permissions cannot resume",legacyRuntime,legacySuspended,false)
+ checkWithOld("resume adopts current permissions without changing disk or image",fixture,legacySuspended,true)
+ legacyChanged:=clone(legacySuspended);envs(legacyChanged)[0].(object)["value"]="0"
+ checkWithOld("legacy suspension cannot edit its template",legacyChanged,legacyRuntime,false)
+ legacyPrivileged:=clone(legacyRuntime);security(legacyPrivileged)["privileged"]=true
+ legacySuspendedPrivileged:=clone(legacyPrivileged);legacySuspendedPrivileged["spec"].(object)["operatingMode"]="Suspended"
+ checkWithOld("legacy suspension cannot retain privileged workload",legacySuspendedPrivileged,legacyPrivileged,false)
  checkWithOld("current retained update",fixture,fixture,true)
  seccompCases:=0
  seccompCheck:=func(name string,v object,old any,want bool){checkWithOld(name,v,old,want);seccompCases++}
@@ -309,6 +332,16 @@ func main(){
  "additional probe handler":func(v object){node(v)["startupProbe"].(object)["httpGet"]=object{"path":"/","port":80}},
  "new readiness command":func(v object){node(v)["readinessProbe"]=clone(probe)},
  "privileged":func(v object){node(v)["securityContext"].(object)["privileged"]=true},
+ "missing privileged flag":func(v object){delete(security(v),"privileged")},
+ "read only root":func(v object){security(v)["readOnlyRootFilesystem"]=true},
+ "supervisor no new privileges":func(v object){security(v)["allowPrivilegeEscalation"]=false},
+ "nonroot supervisor":func(v object){security(v)["runAsUser"]=1000},
+ "nonroot supervisor group":func(v object){security(v)["runAsGroup"]=1000},
+ "nonroot supervisor required":func(v object){security(v)["runAsNonRoot"]=true},
+ "missing capability":func(v object){caps:=security(v)["capabilities"].(object);caps["add"]=caps["add"].([]any)[1:]},
+ "extra capability":func(v object){caps:=security(v)["capabilities"].(object);caps["add"]=append(caps["add"].([]any),"SYS_ADMIN")},
+ "duplicate capability":func(v object){caps:=security(v)["capabilities"].(object);caps["add"]=append(caps["add"].([]any),"CHOWN")},
+ "missing capability drop":func(v object){delete(security(v)["capabilities"].(object),"drop")},
  "unconfined apparmor":func(v object){node(v)["securityContext"].(object)["appArmorProfile"]=object{"type":"Unconfined"}},
  "unconfined seccomp":func(v object){node(v)["securityContext"].(object)["seccompProfile"].(object)["type"]="Unconfined"},
  "shared process namespace":func(v object){pod(v)["shareProcessNamespace"]=true},

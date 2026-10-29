@@ -541,21 +541,60 @@ pub struct RuntimeFence {
     pub credential_epoch: Option<u64>,
     pub funding_cutoff: Option<DateTime<Utc>>,
 }
-fn execution_fence(machine: &ManagedMachine) -> AppResult<RuntimeFence> {
-    lifecycle::validate_current_contract(machine)?;
-    if machine.resource_state != ResourceState::Ready
-        || machine.authorization_state != crate::models::remote_machine::AuthorizationState::Active
-        || !lifecycle::has_current_verified_runtime_evidence(machine)
-        || !execution_coverage_is_live(machine, Utc::now())
+// Gate-local metadata only; never include configuration, arguments or error text.
+fn execution_denied(
+    node: &Node,
+    machine: Option<&ManagedMachine>,
+    reason: &'static str,
+    error: AppError,
+) -> AppError {
+    tracing::warn!(
+        stage = "managed_execution_transaction_gate",
+        reason,
+        error_code = error.error_code(),
+        node_id = %node.id,
+        runtime_id = node.machine.as_ref().map(|profile| profile.runtime_id.as_str()).filter(|id| uuid::Uuid::parse_str(id).is_ok()),
+        runtime_generation = machine.map(|machine| machine.runtime_generation),
+        credential_epoch = machine.map(|machine| machine.credential_epoch),
+        owner_matches = machine.map(|machine| machine.owner_id == node.user_id),
+        resource_ready = machine.map(|machine| machine.resource_state == ResourceState::Ready),
+        authorization_active = machine.map(|machine| machine.authorization_state == crate::models::remote_machine::AuthorizationState::Active),
+        writer_admitted = machine.map(|machine| machine.writer_admitted),
+        "Managed Machine execution admission denied"
+    );
+    error
+}
+
+fn execution_fence(machine: &ManagedMachine, node: &Node) -> AppResult<RuntimeFence> {
+    let denied =
+        |reason| execution_denied(node, Some(machine), reason, AppError::MachineNotAllowed);
+    lifecycle::validate_current_contract(machine).map_err(|error| {
+        execution_denied(node, Some(machine), "current_contract_invalid", error)
+    })?;
+    let reason = if machine.resource_state != ResourceState::Ready {
+        Some("resource_not_ready")
+    } else if machine.authorization_state
+        != crate::models::remote_machine::AuthorizationState::Active
     {
-        return Err(AppError::MachineNotAllowed);
+        Some("authorization_not_active")
+    } else if !lifecycle::has_current_verified_runtime_evidence(machine) {
+        Some("current_runtime_evidence_invalid")
+    } else if !execution_coverage_is_live(machine, Utc::now()) {
+        Some("execution_coverage_not_live")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(denied(reason));
     }
     Ok(RuntimeFence {
         runtime_generation: Some(
-            u64::try_from(machine.runtime_generation).map_err(|_| AppError::MachineNotAllowed)?,
+            u64::try_from(machine.runtime_generation)
+                .map_err(|_| denied("runtime_generation_invalid"))?,
         ),
         credential_epoch: Some(
-            u64::try_from(machine.credential_epoch).map_err(|_| AppError::MachineNotAllowed)?,
+            u64::try_from(machine.credential_epoch)
+                .map_err(|_| denied("credential_epoch_invalid"))?,
         ),
         funding_cutoff: effective_execution_cutoff(machine),
     })
@@ -577,7 +616,7 @@ pub async fn require_execution_cutoff(
     {
         return Err(AppError::MachineNotAllowed);
     }
-    Ok(execution_fence(&machine)?.funding_cutoff)
+    Ok(execution_fence(&machine, node)?.funding_cutoff)
 }
 /// Admission/renewal calls this in the same transaction as the source grant fence.
 pub fn fence_execution_in_session<'a>(
@@ -594,23 +633,32 @@ pub fn fence_execution_in_session<'a>(
             .find_one(doc! {"_id": &node.id, "owner_id": &node.user_id})
             .session(&mut *session)
             .await?
-            .ok_or(AppError::MachineNotAllowed)?;
-        let fence = execution_fence(&machine)?;
+            .ok_or_else(|| {
+                execution_denied(
+                    node,
+                    None,
+                    "owner_machine_missing",
+                    AppError::MachineNotAllowed,
+                )
+            })?;
+        let denied =
+            |reason| execution_denied(node, Some(&machine), reason, AppError::MachineNotAllowed);
+        let fence = execution_fence(&machine, node)?;
         let live_node = db
             .collection::<Node>(crate::models::node::COLLECTION_NAME)
             .find_one(doc! {"_id":&node.id,"user_id":&node.user_id,"is_active":true})
             .session(&mut *session)
             .await?
-            .ok_or(AppError::MachineNotAllowed)?;
+            .ok_or_else(|| denied("active_owner_node_missing"))?;
         if super::remote_machine_configuration::configuration_view(&machine, Some(&live_node)).state
             != "applied"
         {
-            return Err(AppError::MachineNotAllowed);
+            return Err(denied("configuration_not_applied"));
         }
         let profile = live_node
             .machine
             .as_ref()
-            .ok_or(AppError::MachineNotAllowed)?;
+            .ok_or_else(|| denied("live_node_profile_missing"))?;
         let node_fence = db
             .collection::<Document>(crate::models::node::COLLECTION_NAME)
             .update_one(
@@ -620,20 +668,36 @@ pub fn fence_execution_in_session<'a>(
             .session(&mut *session)
             .await?;
         if node_fence.matched_count != 1 {
-            return Err(AppError::MachineNotAllowed);
+            return Err(denied("node_runtime_fence_changed"));
         }
-        lifecycle::ensure_owner_eligible_in_session(db, session, &machine.owner_id).await?;
+        lifecycle::ensure_owner_eligible_in_session(db, session, &machine.owner_id)
+            .await
+            .map_err(|error| {
+                execution_denied(
+                    node,
+                    Some(&machine),
+                    "owner_eligibility_fence_rejected",
+                    error,
+                )
+            })?;
         if !machine.free_slot {
-            let run = db.collection::<MachineRuntimeRun>(RUN_COLLECTION).find_one(doc! {"_id": &machine.runtime_run_id, "node_id": &machine.node_id, "owner_id": &machine.owner_id, "runtime_generation": machine.runtime_generation, "state":"running"}).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;
-            validate_run_profile(&machine, &run)?;
+            let run = db.collection::<MachineRuntimeRun>(RUN_COLLECTION).find_one(doc! {"_id": &machine.runtime_run_id, "node_id": &machine.node_id, "owner_id": &machine.owner_id, "runtime_generation": machine.runtime_generation, "state":"running"}).session(&mut *session).await?.ok_or_else(|| denied("running_contract_missing"))?;
+            validate_run_profile(&machine, &run).map_err(|error| {
+                execution_denied(
+                    node,
+                    Some(&machine),
+                    "running_contract_profile_invalid",
+                    error,
+                )
+            })?;
             if run.covered_until_ns < Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX) {
-                return Err(AppError::MachineNotAllowed);
+                return Err(denied("running_contract_coverage_expired"));
             }
         }
         let changed = db.collection::<Document>(MACHINES).update_one(doc! {"_id": &machine.node_id, "revision": machine.revision, "resource_state":"ready", "writer_admitted":true},
         doc! {"$inc":{"execution_admission_fence":1_i64}}).session(session).await?;
         if changed.matched_count != 1 {
-            return Err(AppError::MachineNotAllowed);
+            return Err(denied("machine_revision_fence_changed"));
         }
         Ok(fence)
     })

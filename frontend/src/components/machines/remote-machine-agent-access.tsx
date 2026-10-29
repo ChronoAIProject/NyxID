@@ -225,10 +225,11 @@ function AgentAssignment({
             Assign this machine to {agent.display_name ?? agent.name}
           </label>
           <p className="text-12 text-muted-foreground">
-            Hosted assignments create membership only. New assignments start with
-            all tools and saved logins off, regardless of editing flags. Review the current policy after assigning.
-            Removing membership requests cancellation of this agent’s work on
-            this machine; delivery and cleanup still need confirmation.
+            Hosted assignments create membership only. New assignments start
+            with all tools and saved logins off, regardless of editing flags.
+            Review the current policy after assigning. Removing membership
+            requests cancellation of this agent’s work on this machine; delivery
+            and cleanup still need confirmation.
           </p>
           {error ? (
             <p role="alert" className="text-12 text-destructive">
@@ -318,6 +319,8 @@ function HostedCapabilities({
   disabled,
   onSaveError,
   onSaveSuccess,
+  availableLogins,
+  sharedLoginsAllowed,
 }: {
   readonly agentId: string;
   readonly machine: MachineAccess;
@@ -325,6 +328,13 @@ function HostedCapabilities({
   readonly disabled: boolean;
   readonly onSaveError?: () => void;
   readonly onSaveSuccess?: () => void;
+  readonly availableLogins?: readonly {
+    id: string;
+    label: string;
+    username_hint: string;
+    eligible: boolean;
+  }[];
+  readonly sharedLoginsAllowed?: boolean;
 }) {
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
   const contextsEnabled = useFeature(FEATURE_FLAG.MACHINE_CONTEXTS);
@@ -348,6 +358,9 @@ function HostedCapabilities({
         contextEnabled={contextsEnabled}
         onSaveError={onSaveError}
         onSaveSuccess={onSaveSuccess}
+        availableLogins={availableLogins}
+        sharedLoginsAllowed={sharedLoginsAllowed}
+        configurationApplicability="hosted"
       />
     </section>
   );

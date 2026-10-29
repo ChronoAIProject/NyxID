@@ -91,7 +91,7 @@ fn owned_directory(root: &Path, relative: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+fn stage_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<tempfile::NamedTempFile> {
     let parent = path.parent().context("invalid managed policy path")?;
     std::fs::create_dir_all(parent)?;
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -102,7 +102,21 @@ fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     file.write_all(bytes)?;
     file.as_file()
         .set_permissions(std::fs::Permissions::from_mode(mode))?;
+    Ok(file)
+}
+
+fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let file = stage_owned(path, bytes, mode)?;
     preserve_access_acl(path, file.as_file())?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
+fn write_runtime_marker(path: &Path, bytes: &[u8]) -> Result<()> {
+    // This is private supervisor state, not a policy/native-host file with
+    // named worker denials. Runtime tmpfs may not implement POSIX ACLs.
+    let file = stage_owned(path, bytes, 0o600)?;
     file.as_file().sync_all()?;
     file.persist(path)?;
     Ok(())
@@ -215,42 +229,11 @@ pub fn install_container_policies(
 }
 
 pub(super) fn runtime_directory(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<()> {
-    match std::fs::create_dir(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.into()),
-    }
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || ![uid, unsafe { libc::geteuid() }].contains(&metadata.uid()) {
-        bail!("managed browser runtime directory has an unsafe owner or is a symlink");
-    }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    if unsafe { libc::geteuid() } == 0 {
-        chown(path, uid, gid)?;
-    }
-    Ok(())
+    super::browser_directory::initialize(path, uid, gid, mode)
 }
 
 pub(super) fn protected_runtime_parent(directory: &Path) -> Result<()> {
-    let supervisor = unsafe { libc::geteuid() };
-    std::fs::create_dir_all(directory)?;
-    if std::fs::symlink_metadata(directory)?
-        .file_type()
-        .is_symlink()
-    {
-        bail!("managed browser data directory must not be a symlink");
-    }
-    let canonical = directory.canonicalize()?;
-    for ancestor in canonical.ancestors() {
-        let metadata = std::fs::metadata(ancestor)?;
-        let sticky_root = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
-        if ![0, supervisor].contains(&metadata.uid())
-            || (metadata.mode() & 0o022 != 0 && !sticky_root)
-        {
-            bail!("managed browser data directory must be protected from other OS users");
-        }
-    }
-    Ok(())
+    super::browser_directory::protected_parent(directory)
 }
 
 /// Called only by the privileged setup helper. Installs no credentials.
@@ -425,6 +408,20 @@ pub fn refresh_extension(profile: &Path, force: bool) -> Result<()> {
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum Failure {
+    #[error("secure_browser_setup_failed")]
+    Setup,
+    #[error("secure_browser_runtime_directory_unavailable")]
+    RuntimeDirectory,
+    #[error("secure_browser_profile_directory_unavailable")]
+    ProfileDirectory,
+    #[error("secure_browser_identity_unavailable")]
+    Identity,
+    #[error("secure_browser_package_server_unavailable")]
+    PackageServer,
+    #[error("secure_browser_extension_refresh_failed")]
+    Refresh,
+    #[error("secure_browser_spawn_failed")]
+    Spawn,
     #[error("secure_browser_extension_unavailable")]
     ExtensionUnavailable,
     #[error("secure_browser_already_running")]
@@ -441,6 +438,27 @@ pub enum Failure {
 impl Failure {
     pub fn message(self) -> &'static str {
         match self {
+            Self::Setup => {
+                "machine_browser_unavailable: secure browser setup failed; check browser startup diagnostics or update the machine"
+            }
+            Self::RuntimeDirectory => {
+                "machine_browser_unavailable: secure browser runtime directory is unavailable; check supervisor directory ownership and permissions"
+            }
+            Self::ProfileDirectory => {
+                "machine_browser_unavailable: secure browser profile directory initialization failed; check profile ownership and permissions or update the machine"
+            }
+            Self::Identity => {
+                "machine_browser_unavailable: secure browser OS user cannot be used; repair the separate browser user or update the machine"
+            }
+            Self::PackageServer => {
+                "machine_browser_unavailable: managed extension package server could not start; check its configured local port"
+            }
+            Self::Refresh => {
+                "machine_browser_unavailable: managed extension profile refresh failed; check browser startup diagnostics or update the machine"
+            }
+            Self::Spawn => {
+                "machine_browser_unavailable: secure browser process could not start; check the installed browser binary and startup diagnostics"
+            }
             Self::ExtensionUnavailable => {
                 "machine_browser_unavailable: secure browser extension did not connect after automatic repair; retry once, then offer a machine update or reinstall managed browser policies"
             }
@@ -469,24 +487,88 @@ impl Failure {
     }
 }
 
+pub(super) fn runtime_lock(directory: &Path) -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(directory.join("supervisor.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(Failure::AlreadyRunning.into());
+    }
+    Ok(lock)
+}
+
+/// Only fixed stages, errno and numeric identity/exit metadata are logged.
+/// Browser stderr, arguments, environment and private paths are never recorded.
+pub(super) fn startup_failure(
+    browser: &'static str,
+    stage: impl std::fmt::Display,
+    identity: &Identity,
+    error: &anyhow::Error,
+) {
+    tracing::warn!(
+        browser, stage = %stage,
+        errno = error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error),
+        expected_uid = identity.uid, expected_gid = identity.gid,
+        "browser_startup_failed"
+    );
+}
+
+pub(super) fn record_exit(
+    browser: &'static str,
+    stage: &'static str,
+    status: std::process::ExitStatus,
+) {
+    use std::os::unix::process::ExitStatusExt;
+    tracing::warn!(
+        browser,
+        stage,
+        exit_code = status.code(),
+        signal = status.signal(),
+        "browser_process_exited"
+    );
+}
+
 // Context browsers share the public signed-package endpoint, never profiles or
 // native sockets. Its lifetime must not depend on the legacy browser being alive.
-struct PackageServer(tokio::task::JoinHandle<()>);
+struct PackageServer(tokio::task::AbortHandle);
 impl Drop for PackageServer {
     fn drop(&mut self) {
         self.0.abort();
     }
 }
+struct PackageServerEntry {
+    server: std::sync::Weak<PackageServer>,
+    task: tokio::task::JoinHandle<()>,
+}
 static PACKAGE_SERVERS: std::sync::LazyLock<
-    Mutex<std::collections::HashMap<u16, std::sync::Weak<PackageServer>>>,
+    Mutex<std::collections::HashMap<u16, PackageServerEntry>>,
 > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 impl PackageServer {
     async fn acquire(port: u16) -> Result<Arc<Self>> {
         let mut servers = PACKAGE_SERVERS.lock().await;
-        servers.retain(|_, server| server.strong_count() > 0);
+        let retired: Vec<_> = servers
+            .iter()
+            .filter(|(_, entry)| entry.server.strong_count() == 0)
+            .map(|(port, _)| *port)
+            .collect();
+        for port in retired {
+            if let Some(entry) = servers.get_mut(&port) {
+                // Dropping the last browser requests cancellation. Reap the
+                // listener before any immediate relaunch rebinds its port.
+                // Keep the handle registered if this acquire is cancelled.
+                let _ = (&mut entry.task).await;
+            }
+            servers.remove(&port);
+        }
         if port != 0
-            && let Some(server) = servers.get(&port).and_then(std::sync::Weak::upgrade)
+            && let Some(server) = servers.get(&port).and_then(|entry| entry.server.upgrade())
         {
             return Ok(server);
         }
@@ -523,10 +605,17 @@ impl PackageServer {
                     )
                 }),
             );
-        let server = Arc::new(Self(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let _ = axum::serve(tcp, router).await;
-        })));
-        servers.insert(actual_port, Arc::downgrade(&server));
+        });
+        let server = Arc::new(Self(task.abort_handle()));
+        servers.insert(
+            actual_port,
+            PackageServerEntry {
+                server: Arc::downgrade(&server),
+                task,
+            },
+        );
         Ok(server)
     }
 }
@@ -607,7 +696,27 @@ impl Browser {
         container: bool,
         repair: bool,
     ) -> Result<Self> {
-        protected_runtime_parent(directory)?;
+        Self::launch_inner(directory, identity, binary, port, container, repair)
+            .await
+            .map_err(|error| {
+                let failure = error
+                    .downcast_ref::<Failure>()
+                    .copied()
+                    .unwrap_or(Failure::Setup);
+                startup_failure("secure", failure, identity, &error);
+                anyhow::Error::new(failure)
+            })
+    }
+
+    async fn launch_inner(
+        directory: &Path,
+        identity: &Identity,
+        binary: &Path,
+        port: u16,
+        container: bool,
+        repair: bool,
+    ) -> Result<Self> {
+        protected_runtime_parent(directory).context(Failure::RuntimeDirectory)?;
         // Keep per-context Unix socket paths below sockaddr_un.sun_path even
         // for named VM profiles. Legacy paths remain unchanged.
         let run = directory.join(if identity.desktop.is_some() {
@@ -615,35 +724,29 @@ impl Browser {
         } else {
             "browser-run"
         });
-        runtime_directory(&run, unsafe { libc::geteuid() }, identity.gid, 0o750)?;
-        use std::os::fd::AsRawFd;
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(run.join("supervisor.lock"))?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Failure::AlreadyRunning.into());
-        }
+        runtime_directory(&run, unsafe { libc::geteuid() }, identity.gid, 0o750)
+            .context(Failure::RuntimeDirectory)?;
+        let lock = runtime_lock(&run)?;
         let socket = run.join("filler.sock");
         if socket.exists() {
-            std::fs::remove_file(&socket)?;
+            std::fs::remove_file(&socket).context(Failure::RuntimeDirectory)?;
         }
-        let listener = UnixListener::bind(&socket)?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660))?;
+        let listener = UnixListener::bind(&socket).context(Failure::RuntimeDirectory)?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660))
+            .context(Failure::RuntimeDirectory)?;
         if unsafe { libc::geteuid() } == 0 {
-            chown(&socket, 0, identity.gid)?;
+            chown(&socket, 0, identity.gid).context(Failure::RuntimeDirectory)?;
         }
         let connection = Arc::new(Mutex::new(None));
         let ready = Arc::new(Notify::new());
         let startup_verified = Arc::new(AtomicBool::new(false));
         let connection_generation = Arc::new(AtomicU64::new(0));
-        let updates = PackageServer::acquire(port).await?;
+        let updates = PackageServer::acquire(port)
+            .await
+            .context(Failure::PackageServer)?;
         let profile = directory.join("browser-profile");
-        runtime_directory(&profile, identity.uid, identity.gid, 0o700)?;
+        runtime_directory(&profile, identity.uid, identity.gid, 0o700)
+            .context(Failure::ProfileDirectory)?;
         let package_hash = hex::encode(Sha256::digest(PACKAGE));
         let marker = run.join("extension-package-sha256");
         let force =
@@ -651,7 +754,7 @@ impl Browser {
         // Always check for a missing installed directory, even with a current
         // package marker (including profiles damaged by the old refresh path).
         let mut refresh = Command::new(std::env::current_exe()?);
-        identity.prepare(&mut refresh)?;
+        identity.prepare(&mut refresh).context(Failure::Identity)?;
         refresh
             .args(["node", "machine-browser-refresh"])
             .arg(&profile);
@@ -663,13 +766,15 @@ impl Browser {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .await?;
+            .await
+            .context(Failure::Refresh)?;
         if !result.success() {
-            bail!("Managed extension refresh failed");
+            record_exit("secure", "extension_refresh", result);
+            return Err(Failure::Refresh.into());
         }
-        write_owned(&marker, package_hash.as_bytes(), 0o600)?;
+        write_runtime_marker(&marker, package_hash.as_bytes()).context(Failure::Refresh)?;
         let mut command = Command::new(binary);
-        identity.prepare(&mut command)?;
+        identity.prepare(&mut command).context(Failure::Identity)?;
         identity.desktop_env(&mut command);
         command
             .env("NYXID_BROWSER_SOCKET", &socket)
@@ -689,11 +794,11 @@ impl Browser {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         if container && (!cfg!(target_os = "linux") || identity.uid == 0) {
-            bail!("container browser requires the isolated non-root browser user");
+            return Err(Failure::Identity.into());
         }
         command.kill_on_drop(true);
         let startup = Arc::new(Startup::new());
-        let child = command.spawn().context("managed browser unavailable")?;
+        let child = command.spawn().context(Failure::Spawn)?;
         let context_browser = identity.desktop.is_some();
         if context_browser {
             startup.phase("spawned");
@@ -872,11 +977,26 @@ impl Browser {
     }
 
     pub async fn alive(&self) -> bool {
-        self.child
-            .lock()
-            .await
-            .as_mut()
-            .is_some_and(|child| child.try_wait().is_ok_and(|exit| exit.is_none()))
+        let mut guard = self.child.lock().await;
+        let Some(child) = guard.as_mut() else {
+            return false;
+        };
+        match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                record_exit("secure", "liveness", status);
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    browser = "secure",
+                    stage = "liveness",
+                    errno = error.raw_os_error(),
+                    "browser_process_status_failed"
+                );
+                false
+            }
+        }
     }
 
     pub async fn action(&self, mut parameters: Value) -> Result<Value> {
@@ -1447,6 +1567,31 @@ mod tests {
         assert!(exchange.await.unwrap().is_ok());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn package_server_relaunch_waits_for_the_previous_listener_to_close() {
+        let first = PackageServer::acquire(0).await.unwrap();
+        let port = PACKAGE_SERVERS
+            .lock()
+            .await
+            .iter()
+            .find_map(|(port, server)| {
+                server
+                    .server
+                    .upgrade()
+                    .filter(|server| Arc::ptr_eq(server, &first))
+                    .map(|_| *port)
+            })
+            .unwrap();
+        drop(first);
+        // abort() requests cancellation; it has not dropped the listener yet.
+        // Immediate relaunch must reap that task before binding the same port.
+        let _restarted = PackageServer::acquire(port).await.unwrap();
+        let response = reqwest::get(format!("http://127.0.0.1:{port}/filler.crx"))
+            .await
+            .unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), PACKAGE);
+    }
+
     #[tokio::test]
     async fn package_server_survives_legacy_browser_release() {
         let first = PackageServer::acquire(0).await.unwrap();
@@ -1456,6 +1601,7 @@ mod tests {
             .iter()
             .find_map(|(port, server)| {
                 server
+                    .server
                     .upgrade()
                     .filter(|server| Arc::ptr_eq(server, &first))
                     .map(|_| *port)
@@ -1537,6 +1683,238 @@ mod tests {
         );
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(protected_runtime_parent(root.path()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires disposable hardened Linux supervisor with tmpfs runtime state"]
+    fn runtime_markers_can_be_rewritten_without_filesystem_acl_support() {
+        let root = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        let marker = root.path().join("extension-package-sha256");
+        write_runtime_marker(&marker, b"first-package").unwrap();
+        write_runtime_marker(&marker, b"next-package").unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), b"next-package");
+        let meta = std::fs::symlink_metadata(&marker).unwrap();
+        assert_eq!((meta.uid(), meta.mode() & 0o777), (0, 0o600));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a disposable read-only Linux container with only CHOWN/SETUID/SETGID/KILL and no-new-privileges"]
+    fn runtime_directories_reinitialize_under_minimal_capabilities() {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        for field in [
+            "CapEff:\t00000000000000e1",
+            "CapBnd:\t00000000000000e1",
+            "NoNewPrivs:\t1",
+        ] {
+            assert!(
+                status.contains(field),
+                "missing hardened fixture constraint: {field}"
+            );
+        }
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        assert_eq!(
+            unsafe { libc::statvfs(c"/".as_ptr(), stat.as_mut_ptr()) },
+            0
+        );
+        assert_ne!(unsafe { stat.assume_init() }.f_flag & libc::ST_RDONLY, 0);
+        let root = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        for (name, uid, gid, mode) in [
+            ("browser-profile", 1001, 1001, 0o700),
+            ("dev-browser-profile", 1002, 1002, 0o700),
+            ("context-secure-profile", 20001, 20001, 0o700),
+            ("context-developer-profile", 20002, 20002, 0o700),
+            ("browser-run", 0, 1001, 0o750),
+        ] {
+            let path = root.path().join(name);
+            runtime_directory(&path, uid, gid, mode).unwrap();
+            let first = std::fs::symlink_metadata(&path).unwrap();
+            assert_eq!(
+                (first.uid(), first.gid(), first.mode() & 0o7777),
+                (uid, gid, mode)
+            );
+            runtime_directory(&path, uid, gid, mode).unwrap();
+            let second = std::fs::symlink_metadata(&path).unwrap();
+            assert_eq!(
+                (second.uid(), second.gid(), second.mode() & 0o7777),
+                (uid, gid, mode)
+            );
+            assert_eq!(
+                (second.ctime(), second.ctime_nsec()),
+                (first.ctime(), first.ctime_nsec()),
+                "an already correct directory must be reused without ownership or mode writes"
+            );
+            // Only fixture cleanup takes ownership; the production fast path
+            // must leave the browser-owned 0700 directory untouched.
+            std::os::unix::fs::chown(&path, Some(0), Some(0)).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires disposable hardened Linux supervisor"]
+    fn runtime_directories_repair_permissions_and_refuse_untrusted_objects() {
+        use std::os::unix::process::CommandExt;
+        let root = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
+        for uid in [1001, 1002, 20001, 20002] {
+            for mode in [0o000, 0o500, 0o750, 0o777] {
+                let path = root.path().join(format!("profile-{uid}-{mode}"));
+                std::fs::create_dir(&path).unwrap();
+                let marker = path.join("retained-marker");
+                std::fs::write(&marker, "retained browser data").unwrap();
+                std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644)).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+                std::os::unix::fs::chown(&path, Some(uid), Some(1000)).unwrap();
+                runtime_directory(&path, uid, uid, 0o700).unwrap();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                assert_eq!(
+                    (meta.uid(), meta.gid(), meta.mode() & 0o7777),
+                    (uid, uid, 0o700)
+                );
+                let output = std::process::Command::new("/bin/cat")
+                    .arg(&marker)
+                    .uid(uid)
+                    .gid(uid)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                assert_eq!(output.stdout, b"retained browser data");
+                std::os::unix::fs::chown(&path, Some(0), Some(0)).unwrap();
+            }
+        }
+        let interrupted = root.path().join("interrupted");
+        std::fs::create_dir(&interrupted).unwrap();
+        std::fs::set_permissions(&interrupted, std::fs::Permissions::from_mode(0o700)).unwrap();
+        runtime_directory(&interrupted, 1001, 1001, 0o700).unwrap();
+        assert_eq!(std::fs::symlink_metadata(&interrupted).unwrap().uid(), 1001);
+        std::os::unix::fs::chown(&interrupted, Some(0), Some(0)).unwrap();
+
+        let target = root.path().join("wrong-owner");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::chown(&target, Some(1000), Some(1000)).unwrap();
+        let before = std::fs::symlink_metadata(&target).unwrap();
+        let alias = root.path().join("profile-alias");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        for uid in [1001, 1002, 20001, 20002] {
+            assert!(runtime_directory(&target, uid, uid, 0o700).is_err());
+            assert!(runtime_directory(&alias, uid, uid, 0o700).is_err());
+        }
+        let after = std::fs::symlink_metadata(&target).unwrap();
+        assert_eq!(
+            (
+                before.uid(),
+                before.gid(),
+                before.mode(),
+                before.ctime(),
+                before.ctime_nsec()
+            ),
+            (
+                after.uid(),
+                after.gid(),
+                after.mode(),
+                after.ctime(),
+                after.ctime_nsec()
+            )
+        );
+        std::os::unix::fs::chown(&target, Some(0), Some(0)).unwrap();
+
+        let unsafe_parent = root.path().join("unsafe-parent");
+        std::fs::create_dir(&unsafe_parent).unwrap();
+        let existing = unsafe_parent.join("profile");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::chown(&existing, Some(1001), Some(1001)).unwrap();
+        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        for uid in [1001, 1002, 20001, 20002] {
+            std::os::unix::fs::chown(&existing, Some(uid), Some(uid)).unwrap();
+            let before = std::fs::symlink_metadata(&existing).unwrap();
+            assert!(runtime_directory(&existing, uid, uid, 0o700).is_err());
+            assert!(runtime_directory(&unsafe_parent.join("absent"), uid, uid, 0o700).is_err());
+            assert!(!unsafe_parent.join("absent").exists());
+            let after = std::fs::symlink_metadata(&existing).unwrap();
+            assert_eq!(
+                (
+                    before.uid(),
+                    before.gid(),
+                    before.mode(),
+                    before.ctime(),
+                    before.ctime_nsec()
+                ),
+                (
+                    after.uid(),
+                    after.gid(),
+                    after.mode(),
+                    after.ctime(),
+                    after.ctime_nsec()
+                )
+            );
+        }
+        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::chown(&existing, Some(0), Some(0)).unwrap();
+    }
+
+    #[test]
+    fn startup_failures_preserve_fixed_classification_without_sources() {
+        for failure in [
+            Failure::Setup,
+            Failure::RuntimeDirectory,
+            Failure::ProfileDirectory,
+            Failure::Identity,
+            Failure::PackageServer,
+            Failure::Refresh,
+            Failure::Spawn,
+        ] {
+            let error = super::super::MachineError::from(
+                anyhow::anyhow!("/private/secret-fixture cookie=secret-fixture").context(failure),
+            );
+            assert_eq!(error.public().0, 12413);
+            assert!(error.public().1.starts_with("machine_browser_unavailable:"));
+            assert!(!error.public().1.contains("secret-fixture"));
+        }
+    }
+
+    #[test]
+    fn startup_diagnostics_omit_private_paths_and_error_sources() {
+        use std::{io::Write, os::unix::process::ExitStatusExt, sync::Mutex as StdMutex};
+        #[derive(Clone)]
+        struct Capture(Arc<StdMutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let writer = Capture(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let identity = Identity::resolve(None).unwrap();
+        let error = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::EACCES))
+            .context("/private/secret-fixture profile cookie=secret-fixture");
+        startup_failure("secure", Failure::Spawn, &identity, &error);
+        record_exit(
+            "secure",
+            "liveness",
+            std::process::ExitStatus::from_raw(42 << 8),
+        );
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("secure_browser_spawn_failed"));
+        assert!(text.contains("errno=13"));
+        assert!(text.contains("expected_uid="));
+        assert!(text.contains("expected_gid="));
+        assert!(text.contains("exit_code=42"));
+        assert!(!text.contains("secret-fixture"));
+        assert!(!text.contains("/private/"));
     }
     #[test]
     fn linux_and_macos_policy_pin_extension_and_close_debugging() {

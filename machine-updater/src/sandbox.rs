@@ -281,8 +281,9 @@ impl SandboxIntent {
                             }
                         },
                         "securityContext": {
-                            "allowPrivilegeEscalation": false,
-                            "readOnlyRootFilesystem": true,
+                            "allowPrivilegeEscalation": true,
+                            "readOnlyRootFilesystem": false,
+                            "privileged": false,
                             "runAsNonRoot": false,
                             "runAsUser": 0,
                             "runAsGroup": 0,
@@ -290,10 +291,9 @@ impl SandboxIntent {
                                 Some(reference) => json!({"type": "Localhost", "localhostProfile": reference}),
                                 None => json!({"type": "RuntimeDefault"}),
                             },
-                            // Required only by the supervisor to initialize
-                            // the workspace and drop every command to agent.
-                            // setuid clears these from command descendants.
-                            "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "SETUID", "SETGID", "KILL"]}
+                            // Match Docker's fixed default supervisor baseline;
+                            // workers retain UID drops and process-level NNP.
+                            "capabilities": {"drop": ["ALL"], "add": *nyxid_machine::managed::DOCKER_SUPERVISOR_CAPABILITIES}
                         },
                         "volumeMounts": [
                             {"name": "workspace", "mountPath": "/workspace", "subPath": "legacy"},
@@ -2522,6 +2522,38 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn hosted_runtime_matches_self_hosted_docker_permissions() {
+        let server = MockServer::start().await;
+        let rendered = intent(&server).apply_object();
+        let security = &rendered["spec"]["podTemplate"]["spec"]["containers"][0]["securityContext"];
+        assert_eq!(security["readOnlyRootFilesystem"], false);
+        assert_eq!(security["allowPrivilegeEscalation"], true);
+        assert_eq!(security["privileged"], false);
+        assert_eq!(security["runAsUser"], 0);
+        assert_eq!(security["runAsGroup"], 0);
+        assert_eq!(security["capabilities"]["drop"], json!(["ALL"]));
+        assert_eq!(
+            security["capabilities"]["add"],
+            json!([
+                "AUDIT_WRITE",
+                "CHOWN",
+                "DAC_OVERRIDE",
+                "FOWNER",
+                "FSETID",
+                "KILL",
+                "MKNOD",
+                "NET_BIND_SERVICE",
+                "NET_RAW",
+                "SETFCAP",
+                "SETGID",
+                "SETPCAP",
+                "SETUID",
+                "SYS_CHROOT"
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn hosted_retained_contexts_share_original_pvc_without_exposing_its_root() {
         let server = MockServer::start().await;
         let rendered = intent(&server).apply_object();
@@ -2544,14 +2576,6 @@ mod tests {
                 .unwrap()
                 .len(),
             1
-        );
-        assert_eq!(
-            pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"],
-            true
-        );
-        assert_eq!(
-            pod["containers"][0]["securityContext"]["capabilities"]["add"],
-            json!(["CHOWN", "SETUID", "SETGID", "KILL"])
         );
         assert!(
             pod["volumes"]

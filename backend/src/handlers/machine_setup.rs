@@ -72,6 +72,10 @@ pub async fn get(
 ) -> AppResult<Json<SetupInfo>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let mut row = setup::get(&state.db, &auth.user_id.to_string(), &id).await?;
+    if row.choices.machine_assignment.is_some() {
+        Box::pin(setup::complete_page_setup(&state.db, &id)).await?;
+        row = setup::get(&state.db, &auth.user_id.to_string(), &id).await?;
+    }
     let node = crate::services::node_service::get_node_by_id(&state.db, &id).await?;
     let mut selection_reason = None;
     if let Some(node) = &node {
@@ -94,6 +98,8 @@ pub async fn get(
                 "permissions_missing"
             } else if selection_reason.is_some() {
                 "selection_required"
+            } else if row.choices.machine_assignment.is_some() && row.status != "connected" {
+                "waiting"
             } else {
                 "connected"
             }
@@ -301,6 +307,7 @@ pub async fn link_tool(
     crate::services::machine_service::caller(chat)?;
     rate_owner(state, &chat.user_id).await?;
     let choices = Choices {
+        machine_assignment: None,
         separation: None,
         legacy_warning_acknowledged: false,
         automatic_updates: None,

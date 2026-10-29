@@ -1,10 +1,12 @@
+import { useAuthStore } from "@/stores/auth-store";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { SavedLogin, SavedLoginInput } from "@/schemas/saved-logins";
 
 export function useSavedLogins(owner: string | null = null) {
+  const actor = useAuthStore((state) => state.user?.id);
   return useQuery({
-    queryKey: ["saved-logins", owner],
+    queryKey: ["saved-logins", actor, owner],
     queryFn: () =>
       api.get<SavedLogin[]>(
         `/saved-logins${owner === "all" ? "?available=true" : owner ? `?owner_id=${encodeURIComponent(owner)}` : ""}`,

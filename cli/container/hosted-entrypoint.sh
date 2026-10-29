@@ -26,8 +26,27 @@ root='/var/lib/nyxid-contexts'
 volume=os.lstat(root)
 legacy=os.lstat(root+'/legacy')
 workspace=os.lstat('/workspace')
-assert stat.S_ISDIR(volume.st_mode) and volume.st_uid == 0 and not volume.st_mode & 0o022, 'Invalid retained volume root'
+if (not stat.S_ISDIR(volume.st_mode) or volume.st_uid != 0 or volume.st_gid != 0
+        or stat.S_IMODE(volume.st_mode) not in (0o700, 0o711, 0o755, 0o777)):
+    raise ValueError('Invalid retained volume root')
+# This check grants no initialization authority and changes no retained mode.
+# The authenticated WSS storage grant and exclusive new metadata creation gate
+# the CLI's pinned-root 0711 initialization. Existing storage must already have
+# exact 0711 public parents; recovery never repairs them from a mode heuristic.
 assert stat.S_ISDIR(legacy.st_mode) and (legacy.st_dev,legacy.st_ino)==(workspace.st_dev,workspace.st_ino), 'Workspace must be the retained legacy subdirectory'
+# A fresh Kubernetes EmptyDir is 0777. Add only its missing sticky bit;
+# never normalize an unexpected owner, type, mode or symlink target.
+tmp_fd=os.open('/tmp', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    temporary=os.fstat(tmp_fd)
+    mode=stat.S_IMODE(temporary.st_mode)
+    if (not stat.S_ISDIR(temporary.st_mode) or temporary.st_uid != 0
+            or temporary.st_gid != 0 or mode not in (0o777, 0o1777)):
+        raise ValueError('Invalid temporary directory')
+    if mode == 0o777:
+        os.fchmod(tmp_fd, 0o1777)
+finally:
+    os.close(tmp_fd)
 STORAGE
         # Kubernetes' EmptyDir hides the image's /home permissions. Establish
         # the supervisor-owned parent before starting any worker or desktop.

@@ -13,7 +13,10 @@ import { RemoteMachineAgentAccess } from "./remote-machine-agent-access";
 import { useAuthStore } from "@/stores/auth-store";
 import type { MachineAccess } from "@/schemas/machine-access";
 import type { NodeInfo } from "@/types/nodes";
-import { machineAccessFixture, machineContextReviewFixture } from "@/test/machine-access-fixture";
+import {
+  machineAccessFixture,
+  machineContextReviewFixture,
+} from "@/test/machine-access-fixture";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 
 const state = vi.hoisted(() => ({
@@ -65,14 +68,25 @@ vi.mock("@/hooks/use-machines", () => ({
   useMachineSettings: () => ({ mutateAsync: vi.fn() }),
 }));
 vi.mock("@/hooks/use-feature-flag", () => ({
-  useFeature: (flag: string) => flag === FEATURE_FLAG.MACHINE_CONTEXTS ? state.contexts : state.feature,
+  useFeature: (flag: string) =>
+    flag === FEATURE_FLAG.MACHINE_CONTEXTS ? state.contexts : state.feature,
 }));
 const auth = useAuthStore.getState();
 it("opens the selected Specialist configuration as membership only without a capability write", () => {
   state.assigned = true;
-  render(<RemoteMachineAgentAccess machineId="machine-1" initialAgentId="agent-1" />);
-  expect(screen.getByText("No tools granted. Membership alone does not authorize tools.")).toBeVisible();
-  expect(screen.getByText(/all tools and saved logins off, regardless of editing flags/)).toBeVisible();
+  render(
+    <RemoteMachineAgentAccess machineId="machine-1" initialAgentId="agent-1" />,
+  );
+  expect(
+    screen.getByText(
+      "No tools granted. Membership alone does not authorize tools.",
+    ),
+  ).toBeVisible();
+  expect(
+    screen.getByText(
+      /all tools and saved logins off, regardless of editing flags/,
+    ),
+  ).toBeVisible();
   expect(state.setCapabilities).not.toHaveBeenCalled();
   expect(state.setGrants).not.toHaveBeenCalled();
 });
@@ -285,35 +299,57 @@ it("does not enable editing when the existing capability feature is unavailable"
 });
 
 it.each([
-  [false, false], [false, true], [true, false], [true, true],
-])("keeps capability editing %s independent from context opt-in %s", async (editing, contexts) => {
-  state.feature = editing;
-  state.contexts = contexts;
-  state.machine!.separated = { available: true, reason: null, landlock_abi: 6 };
-  await show();
-  const shell = screen.getByRole("checkbox", { name: "Shell commands" });
-  if (editing) expect(shell).toBeEnabled();
-  else expect(shell).toBeDisabled();
-  const request = screen.getByRole("button", { name: "Separate workspace and browser for this agent" });
-  if (contexts) {
-    expect(request).toBeEnabled();
-    await userEvent.click(request);
-    await waitFor(() => expect(state.requestContext).toHaveBeenCalledWith({
-      node: "machine-1",
-      body: { mode: "separated", policy_version: "machine-context-mode-v1", acknowledge_separation: true },
-    }));
-  } else {
-    expect(request).toBeDisabled();
-    expect(screen.getByText(/Context setup is not enabled for this account/)).toBeVisible();
-  }
-  expect(state.setCapabilities).not.toHaveBeenCalled();
-});
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+])(
+  "keeps capability editing %s independent from context opt-in %s",
+  async (editing, contexts) => {
+    state.feature = editing;
+    state.contexts = contexts;
+    state.machine!.separated = {
+      available: true,
+      reason: null,
+      landlock_abi: 6,
+    };
+    await show();
+    const shell = screen.getByRole("checkbox", { name: "Shell commands" });
+    if (editing) expect(shell).toBeEnabled();
+    else expect(shell).toBeDisabled();
+    const request = screen.getByRole("button", {
+      name: "Separate workspace and browser for this agent",
+    });
+    if (contexts) {
+      expect(request).toBeEnabled();
+      await userEvent.click(request);
+      await waitFor(() =>
+        expect(state.requestContext).toHaveBeenCalledWith({
+          node: "machine-1",
+          body: {
+            mode: "separated",
+            policy_version: "machine-context-mode-v1",
+            acknowledge_separation: true,
+          },
+        }),
+      );
+    } else {
+      expect(request).toBeDisabled();
+      expect(
+        screen.getByText(/Context setup is not enabled for this account/),
+      ).toBeVisible();
+    }
+    expect(state.setCapabilities).not.toHaveBeenCalled();
+  },
+);
 
 it("shows membership and all-off tools separately and updates membership from the Agent read", async () => {
   const view = await show();
   expect(screen.getByText("Not assigned")).toBeVisible();
   expect(screen.getByText(/No tools granted/)).toBeVisible();
-  expect(screen.queryByText(/permissions need configuration/i)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/permissions need configuration/i),
+  ).not.toBeInTheDocument();
   state.assigned = true;
   view.rerender(<RemoteMachineAgentAccess machineId="machine-1" />);
   expect(screen.getByText("Assigned")).toBeVisible();
@@ -326,12 +362,19 @@ it("keeps capability and mode requests read-only without Agent maintenance right
   state.machine!.mode = "selection_required";
   state.machine!.separated = { available: true, reason: null, landlock_abi: 6 };
   await show();
-  for (const checkbox of screen.getAllByRole("checkbox")) expect(checkbox).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Separate workspace and browser for this agent" })).toBeDisabled();
+  for (const checkbox of screen.getAllByRole("checkbox"))
+    expect(checkbox).toBeDisabled();
+  expect(
+    screen.getByRole("button", {
+      name: "Separate workspace and browser for this agent",
+    }),
+  ).toBeDisabled();
   expect(screen.getByText(/This Agent is read-only/)).toBeVisible();
   expect(state.requestContext).not.toHaveBeenCalled();
   await act(async () => {
-    fireEvent.submit(screen.getByRole("form", { name: "Specialist machine membership" }));
+    fireEvent.submit(
+      screen.getByRole("form", { name: "Specialist machine membership" }),
+    );
     fireEvent.submit(screen.getByRole("form", { name: /capabilities$/ }));
   });
   expect(state.setGrants).not.toHaveBeenCalled();
@@ -339,9 +382,16 @@ it("keeps capability and mode requests read-only without Agent maintenance right
 });
 
 it("shows an offline connection without treating saved permissions as runtime readiness", async () => {
-  render(<RemoteMachineAgentAccess machineId="machine-1" node={{ id: "machine-1", is_connected: false } as NodeInfo} />);
+  render(
+    <RemoteMachineAgentAccess
+      machineId="machine-1"
+      node={{ id: "machine-1", is_connected: false } as NodeInfo}
+    />,
+  );
   expect(screen.getByText(/Machine is offline/)).toBeVisible();
-  expect(screen.getByText(/Saved permissions do not confirm runtime availability/)).toBeVisible();
+  expect(
+    screen.getByText(/Saved permissions do not confirm runtime availability/),
+  ).toBeVisible();
 });
 
 it("preserves existing Browser, Computer, developer browser and saved-login grants when Commands changes", async () => {
@@ -486,7 +536,7 @@ it("removes only Browser-dependent capability grants when Browser is unchecked",
           computer: false,
           developer_browser: false,
         },
-        saved_login_ids: ["existing-login"],
+        saved_login_ids: [],
       },
     }),
   );

@@ -13,6 +13,93 @@ use std::{
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
+
+#[test]
+fn context_preparation_failure_projection_uses_fixed_metadata() {
+    let correlation = id();
+    let error = anyhow::anyhow!("private path=/var/lib/secret cookie=secret").context(
+        PreparationFailure::new(
+            "workspace_probe",
+            "workspace_probe_failed",
+            37,
+            &correlation,
+            9,
+        ),
+    );
+    let diagnostic = failure_diagnostic(&error).expect("typed context diagnostic");
+    assert_eq!(diagnostic.stage, "workspace_probe");
+    assert_eq!(diagnostic.reason, "workspace_probe_failed");
+    assert_eq!(diagnostic.elapsed_ms, 37);
+    assert_eq!(diagnostic.correlation_id, correlation);
+    assert_eq!(diagnostic.generation, 9);
+    assert!(!diagnostic.to_string().contains("secret"));
+}
+
+#[test]
+fn context_preparation_failure_classification_does_not_use_error_text() {
+    let correlation = id();
+    let first =
+        anyhow::anyhow!("permission denied at /private/a").context(PreparationFailure::new(
+            "browser_resources",
+            "browser_resources_unavailable",
+            1,
+            &correlation,
+            2,
+        ));
+    let second =
+        anyhow::anyhow!("permission denied at /private/b").context(PreparationFailure::new(
+            "browser_resources",
+            "browser_resources_unavailable",
+            99,
+            &correlation,
+            2,
+        ));
+    let first = failure_diagnostic(&first).unwrap();
+    let second = failure_diagnostic(&second).unwrap();
+    assert_eq!(first.stage, second.stage);
+    assert_eq!(first.reason, second.reason);
+    assert_eq!(first.correlation_id, second.correlation_id);
+    assert_ne!(first.elapsed_ms, second.elapsed_ms);
+}
+
+#[test]
+fn context_preparation_stage_reason_mapping_is_fixed() {
+    for (stage, reason) in [
+        ("authority", "context_authority_invalid"),
+        ("binding", "hosted_context_binding_required"),
+        ("identity", "context_identity_mismatch"),
+        ("generation", "context_generation_quarantined"),
+        ("capability", "context_backend_unavailable"),
+        ("custody", "node_custody_unverified"),
+        ("legacy_roots", "legacy_roots_unavailable"),
+        ("legacy_browser_home", "legacy_browser_home_unavailable"),
+        ("allocation_store", "context_store_unavailable"),
+        ("provision_users", "context_user_provision_failed"),
+        ("reap_secure", "context_secure_reap_failed"),
+        ("reap_developer", "context_developer_reap_failed"),
+        ("workspace_probe", "workspace_probe_failed"),
+        ("native_policy", "native_browser_policy_failed"),
+        ("browser_resources", "browser_resources_unavailable"),
+        ("context_runtime", "context_runtime_unavailable"),
+        ("context_connect", "context_node_offline"),
+    ] {
+        assert_eq!(stage_reason(stage), reason, "stage {stage}");
+    }
+}
+
+#[test]
+fn context_support_failures_keep_custody_distinct_from_capability() {
+    assert_eq!(
+        support_failure_stage(Some("node_custody_unverified")),
+        "custody"
+    );
+    assert_eq!(
+        support_failure_stage(Some("separated_requires_landlock_abi_6")),
+        "capability"
+    );
+    assert_eq!(support_failure_stage(None), "capability");
+}
+
 fn evidence() -> Evidence {
     Evidence {
         version: 4,
@@ -220,6 +307,28 @@ async fn hosted_first_dispatch_prepares_startup_private_homes() {
         assert_eq!(fs::metadata("/home/agent").unwrap().uid(), 1000);
     }
     runtime.contexts.lock().await.test_evidence = Some(evidence());
+    // Preparation diagnostics must preserve the installed retained store when
+    // provisioning refuses an invalid generation. A subsequent request still
+    // needs that exact store and its exclusive writer lock.
+    let invalid = Authority {
+        generation: 0,
+        ..authority.clone()
+    };
+    let failure = match runtime.context_instance(&invalid).await {
+        Ok(_) => panic!("invalid generation unexpectedly provisioned"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure_stage(&failure), "provision_users");
+    assert!(
+        runtime
+            .contexts
+            .lock()
+            .await
+            .store
+            .as_ref()
+            .is_some_and(Store::is_hosted),
+        "provisioning refusal must retain the hosted store and writer lock"
+    );
     for operation in [Operation::ReadFile, Operation::Exec] {
         authority.lease_id = id();
         let result = dispatch(&runtime, &authority, operation).await;

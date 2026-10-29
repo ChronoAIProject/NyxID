@@ -928,6 +928,28 @@ async fn native_observation_rejects_late_operation_generation_and_stale_worker_r
 }
 
 #[tokio::test]
+async fn native_observation_rejects_out_of_order_heartbeat_replay() {
+    let f = fixture("native_out_of_order_heartbeat").await;
+    let current = f.start().await;
+    let original = current.native_observation.clone().unwrap();
+    let mut newer = original.clone();
+    newer.observed_at += chrono::Duration::milliseconds(10);
+    newer.sandbox_resource_version = "newer-resource-version".into();
+    newer.evidence_ref = "newer-evidence".into();
+
+    native::record(&f.db, &current, &newer, Document::new())
+        .await
+        .unwrap();
+    assert!(
+        native::record(&f.db, &current, &original, Document::new())
+            .await
+            .is_err(),
+        "an older heartbeat cannot overwrite a newer observation"
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn native_force_delete_then_notfound_never_unlocks_old_workspace() {
     let f = fixture("native_force_delete").await;
     f.start().await;

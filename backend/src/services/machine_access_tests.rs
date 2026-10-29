@@ -69,6 +69,72 @@ fn selection(revision: i64, caps: Capabilities) -> Selection {
         saved_login_ids: None,
     }
 }
+
+async fn rollout_membership(
+    state: &crate::AppState,
+    auth: crate::mw::auth::AuthUser,
+    agent: &str,
+    node: &str,
+    assigned: bool,
+) -> crate::errors::AppResult<()> {
+    use crate::handlers::assistant_team::{GrantsRequest, set_agent_grants};
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    let body: GrantsRequest = serde_json::from_value(json!({
+        "machine_membership":{"node_id":node,"assigned":assigned}
+    }))
+    .unwrap();
+    let _ = Box::pin(set_agent_grants(
+        State(state.clone()),
+        auth,
+        Path(agent.into()),
+        Json(body),
+    ))
+    .await?;
+    Ok(())
+}
+
+#[test]
+fn machine_access_rollout_membership_payloads_are_disjoint_and_strict() {
+    use crate::handlers::assistant_team::GrantsRequest;
+    let membership = json!({"machine_membership":{"node_id":"machine","assigned":true}});
+    assert!(serde_json::from_value::<GrantsRequest>(membership.clone()).is_ok());
+    for (field, value) in [
+        ("machines", json!([])),
+        ("logins", json!([])),
+        ("services", json!([])),
+        ("account_read", json!(false)),
+        ("guest_access", json!({})),
+        ("capabilities", json!({})),
+        ("saved_login_ids", json!([])),
+    ] {
+        let mut mixed = membership.clone();
+        mixed[field] = value;
+        assert!(
+            serde_json::from_value::<GrantsRequest>(mixed).is_err(),
+            "{field}"
+        );
+    }
+    for invalid in [
+        json!({"machine_membership":{"node_id":"machine"}}),
+        json!({"machine_membership":{"node_id":"machine","assigned":true,"capabilities":{}}}),
+        json!({"machine_membership":null,"services":[],"account_read":false}),
+    ] {
+        assert!(serde_json::from_value::<GrantsRequest>(invalid).is_err());
+    }
+    assert!(
+        serde_json::from_value::<GrantsRequest>(json!({"services":[],"account_read":false}))
+            .is_ok()
+    );
+    assert!(
+        serde_json::from_value::<crate::handlers::assistant_team::CreateAgentRequest>(json!({
+            "name":"worker","description":"Work","machine_assignment":"unknown"
+        }))
+        .is_err()
+    );
+}
 #[tokio::test]
 async fn machine_access_cutover_materializes_legacy_nyxbot_and_does_not_inherit_new_nodes() {
     let f = orchestrator_fixture("machine_access_cutover").await;
@@ -1277,6 +1343,550 @@ async fn machine_access_flag_off_new_nyxbot_machines_snapshot_at_use_with_live_a
         ))
         .await
         .is_ok()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_rollout_membership_handler_is_all_off_independent_of_flags() {
+    use super::assistant_authority_tests::connected;
+    use crate::handlers::{assistant_team, machine_access};
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+
+    async fn replace(f: &Fixture, nodes: Vec<String>, login: &str) {
+        let body = serde_json::from_value::<assistant_team::GrantsRequest>(json!({
+            "machines":nodes, "services":["github"], "account_read":true,
+            "logins":[login], "guest_access":{"github":"read"}
+        }))
+        .unwrap();
+        let Json(response) = Box::pin(assistant_team::set_agent_grants(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            Path(f.chat.agent_id.clone()),
+            Json(body),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response["id"], f.chat.agent_id);
+    }
+
+    for (hosted, editing) in [(false, false), (false, true), (true, false), (true, true)] {
+        let f = fixture("rollout_membership").await;
+        access::ensure_indexes(&f.state.db).await.unwrap();
+        let old = v2(&f).await;
+        let new = v2(&f).await;
+        connected(&f.state.db, &f.owner, "github", "https://api.github.com").await;
+        let login = super::saved_login_service::put(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.owner,
+            None,
+            super::saved_login_service::Input {
+                label: "Rollout fixture".into(),
+                allowed_origins: vec!["https://example.test".into()],
+                username: zeroize::Zeroizing::new("fixture-user".into()),
+                password: None,
+                totp_secret: None,
+                confirm_each_sign_in: false,
+            },
+        )
+        .await
+        .unwrap();
+        // Existing legacy authority is deliberate and must survive the rollout gate.
+        replace(&f, vec![old.id.clone()], &login.id).await;
+        let before = Box::pin(super::assistant_team_service::agent(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+        ))
+        .await
+        .unwrap();
+        let old_assignment = before.machine_access.as_ref().unwrap().assignments[&old.id].clone();
+        assert!(old_assignment.legacy);
+        if editing {
+            enable(&f).await;
+        }
+        if hosted {
+            // Persist the actual binding used by the generic grants writer; no runtime is provisioned.
+            let managed =
+                super::remote_machine_service::CreateMachineInput::fixed(&f.owner, true, "fixture")
+                    .preview(&new.id, chrono::Utc::now());
+            f.state
+                .db
+                .collection(crate::models::remote_machine::COLLECTION_NAME)
+                .insert_one(managed)
+                .await
+                .unwrap();
+        }
+        let body = serde_json::from_value::<assistant_team::GrantsRequest>(json!({
+            "machine_membership":{"node_id":new.id,"assigned":true}
+        }))
+        .unwrap();
+        let _ = Box::pin(assistant_team::set_agent_grants(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            Path(f.chat.agent_id.clone()),
+            Json(body),
+        ))
+        .await
+        .unwrap();
+        let after = Box::pin(super::assistant_team_service::agent(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(after.grants, before.grants);
+        assert_eq!(after.guest_access, before.guest_access);
+        assert_eq!(after.saved_login_ids, before.saved_login_ids);
+        let policy = after.machine_access.as_ref().unwrap();
+        assert_eq!(policy.assignments[&old.id], old_assignment);
+        let assignment = &policy.assignments[&new.id];
+        assert!(!assignment.legacy);
+        assert_eq!(assignment.capabilities, Capabilities::default());
+        assert_eq!(assignment.saved_login_ids, Some(Vec::new()));
+        let options = Box::pin(machine_access::options(
+            &f.state,
+            &f.owner,
+            &f.chat.agent_id,
+        ))
+        .await
+        .unwrap();
+        let options = serde_json::to_value(options).unwrap();
+        let option = options
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["node_id"] == new.id)
+            .unwrap();
+        assert_eq!(option["membership"], true);
+        assert_eq!(option["capability_edit_enabled"], editing);
+        assert_eq!(
+            option["capabilities"],
+            serde_json::to_value(assignment.capabilities).unwrap()
+        );
+        assert!(
+            Box::pin(access::authorize(
+                &f.state.db,
+                &f.chat,
+                &old,
+                Operation::Exec,
+                &json!({})
+            ))
+            .await
+            .is_ok()
+        );
+        assert!(
+            Box::pin(access::authorize(
+                &f.state.db,
+                &f.chat,
+                &new,
+                Operation::Exec,
+                &json!({})
+            ))
+            .await
+            .is_err()
+        );
+        for operation in [
+            Operation::ReadFile,
+            Operation::Browser,
+            Operation::Computer,
+            Operation::FillLogin,
+        ] {
+            assert!(
+                Box::pin(access::authorize(
+                    &f.state.db,
+                    &f.chat,
+                    &new,
+                    operation,
+                    &json!({})
+                ))
+                .await
+                .is_err()
+            );
+        }
+        if !hosted && editing {
+            // Tool authority requires the existing explicit per-Agent revision-bound writer.
+            let Json(reviewed_options) = Box::pin(machine_access::put(
+                State(f.state.clone()),
+                crate::test_utils::test_auth_user(&f.owner),
+                Path((f.chat.agent_id.clone(), new.id.clone())),
+                Json(selection(
+                    policy.revision,
+                    Capabilities {
+                        shell: true,
+                        ..Default::default()
+                    },
+                )),
+            ))
+            .await
+            .unwrap();
+            let reviewed_options = serde_json::to_value(reviewed_options).unwrap();
+            let reviewed = reviewed_options
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["node_id"] == new.id)
+                .unwrap();
+            assert_eq!(reviewed["capabilities"]["shell"], true);
+            assert!(
+                Box::pin(access::authorize(
+                    &f.state.db,
+                    &f.chat,
+                    &new,
+                    Operation::Exec,
+                    &json!({})
+                ))
+                .await
+                .is_ok()
+            );
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn machine_access_rollout_review_retry_and_readd_preserve_only_active_authority() {
+    use crate::test_utils::test_auth_user;
+    let f = fixture("f04_review_retry").await;
+    enable(&f).await;
+    let machine = v2(&f).await;
+    let other = v2(&f).await;
+    for node in [&machine, &other] {
+        rollout_membership(
+            &f.state,
+            test_auth_user(&f.owner),
+            &f.chat.agent_id,
+            &node.id,
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let p = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap();
+    let reviewed = Box::pin(access::configure(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &machine.id,
+        selection(
+            p.revision,
+            Capabilities {
+                shell: true,
+                ..Default::default()
+            },
+        ),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        Box::pin(access::configure(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &machine.id,
+            selection(
+                p.revision,
+                Capabilities {
+                    files: true,
+                    ..Default::default()
+                }
+            )
+        ))
+        .await
+        .is_err(),
+        "stale Review must fail"
+    );
+    super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        access::FLAG,
+        &super::feature_flag_service::FlagTarget::Global,
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    assert!(
+        Box::pin(access::configure(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &machine.id,
+            selection(
+                reviewed.revision,
+                Capabilities {
+                    files: true,
+                    ..Default::default()
+                }
+            )
+        ))
+        .await
+        .is_err(),
+        "flag-off Review must fail"
+    );
+    rollout_membership(
+        &f.state,
+        test_auth_user(&f.owner),
+        &f.chat.agent_id,
+        &machine.id,
+        true,
+    )
+    .await
+    .unwrap();
+    let legacy = super::machine_service::resolve_grant_change(
+        &f.state.db,
+        &f.owner,
+        Some(vec![machine.id.clone()]),
+        None,
+        super::assistant_team_service::GrantChange::Add(Default::default()),
+        super::assistant_team_service::MachineGrantMode::Add,
+    )
+    .await
+    .unwrap();
+    Box::pin(super::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        legacy,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+            .await
+            .unwrap(),
+        reviewed
+    );
+    // Existing execution can still be cancelled after membership removal/re-add.
+    let job = super::machine_service::issue_job(&f.state.db, &f.chat, &machine, 120, vec![])
+        .await
+        .unwrap();
+    rollout_membership(
+        &f.state,
+        test_auth_user(&f.owner),
+        &f.chat.agent_id,
+        &machine.id,
+        false,
+    )
+    .await
+    .unwrap();
+    rollout_membership(
+        &f.state,
+        test_auth_user(&f.owner),
+        &f.chat.agent_id,
+        &machine.id,
+        true,
+    )
+    .await
+    .unwrap();
+    let after = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap();
+    let fresh = &after.assignments[&machine.id];
+    assert_eq!(fresh.capabilities, Capabilities::default());
+    assert_eq!(fresh.saved_login_ids, Some(vec![]));
+    assert!(!fresh.legacy);
+    assert_eq!(fresh.mode, reviewed.assignments[&machine.id].mode);
+    assert!(fresh.revision > reviewed.assignments[&machine.id].revision);
+    assert_eq!(
+        after.assignments[&other.id],
+        reviewed.assignments[&other.id]
+    );
+    assert!(
+        f.state
+            .db
+            .collection::<Document>(model::OUTBOX)
+            .find_one(doc! {"agent_id":&f.chat.agent_id,"node_id":&machine.id,"pending":true})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for op in [
+        Operation::Exec,
+        Operation::ReadFile,
+        Operation::Browser,
+        Operation::Computer,
+        Operation::FillLogin,
+    ] {
+        assert!(
+            Box::pin(access::authorize(
+                &f.state.db,
+                &f.chat,
+                &machine,
+                op,
+                &json!({})
+            ))
+            .await
+            .is_err()
+        );
+    }
+    assert!(
+        Box::pin(access::authorize(
+            &f.state.db,
+            &f.chat,
+            &machine,
+            Operation::JobCancel,
+            &json!({"job_id":job.id})
+        ))
+        .await
+        .is_ok()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_rollout_create_agent_producer_initializes_all_off() {
+    use crate::{handlers::assistant_team, test_utils::test_auth_user};
+    use axum::{Json, extract::State};
+    for editing in [false, true] {
+        let f = orchestrator_fixture("f04_create_agent").await;
+        access::ensure_indexes(&f.state.db).await.unwrap();
+        if editing {
+            enable(&f).await;
+        }
+        let machine = v2(&f).await;
+        let body = serde_json::from_value::<assistant_team::CreateAgentRequest>(json!({
+            "name":"rollout-worker","description":"Work on a chosen machine",
+            "machines":[machine.id],"machine_assignment":"membership_only"
+        }))
+        .unwrap();
+        let (_, Json(created)) = Box::pin(assistant_team::create_agent(
+            State(f.state.clone()),
+            test_auth_user(&f.owner),
+            Json(body),
+        ))
+        .await
+        .unwrap();
+        let p = Box::pin(access::policy(&f.state.db, created["id"].as_str().unwrap()))
+            .await
+            .unwrap();
+        let a = &p.assignments[&machine.id];
+        assert_eq!(a.capabilities, Capabilities::default());
+        assert_eq!(a.saved_login_ids, Some(vec![]));
+        assert!(!a.legacy);
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn machine_access_rollout_membership_acl_and_selection_stay_denied() {
+    use crate::{mw::auth::AuthMethod, test_utils::test_auth_user};
+    let f = fixture("f04_membership_acl").await;
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    let mut machine = v2(&f).await;
+    machine.machine.as_mut().unwrap().separation_choice = None;
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&machine.id},
+            doc! {"$set":{"machine":bson::to_bson(&machine.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    rollout_membership(
+        &f.state,
+        test_auth_user(&f.owner),
+        &f.chat.agent_id,
+        &machine.id,
+        true,
+    )
+    .await
+    .unwrap();
+    let p = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap();
+    assert_eq!(p.assignments[&machine.id].mode, model::SELECTION_REQUIRED);
+    assert_eq!(p.assignments[&machine.id].saved_login_ids, Some(vec![]));
+    assert!(
+        Box::pin(access::authorize(
+            &f.state.db,
+            &f.chat,
+            &machine,
+            Operation::Exec,
+            &json!({})
+        ))
+        .await
+        .is_err()
+    );
+    let foreign = v2(&f).await;
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&foreign.id},
+            doc! {"$set":{"user_id":uuid::Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        rollout_membership(
+            &f.state,
+            test_auth_user(&f.owner),
+            &f.chat.agent_id,
+            &foreign.id,
+            true
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        rollout_membership(
+            &f.state,
+            test_auth_user(&uuid::Uuid::new_v4().to_string()),
+            &f.chat.agent_id,
+            &machine.id,
+            true
+        )
+        .await
+        .is_err()
+    );
+    for method in [AuthMethod::Delegated, AuthMethod::ApiKey] {
+        let mut auth = test_auth_user(&f.owner);
+        auth.auth_method = method;
+        assert!(
+            rollout_membership(&f.state, auth, &f.chat.agent_id, &machine.id, true)
+                .await
+                .is_err()
+        );
+    }
+    enable(&f).await;
+    let old = node(&f, &f.owner).await;
+    rollout_membership(
+        &f.state,
+        test_auth_user(&f.owner),
+        &f.chat.agent_id,
+        &old.id,
+        true,
+    )
+    .await
+    .unwrap();
+    let p = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(access::configure(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &old.id,
+            selection(
+                p.revision,
+                Capabilities {
+                    shell: true,
+                    ..Default::default()
+                }
+            )
+        ))
+        .await
+        .is_err()
     );
     f.state.db.drop().await.unwrap();
 }
@@ -3714,6 +4324,7 @@ async fn machine_access_setup_selection_respects_context_gate_and_existing_denia
         &f.owner,
         None,
         crate::models::machine_setup::Choices {
+            machine_assignment: None,
             separation: Some(nyxid_machine::context::Choice::Automatic),
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -4047,4 +4658,496 @@ async fn separated_runtime_recovery_advances_once_without_widening_grants() {
     assert_eq!(still.runtime_id, recovered.runtime_id);
     assert_eq!(still.generation, recovered.generation);
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_rollout_org_membership_requires_live_maintainer() {
+    use super::org_agent_tests::Fixture as OrgFixture;
+    use crate::test_utils::test_auth_user;
+    let org = OrgFixture::new("f04_org_membership").await;
+    let (agent, _) = org.create().await;
+    access::ensure_indexes(&org.state.db).await.unwrap();
+    // Reuse the machine fixture's reported profile without sharing a database.
+    let f = fixture("f04_org_profile").await;
+    let mut node = v2(&f).await;
+    node.user_id = org.org.clone();
+    org.state
+        .db
+        .collection::<crate::models::node::Node>(crate::models::node::COLLECTION_NAME)
+        .insert_one(&node)
+        .await
+        .unwrap();
+    rollout_membership(
+        &org.state,
+        test_auth_user(&org.admin),
+        &agent.id,
+        &node.id,
+        true,
+    )
+    .await
+    .unwrap();
+    let policy = Box::pin(access::policy(&org.state.db, &agent.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        policy.assignments[&node.id].capabilities,
+        Capabilities::default()
+    );
+    assert_eq!(policy.assignments[&node.id].saved_login_ids, Some(vec![]));
+    // Existing Agent maintenance is collaborative: active Admins and Members
+    // can maintain an org Specialist; Viewers and outsiders cannot.
+    rollout_membership(
+        &org.state,
+        test_auth_user(&org.member),
+        &agent.id,
+        &node.id,
+        true,
+    )
+    .await
+    .unwrap();
+    for actor in [&org.viewer, &org.outsider] {
+        assert!(
+            rollout_membership(
+                &org.state,
+                test_auth_user(actor),
+                &agent.id,
+                &node.id,
+                false
+            )
+            .await
+            .is_err()
+        );
+    }
+    org.revoke(&org.member).await;
+    assert!(
+        rollout_membership(
+            &org.state,
+            test_auth_user(&org.member),
+            &agent.id,
+            &node.id,
+            false
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        Box::pin(access::policy(&org.state.db, &agent.id))
+            .await
+            .unwrap(),
+        policy
+    );
+    f.state.db.drop().await.unwrap();
+    org.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_rollout_setup_create_mint_completion_and_chat_handoff_are_all_off() {
+    use super::{assistant_team_service as team, machine_setup_service as setup};
+    use crate::{
+        handlers::machine_setup,
+        models::machine_setup::{COLLECTION_NAME as SETUPS, Choices},
+        test_utils::test_auth_user,
+    };
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    for (chat_origin, editing) in [(false, false), (false, true), (true, false), (true, true)] {
+        let f = fixture("f04_setup_producers").await;
+        access::ensure_indexes(&f.state.db).await.unwrap();
+        if editing {
+            enable(&f).await;
+        }
+        let choices = |tagged| {
+            serde_json::from_value::<Choices>(json!({
+                "name":"rollout-setup","where":"vm","capabilities":["shell","files"],
+                "separation":"shared_legacy","legacy_warning_acknowledged":true,
+                "grant_to":f.chat.agent_id,
+                "machine_assignment":if tagged {json!("membership_only")} else {json!(null)}
+            }))
+            .unwrap()
+        };
+        let id = if chat_origin {
+            // The actual chat creates an untagged prefilled link. The page's
+            // later mint is the explicit rollout adoption; provenance stays put.
+            setup::create_link(
+                &f.state.db,
+                &f.owner,
+                Some(&f.row.id),
+                choices(false),
+                &super::nyxbot_watch_service::ReportProvenance::from_chat(&f.chat),
+            )
+            .await
+            .unwrap()
+            .id
+        } else {
+            let Json(created) = machine_setup::create(
+                State(f.state.clone()),
+                test_auth_user(&f.owner),
+                Json(choices(true)),
+            )
+            .await
+            .unwrap();
+            serde_json::to_value(created).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let before = setup::get(&f.state.db, &f.owner, &id).await.unwrap();
+        assert_eq!(before.choices.machine_assignment.is_some(), !chat_origin);
+        // Page-only also verifies that replacing Choices without repeating a
+        // previously recorded tag cannot silently restore legacy initialization.
+        let Json(issued) = machine_setup::mint(
+            State(f.state.clone()),
+            test_auth_user(&f.owner),
+            Path(id.clone()),
+            Json(choices(chat_origin)),
+        )
+        .await
+        .unwrap();
+        let issued = serde_json::to_value(issued).unwrap();
+        let token = issued["token"].as_str().unwrap();
+        let stored = setup::get(&f.state.db, &f.owner, &id).await.unwrap();
+        assert_eq!(
+            stored.choices.machine_assignment,
+            Some(model::AssignmentIntent::MembershipOnly)
+        );
+        assert_eq!(stored.conversation_id, before.conversation_id);
+        let (mut node, _, _) =
+            super::node_service::register_node(&f.state.db, &f.state.encryption_keys, token, None)
+                .await
+                .unwrap();
+        node.machine = v2(&f).await.machine;
+        node.status = crate::models::node::NodeStatus::Online;
+        f.state
+            .db
+            .collection::<Document>(crate::models::node::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"status":"online","machine":bson::to_bson(&node.machine).unwrap()}},
+            )
+            .await
+            .unwrap();
+        if chat_origin {
+            // Make the completion transaction fail. A watcher must not announce
+            // connected or retain its status update without the membership.
+            let nyxbot = team::ensure_nyxbot(&f.state.db, &f.owner).await.unwrap();
+            f.state
+                .db
+                .collection::<Document>(SETUPS)
+                .update_one(
+                    doc! {"_id":&id},
+                    doc! {"$set":{"choices.grant_to":nyxbot.id}},
+                )
+                .await
+                .unwrap();
+            crate::handlers::nyxbot::process_watches(&f.state)
+                .await
+                .unwrap();
+            assert_ne!(
+                setup::get(&f.state.db, &f.owner, &id).await.unwrap().status,
+                "connected"
+            );
+            assert!(
+                super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+                    .await
+                    .unwrap()
+                    .pending_events
+                    .is_empty()
+            );
+            f.state
+                .db
+                .collection::<Document>(SETUPS)
+                .update_one(
+                    doc! {"_id":&id},
+                    doc! {"$set":{"choices.grant_to":&f.chat.agent_id}},
+                )
+                .await
+                .unwrap();
+            // Watcher wins the race with node_ws and completes the shared transaction.
+            crate::handlers::nyxbot::process_watches(&f.state)
+                .await
+                .unwrap();
+        } else {
+            let (one, two) = tokio::join!(
+                setup::complete_page_setup(&f.state.db, &id),
+                setup::complete_page_setup(&f.state.db, &id)
+            );
+            one.unwrap();
+            two.unwrap();
+        }
+        let row = setup::get(&f.state.db, &f.owner, &id).await.unwrap();
+        assert_eq!(row.status, "connected");
+        assert_eq!(row.conversation_id, before.conversation_id);
+        let p = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+            .await
+            .unwrap();
+        assert_eq!(p.assignments[&id].capabilities, Capabilities::default());
+        assert_eq!(p.assignments[&id].saved_login_ids, Some(vec![]));
+        assert!(!p.assignments[&id].legacy);
+        for op in [
+            Operation::Exec,
+            Operation::ReadFile,
+            Operation::Browser,
+            Operation::Computer,
+            Operation::FillLogin,
+        ] {
+            assert!(
+                Box::pin(access::authorize(
+                    &f.state.db,
+                    &f.chat,
+                    &node,
+                    op,
+                    &json!({})
+                ))
+                .await
+                .is_err()
+            );
+        }
+        // The legacy grant_subagent continuation must find the durable denial.
+        let duplicate = super::machine_service::resolve_grant_change(
+            &f.state.db,
+            &f.owner,
+            Some(vec![id.clone()]),
+            None,
+            team::GrantChange::Add(Default::default()),
+            team::MachineGrantMode::Add,
+        )
+        .await
+        .unwrap();
+        Box::pin(team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            duplicate,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+                .await
+                .unwrap(),
+            p
+        );
+        rollout_membership(
+            &f.state,
+            test_auth_user(&f.owner),
+            &f.chat.agent_id,
+            &id,
+            false,
+        )
+        .await
+        .unwrap();
+        setup::complete_page_setup(&f.state.db, &id).await.unwrap();
+        let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+        assert!(!agent.machine_node_ids.contains(&id));
+        crate::handlers::nyxbot::process_watches(&f.state)
+            .await
+            .unwrap();
+        if chat_origin {
+            let events = super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .pending_events;
+            assert_eq!(events.len(), 1);
+            let event = serde_json::to_string(&events).unwrap();
+            assert!(event.contains("Membership completion is durable"));
+            assert!(!event.contains("git --version"));
+            assert!(!event.contains(token));
+        }
+        // The GET projection must agree with committed completion.
+        let Json(info) = Box::pin(machine_setup::get(
+            State(f.state.clone()),
+            test_auth_user(&f.owner),
+            Path(id),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(serde_json::to_value(info).unwrap()["status"], "connected");
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+/// Rust owns the isolated replica-set fixture and production router. Vitest
+/// renders the actual Settings editor and uses the guarded domain mutation.
+/// The only injected failures are at the HTTP boundary, before production writes.
+#[tokio::test]
+async fn machine_access_rollout_live_frontend_hook_server_flag_disable_and_partial_retry() {
+    use super::assistant_team_service as team;
+    use axum::{
+        body::Body,
+        extract::Request,
+        middleware::{self, Next},
+        response::IntoResponse,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for partial in [false, true] {
+        let f = fixture("f04_live_hook").await;
+        enable(&f).await;
+        let machine = v2(&f).await;
+        f.state
+            .db
+            .collection::<Document>(AGENTS)
+            .update_one(
+                doc! {"_id":&f.chat.agent_id},
+                doc! {"$set":{"display_name":"Live worker one"}},
+            )
+            .await
+            .unwrap();
+        let mut agents = vec![f.chat.agent_id.clone()];
+        if partial {
+            let (agent, _) = Box::pin(team::create_specialist(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.owner,
+                team::CreateRequest {
+                    name: "live-worker-two".into(),
+                    description: "Second live fixture".into(),
+                    display_name: Some("Live worker two".into()),
+                    persona: None,
+                    machines: None,
+                    logins: None,
+                    targets: Default::default(),
+                    account_read: false,
+                    specialty: None,
+                    created_by: "user",
+                },
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+            agents.push(agent.id);
+        }
+        let token = crate::crypto::jwt::generate_access_token(
+            &f.state.jwt_keys,
+            &f.state.config,
+            &uuid::Uuid::parse_str(&f.owner).unwrap(),
+            "read write",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, router) = crate::routes::build_router_with_state(f.state.clone());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let db = f.state.db.clone();
+        let owner = f.owner.clone();
+        let app = router.with_state(f.state.clone()).layer(middleware::from_fn(move |request: Request<Body>,next: Next| {
+            let attempts = observed.clone(); let db = db.clone(); let owner = owner.clone();
+            async move {
+                if request.method() != axum::http::Method::PUT || !request.uri().path().ends_with("/grants") {
+                    return next.run(request).await;
+                }
+                let attempt = attempts.fetch_add(1,Ordering::SeqCst)+1;
+                if !partial && attempt == 1 {
+                    let row = super::feature_flag_service::set_platform_override(&db,access::FLAG,
+                        &super::feature_flag_service::FlagTarget::Global,false,&owner).await.unwrap();
+                    assert!(!row.enabled, "The disable writer must return its disabled row");
+                    assert!(!super::feature_flag_service::personal_flag_enabled(&db,&owner,access::FLAG).await.unwrap(),
+                        "The server must be disabled before the stale browser's membership handler runs");
+                }
+                if partial && attempt == 2 {
+                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE,axum::Json(json!({
+                        "error":"unavailable","error_code":5000,"message":"Injected transient failure"
+                    }))).into_response();
+                }
+                let response = next.run(request).await;
+                if partial && attempt == 1 {
+                    assert_eq!(response.status(),axum::http::StatusCode::OK);
+                    let row = super::feature_flag_service::set_platform_override(&db,access::FLAG,
+                        &super::feature_flag_service::FlagTarget::Global,false,&owner).await.unwrap();
+                    assert!(!row.enabled, "The disable writer must return its disabled row");
+                    assert!(!super::feature_flag_service::personal_flag_enabled(&db,&owner,access::FLAG).await.unwrap(),
+                        "The server must be disabled between the first success and partial-save retry");
+                }
+                response
+            }
+        }))
+        // Main mounts this same private CORS policy around the production API.
+        // Preserve the real browser preflight and authenticated HTTP transport.
+        .layer(crate::private_cors(std::collections::HashSet::from([
+            f.state.config.frontend_url.parse().unwrap(),
+        ])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let report = tempfile::NamedTempFile::new().unwrap();
+        let output = tokio::process::Command::new("npm")
+            .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../frontend"))
+            .args([
+                "test",
+                "--",
+                "src/components/shared/machine-settings-live.test.tsx",
+                "--reporter=json",
+                "--outputFile",
+            ])
+            .arg(report.path())
+            .env("NYXID_F04_TEST_ORIGIN", format!("http://{address}"))
+            .env("NYXID_F04_TEST_OWNER", &f.owner)
+            .env("NYXID_F04_TEST_MACHINE", &machine.id)
+            .env("NYXID_F04_TEST_TOKEN", &token)
+            .env(
+                "NYXID_F04_TEST_PARTIAL",
+                if partial { "true" } else { "false" },
+            )
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        server.abort();
+        assert!(
+            output.status.success(),
+            "Live hook check failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let counts: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(report.path()).unwrap()).unwrap();
+        assert_eq!(
+            counts["numPassedTests"], 1,
+            "The live check must actually execute"
+        );
+        assert_eq!(counts["numTotalTests"], 1);
+        assert_eq!(
+            counts["numPendingTests"], 0,
+            "Skipped checks are not evidence"
+        );
+        assert_eq!(counts["numFailedTests"], 0);
+        assert_eq!(attempts.load(Ordering::SeqCst), if partial { 3 } else { 1 });
+        assert!(
+            !super::feature_flag_service::personal_flag_enabled(
+                &f.state.db,
+                &f.owner,
+                access::FLAG
+            )
+            .await
+            .unwrap(),
+            "The server must remain disabled after the live hook case; partial={partial}"
+        );
+        for agent in agents {
+            let p = Box::pin(access::policy(&f.state.db, &agent)).await.unwrap();
+            assert_eq!(
+                p.assignments[&machine.id].capabilities,
+                Capabilities::default()
+            );
+            assert_eq!(p.assignments[&machine.id].saved_login_ids, Some(vec![]));
+            assert!(!p.assignments[&machine.id].legacy);
+        }
+        f.state.db.drop().await.unwrap();
+    }
 }

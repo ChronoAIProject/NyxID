@@ -5222,6 +5222,15 @@ async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult
             Err(error) => return Err(error),
         }
     }
+    if row.choices.machine_assignment.is_some() {
+        // A watcher may win the race with node_ws. It must await the same
+        // completion transaction before announcing a successful handoff.
+        Box::pin(crate::services::machine_setup_service::complete_page_setup(
+            &state.db, id,
+        ))
+        .await?;
+        row = crate::services::machine_setup_service::get(&state.db, &watch.user_id, id).await?;
+    }
     let (status, message) = if row.status == "declined" || declined_card {
         (
             "declined",
@@ -5258,16 +5267,27 @@ async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult
                     .path()
                 ),
             )
+        } else if row.choices.machine_assignment.is_some() && row.status != "connected" {
+            return Ok(());
         } else {
             (
                 "connected",
-                format!(
-                    "Machine {} ({}) connected with capabilities {}. Use nyx__machine_list and a harmless check such as git --version to verify it, then continue. Requested specialist grant: {}. Grant it with nyxid__grant_subagent after verification.",
-                    node.name,
-                    node.id,
-                    row.choices.capabilities.join(", "),
-                    row.choices.grant_to.as_deref().unwrap_or("none")
-                ),
+                if row.choices.machine_assignment.is_some() {
+                    format!(
+                        "Machine {} ({}) connected. Requested specialist membership: {}. Membership completion is durable; new assignments have no tools or saved-login access. Explicit owner Review is required before new execution. Do not grant tools or logins on the owner's behalf.",
+                        node.name,
+                        node.id,
+                        row.choices.grant_to.as_deref().unwrap_or("none")
+                    )
+                } else {
+                    format!(
+                        "Machine {} ({}) connected with capabilities {}. Use nyx__machine_list and a harmless check such as git --version to verify it, then continue. Requested specialist grant: {}. Grant it with nyxid__grant_subagent after verification.",
+                        node.name,
+                        node.id,
+                        row.choices.capabilities.join(", "),
+                        row.choices.grant_to.as_deref().unwrap_or("none")
+                    )
+                },
             )
         }
     } else if row.expires_at <= Utc::now() {
@@ -5275,14 +5295,16 @@ async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult
     } else {
         return Ok(());
     };
-    state
-        .db
-        .collection::<MachineSetup>(SETUPS)
-        .update_one(
-            doc! {"_id":id,"user_id":&row.user_id},
-            doc! {"$set":{"status":status}},
-        )
-        .await?;
+    if row.choices.machine_assignment.is_none() {
+        state
+            .db
+            .collection::<MachineSetup>(SETUPS)
+            .update_one(
+                doc! {"_id":id,"user_id":&row.user_id},
+                doc! {"$set":{"status":status}},
+            )
+            .await?;
+    }
     machine_wake(
         state,
         watch,

@@ -48,6 +48,24 @@ class SeccompProfileTest(unittest.TestCase):
         self.assertFalse(any("requires_both" in rule["names"]
                              for rule in self.exporter.export_policy(source)["syscalls"]))
 
+    def test_supervisor_uses_the_fixed_docker_default_capabilities(self):
+        self.assertEqual(self.exporter.CAPABILITIES, {
+            "CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER",
+            "CAP_FSETID", "CAP_KILL", "CAP_MKNOD", "CAP_NET_BIND_SERVICE",
+            "CAP_NET_RAW", "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP",
+            "CAP_SETUID", "CAP_SYS_CHROOT",
+        })
+        source = copy.deepcopy(self.source)
+        source["syscalls"].extend([
+            {"names": ["docker_default_only"], "action": "SCMP_ACT_ALLOW",
+             "includes": {"caps": ["CAP_FOWNER", "CAP_DAC_OVERRIDE", "CAP_SYS_CHROOT"]}},
+            {"names": ["outside_baseline"], "action": "SCMP_ACT_ALLOW",
+             "includes": {"caps": ["CAP_SYS_ADMIN"]}},
+        ])
+        names = {name for rule in self.exporter.export_policy(source)["syscalls"] for name in rule["names"]}
+        self.assertIn("docker_default_only", names)
+        self.assertNotIn("outside_baseline", names)
+
     def test_architecture_conditions_cannot_widen_common_native_syscalls(self):
         source = copy.deepcopy(self.source)
         source["syscalls"].append({"names": ["bpf"], "action": "SCMP_ACT_ALLOW",

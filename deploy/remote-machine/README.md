@@ -49,13 +49,35 @@ Creation selects shell/files/browser/computer (default shell/files); computer
 requires browser. The sealed bootstrap carries the selected capabilities and
 the Node persists them as an immutable configuration ceiling. Enabling a
 capability does not authorize a client. There is no inbound Service, public
-port or arbitrary user PodSpec. The supervisor retains only
-`CHOWN`, `SETUID`, `SETGID`, `KILL`; commands clear supplementary groups, switch
-to `agent` and set `no_new_privs`. Node credentials and the projected workload
-identity token are root-only on separate protected mounts. The custom admission
-policy and default-deny network policy retain these boundaries. Namespace
-PodSecurity is `baseline`; this root supervisor does not claim the Kubernetes
-`restricted` policy.
+port or arbitrary user PodSpec. The UID/GID 0 supervisor uses a writable root
+filesystem, `allowPrivilegeEscalation: true`, explicit `privileged: false`, and
+`drop: [ALL]` followed by the fixed 14 Docker-default capabilities in
+[`docker-supervisor-capabilities.json`](../../machine/resources/docker-supervisor-capabilities.json):
+`AUDIT_WRITE`, `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `MKNOD`,
+`NET_BIND_SERVICE`, `NET_RAW`, `SETFCAP`, `SETGID`, `SETPCAP`, `SETUID`, `SYS_CHROOT`.
+This matches the default self-hosted Docker supervisor baseline within the
+existing container boundary. The renderer, exporter and disposable image
+fixtures consume this shared list; contracts check the admission copy for drift.
+
+Commands still clear supplementary groups, switch to a non-root command identity,
+set process-level `no_new_privs`, and install their namespace/mount seccomp
+filter. Browser workers remain separate non-root identities with
+`no_new_privs`; separated contexts retain DAC/Landlock and private HOME/tmp.
+The container setting does not give Agent commands sudo, system package
+installation, Docker-in-Docker or host access. Python, Node and C project
+development in the authorized workspace is covered by signed-command image
+checks. Install additional system toolchains through a separately built image;
+the writable container layer is temporary and only workspace data is retained.
+
+Node credentials and the projected workload identity token remain root-only on
+separate protected mounts. The exact Sandbox admission contract and default-deny
+network policy remain mandatory. Docker-default `NET_RAW` is outside Kubernetes
+PodSecurity baseline, so namespace PSA **enforce is `privileged`**, with
+`restricted` audit/warn retained. This PSA level does not set the container's
+`privileged` flag. The Sandbox contract still rejects privileged containers,
+host namespaces, extra capabilities, arbitrary mounts and entrypoint overrides;
+Manager/workload RBAC must not permit direct Pod creation. This profile does not
+claim Kubernetes baseline or restricted compliance.
 
 ## Full image, startup and retained data
 
@@ -105,12 +127,31 @@ profiles, downloads and tmp remain temporary. Reconstructing ephemeral profiles
 requires an authorized newer context generation; a daemon restart cannot
 silently reuse the former generation. The store must authenticate the original
 PVC and explicit fresh-allocation/recovery authority before opening it.
+The retained mount root and common `contexts/` directory are exactly
+`root:root 0711`: workers may traverse them but cannot list or modify them.
+Each `contexts/<command UID>/` gate is `root:<exclusive worker GID> 0710`,
+its `workspace/` is `<worker UID>:<worker GID> 0700`, and `metadata/` is
+`root:root 0700` with the existing private journal and lock. These permissions
+do not broaden the File sandbox or change the legacy workspace, HOME, browser
+profile or generation lifecycle.
 The final producer/consumer contract and local verification scope are recorded in
 [the integration evidence](../../docs/REMOTE_MACHINE_SEPARATION_INTEGRATION_EVIDENCE.md).
 Sealed bootstrap supplies the controller-observed original PVC and accepted
 allocation identity. Authenticated WSS binds initialization to one daemon UUID;
 replacement daemons must recover the retained journal. Missing or mismatched
 storage authority denies startup, separated work and quarantine ACK. The Node
+entrypoint leaves retained mount-root permissions unchanged until this grant is verified.
+Only that authenticated initialization grant, an exclusively created private
+metadata directory, a validated private supervisor lock, and absence of existing
+contexts or unknown retained entries permit the CLI to set its pinned mount
+root to `0711`. An empty directory or `0777` mount mode alone is never fresh
+allocation evidence. The original daemon can receive the same grant on
+reconnect; existing metadata always selects recovery and requires the exact
+retained permissions without normalization. A missing journal or drift in
+volume identity, workspace ownership, public-parent permissions or generation
+fails closed. Deploy the matching CLI and entrypoint together; replacing only
+the shell script does not install this authenticated initialization boundary.
+The Node
 identity and workload token are never made readable to the command/browser
 users. Managed workspace ownership changes only after the exact WSS runtime
 acknowledgement. Signed local expiry shuts down the Node; Tini then exits and
@@ -125,7 +166,9 @@ ownership through the descriptor using existing `CHOWN`. It then opens the
 same pinned inode for mode/ACL updates. Command group access and browser
 UID-specific ACL access preserve existing shared operations; browser policy
 groups gain no home access. Protected parents, no-follow checks and fail-closed
-ownership/probe checks remain required. No DAC/FOWNER capability is added.
+ownership/probe checks remain required. The directory initialization also remains
+compatible with the earlier four-capability runtime; it does not depend on the
+supervisor's newly available DAC_OVERRIDE/FOWNER capabilities.
 
 Without an explicit platform selection, the Pod uses `RuntimeDefault` seccomp.
 Chromium's user-namespace sandbox requires namespace syscalls that some runtimes
@@ -136,12 +179,12 @@ content-addressed OCI Localhost artifact for Remote Machines; see installation
 and configuration below. Docker's conditional capability/architecture/kernel
 selectors are resolved during export rather than passed to a CRI reader that
 could ignore them. Rules requiring capabilities outside the supervisor's fixed
-four are omitted; syscall argument constraints, default denial and errno actions
-are preserved. Only native amd64/arm64 ABIs are included.
+Docker-default list are omitted; syscall argument constraints, default denial
+and errno actions are preserved. Only native amd64/arm64 ABIs are included.
 The profile allows `chroot` for Chromium's child user namespace; the kernel
-still requires the corresponding namespace capability, and the container's
-four-capability set does not include `SYS_CHROOT`. This preserves Chromium's
-namespace sandbox without granting chroot in the original namespace.
+still requires the corresponding namespace capability. `SYS_CHROOT` now belongs
+to the supervisor baseline; non-root command workers have no effective/permitted
+capabilities and their process seccomp still refuses namespace/mount operations.
 The selected runtime must still prove browser/computer readiness. Neither a
 valid Localhost reference nor admission approval proves node installation or
 complete v4 support. Do not disable Chromium sandboxing or use an unconfined
@@ -153,7 +196,7 @@ entrypoint with disposable local bootstrap/WSS fixtures. It checks CLI/Node,
 gh, Chromium and cua versions, signed Commands/Files, secure Chromium
 navigation/snapshot, actual cua desktop capture/window observation, denied
 capability requests, protected identities and signed-expiry container teardown.
-The selections are Commands/Files, Browser alone, and all four capabilities;
+The selections are Commands/Files, Browser alone, and all four tool capabilities;
 the last selection executes a command while Chromium and cua remain active.
 Independent selections still run after a failed case, preserving each result.
 The fixtures prove Node-side protocol behavior, not live backend authorization
@@ -190,6 +233,19 @@ resource gate; without Xvfb/Chromium it fails closed there. This does not establ
 full-image, RuntimeDefault/AppArmor, CSI, amd64, client/controller or paid
 acceptance. See the later-source repair addendum in
 [the integration evidence](../../docs/REMOTE_MACHINE_SEPARATION_INTEGRATION_EVIDENCE.md).
+
+Those four-capability fixtures remain extra hardening regressions. Current
+`tests/full-machine-image-smoke.sh` and `tests/browser-recovery.sh` instead use
+the shared Docker-default supervisor baseline, a writable root, no container-level
+NNP, and the generated OCI seccomp profile. They assert actual supervisor and
+signed non-root worker permissions independently. Browser recovery runs both
+`shared_legacy` and `separated`, checking Secure/Developer navigation/snapshots,
+Computer `list_windows`, browser relaunch, WSS reconnect, and Node restart.
+Separated restart requires an authorized newer generation and fresh private
+profiles; the retained command workspace survives. The signed command probe
+compiles/runs Python, Node and C while confirming zero worker capabilities,
+NNP, namespace-call refusal and unreadable identity files. It uses kernel
+capget/prctl queries because separated Landlock denies `/proc/self/status`.
 
 ## Required cluster selection and configuration
 
@@ -237,9 +293,10 @@ with either runtime selection.
 
 ### Explicit Localhost seccomp installation
 
-The generated policy and manifest are under `seccomp/`. Their single source is
-the ordinary Docker Machine policy. After reviewing a source change, regenerate
-with `python3 deploy/remote-machine/seccomp/export.py`, review the resulting
+The generated policy and manifest are under `seccomp/`. They resolve the ordinary
+Docker Machine policy against the shared supervisor capability JSON. After
+reviewing either source change, regenerate with
+`python3 deploy/remote-machine/seccomp/export.py`, review the resulting
 artifact and manifest, and commit them together. A new policy receives a new
 SHA-256 name; never edit an installed file under an existing reference.
 
@@ -284,6 +341,24 @@ Changing today's setting applies to new allocations only. An observed Sandbox
 whose profile differs from its saved Machine is refused before the manager
 sends its apply; UID/resourceVersion guards remain in force. Safety suspension
 preserves the observed template rather than requiring a profile rewrite.
+
+For the Docker-default supervisor transition, drain old Manager writers and
+coordinate deployment of the new Manager renderer, Sandbox admission contract
+and namespace PSA labels. Install/verify the selected seccomp artifact on all
+eligible nodes before allowing new workloads. The exact contract must be active
+before lowering PSA enforcement, and direct Pod writes remain forbidden to the
+Manager and workload identities. A source change does not update running Pods.
+The new renderer supplies the new permissions on its next ordinary desired-state
+apply/resume, preserving saved image/seccomp and original storage identity.
+An old four-capability Pod template may still be suspended unchanged by the
+existing identity-guarded safety path; it cannot create a new Machine, resume
+with old permissions, or edit its Pod template through that exception. Do not
+rewrite retained storage, seccomp references or images to force the transition.
+
+The local permissions, development and browser recovery results for this
+transition are recorded in
+[the Docker runtime parity acceptance](../../docs/REMOTE_MACHINE_DOCKER_RUNTIME_PARITY_ACCEPTANCE_20261026.md).
+Earlier four-capability acceptance records retain their historical scope.
 
 `tests/contracts.sh` checks exporter freshness, installer regressions and actual
 CEL evaluation of Rust-rendered RuntimeDefault/Localhost objects. These checks

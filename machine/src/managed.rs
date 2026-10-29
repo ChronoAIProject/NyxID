@@ -7,6 +7,16 @@ pub const PROFILE_CPU_MILLIS: u32 = 2_000;
 pub const PROFILE_MEMORY_MIB: u32 = 2_048;
 pub const PROFILE_WORKSPACE_GIB: u32 = 20;
 
+/// Fixed Docker-default supervisor baseline, shared with the OCI exporter and
+/// image fixtures. Workers still drop UID/GID and set their own no_new_privs.
+pub static DOCKER_SUPERVISOR_CAPABILITIES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!(
+            "../resources/docker-supervisor-capabilities.json"
+        ))
+        .expect("embedded Docker supervisor capabilities must be valid JSON")
+    });
+
 /// Operator-installed immutable OCI profile. The reference embeds the exact
 /// artifact digest; admission separately binds new Machines to operator approval.
 pub fn validate_seccomp_localhost_profile(reference: &str) -> Result<(), &'static str> {

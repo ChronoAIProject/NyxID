@@ -542,6 +542,7 @@ fn canonical_json(value: Value) -> Value {
 
 pub fn safe_view(machine: &ManagedMachine) -> SafeManagedMachineView {
     SafeManagedMachineView {
+        presentation: None,
         node_id: machine.node_id.clone(),
         name: machine.name.clone(),
         capabilities: machine.capabilities.clone(),

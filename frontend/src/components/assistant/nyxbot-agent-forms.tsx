@@ -174,9 +174,11 @@ function AgentOwnerPicker({
 
 /** Create a specialist: its name, role and starting grants. */
 export function NewAgentDialog({
+  machineAssignment,
   onClose,
   onCreated,
 }: {
+  readonly machineAssignment?: "membership_only";
   readonly onClose: () => void;
   readonly onCreated: (created: { id: string; home_conversation_id: string }) => void;
 }) {
@@ -201,7 +203,10 @@ export function NewAgentDialog({
   async function submit(values: AssistantAgentCreate) {
     setError(undefined);
     try {
-      const created = await create.mutateAsync(values);
+      const created = await create.mutateAsync({
+        ...values,
+        ...(machineAssignment ? { machine_assignment: machineAssignment } : {}),
+      });
       onCreated(created);
     } catch (cause) {
       setError(errorMessage(cause, "Could not create the agent. Try again."));

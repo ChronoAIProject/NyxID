@@ -207,6 +207,9 @@ fn private_file(path: &Path, create: bool) -> Result<File> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)?;
+    validate_private_file(file)
+}
+fn validate_private_file(file: File) -> Result<File> {
     let meta = file.metadata()?;
     ensure!(
         meta.is_file()
@@ -217,6 +220,44 @@ fn private_file(path: &Path, create: bool) -> Result<File> {
         "context_store_invalid"
     );
     Ok(file)
+}
+
+/// Only this retained-volume boundary may admit an uninitialized mount mode.
+/// Generic supervisor ancestors keep their existing strict no-write checks.
+fn retained_root(root: &Path) -> Result<OwnedFd> {
+    let parent = directory(root.parent().context("context_path_invalid")?, false)?;
+    let name =
+        std::ffi::CString::new(root.file_name().context("context_path_invalid")?.as_bytes())?;
+    let raw = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    ensure!(raw >= 0, "context_directory_unavailable");
+    let root_fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let meta = File::from(root_fd.try_clone()?).metadata()?;
+    ensure!(
+        meta.uid() == 0
+            && meta.gid() == 0
+            && matches!(meta.mode() & 0o7777, 0o700 | 0o711 | 0o755 | 0o777),
+        "context_retained_root_invalid"
+    );
+    // The root cannot be renamed by workers: its parent was pinned and checked
+    // above. Never adopt unknown retained data as a fresh allocation.
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        ensure!(
+            matches!(name.to_str(), Some("legacy" | "metadata" | "contexts")),
+            "context_store_inconsistent"
+        );
+        if name == "legacy" {
+            ensure!(entry.file_type()?.is_dir(), "context_store_inconsistent");
+        }
+    }
+    Ok(root_fd)
 }
 
 pub struct HostedStore {
@@ -257,30 +298,94 @@ impl HostedStore {
             uuid::Uuid::parse_str(runtime_id).is_ok(),
             "context_runtime_invalid"
         );
-        directory(root, false)?;
+        let root_fd = retained_root(root)?;
         let state = root.join("metadata");
-        let fresh = if initialize {
-            match std::fs::create_dir(&state) {
-                Ok(()) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
-                Err(e) => return Err(e.into()),
+        let state_exists = match std::fs::symlink_metadata(&state) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        let fresh = if initialize && !state_exists {
+            // The authenticated fresh grant is necessary, but a reconnect by
+            // that same daemon also carries initialize=true. Only an exclusive
+            // metadata creation authorizes the one-time retained-root change.
+            ensure!(
+                matches!(std::fs::symlink_metadata(root.join("contexts")), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                "context_store_inconsistent"
+            );
+            let result = unsafe { libc::mkdirat(root_fd.as_raw_fd(), c"metadata".as_ptr(), 0o700) };
+            if result != 0 {
+                ensure!(
+                    std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists,
+                    "context_store_invalid"
+                );
             }
+            result == 0
         } else {
             false
         };
-        if fresh {
-            ensure!(initialize, "context_original_volume_missing");
-            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-            File::open(root)?.sync_all()?;
+        if !fresh {
+            let meta = File::from(root_fd.try_clone()?).metadata()?;
+            ensure!(
+                meta.mode() & 0o7777 == 0o711,
+                "context_retained_root_invalid"
+            );
         }
-        let state_fd = directory(&state, false)?;
-        let meta = File::from(state_fd).metadata()?;
-        ensure!(meta.mode() & 0o777 == 0o700, "context_store_invalid");
-        let lock = private_file(&state.join("lock"), true)?;
+        let raw = unsafe {
+            libc::openat(
+                root_fd.as_raw_fd(),
+                c"metadata".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        ensure!(raw >= 0, "context_original_volume_missing");
+        let state_fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let meta = File::from(state_fd.try_clone()?).metadata()?;
+        ensure!(
+            meta.uid() == 0 && meta.gid() == 0 && meta.mode() & 0o7777 == 0o700,
+            "context_store_invalid"
+        );
+        // Pin the new private state before the mount root becomes traversable.
+        // No root-relative parent lookup can redirect lock creation.
+        let raw = unsafe {
+            libc::openat(
+                state_fd.as_raw_fd(),
+                c"lock".as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        ensure!(raw >= 0, "context_store_invalid");
+        let lock = validate_private_file(unsafe { File::from_raw_fd(raw) })?;
         ensure!(
             unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
             "context_supervisor_already_running"
         );
+        if fresh {
+            let current = std::fs::symlink_metadata(&state)?;
+            ensure!(
+                current.is_dir() && current.dev() == meta.dev() && current.ino() == meta.ino(),
+                "context_store_inconsistent"
+            );
+            File::from(state_fd).sync_all()?;
+            ensure!(
+                unsafe { libc::fchmod(root_fd.as_raw_fd(), 0o711) } == 0,
+                "context_retained_root_invalid"
+            );
+            File::from(root_fd.try_clone()?).sync_all()?;
+            // Recheck after closing the initial writable-mount window. Unknown
+            // entries or a replaced state directory never become adoption.
+            retained_root(root)?;
+            let current = std::fs::symlink_metadata(&state)?;
+            ensure!(
+                current.is_dir() && current.dev() == meta.dev() && current.ino() == meta.ino(),
+                "context_store_inconsistent"
+            );
+        }
         let data = root.join("contexts");
         let journal = if fresh {
             ensure!(!data.exists(), "context_store_inconsistent");
@@ -330,7 +435,12 @@ impl HostedStore {
             .registry
             .validate()
             .map_err(anyhow::Error::msg)?;
-        directory(&self.data, false)?;
+        let data = directory(&self.data, false)?;
+        let meta = File::from(data).metadata()?;
+        ensure!(
+            meta.uid() == 0 && meta.gid() == 0 && meta.mode() & 0o7777 == 0o711,
+            "context_store_invalid"
+        );
         ensure!(
             self.journal.workspaces.len() == self.journal.registry.contexts.len(),
             "context_store_inconsistent"
@@ -389,7 +499,7 @@ impl HostedStore {
         let gate = directory(path.parent().context("context_path_invalid")?, false)?;
         let meta = File::from(gate).metadata()?;
         ensure!(
-            meta.gid() == allocation.command_uid && meta.mode() & 0o777 == 0o710,
+            meta.gid() == allocation.command_uid && meta.mode() & 0o7777 == 0o710,
             "context_workspace_gate_invalid"
         );
         let meta =
@@ -398,7 +508,7 @@ impl HostedStore {
             meta.is_dir()
                 && meta.uid() == allocation.command_uid
                 && meta.gid() == allocation.command_uid
-                && meta.mode() & 0o777 == 0o700,
+                && meta.mode() & 0o7777 == 0o700,
             "context_workspace_invalid"
         );
         Ok(())
@@ -493,3 +603,7 @@ impl HostedStore {
         Ok(users)
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "hosted_context_tests.rs"]
+mod tests;

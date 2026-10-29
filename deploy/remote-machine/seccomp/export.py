@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Export the Docker Machine policy as a fixed native amd64/arm64 OCI policy.
 
-The hosted supervisor has only CHOWN/SETUID/SETGID/KILL. Docker-specific
-conditions must be resolved, not silently discarded by a CRI JSON reader.
+The hosted supervisor uses the fixed Docker-default capability baseline.
+Docker-specific conditions must be resolved, not silently discarded by a CRI reader.
 Only --install-root writes outside this artifact directory, and requires root
 on a supported Linux node. It never changes an existing profile's contents.
 """
@@ -16,8 +16,10 @@ import re
 import stat
 import tempfile
 
-SOURCE = Path(__file__).resolve().parents[3] / "cli/resources/machine-container/seccomp.json"
-CAPABILITIES = {"CAP_CHOWN", "CAP_SETUID", "CAP_SETGID", "CAP_KILL"}
+REPOSITORY = Path(__file__).resolve().parents[3]
+SOURCE = REPOSITORY / "cli/resources/machine-container/seccomp.json"
+CAPABILITIES = {"CAP_" + name for name in json.loads(
+    (REPOSITORY / "machine/resources/docker-supervisor-capabilities.json").read_text())}
 ARCHES = {"amd64", "arm64"}
 # These reviewed architecture-only names cannot grant a common syscall on the
 # other native ABI. New architecture-dependent common rules need review: OCI

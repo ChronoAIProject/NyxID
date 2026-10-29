@@ -44,5 +44,9 @@ run_fixture cargo test --offline --locked -p nyxid-cli --lib --features node-pro
 run_fixture cargo test --offline --locked -p nyxid-cli --lib --features node-proxy-test managed_configuration -- --include-ignored --test-threads=1 --nocapture
 run_fixture cargo test --offline --locked -p nyxid-cli --bin nyxid managed_socket_ -- --include-ignored --test-threads=1 --nocapture
 run_fixture cargo test --offline --locked -p nyxid-cli --bin nyxid node::managed_runtime::tests
+run_fixture cargo test --offline --locked -p nyxid-cli --bin nyxid node::machine::browser::tests -- --include-ignored --test-threads=1 --nocapture
+run_fixture cargo test --offline --locked -p nyxid-cli --bin nyxid browser_directory::tests -- --include-ignored --test-threads=1 --nocapture
+run_fixture cargo test --offline --locked -p nyxid-cli --bin nyxid legacy_display_cookie_cleanup_ -- --include-ignored --test-threads=1 --nocapture
+run_fixture cargo test --offline --locked -p nyxid-cli --bin nyxid browser_initialization_errors_are_consistent_for_browser_and_computer -- --test-threads=1 --nocapture
 run_fixture cargo check --offline --locked -p nyxid-cli --lib --features node-proxy-test
 run_fixture cargo check --offline --locked -p nyxid-cli --bin nyxid

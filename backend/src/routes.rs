@@ -3513,6 +3513,9 @@ mod org_membership_tests;
 mod remote_machine_tests;
 
 #[cfg(test)]
+mod machine_experience_tests;
+
+#[cfg(test)]
 mod remote_machine_flag_tests;
 
 #[cfg(test)]

@@ -44,7 +44,8 @@ const offer = {
     terminal_output_max_retention_seconds: 3600,
     separation_policy_version: "remote-machine-separation-v1",
     separation_choices: ["automatic", "require_separated", "shared_legacy"],
-    separation_warning: "Shared OS access can expose files through the execution identity.",
+    separation_warning:
+      "Shared OS access can expose files through the execution identity.",
     shared_environment_mode: "per_agent",
     cross_client_secret_isolation: false,
     inbound_network_service: false,
@@ -63,10 +64,13 @@ const state = vi.hoisted(() => ({
   action: vi.fn(),
   accepted: vi.fn(),
   close: vi.fn(),
+  check: vi.fn(),
   data: undefined as unknown,
   error: null as Error | null,
   walletOwner: "owner",
   walletError: null as Error | null,
+  refetch: vi.fn(),
+  statusRead: vi.fn(),
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useNyxBotAgents: () => ({ data: { agents: [] } }),
@@ -75,10 +79,12 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
 }));
 vi.mock("@/hooks/use-machines", () => ({
+  useRemoteMachines: () => ({ refetch: state.statusRead }),
+  useRemoteMachine: () => ({ data: undefined }),
   useRemoteMachineEntitlement: () => ({
     data: undefined,
     error: null,
-    refetch: vi.fn(),
+    refetch: state.refetch,
   }),
   useRemoteMachineQuote: () => ({
     mutate: state.quote,
@@ -117,6 +123,7 @@ beforeEach(() => {
     isLoading: false,
   });
   sessionStorage.clear();
+  state.check.mockResolvedValue(true);
   state.data = structuredClone(offer);
   state.error = null;
   state.walletOwner = "owner";
@@ -129,6 +136,11 @@ beforeEach(() => {
   state.action.mockResolvedValue({
     operation: remoteMachineOperationFixture,
     replayed: false,
+  });
+  state.refetch.mockResolvedValue({ data: { machine_id: null }, error: null });
+  state.statusRead.mockResolvedValue({
+    data: { machines: [], complete: true },
+    error: null,
   });
 });
 afterEach(() => {
@@ -144,6 +156,7 @@ const show = (machine?: RemoteMachine) =>
         open
         onOpenChange={state.close}
         onAccepted={state.accepted}
+        onCheck={state.check}
         machine={machine}
       />
     ) : (
@@ -151,8 +164,11 @@ const show = (machine?: RemoteMachine) =>
     ),
   );
 const accept = async () => {
-  const separation = screen.queryByRole("checkbox", { name: /I accept the selected Agent separation/ });
-  if (separation && separation.getAttribute("data-state") !== "checked") await userEvent.click(separation);
+  const separation = screen.queryByRole("checkbox", {
+    name: /I accept the selected Agent separation/,
+  });
+  if (separation && separation.getAttribute("data-state") !== "checked")
+    await userEvent.click(separation);
   await userEvent.click(
     screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
   );
@@ -244,6 +260,15 @@ it("replays exactly the original paid body and key after an unknown response", a
   await accept();
   await submit();
   await screen.findByText("Response lost");
+  expect(
+    screen.getByRole("button", { name: "Retry saved create request" }),
+  ).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Check status" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Retry saved create request" }),
+    ).toBeEnabled(),
+  );
   await userEvent.click(
     screen.getByRole("button", { name: "Retry saved create request" }),
   );
@@ -272,6 +297,12 @@ it("recovers a saved paid request after quote expiry without accepting the repla
   state.data = { ...offer, valid_until: "2020-01-01T00:00:00Z" };
   show();
   await accept();
+  await userEvent.click(screen.getByRole("button", { name: "Check status" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Retry saved create request" }),
+    ).toBeEnabled(),
+  );
   await userEvent.click(
     screen.getByRole("button", { name: "Retry saved create request" }),
   );
@@ -319,6 +350,18 @@ it("requires a fresh review and a new intent after a revision conflict", async (
   expect(state.create.mock.calls[1]![0].idempotencyKey).not.toBe(
     state.create.mock.calls[0]![0].idempotencyKey,
   );
+});
+
+it("keeps a new paid resume unavailable when the resource changes during quote review", async () => {
+  const current: RemoteMachine = { ...remoteMachineFixture, resource_state: "paused", billing_state: "suspended", free_slot: false, revision: 9 };
+  const view = show(current);
+  await accept();
+  const confirm = screen.getByRole("button", { name: "Accept quote and resume" });
+  expect(confirm).toBeEnabled();
+  view.rerender(<RemoteMachinePaidStart open onOpenChange={state.close} onAccepted={state.accepted} onCheck={state.check} machine={{ ...current, resource_state: "resuming", revision: 10 }} />);
+  expect(confirm).toBeDisabled();
+  await userEvent.click(confirm);
+  expect(state.action).not.toHaveBeenCalled();
 });
 
 it("resumes a paid paused Machine only with the accepted quote and revision", async () => {
@@ -449,21 +492,25 @@ it.each(["create", "resume"])(
   "does not show a replacement quote estimate for a saved %s intent",
   (operation) => {
     const resume = operation === "resume";
-    getRemoteMachineIntent(
-      "owner",
-      resume ? "machine-1:resume" : "create",
-      {
-        ...(resume
-          ? { action: "resume" as const, expected_revision: 9 }
-          : { free_slot: false, name: "my-remote-machine", capabilities: ["files", "shell"], specialist_id: null, separation_choice: "automatic", separation_policy_version: "remote-machine-separation-v1", acknowledge_separation: true }),
-        profile_version: "remote-machine",
-        quote_id: "original-quote",
-        accept_account_balance: true,
-        policy_version: "remote-machine-mvp",
-        data_policy_version: "remote-machine-data",
-        acknowledge_shared_environment: true,
-      },
-    );
+    getRemoteMachineIntent("owner", resume ? "machine-1:resume" : "create", {
+      ...(resume
+        ? { action: "resume" as const, expected_revision: 9 }
+        : {
+            free_slot: false,
+            name: "my-remote-machine",
+            capabilities: ["files", "shell"],
+            specialist_id: null,
+            separation_choice: "automatic",
+            separation_policy_version: "remote-machine-separation-v1",
+            acknowledge_separation: true,
+          }),
+      profile_version: "remote-machine",
+      quote_id: "original-quote",
+      accept_account_balance: true,
+      policy_version: "remote-machine-mvp",
+      data_policy_version: "remote-machine-data",
+      acknowledge_shared_environment: true,
+    });
     state.data = {
       ...offer,
       billing_preflight: {
@@ -529,6 +576,7 @@ it.each(["off", "loading", "account"])(
           billing_state: "suspended",
         }}
         onAccepted={state.accepted}
+        onCheck={state.check}
       />,
     );
     expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -555,3 +603,43 @@ it.each(["off", "loading", "account"])(
     expect(state.action).not.toHaveBeenCalled();
   },
 );
+
+it("checks paid resume status before retrying the saved original request after refresh", async () => {
+  const saved = getRemoteMachineIntent("owner", "machine-1:resume", {
+    action: "resume",
+    expected_revision: 9,
+    quote_id: "original-quote",
+    accept_account_balance: true,
+    profile_version: "remote-machine",
+    policy_version: "remote-machine-mvp",
+    data_policy_version: "remote-machine-data",
+    acknowledge_shared_environment: true,
+  });
+  show({
+    ...remoteMachineFixture,
+    resource_state: "resuming",
+    billing_state: "suspended",
+    free_slot: false,
+    revision: 15,
+  });
+  const retry = screen.getByRole("button", {
+    name: "Retry saved paid request",
+  });
+  expect(retry).toBeDisabled();
+  state.check.mockResolvedValueOnce(false);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Check request status" }),
+  );
+  expect(retry).toBeDisabled();
+  expect(state.action).not.toHaveBeenCalled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Check request status" }),
+  );
+  await userEvent.click(retry);
+  await waitFor(() => expect(state.action).toHaveBeenCalledTimes(1));
+  expect(state.action.mock.calls[0]![0]).toEqual({
+    machineId: "machine-1",
+    body: saved.body,
+    idempotencyKey: saved.idempotencyKey,
+  });
+});

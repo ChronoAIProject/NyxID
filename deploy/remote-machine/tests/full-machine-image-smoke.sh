@@ -23,6 +23,9 @@ root=pathlib.Path(test_dir)
 output=root/'results'
 output.mkdir()
 all_results=[]
+supervisor_capabilities=json.loads((pathlib.Path(repo)/'machine/resources/docker-supervisor-capabilities.json').read_text())
+manifest=json.loads((pathlib.Path(repo)/'deploy/remote-machine/seccomp/manifest.json').read_text())
+seccomp=pathlib.Path(repo)/'deploy/remote-machine/seccomp'/pathlib.Path(manifest['localhost_profile']).name
 volume='nyxid-full-smoke-workspace-'+uuid.uuid4().hex[:12]
 subprocess.run(['docker','volume','create',volume],check=True,stdout=subprocess.DEVNULL)
 atexit.register(lambda: subprocess.run(['docker','volume','rm',volume],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL))
@@ -33,11 +36,11 @@ for capabilities,generation,initialize in [('shell,files',1,True),('browser',1,T
     if generation > 1:
         case+='-retained'
     name='nyxid-full-smoke-'+uuid.uuid4().hex[:12]
-    command=['docker','run','--detach','--name',name,'--network','none','--read-only',
+    command=['docker','run','--detach','--name',name,'--network','none',
         '--cpus','2','--memory','2g','--memory-swap','2g',
-        '--cap-drop','ALL','--cap-add','CHOWN','--cap-add','SETUID','--cap-add','SETGID','--cap-add','KILL',
-        '--security-opt','no-new-privileges',
-        '--security-opt','seccomp='+repo+'/cli/resources/machine-container/seccomp.json',
+        '--cap-drop','ALL',
+        *[argument for cap in supervisor_capabilities for argument in ('--cap-add',cap)],
+        '--security-opt','seccomp='+str(seccomp),
         '--tmpfs','/var/lib/nyxid-machine:rw,nosuid,nodev,mode=0711,size=64m',
         '--tmpfs','/var/run/nyxid-workload:rw,nosuid,nodev,mode=0700,size=1m',
         '--tmpfs','/tmp:rw,nosuid,nodev,size=1g',

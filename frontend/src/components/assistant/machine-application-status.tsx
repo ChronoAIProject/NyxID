@@ -7,11 +7,13 @@ export function MachineApplicationStatus({
   environmentApplied,
   configuration,
   target,
+  configurationApplicability = "unknown",
 }: {
   readonly authorizationApplied?: boolean;
   readonly environmentApplied?: boolean;
   readonly configuration: MachineConfiguration | null;
   readonly target?: MachineContextReview["machine_configuration_target"];
+  readonly configurationApplicability?: "hosted" | "not_applicable" | "unknown";
 }) {
   const configApplied =
     configuration?.state === "applied" && configuration.reason === null;
@@ -35,7 +37,7 @@ export function MachineApplicationStatus({
             : "Agent authorization application is not confirmed"}
         </p>
       ) : null}
-      {configuration ? (
+      {configurationApplicability !== "not_applicable" && configuration ? (
         <>
           <p
             role="status"
@@ -76,9 +78,15 @@ export function MachineApplicationStatus({
             </p>
           </details>
         </>
-      ) : (
-        <p>Hosted configuration evidence is not reported for this machine.</p>
-      )}
+      ) : configurationApplicability === "hosted" ? (
+        <p role="status" className="text-warning">
+          Hosted configuration evidence is not reported for this Remote machine.
+        </p>
+      ) : configurationApplicability === "unknown" ? (
+        <p role="status">
+          Machine type or hosted configuration applicability is unknown; missing configuration evidence is not treated as Self-hosted.
+        </p>
+      ) : null}
       {!targetMatches ? (
         <p role="status" className="text-warning">
           The current hosted configuration differs from the reviewed target.
@@ -87,12 +95,12 @@ export function MachineApplicationStatus({
       ) : null}
       {environmentApplied &&
       authorizationApplied &&
-      configApplied &&
+      (configurationApplicability === "not_applicable" || configApplied) &&
       targetMatches ? (
         <p role="status" className="text-success">
           Environment mode applied
         </p>
-      ) : configuration && environmentApplied !== undefined ? (
+      ) : environmentApplied !== undefined ? (
         <p role="status">
           Environment mode application is not confirmed. Approval, saved
           permissions, authority expiry and a Node ACK alone do not confirm both

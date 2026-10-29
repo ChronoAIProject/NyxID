@@ -1,5 +1,6 @@
 mod authority;
 pub mod browser;
+mod browser_directory;
 mod browser_input;
 mod browser_layout;
 #[cfg(target_os = "linux")]
@@ -65,6 +66,7 @@ const OPERATION_RECEIPT_LIMIT: usize = 4096;
 const OPERATION_RECEIPT_RUNNING_LIMIT: usize = 4096;
 const OPERATION_RECEIPT_RESULT_LIMIT: usize = 256 * 1024;
 const OPERATION_RECEIPT_RESULT_BUDGET: usize = 32 * 1024 * 1024;
+const DEV_BROWSER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 enum ReceiptState {
     Running(Arc<tokio::sync::Notify>),
@@ -606,7 +608,7 @@ impl MachineError {
             ),
             Self::Browser => (
                 12413,
-                "managed browser unavailable; complete browser policy setup and restart the node",
+                "managed browser unavailable; check browser startup diagnostics or update the machine",
             ),
             Self::DevBrowser(error) => (12413, error.message()),
             Self::SecureBrowser(error) => (12413, error.message()),
@@ -1598,12 +1600,26 @@ impl Runtime {
                 Ok(runtime) => Some(runtime),
                 Err(error) => {
                     let stage = context_dispatch::failure_stage(&error);
+                    let reason = context_dispatch::failure_reason(&error);
+                    let diagnostic = context_dispatch::failure_diagnostic(&error);
                     tracing::warn!(
                         stage,
-                        reason = "context_preparation_failed",
+                        reason,
+                        elapsed_ms = diagnostic.map_or(0, |failure| failure.elapsed_ms),
+                        correlation_id = diagnostic
+                            .map(|failure| failure.correlation_id.as_str())
+                            .unwrap_or("unknown"),
+                        generation = diagnostic.map_or(0, |failure| failure.generation),
+                        request_id = %request.request_id,
                         "separated context unavailable"
                     );
-                    return json!({"error":{"code":12419,"stage":stage,"message":"separated_context_unavailable: verify Linux Landlock ABI 6, separate users, private legacy roots and browser setup; shared fallback is disabled"}});
+                    let mut result = json!({"error":{"code":12419,"stage":stage,"reason":reason,"message":"separated_context_unavailable: verify Linux Landlock ABI 6, separate users, private legacy roots and browser setup; shared fallback is disabled"}});
+                    if let Some(diagnostic) = diagnostic {
+                        result["error"]["elapsed_ms"] = json!(diagnostic.elapsed_ms);
+                        result["error"]["correlation_id"] = json!(diagnostic.correlation_id);
+                        result["error"]["generation"] = json!(diagnostic.generation);
+                    }
+                    return result;
                 }
             }
         } else if let Some(id) = request.parameters["context_id"].as_str().filter(|_| {
@@ -1946,7 +1962,7 @@ impl Runtime {
             | Operation::WriteFile
             | Operation::EditFile => self.file_operation(operation, parameters).await,
             Operation::Computer => {
-                self.ensure_browser().await?;
+                self.ensure_browser().await.context(MachineError::Browser)?;
                 let clipboard = parameters["tool"] == "clipboard_write";
                 let window_state = parameters["tool"] == "get_window_state";
                 let mut staged = Vec::new();
@@ -2011,27 +2027,18 @@ impl Runtime {
                         self.secure_browser_action(&parameters).await?
                     }
                     "dev" => {
-                        let config = self
-                            .config
-                            .managed_browser
-                            .as_ref()
+                        // Probe the child and CDP pipe before the business
+                        // action is submitted. A failed handshake is safe to
+                        // recover from because no navigate/click/type payload
+                        // has been written yet.
+                        self.ensure_dev_browser()
+                            .await
                             .context(MachineError::Browser)?;
                         let mut guard = self.dev_browser.lock().await;
-                        // Cancellation drops the pipe and process. A following turn
-                        // starts a fresh session, never consumes a stale CDP reply.
-                        let mut browser = match guard.take() {
-                            Some(browser) => browser,
-                            None => {
-                                let identity = self.developer_identity()?;
-                                dev_browser::DevBrowser::launch(
-                                    &self.dev_directory(config),
-                                    identity.as_ref(),
-                                    &config.binary,
-                                    config.container,
-                                )
-                                .await?
-                            }
-                        };
+                        // Cancellation drops the pipe and process. A following
+                        // turn starts a fresh session, never consumes a stale
+                        // CDP reply.
+                        let mut browser = guard.take().context(MachineError::Browser)?;
                         let result = async {
                             let result = if matches!(
                                 parameters["action"].as_str(),
@@ -2283,7 +2290,19 @@ impl Runtime {
             .as_ref()
             .context(MachineError::Browser)?;
         let mut browser = self.dev_browser.lock().await;
-        if browser.is_none() {
+        let healthy = match browser.as_mut() {
+            Some(active) => tokio::time::timeout(DEV_BROWSER_PROBE_TIMEOUT, active.probe())
+                .await
+                .is_ok_and(|result| result.is_ok()),
+            None => false,
+        };
+        if !healthy {
+            // Reap the stale Chromium process before launching against the
+            // same profile. Dropping alone only sends SIGKILL and can leave
+            // the profile SingletonLock held while the replacement starts.
+            if let Some(stale) = browser.take() {
+                stale.terminate().await.context(MachineError::Browser)?;
+            }
             let identity = self.developer_identity()?;
             *browser = Some(
                 dev_browser::DevBrowser::launch(
@@ -2363,7 +2382,7 @@ impl Runtime {
     }
 
     async fn file_operation(&self, operation: Operation, parameters: Value) -> Result<Value> {
-        self.file_operation_with_roots(operation, parameters, self.config.roots.clone())
+        self.file_operation_with_roots(operation, parameters, self.roots.paths().to_vec())
             .await
     }
 
@@ -2380,12 +2399,7 @@ impl Runtime {
             let mut parameters = parameters;
             parameters["scrub_context"] =
                 serde_json::json!(self.redactor.lock().await.max_pattern_bytes());
-            let request = FileRequest {
-                roots: roots.clone(),
-                excluded: self.excluded.clone(),
-                operation,
-                parameters: parameters.clone(),
-            };
+            let request = self.file_request(roots, operation, parameters.clone());
             let page = self.execute_file_worker(request).await?;
             let bytes = zeroize::Zeroizing::new(
                 STANDARD.decode(
@@ -2411,13 +2425,31 @@ impl Runtime {
                 json!({"content":content,"encoding":encoding,"offset":page["offset"],"size":page["size"],"has_more":page["has_more"]}),
             );
         }
-        let request = FileRequest {
+        let request = self.file_request(roots, operation, parameters);
+        self.execute_file_worker(request).await
+    }
+
+    fn file_request(
+        &self,
+        roots: Vec<PathBuf>,
+        operation: Operation,
+        parameters: Value,
+    ) -> FileRequest {
+        #[cfg(target_os = "linux")]
+        let pinned_workspace = self
+            .identity
+            .sandbox
+            .as_ref()
+            .and_then(|_| self.roots.paths().first().cloned());
+        #[cfg(not(target_os = "linux"))]
+        let pinned_workspace = None;
+        FileRequest {
             roots,
-            excluded: self.excluded.clone(),
+            excluded: self.roots.exclusions().to_vec(),
+            pinned_workspace,
             operation,
             parameters,
-        };
-        self.execute_file_worker(request).await
+        }
     }
 
     async fn execute_file_worker(&self, request: FileRequest) -> Result<Value> {
@@ -2449,10 +2481,13 @@ impl Runtime {
                 .map_err(|_| failure(FileFailure::new("worker_exit_nonzero")))?
                 .map_err(|error| failure(FileFailure::new(file_error_reason(&error))));
         }
-        let mut command = tokio::process::Command::new(
-            std::env::current_exe()
-                .map_err(|_| failure(FileFailure::new("worker_spawn_failed")))?,
-        );
+        let executable = std::env::current_exe()
+            .map_err(|_| failure(FileFailure::new("worker_spawn_failed")))?;
+        #[cfg(test)]
+        let executable = std::env::var_os("NYXID_TEST_FILE_WORKER")
+            .map(PathBuf::from)
+            .unwrap_or(executable);
+        let mut command = tokio::process::Command::new(executable);
         self.identity
             .prepare_agent(&mut command)
             .map_err(|_| failure(FileFailure::new("worker_spawn_failed")))?;
@@ -2726,8 +2761,24 @@ fn enforce_managed_write_limit(parameters: &Value) -> Result<()> {
 struct FileRequest {
     roots: Vec<PathBuf>,
     excluded: Vec<PathBuf>,
+    pinned_workspace: Option<PathBuf>,
     operation: Operation,
     parameters: Value,
+}
+
+impl FileRequest {
+    fn file_roots(&self) -> Result<files::Roots> {
+        if let Some(workspace) = &self.pinned_workspace {
+            #[cfg(target_os = "linux")]
+            return files::Roots::from_pinned_workspace(&self.roots, &self.excluded, workspace);
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = workspace;
+                bail!("pinned workspace requires Linux");
+            }
+        }
+        files::Roots::new(&self.roots, &self.excluded)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2851,7 +2902,7 @@ fn worker_exit_outcome(
 }
 
 fn execute_file(request: FileRequest) -> Result<Value> {
-    let roots = files::Roots::new(&request.roots, &request.excluded)?;
+    let roots = request.file_roots()?;
     let p = &request.parameters;
     let path = string(p, "path")?;
     match request.operation {
@@ -2951,6 +3002,376 @@ mod file_worker_tests {
         assert_eq!(failure.reason, "worker_exit_nonzero");
         assert_eq!(failure.exit_code, Some(23));
         assert_eq!(failure.signal, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn pinned_file(
+        runtime: &Runtime,
+        workspace: &Path,
+        operation: Operation,
+        parameters: Value,
+    ) -> Result<Value> {
+        let request = runtime.file_request(vec![workspace.to_owned()], operation, parameters);
+        assert_eq!(request.pinned_workspace.as_deref(), Some(workspace));
+        runtime.execute_file_worker(request).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn pinned_transfer(
+        runtime: &Runtime,
+        workspace: &Path,
+        operation: Operation,
+        parameters: Value,
+        body: &[u8],
+    ) -> (Vec<u8>, std::process::ExitStatus) {
+        let request = runtime.file_request(vec![workspace.to_owned()], operation, parameters);
+        let mut command =
+            tokio::process::Command::new(std::env::var_os("NYXID_TEST_FILE_WORKER").unwrap());
+        runtime.identity.prepare_agent(&mut command).unwrap();
+        command
+            .args(["node", "machine-transfer-worker"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let header = serde_json::to_vec(&request).unwrap();
+        input.write_u32_le(header.len() as u32).await.unwrap();
+        input.write_all(&header).await.unwrap();
+        input.write_all(body).await.unwrap();
+        input.shutdown().await.unwrap();
+        drop(input);
+        let stdout = child.stdout.take().unwrap();
+        let (output, status) = collect_file_worker(&mut child, stdout).await.unwrap();
+        (output.to_vec(), status)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable Linux root, Landlock ABI 6, no DAC capabilities, and NYXID_TEST_FILE_WORKER CLI under /usr/bin"]
+    async fn private_ancestor_file_worker_uses_pinned_workspace() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink};
+
+        // Only synthetic files are created. Restore ownership before TempDir
+        // cleanup because the supervisor deliberately has no DAC override.
+        struct Fixture(tempfile::TempDir);
+        impl Fixture {
+            fn restore_owner(&self) {
+                for uid in [20000, 20003] {
+                    for name in ["workspace", "home", "tmp"] {
+                        let _ = chown(
+                            self.0.path().join(uid.to_string()).join(name),
+                            Some(0),
+                            Some(0),
+                        );
+                    }
+                }
+            }
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                self.restore_owner();
+            }
+        }
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        for field in ["CapEff", "CapPrm", "CapBnd"] {
+            let value = status
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{field}:")))
+                .unwrap();
+            assert_eq!(u64::from_str_radix(value.trim(), 16).unwrap() & 6, 0);
+        }
+        let executable = std::env::var_os("NYXID_TEST_FILE_WORKER")
+            .expect("set NYXID_TEST_FILE_WORKER to the built production CLI");
+        assert!(Path::new(&executable).starts_with("/usr/bin"));
+        let fixture = Fixture(
+            tempfile::Builder::new()
+                .prefix("nyxid-pinned-worker-")
+                .tempdir_in("/var/lib")
+                .unwrap(),
+        );
+        let root = fixture.0.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for uid in [20000, 20003] {
+            let gate = root.join(uid.to_string());
+            std::fs::create_dir(&gate).unwrap();
+            std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o710)).unwrap();
+            chown(&gate, Some(0), Some(uid)).unwrap();
+            for name in ["workspace", "home", "tmp"] {
+                let path = gate.join(name);
+                std::fs::create_dir(&path).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+                if name == "workspace" {
+                    let private = path.join("preserved.txt");
+                    std::fs::write(&private, b"private").unwrap();
+                    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o640))
+                        .unwrap();
+                    chown(&private, Some(uid), Some(uid)).unwrap();
+                }
+                chown(&path, Some(uid), Some(uid)).unwrap();
+            }
+        }
+        let gate = root.join("20000");
+        let workspace = gate.join("workspace");
+        let sibling = root.join("20003/workspace");
+        let metadata = root.join("metadata");
+        std::fs::create_dir(&metadata).unwrap();
+        std::fs::set_permissions(&metadata, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(metadata.join("state.json"), b"synthetic-supervisor-state").unwrap();
+        // The supervisor owns ancestors, so it can install the symlink before
+        // the directory's final ownership handoff without weakening its mode.
+        chown(&workspace, Some(0), Some(0)).unwrap();
+        symlink(&sibling, workspace.join("escape")).unwrap();
+        chown(&workspace, Some(20000), Some(20000)).unwrap();
+        let sandbox = Arc::new(process::context_sandbox::Sandbox::open(&gate, 20000).unwrap());
+        let identity = process::Identity {
+            uid: 20000,
+            gid: 20000,
+            name: "fixture-worker".into(),
+            home: gate.join("home"),
+            policy_groups: vec![],
+            desktop: None,
+            sandbox: Some(sandbox),
+        };
+        let mut probe = tokio::process::Command::new("/bin/true");
+        identity.prepare_agent(&mut probe).unwrap();
+        unsafe {
+            probe.pre_exec(|| {
+                #[repr(C)]
+                struct Header {
+                    version: u32,
+                    pid: i32,
+                }
+                let mut header = Header {
+                    version: 0x20080522,
+                    pid: 0,
+                };
+                let mut capabilities = [0u32; 6];
+                if libc::geteuid() != 20000
+                    || libc::getegid() != 20000
+                    || libc::getgroups(0, std::ptr::null_mut()) != 0
+                    || libc::syscall(libc::SYS_capget, &mut header, capabilities.as_mut_ptr()) != 0
+                    || capabilities[..3].iter().any(|value| value & 6 != 0)
+                    || libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1
+                {
+                    return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+                }
+                Ok(())
+            });
+        }
+        assert!(probe.status().await.unwrap().success());
+        let mut runtime = Runtime::new(
+            &Config {
+                roots: vec![workspace.clone()],
+                allow_root: true,
+                ..Default::default()
+            },
+            "fixture-node",
+            &metadata,
+        )
+        .unwrap();
+        Arc::get_mut(&mut runtime).unwrap().identity = identity.clone();
+
+        for path in [
+            "relative.txt".into(),
+            workspace
+                .join("absolute.txt")
+                .to_string_lossy()
+                .into_owned(),
+        ] {
+            let initial_hash = hex::encode(Sha256::digest(b"one one"));
+            let created = pinned_file(&runtime, &workspace, Operation::WriteFile,
+                json!({"path":path,"content":STANDARD.encode(b"one one"),"encoding":"base64","mode":"create"}))
+                .await;
+            if let Err(error) = &created {
+                let reason = match error.downcast_ref::<MachineError>() {
+                    Some(MachineError::File(failure)) => failure.reason,
+                    Some(MachineError::PathOutsideRoots) => "path_outside_roots",
+                    _ => "unexpected_failure",
+                };
+                eprintln!("file_worker_private_ancestor_first_write_reason={reason}");
+            }
+            let created = created.expect("own write must work below a root-owned 0700 ancestor");
+            assert_eq!(created, json!({"sha256":initial_hash,"bytes":7}));
+            let read = pinned_file(
+                &runtime,
+                &workspace,
+                Operation::ReadFile,
+                json!({"path":path,"offset":4,"limit":3}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                STANDARD.decode(read["context"].as_str().unwrap()).unwrap(),
+                b"one"
+            );
+            assert_eq!(read["offset"], 7);
+            assert_eq!(read["has_more"], false);
+            let duplicate = pinned_file(
+                &runtime,
+                &workspace,
+                Operation::WriteFile,
+                json!({"path":path,"content":"wrong","mode":"create"}),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(duplicate.downcast_ref::<MachineError>(), Some(MachineError::File(failure)) if failure.reason == "file_exists")
+            );
+            let appended = pinned_file(&runtime, &workspace, Operation::WriteFile,
+                json!({"path":path,"content":" two","mode":"append","expected_sha256":initial_hash})).await.unwrap();
+            assert_eq!(
+                appended["sha256"],
+                hex::encode(Sha256::digest(b"one one two"))
+            );
+            let edited = pinned_file(&runtime, &workspace, Operation::EditFile,
+                json!({"path":path,"old_string":"one","new_string":"ONE","replace_all":true,"expected_sha256":appended["sha256"]})).await.unwrap();
+            assert_eq!(
+                edited["sha256"],
+                hex::encode(Sha256::digest(b"ONE ONE two"))
+            );
+            for operation in [Operation::WriteFile, Operation::EditFile] {
+                let stale = pinned_file(&runtime, &workspace, operation,
+                    json!({"path":path,"content":"wrong","mode":"overwrite","old_string":"ONE","new_string":"wrong","replace_all":true,"expected_sha256":initial_hash})).await.unwrap_err();
+                assert!(
+                    matches!(stale.downcast_ref::<MachineError>(), Some(MachineError::File(failure)) if failure.reason == "sha256_mismatch")
+                );
+            }
+            let first = pinned_file(
+                &runtime,
+                &workspace,
+                Operation::ReadFile,
+                json!({"path":path,"limit":3}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                STANDARD.decode(first["context"].as_str().unwrap()).unwrap(),
+                b"ONE"
+            );
+            assert_eq!(first["has_more"], true);
+        }
+        for path in [".".into(), workspace.to_string_lossy().into_owned()] {
+            let listing = pinned_file(
+                &runtime,
+                &workspace,
+                Operation::ListFiles,
+                json!({"path":path}),
+            )
+            .await
+            .unwrap();
+            for expected in ["relative.txt", "absolute.txt", "preserved.txt"] {
+                assert!(
+                    listing["entries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry["name"] == expected)
+                );
+            }
+        }
+        let attachment = b"synthetic attachment";
+        let attachment_hash = hex::encode(Sha256::digest(attachment));
+        let (_, saved) = pinned_transfer(&runtime, &workspace, Operation::SaveAttachment,
+            json!({"path":"attachment","max_bytes":100,"size":attachment.len(),"sha256":attachment_hash}), attachment).await;
+        assert!(saved.success());
+        let (shared, status) = pinned_transfer(
+            &runtime,
+            &workspace,
+            Operation::ShareFile,
+            json!({"path":workspace.join("attachment"),"max_bytes":100}),
+            b"",
+        )
+        .await;
+        assert!(status.success());
+        assert_eq!(shared, attachment);
+        for (path, size, hash, body) in [
+            (
+                "bad-checksum",
+                attachment.len(),
+                "wrong",
+                attachment.as_slice(),
+            ),
+            (
+                "interrupted",
+                attachment.len() + 1,
+                attachment_hash.as_str(),
+                attachment.as_slice(),
+            ),
+        ] {
+            let (_, status) = pinned_transfer(
+                &runtime,
+                &workspace,
+                Operation::SaveAttachment,
+                json!({"path":path,"max_bytes":100,"size":size,"sha256":hash}),
+                body,
+            )
+            .await;
+            assert!(!status.success());
+            assert!(
+                pinned_file(
+                    &runtime,
+                    &workspace,
+                    Operation::ReadFile,
+                    json!({"path":path})
+                )
+                .await
+                .is_err()
+            );
+        }
+        let overwritten = pinned_file(&runtime, &workspace, Operation::WriteFile,
+            json!({"path":workspace.join("preserved.txt"),"content":"preserved","mode":"overwrite","expected_sha256":hex::encode(Sha256::digest(b"private"))})).await.unwrap();
+        assert_eq!(
+            overwritten["sha256"],
+            hex::encode(Sha256::digest(b"preserved"))
+        );
+        let mut modes = tokio::process::Command::new("/bin/sh");
+        identity.prepare_agent(&mut modes).unwrap();
+        assert!(modes.args(["-ec", "test \"$(stat -c %u:%g:%a relative.txt)\" = 20000:20000:600; test \"$(stat -c %u:%g:%a absolute.txt)\" = 20000:20000:600; test \"$(stat -c %u:%g:%a preserved.txt)\" = 20000:20000:640"]).status().await.unwrap().success());
+
+        let denied = [
+            (
+                sibling.to_string_lossy().into_owned(),
+                sibling.join("preserved.txt").to_string_lossy().into_owned(),
+            ),
+            (
+                metadata.to_string_lossy().into_owned(),
+                metadata.join("state.json").to_string_lossy().into_owned(),
+            ),
+            ("..".into(), "../../metadata/state.json".into()),
+            ("escape".into(), "escape/preserved.txt".into()),
+            ("/etc".into(), "/etc/passwd".into()),
+        ];
+        for (directory, file) in denied {
+            for operation in [
+                Operation::ListFiles,
+                Operation::ReadFile,
+                Operation::WriteFile,
+                Operation::EditFile,
+            ] {
+                let path = if operation == Operation::ListFiles {
+                    &directory
+                } else {
+                    &file
+                };
+                assert!(pinned_file(&runtime, &workspace, operation,
+                    json!({"path":path,"content":"wrong","mode":"overwrite","old_string":"private","new_string":"wrong","replace_all":true})).await.is_err(),
+                    "{operation:?} unexpectedly accepted {path}");
+            }
+        }
+        fixture.restore_owner();
+        chown(sibling.join("preserved.txt"), Some(0), Some(0)).unwrap();
+        assert_eq!(
+            std::fs::read(sibling.join("preserved.txt")).unwrap(),
+            b"private"
+        );
+        assert_eq!(
+            std::fs::read(metadata.join("state.json")).unwrap(),
+            b"synthetic-supervisor-state"
+        );
+        assert_eq!(std::fs::metadata(root).unwrap().uid(), 0);
+        assert_eq!(std::fs::metadata(root).unwrap().mode() & 0o777, 0o700);
     }
 }
 
@@ -3218,6 +3639,60 @@ mod readiness_tests {
             .0,
             12406
         );
+    }
+
+    #[tokio::test]
+    async fn browser_initialization_errors_are_consistent_for_browser_and_computer() {
+        let root = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            &Config {
+                browser: Some(true),
+                computer: true,
+                allow_root: true,
+                roots: vec![root.path().into()],
+                ..Default::default()
+            },
+            "node",
+            root.path(),
+        )
+        .unwrap();
+        let directory = root.path().join("desktop");
+        browser::protected_runtime_parent(&directory).unwrap();
+        // A regular file cannot become a profile. Both public operations must
+        // keep the profile classification, with no path or source material.
+        std::fs::write(directory.join("browser-profile"), "secret-fixture").unwrap();
+        Arc::get_mut(&mut runtime).unwrap().config.managed_browser =
+            Some(nyxid_machine::config::ManagedBrowserConfig {
+                binary: "/missing/secret-fixture".into(),
+                data_dir: directory,
+                update_port: 0,
+                container: false,
+            });
+        for (operation, parameters) in [
+            (
+                Operation::Browser,
+                json!({"browser":"secure", "action":"snapshot"}),
+            ),
+            (
+                Operation::Computer,
+                json!({"tool":"list_windows", "arguments":{}}),
+            ),
+        ] {
+            let error = MachineError::from(
+                runtime
+                    .execute_inner(operation, parameters)
+                    .await
+                    .unwrap_err(),
+            );
+            assert_eq!(error.public().0, 12413);
+            assert!(
+                error
+                    .public()
+                    .1
+                    .contains("profile directory initialization failed")
+            );
+            assert!(!error.public().1.contains("secret-fixture"));
+        }
     }
 
     #[tokio::test]

@@ -36,6 +36,7 @@ type Props = {
   readonly contextEnabled: boolean;
   readonly disabled: boolean;
   readonly unsavedCapabilities?: boolean;
+  readonly configurationApplicability?: "hosted" | "not_applicable" | "unknown";
 };
 
 export function MachineContextReview(props: Props) {
@@ -54,6 +55,7 @@ function OwnerReview({
   contextEnabled,
   disabled,
   unsavedCapabilities = false,
+  configurationApplicability = "unknown",
 }: Props) {
   const prepare = usePrepareMachineContext(agentId);
   const commit = useCommitMachineContext(agentId);
@@ -447,6 +449,7 @@ function OwnerReview({
                 environmentApplied={review.environment_applied}
                 configuration={review.machine_configuration}
                 target={review.machine_configuration_target}
+                configurationApplicability={configurationApplicability}
               />
             </>
           ) : (

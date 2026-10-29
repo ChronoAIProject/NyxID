@@ -10,11 +10,13 @@ use crate::{
         },
     },
 };
+use futures::TryStreamExt;
 use mongodb::{
     Database,
     bson::{self, Document, doc},
 };
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[cfg(test)]
 mod contract_tests {
@@ -160,21 +162,30 @@ pub fn configuration_view(
     machine: &ManagedMachine,
     node: Option<&crate::models::node::Node>,
 ) -> crate::models::remote_machine::SafeMachineConfigurationView {
-    let digest = machine.configuration.digest().unwrap_or_default();
-    let applied = node.is_some_and(|node| {
-        let Some(profile) = node.machine.as_ref() else {
-            return false;
-        };
-        let Some(connection) = node
-            .connection_owner
-            .as_ref()
+    configuration_view_from_report(
+        machine,
+        node.is_some_and(|n| {
+            n.user_id == machine.owner_id
+                && n.is_active
+                && n.status == crate::models::node::NodeStatus::Online
+        }),
+        node.and_then(|n| n.machine.as_ref()),
+        node.and_then(|n| n.connection_owner.as_ref())
             .filter(|c| c.capabilities_resolved && c.is_live_at(chrono::Utc::now()))
-        else {
-            return false;
-        };
-        node.is_active
-            && node.user_id == machine.owner_id
-            && node.status == crate::models::node::NodeStatus::Online
+            .map(|c| c.connection_id.as_str()),
+    )
+}
+
+fn configuration_view_from_report(
+    machine: &ManagedMachine,
+    active_owner_connection: bool,
+    profile: Option<&nyxid_machine::MachineProfile>,
+    connection_id: Option<&str>,
+) -> crate::models::remote_machine::SafeMachineConfigurationView {
+    let digest = machine.configuration.digest().unwrap_or_default();
+    let applied = profile.is_some_and(|profile| {
+        active_owner_connection
+            && connection_id.is_some()
             && machine.writer_admitted
             && machine.resource_state == crate::models::remote_machine::ResourceState::Ready
             && super::remote_machine_manager::accepts_selected_profile(machine, profile)
@@ -184,7 +195,7 @@ pub fn configuration_view(
                     && e.runtime_generation == machine.runtime_generation
                     && e.credential_epoch == machine.credential_epoch
                     && e.runtime_id == profile.runtime_id
-                    && e.connection_id == connection.connection_id
+                    && Some(e.connection_id.as_str()) == connection_id
             })
     });
     crate::models::remote_machine::SafeMachineConfigurationView {
@@ -329,27 +340,163 @@ pub async fn safe_view(
     db: &Database,
     machine: &ManagedMachine,
 ) -> AppResult<SafeManagedMachineView> {
-    let mut view = super::remote_machine_service::safe_view(machine);
-    let node = db
-        .collection::<crate::models::node::Node>(crate::models::node::COLLECTION_NAME)
-        .find_one(doc! {"_id":&machine.node_id})
-        .await?;
-    view.machine_configuration = configuration_view(machine, node.as_ref());
-    if machine.specialist_assignment_state != "assigned" {
-        return Ok(view);
+    Ok(safe_views(db, std::slice::from_ref(machine))
+        .await?
+        .remove(0))
+}
+
+// Database projection inputs only; never serialized as API responses. Optional
+// saved policies retain missing-as-unknown rather than Node's legacy defaults.
+#[derive(serde::Deserialize)]
+struct PresentationNode {
+    #[serde(rename = "_id")]
+    id: String,
+    user_id: String,
+    is_active: bool,
+    status: crate::models::node::NodeStatus,
+    machine: Option<nyxid_machine::MachineProfile>,
+    metadata: Option<crate::models::node::NodeMetadata>,
+    machine_confirm: Option<nyxid_machine::Confirmation>,
+    allow_single_user_saved_logins: Option<bool>,
+    connection_owner: Option<PresentationConnection>,
+}
+
+#[derive(serde::Deserialize)]
+struct PresentationConnection {
+    connection_id: String,
+    #[serde(default)]
+    capabilities_resolved: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Machines have already been selected by the authenticated owner. Both joins
+/// are bounded by that page and exact owner bindings, with no per-row DB reads.
+pub async fn safe_views(
+    db: &Database,
+    machines: &[ManagedMachine],
+) -> AppResult<Vec<SafeManagedMachineView>> {
+    if machines.is_empty() {
+        return Ok(Vec::new());
     }
-    let Some(id) = machine.specialist_id.as_deref() else {
-        return Ok(view);
+    let bindings: Vec<_> = machines
+        .iter()
+        .map(|m| doc! {"_id":&m.node_id,"user_id":&m.owner_id})
+        .collect();
+    let nodes: Vec<PresentationNode> = db.collection(crate::models::node::COLLECTION_NAME)
+        .find(doc! {"$or":bindings})
+        .projection(doc! {"_id":1,"user_id":1,"is_active":1,"status":1,"machine":1,
+            "metadata.agent_version":1,"machine_confirm":1,"allow_single_user_saved_logins":1,
+            "connection_owner.connection_id":1,"connection_owner.capabilities_resolved":1,"connection_owner.expires_at":1})
+        .max_time(std::time::Duration::from_secs(3)).await?.try_collect().await?;
+    let nodes: HashMap<_, _> = nodes
+        .into_iter()
+        .map(|node| (node.id.clone(), node))
+        .collect();
+    let specialist_bindings: Vec<_> = machines
+        .iter()
+        .filter(|m| m.specialist_assignment_state == "assigned")
+        .filter_map(|m| {
+            m.specialist_id
+                .as_ref()
+                .map(|id| doc! {"_id":id,"user_id":&m.owner_id})
+        })
+        .collect();
+    let agents: Vec<AssistantAgent> = if specialist_bindings.is_empty() {
+        Vec::new()
+    } else {
+        db.collection(crate::models::assistant_agent::COLLECTION_NAME)
+            .find(doc! {"$or":specialist_bindings,"kind":"specialist","destroyed_at":bson::Bson::Null})
+            .max_time(std::time::Duration::from_secs(3)).await?.try_collect().await?
     };
-    let agent = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
-        .find_one(doc!{"_id":id,"user_id":&machine.owner_id,"kind":"specialist","destroyed_at":bson::Bson::Null}).await?;
-    let assignment = agent
-        .as_ref()
-        .filter(|a| a.machine_node_ids.contains(&machine.node_id))
-        .and_then(|a| a.machine_access.as_ref())
-        .and_then(|p| p.assignments.get(&machine.node_id));
-    if assignment.is_none() {
-        view.specialist_assignment_state = "not_assigned".into();
-    }
-    Ok(view)
+    let agents: HashMap<_, _> = agents.into_iter().map(|a| (a.id.clone(), a)).collect();
+    Ok(machines
+        .iter()
+        .map(|machine| {
+            let mut view = super::remote_machine_service::safe_view(machine);
+            if let Some(node) = nodes
+                .get(&machine.node_id)
+                .filter(|n| n.user_id == machine.owner_id)
+            {
+                let live = node.is_active && node.status == crate::models::node::NodeStatus::Online;
+                let connection = node
+                    .connection_owner
+                    .as_ref()
+                    .filter(|c| c.capabilities_resolved && c.expires_at > chrono::Utc::now())
+                    .map(|c| c.connection_id.as_str());
+                view.machine_configuration = configuration_view_from_report(
+                    machine,
+                    live,
+                    node.machine.as_ref(),
+                    connection,
+                );
+                if machine.resource_state != crate::models::remote_machine::ResourceState::Deleted
+                    && let Some(profile) = node
+                        .machine
+                        .as_ref()
+                        .filter(|p| p.version > 0 && !p.runtime_id.is_empty())
+                {
+                    let current = view.machine_configuration.state == "applied";
+                    let capabilities = [
+                        ("shell", profile.shell),
+                        ("files", profile.files),
+                        ("browser", profile.browser_enabled()),
+                        ("computer", profile.computer),
+                    ]
+                    .into_iter()
+                    .filter(|(_, enabled)| *enabled)
+                    .map(|(name, _)| name.to_owned())
+                    .collect();
+                    view.presentation =
+                        Some(crate::models::remote_machine::SafeMachinePresentationView {
+                            agent_version: node
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.agent_version.clone()),
+                            os: (!profile.os.is_empty()).then(|| profile.os.clone()),
+                            arch: (!profile.arch.is_empty()).then(|| profile.arch.clone()),
+                            roots: profile.roots.clone(),
+                            capabilities,
+                            commands_isolated: profile.commands_isolated,
+                            browser_isolated: profile.browser_isolated,
+                            separation_support: profile
+                                .separation_evidence
+                                .as_ref()
+                                .map(|e| e.support().available),
+                            owner_confirmation: node.machine_confirm,
+                            allow_single_user_saved_logins: node.allow_single_user_saved_logins,
+                            computer_mode: profile.computer_mode,
+                            cua_version: profile.cua_version.clone(),
+                            connected: current,
+                            desktop_ready: current
+                                && profile.computer_ready
+                                && (profile.computer || profile.browser_enabled()),
+                            historical: !current,
+                            configuration_current: current,
+                            last_reported_at: machine
+                                .configuration_evidence
+                                .as_ref()
+                                .filter(|e| e.runtime_id == profile.runtime_id)
+                                .map(|e| e.observed_at),
+                        });
+                }
+            }
+            if machine.specialist_assignment_state == "assigned"
+                && machine
+                    .specialist_id
+                    .as_ref()
+                    .and_then(|id| agents.get(id))
+                    .filter(|a| {
+                        a.user_id == machine.owner_id
+                            && a.machine_node_ids.contains(&machine.node_id)
+                    })
+                    .and_then(|a| a.machine_access.as_ref())
+                    .and_then(|p| p.assignments.get(&machine.node_id))
+                    .is_none()
+            {
+                view.specialist_assignment_state = "not_assigned".into();
+            }
+            view
+        })
+        .collect())
 }

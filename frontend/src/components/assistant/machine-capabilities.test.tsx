@@ -7,6 +7,10 @@ import { FEATURE_FLAG } from "@/lib/feature-flags";
 const { save, contextSave, feature, query } = vi.hoisted(() => ({ save: vi.fn(), contextSave: vi.fn(), feature: vi.fn(), query: vi.fn() }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: feature }));
 vi.mock("@/hooks/use-machine-access", () => ({ useMachineAccess: query, useSetMachineAccess: () => ({ mutateAsync: save, isPending: false }), usePrepareMachineContext: () => ({ mutateAsync: contextSave, isPending: false }), useCommitMachineContext: () => ({ mutateAsync: vi.fn(), isPending: false }), useMachineContextReview: () => ({ refetch: vi.fn() }) }));
+const metadata = vi.hoisted(() => ({ nodes: { data: [] as unknown[], isError: false }, remotes: { data: [] as unknown[], isError: false }, logins: { data: [] as { id: string; label: string; username_hint: string }[], isError: false, isPending: false } }));
+vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => metadata.nodes }));
+vi.mock("@/hooks/use-machines", () => ({ useRemoteMachines: () => metadata.remotes }));
+vi.mock("@/hooks/use-saved-logins", () => ({ useSavedLogins: () => metadata.logins }));
 const off = { shell: false, files: false, browser: false, computer: false, developer_browser: false };
 const machine: MachineAccess = { ...machineAccessFixture, machine_configuration: null, availability_reason: null, mode: undefined, node_id: "node", name: "Work Mac", revision: 3, protocol_v2: true, can_edit: true, capabilities: off, ceiling: { shell: true, files: true, browser: true, computer: true, developer_browser: true }, legacy: false, saved_login_ids: null, separated: { available: true, landlock_abi: 6, reason: null } };
 beforeEach(() => { vi.clearAllMocks(); feature.mockReturnValue(true); query.mockReturnValue({ data: [machine] }); save.mockResolvedValue([]); contextSave.mockResolvedValue(machineContextReviewFixture); });
@@ -276,3 +280,34 @@ it("keeps missing evidence actionable with flags off and requires affirmative le
    expect(consent).toBeDisabled();
    expect(screen.getByRole("button", { name: "Review shared legacy mode" })).toBeDisabled();
  });
+
+it.each([null, [], ["missing", "login-a"]] as const)("preserves Machine login scope %j when saving unrelated capabilities", async (ids) => {
+  render(<MachineCapabilityForm machine={{ ...machine, mode: "separated", capabilities: { ...off, browser: true }, saved_login_ids: ids === null ? null : [...ids] }} agentId="agent" availableLogins={[{ id: "login-a", label: "Account A", username_hint: "a", eligible: true }, { id: "login-b", label: "Account B", username_hint: "b", eligible: false }]} />);
+  expect(screen.getByRole("checkbox", { name: "Allow Account B" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: "File tools" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save capabilities" }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ selection: expect.objectContaining({ saved_login_ids: ids }) })));
+});
+it("retains explicit login IDs and capability edits when login metadata fails", async () => {
+  render(<MachineCapabilityForm machine={{ ...machine, mode: "shared_legacy", capabilities: { ...off, browser: true }, saved_login_ids: ["login-a", "unlisted"] }} agentId="agent" sharedLoginsAllowed availableLogins={[{ id: "login-a", label: "Account A", username_hint: "a", eligible: true }]} savedLoginsState="error" />);
+  expect(screen.getByRole("checkbox", { name: "Allow Account A" })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Allow Account A" })).toBeDisabled();
+  expect(screen.getByText(/Saved logins could not be refreshed/)).toBeVisible();
+  fireEvent.click(screen.getByRole("checkbox", { name: "File tools" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save capabilities" }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ selection: expect.objectContaining({ saved_login_ids: ["login-a", "unlisted"] }) })));
+});
+it("loads per-node Shared policy and account eligibility in Agent Grants", () => {
+  metadata.nodes.data = [{ id: "node", allow_single_user_saved_logins: false, metadata: null }];
+  metadata.logins.data = [{ id: "login-a", label: "Account A", username_hint: "a" }, { id: "login-b", label: "Account B", username_hint: "b" }];
+  query.mockReturnValue({ data: [{ ...machine, mode: "shared_legacy", capabilities: { ...off, browser: true }, saved_login_ids: null }] });
+  const view = render(<MachineCapabilities agentId="agent" agent={{ kind: "specialist", machines: ["node"], logins: ["login-a"] }} />);
+  expect(screen.getByRole("checkbox", { name: "Allow Account A" })).toBeDisabled();
+  expect(screen.queryByText(/Hosted configuration evidence/)).not.toBeInTheDocument();
+  metadata.nodes.data = [{ id: "node", allow_single_user_saved_logins: true, metadata: null }];
+  view.rerender(<MachineCapabilities agentId="agent" agent={{ kind: "specialist", machines: ["node"], logins: ["login-a"] }} />);
+  expect(screen.getByRole("checkbox", { name: "Allow Account A" })).toBeEnabled();
+  expect(screen.getByRole("checkbox", { name: "Allow Account B" })).toBeDisabled();
+  metadata.nodes.data = [];
+  metadata.logins.data = [];
+});

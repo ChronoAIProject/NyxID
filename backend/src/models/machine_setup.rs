@@ -7,6 +7,8 @@ pub const COLLECTION_NAME: &str = "machine_setups";
 #[serde(deny_unknown_fields)]
 pub struct Choices {
     #[serde(default)]
+    pub machine_assignment: Option<crate::models::machine_access::AssignmentIntent>,
+    #[serde(default)]
     pub separation: Option<nyxid_machine::context::Choice>,
     #[serde(default)]
     pub legacy_warning_acknowledged: bool,
