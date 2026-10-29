@@ -42,6 +42,9 @@ pub struct CmaOperation {
     pub seen_working: bool,
     pub kind: CmaOperationKind,
     pub agent_id: Option<String>,
+    /// CMA-supplied browser destination, never a webhook or polling target.
+    #[serde(default)]
+    pub callback_url: Option<String>,
     pub idempotency_key: Option<String>,
     pub status: Option<String>,
     pub phase: Option<String>,

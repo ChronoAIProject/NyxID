@@ -843,6 +843,7 @@ pub struct CmaOperationResponse {
     monitor_name: String,
     created_at: DateTime<Utc>,
     checked_at: Option<DateTime<Utc>>,
+    cma_url: Option<String>,
 }
 #[derive(Serialize)]
 pub struct ChatApprovalResponse {
@@ -936,8 +937,8 @@ pub async fn history(
     .await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
-    let cma_operations = crate::services::cma_operation::cards(&state.db, &user_id, &id)
-        .await?
+    let cma_rows = crate::services::cma_operation::cards(&state.db, &user_id, &id).await?;
+    let cma_operations = cma_rows
         .into_iter()
         .filter_map(|row| {
             let cma = row.cma?;
@@ -953,6 +954,7 @@ pub async fn history(
                 })
                 .unwrap_or_else(|| "NyxBot".into());
             Some(CmaOperationResponse {
+                cma_url: crate::services::cma_operation::card_url(&cma),
                 id: row.id,
                 turn_id: row.turn_id,
                 kind: cma.kind,
