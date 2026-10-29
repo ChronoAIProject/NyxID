@@ -23,7 +23,7 @@ import {
   useNyxBotChannels,
 } from "@/hooks/use-nyxbot-agents";
 import { agentTitle, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
-import { nyxBotChannelError } from "@/lib/assistant/nyxbot-channel-errors";
+import { nyxBotChannelError, nyxBotChannelMutationError } from "@/lib/assistant/nyxbot-channel-errors";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils";
 import type {
   AssistantAgent,
@@ -32,7 +32,9 @@ import type {
 } from "@/schemas/assistant-nyxagent";
 
 function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  return error instanceof Error && error.message
+    ? nyxBotChannelMutationError(error.message)
+    : fallback;
 }
 
 const channelStatus: Record<string, { label: string; variant: "success" | "warning" | "destructive" }> =

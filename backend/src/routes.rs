@@ -3143,6 +3143,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::telegram_new::launch),
         )
         .route(
+            "/channel-bots/telegram-new/requests/{id}/creation-link",
+            post(handlers::telegram_new::creation_link),
+        )
+        .route(
             "/channel-bots/telegram-new/requests/{id}/connect",
             post(handlers::telegram_new::connect),
         )

@@ -917,3 +917,122 @@ test("legacy Finish saved connection does not submit the create-bot form", async
   expect(state.writes).toEqual([]);
   expect(submits).toBe(0);
 });
+
+for (const width of [390, 1440]) {
+  test(`Telegram delivery recovery stays scoped at ${width}px`, async ({ page, context }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await context.route("https://t.me/**", (route) => route.fulfill({ contentType: "text/html", body: "Local Telegram form fixture" }));
+    const saved: TelegramNewRequest = {
+      ...pendingRequest, status: "waiting_bot", owner_user_id: "test-user",
+      label: "Customer Support 你好 — saved specialist destination with a long label that wraps on a small screen",
+      can_open_creation_form: true,
+      prompt_delivery: {
+        attempt_id: "43cd44db-fc22-4f8d-aa8c-c835f8f568b2", phase: "keyboard", outcome: "rejected",
+        attempted_at: "2026-10-27T01:00:00Z", completed_at: "2026-10-27T01:00:01Z",
+        failure: "http_rejected", reason: "bad_request", http_status: 400, error_code: 400, retry_after: null,
+      },
+    };
+    const state = await reviewFixture(page, saved);
+    const recoveries: string[] = [];
+    await page.route("**/api/v1/channel-bots/telegram-new/requests/*/creation-link", (route) => {
+      recoveries.push(new URL(route.request().url()).pathname);
+      expect(route.request().postData()).toBeNull();
+      return route.fulfill({ json: { request: state.request, creation_url: "https://t.me/newbot/NyxSetupBot/support_bot?name=Support" } });
+    });
+    await page.goto(`/channel-bots?connect=telegram-new&request_id=${requestId}`);
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText(/Telegram rejected the creation message/)).toBeVisible();
+    await page.screenshot({ path: `../.tmp/telegram-ui/rejected-${width}.png`, fullPage: true });
+    const button = dialog.getByRole("button", { name: "Open creation form", exact: true });
+    await button.focus();
+    await expect(button).toBeFocused();
+    await expect(button).toBeInViewport({ ratio: 1 });
+    await page.screenshot({ path: `../.tmp/telegram-ui/recovery-focused-${width}.png`, fullPage: true });
+    const popup = page.waitForEvent("popup");
+    await button.press("Enter");
+    const form = await popup;
+    await expect(form).toHaveURL("https://t.me/newbot/NyxSetupBot/support_bot?name=Support");
+    await form.close();
+    expect(recoveries).toEqual([`/api/v1/channel-bots/telegram-new/requests/${requestId}/creation-link`]);
+    expect(state.writes).toEqual([]);
+    if (state.request?.prompt_delivery) state.request.prompt_delivery.outcome = "unknown";
+    await page.reload();
+    await expect(dialog.getByText(/Delivery of the Create bot message is unconfirmed/)).toBeVisible();
+    await page.screenshot({ path: `../.tmp/telegram-ui/unknown-${width}.png`, fullPage: true });
+    if (state.request?.prompt_delivery) state.request.prompt_delivery.outcome = "accepted";
+    await page.reload();
+    await expect(dialog.getByText(/does not confirm the button appeared/)).toBeVisible();
+    await page.screenshot({ path: `../.tmp/telegram-ui/accepted-${width}.png`, fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+}
+
+for (const width of [390, 1440]) {
+  for (const hosted of [false, true]) {
+    test(`Telegram ${hosted ? "hosted" : "full page"} recovery preserves source return at ${width}px`, async ({ page, context }) => {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      await page.emulateMedia({ colorScheme: "dark" });
+      await context.route("https://t.me/**", (route) => route.fulfill({ contentType: "text/html", body: "Local Telegram form fixture" }));
+      const source = `nyxg-${"c".repeat(32)}`;
+      const sourcePath = `/assistant?g=${source}`;
+      const state = await reviewFixture(page, {
+        ...pendingRequest, owner_user_id: "test-user", status: "waiting_bot",
+        label: "Saved research specialist", can_open_creation_form: true,
+        prompt_delivery: { attempt_id: "7adc6ed1-520a-4cdb-a5b2-70fd04aaef0b", phase: "keyboard", outcome: "unknown",
+          attempted_at: "2026-10-27T01:00:00Z", completed_at: null, failure: "invalid_response",
+          reason: "unknown", http_status: 200, error_code: null, retry_after: null },
+      });
+      const link = {
+        id: requestId, status: "pending", platform: "telegram-new", label: state.request!.label,
+        owner_id: "test-user", requested_by: "research-specialist", expires_at: pendingRequest.expires_at,
+        telegram_request_id: requestId, bot_id: null as string | null, connection_id: null,
+        callback_url: null as string | null, last_error: null, delivery_status: null,
+      };
+      const recoveries: string[] = [];
+      await page.route("**/api/v1/channel-bots/telegram-new/requests/*/creation-link", (route) => {
+        recoveries.push(new URL(route.request().url()).pathname);
+        expect(route.request().postData()).toBeNull();
+        return route.fulfill({ json: { request: state.request, creation_url: "https://t.me/newbot/NyxSetupBot/research_bot?name=Research" } });
+      });
+      await page.route("**/api/v1/channel-connect-links/**", (route) => route.fulfill({ json: link }));
+      const entry = hosted ? "/connect/bot/nyx_bcl_local_fixture" : `/channel-bots/connect/telegram-new?request_id=${requestId}&return_to=${source}`;
+      await page.goto(entry);
+      await expect(page.getByText(/Delivery of the Create bot message is unconfirmed/)).toBeVisible();
+      await expect(page.getByRole("textbox", { name: "Bot name", exact: true })).toHaveValue("Saved research specialist");
+      await expect(page.getByRole("textbox", { name: "Bot name", exact: true })).toBeDisabled();
+      if (hosted) {
+        await expect(page.getByRole("heading", { name: "Create your Telegram channel bot", exact: true })).toBeVisible();
+        await expect(page.getByText("Requested by research-specialist")).toBeVisible();
+      }
+      else await expect(page.getByRole("link", { name: "Back to chat", exact: true })).toHaveAttribute("href", sourcePath);
+      const button = page.getByRole("button", { name: "Open creation form", exact: true });
+      await button.focus();
+      await expect(button).toBeInViewport({ ratio: 1 });
+      await page.screenshot({ path: `../.tmp/telegram-ui/${hosted ? "hosted" : "full-page"}-recovery-${width}.png`, fullPage: true });
+      const popup = page.waitForEvent("popup");
+      await button.press("Enter");
+      const form = await popup;
+      await expect(form).toHaveURL("https://t.me/newbot/NyxSetupBot/research_bot?name=Research");
+      await form.close();
+      await page.reload();
+      await expect(page.getByRole("button", { name: "Open creation form", exact: true })).toBeVisible();
+      expect(recoveries).toEqual([`/api/v1/channel-bots/telegram-new/requests/${requestId}/creation-link`]);
+      expect(state.writes).toEqual([]);
+      if (hosted) {
+        link.status = "completed";
+        link.bot_id = requestId;
+        link.callback_url = `${new URL(page.url()).origin}${sourcePath}`;
+        await page.reload();
+        await expect(page.getByText("Saved research specialist is connected.")).toBeVisible();
+        await expect(page.getByRole("heading", { name: "Your Telegram channel bot is created", exact: true })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Open creation form", exact: true })).toHaveCount(0);
+        await page.screenshot({ path: `../.tmp/telegram-ui/hosted-source-return-${width}.png`, fullPage: true });
+        await page.getByRole("button", { name: "Continue", exact: true }).click();
+      } else {
+        await page.getByRole("link", { name: "Back to chat", exact: true }).click();
+      }
+      await expect(page).toHaveURL(new RegExp(`/assistant\\?g=${source}$`));
+    });
+  }
+}
