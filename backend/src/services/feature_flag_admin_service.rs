@@ -15,6 +15,7 @@ use super::{
     api_key_mutation_service as key_mutations,
     audit_service::{self, AuditActor},
     feature_flag_service::{self as flags, FlagDefinition},
+    security_readiness_service,
 };
 use crate::{
     errors::{AppError, AppResult},
@@ -200,6 +201,11 @@ pub async fn mutate(
                     return Err(AppError::NotFound("User not found".into()));
                 }
             }
+        }
+        // Security-gated capabilities may be disabled at any time but enabled
+        // only once every replica reports readiness, for every target scope.
+        if *enabled == Some(true) {
+            security_readiness_service::require(db, key).await?;
         }
     }
     let db = db.clone();
@@ -748,6 +754,50 @@ mod tests {
         );
         assert_eq!(report.checked_count, 4);
         assert_eq!(report.pre_chain_count, 0);
+    }
+    #[tokio::test]
+    async fn security_readiness_gates_enabling_capabilities_for_every_scope() {
+        let (db, actor) = setup("flag_admin_readiness").await;
+        let org = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        let flag = flags::FEATURE_FLAGS
+            .iter()
+            .find(|flag| security_readiness_service::CAPABILITIES.contains(&flag.key))
+            .expect("a security-gated capability flag");
+        let targets = [
+            (FlagTargetKind::Global, None),
+            (FlagTargetKind::User, Some(actor.user_id.clone())),
+            (FlagTargetKind::Org, Some(org.clone())),
+        ];
+        let set = |kind: FlagTargetKind, target_id: Option<String>, enabled: bool| {
+            mutate(
+                &db,
+                flag.key,
+                Mutation::Override {
+                    kind,
+                    target_id,
+                    enabled: Some(enabled),
+                },
+                &actor,
+            )
+        };
+        for (kind, target_id) in targets.clone() {
+            assert!(matches!(
+                set(kind, target_id.clone(), true).await,
+                Err(AppError::SecurityReadinessUnavailable)
+            ));
+            // Disabling is always allowed.
+            let row = set(kind, target_id, false).await.unwrap().override_row;
+            assert!(!row.expect("disabled override").enabled);
+        }
+        security_readiness_service::ready_test_replica(&db).await;
+        for (kind, target_id) in targets {
+            let row = set(kind, target_id, true).await.unwrap().override_row;
+            assert!(row.expect("enabled override").enabled);
+        }
     }
     #[tokio::test]
     async fn tags_detect_unseen_conflicts_and_noop_writes_do_not_add_history() {
