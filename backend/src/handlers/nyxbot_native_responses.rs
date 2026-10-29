@@ -12,12 +12,28 @@ use crate::{
 use axum::extract::Query;
 use serde::Deserialize;
 
-pub(super) async fn respond(
+pub(super) fn respond(
     state: AppState,
     row: NyxbotChannel,
     headers: HeaderMap,
     request: Value,
     idempotency: &str,
+) -> futures::future::BoxFuture<'static, Response> {
+    Box::pin(respond_impl(
+        state,
+        row,
+        headers,
+        request,
+        idempotency.to_owned(),
+    ))
+}
+
+async fn respond_impl(
+    state: AppState,
+    row: NyxbotChannel,
+    headers: HeaderMap,
+    request: Value,
+    idempotency: String,
 ) -> Response {
     // CMA retries only this exact refusal as proven pre-admission. A generic
     // 503 is an uncertain submission and must never be used for preparation.
@@ -29,7 +45,7 @@ pub(super) async fn respond(
         )
             .into_response();
     }
-    match accept(&state, &row, &request, idempotency).await {
+    match Box::pin(accept(&state, &row, &request, &idempotency)).await {
         Ok(stored) => stream(state, row, headers, stored.response_id, None),
         Err(error) => {
             let code = if error.status_code().is_client_error() {
@@ -81,6 +97,28 @@ async fn accept(
         ));
     }
     let activity = &context["activity"];
+    if matches!(
+        row.gateway_source.as_ref(),
+        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+    ) {
+        let bot =
+            crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        let config = crate::services::whatsapp_native::load(&state.db, &bot)
+            .await?
+            .ok_or_else(|| AppError::Forbidden("native_whatsapp_identity_unavailable".into()))?;
+        if crate::services::whatsapp_native::verified_account(
+            &config,
+            &bot,
+            row.gateway_channel_id.as_deref().unwrap_or_default(),
+            context,
+        )
+        .is_none()
+        {
+            return Err(AppError::Forbidden(
+                "native_whatsapp_identity_unavailable".into(),
+            ));
+        }
+    }
     let metadata = recovery::metadata(&request["metadata"])?;
     let event_id = activity["event_id"].as_str().unwrap_or_default();
     if metadata.get("cmaeg.event").map(String::as_str) != Some(event_id)
@@ -247,7 +285,12 @@ async fn accept(
     let task_stored = stored.clone();
     let task_context = context.clone();
     tokio::spawn(async move {
-        if let Err(error) = execute(&task_state, &task_row, &task_stored, &task_context).await {
+        // Keep the provider dispatch future off the Tokio worker stack. It
+        // nests channel admission, Mongo transactions and platform history,
+        // and native tests exercise it with the CI-sized 1.5 MiB stack.
+        if let Err(error) =
+            Box::pin(execute(&task_state, &task_row, &task_stored, &task_context)).await
+        {
             tracing::warn!(code = error.error_code(), response_id = %task_stored.response_id,
                 "Native provider dispatch did not settle; durable recovery retains authority");
         }
@@ -273,6 +316,24 @@ async fn execute(
         original_message: true,
         owner_eligible: true,
     };
+    let text = if row.platform == "whatsapp"
+        && crate::services::whatsapp_native::has_unavailable_media(activity)
+    {
+        let text = activity["kind"]["text"].as_str().unwrap_or_default();
+        if text.trim().is_empty() {
+            crate::services::whatsapp_native::MEDIA_UNAVAILABLE.to_owned()
+        } else {
+            format!(
+                "{text}\n\n{}",
+                crate::services::whatsapp_native::MEDIA_UNAVAILABLE
+            )
+        }
+    } else {
+        activity["kind"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
     let result = Box::pin(gateway_inbound(
         state,
         row,
@@ -280,7 +341,7 @@ async fn execute(
         activity,
         context["event_ref"].as_str(),
         &sender,
-        activity["kind"]["text"].as_str().unwrap_or_default(),
+        &text,
         true,
         event_key,
         &mut thread_reply,
@@ -459,7 +520,17 @@ fn stream(
 
 /// Unrelated asynchronous updates retain their original event, including a
 /// followed thread. A newer message never substitutes a destination capability.
-pub(super) async fn send_update(
+pub(super) fn send_update<'a>(
+    state: &'a AppState,
+    row: &'a NyxbotChannel,
+    origin: &'a ChannelOrigin,
+    conversation: &'a str,
+    text: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(send_update_impl(state, row, origin, conversation, text))
+}
+
+async fn send_update_impl(
     state: &AppState,
     row: &NyxbotChannel,
     origin: &ChannelOrigin,
@@ -519,36 +590,62 @@ pub(super) async fn send_update(
     let key = decrypt_agent_key(state, row)
         .await?
         .ok_or_else(unavailable)?;
-    let mut body = json!({"text":bounded_reply(text)});
-    // A local followed reply chain is not necessarily a Discord thread.
-    // CMA accepts native-thread mode only for the original thread channel.
-    if context["activity"]["conversation"]["thread_id"].is_string() {
-        body["thread_reply"] = json!(true);
-    }
-    let result = gateway_call(
-        state,
-        reqwest::Method::POST,
-        &format!("/events/{}/replies", urlencode(reference)),
-        &key,
-        Some(&body),
-        None,
-    )
-    .await;
-    // Transport success alone is not a platform send receipt. Do not retry an
-    // unknown outcome or report a rejected/unsupported send as successful.
-    let outcome = match &result {
-        Ok(result) if (200..300).contains(&result.status) => {
-            match result.body["delivery"]["outcome"].as_str() {
-                Some("confirmed") => "reply_confirmed",
-                Some("rejected") => "reply_rejected",
-                Some("unsupported") => "reply_unsupported",
-                Some("rate_limited") => "reply_rate_limited",
-                _ => "reply_unknown",
-            }
-        }
-        Ok(_) => "reply_refused",
-        Err(_) => "reply_unknown",
+    let reply_parts = if matches!(
+        row.gateway_source.as_ref(),
+        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+    ) {
+        let reply = crate::services::channel_platform::OutboundReply {
+            attachments: Vec::new(),
+            text: Some(text.to_owned()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        crate::services::whatsapp_native::text_reply(&reply)?;
+        crate::services::channel_reply_plan::text_parts(&reply, "whatsapp")?
+    } else {
+        vec![crate::services::channel_platform::OutboundReply {
+            attachments: Vec::new(),
+            text: Some(bounded_reply(text)),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        }]
     };
+    let mut outcome = "reply_confirmed";
+    for part in reply_parts {
+        let mut body = json!({"text":part.text.unwrap_or_default()});
+        // A local followed reply chain is not necessarily a Discord thread.
+        // CMA accepts native-thread mode only for the original thread channel.
+        if context["activity"]["conversation"]["thread_id"].is_string() {
+            body["thread_reply"] = json!(true);
+        }
+        let result = gateway_call(
+            state,
+            reqwest::Method::POST,
+            &format!("/events/{}/replies", urlencode(reference)),
+            &key,
+            Some(&body),
+            None,
+        )
+        .await;
+        // Transport success alone is not a platform send receipt. Do not retry
+        // an unknown outcome or report a rejected send as successful.
+        outcome = match &result {
+            Ok(result) if (200..300).contains(&result.status) => {
+                match result.body["delivery"]["outcome"].as_str() {
+                    Some("confirmed") => "reply_confirmed",
+                    Some("rejected") => "reply_rejected",
+                    Some("unsupported") => "reply_unsupported",
+                    Some("rate_limited") => "reply_rate_limited",
+                    _ => "reply_unknown",
+                }
+            }
+            Ok(_) => "reply_refused",
+            Err(_) => "reply_unknown",
+        };
+        if outcome != "reply_confirmed" {
+            break;
+        }
+    }
     state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
         doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
         doc! {"$set":{"gateway_native_delivery":outcome}},

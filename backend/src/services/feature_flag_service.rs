@@ -318,7 +318,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-whatsapp",
-        "NyxBot reaches personal and linked org WhatsApp bots through the Agent Event Gateway once the gateway verifies WhatsApp; flag off returns them to NyxID's relay.",
+        "NyxBot can use native WhatsApp on the Agent Event Gateway for dedicated-app BYO bots after credential and callback verification. Managed Embedded Signup remains on the relay. Turning the flag off requires restoring and verifying the Meta relay callback.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-x",

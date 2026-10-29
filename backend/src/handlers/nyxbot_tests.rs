@@ -77,19 +77,36 @@ pub(super) fn relay_callback_completed(channel_id: &str, message_id: &str) {
     }
 }
 
-async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+fn setup<'a>(
+    name: &'a str,
+) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
+    Box::pin(setup_impl(name))
+}
+
+async fn setup_impl(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     setup_with_reply(name, "Here is your answer").await
 }
-async fn setup_with_reply(
+
+fn setup_with_reply<'a>(
+    name: &'a str,
+    reply: &'static str,
+) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
+    Box::pin(setup_with_reply_impl(name, reply))
+}
+
+async fn setup_with_reply_impl(
     name: &str,
     reply: &'static str,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
-    let db = connect_transaction_test_database(name).await;
-    engine::ensure_indexes(&db).await.unwrap();
-    db.collection(USERS)
-        .insert_one(test_user(OWNER, UserType::Person))
-        .await
-        .unwrap();
+    let db = Box::pin(connect_transaction_test_database(name)).await;
+    Box::pin(engine::ensure_indexes(&db)).await.unwrap();
+    Box::pin(async {
+        db.collection(USERS)
+            .insert_one(test_user(OWNER, UserType::Person))
+            .await
+            .unwrap();
+    })
+    .await;
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     let upstream = Router::new().route(
@@ -132,10 +149,13 @@ async fn setup_with_reply(
     row.forward_access_token = true;
     row.inject_delegation_token = false;
     row.credential_encrypted.clear();
-    db.collection::<DownstreamService>(SERVICES)
-        .insert_one(row)
-        .await
-        .unwrap();
+    Box::pin(async {
+        db.collection::<DownstreamService>(SERVICES)
+            .insert_one(row)
+            .await
+            .unwrap();
+    })
+    .await;
     (test_app_state(db), calls, server)
 }
 

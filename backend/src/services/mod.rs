@@ -268,6 +268,7 @@ pub mod user_preferences_service;
 pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
+pub mod whatsapp_native;
 pub mod ws_frame_injector;
 
 pub mod catalog_skill_service;

@@ -15,7 +15,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-#[cfg(test)]
 use mongodb::bson::doc;
 
 use crate::AppState;
@@ -744,6 +743,87 @@ async fn handle_webhook_inner_impl(
         // database error, which can include the rejected document or validator.
         tracing::warn!(bot_id = %bot.id, "unable to persist channel receipt metadata");
     }
+
+    // Native WhatsApp owns Meta's callback while gateway-owned. Keep signed
+    // relay deliveries explicit: during rollback they are admitted and fence
+    // native intake; during the gateway phase they are diagnosed and dropped
+    // because native ownership remains authoritative.
+    if bot.platform == "whatsapp"
+        && bot.credential_source == "user"
+        && let Some(config) = crate::services::whatsapp_native::load(state.db, &bot).await?
+    {
+        let payload = serde_json::from_slice::<serde_json::Value>(&prepared.body).ok();
+        match config.callback.phase {
+            crate::models::channel_whatsapp_native::CallbackPhase::AwaitingRelay => {
+                let mut observed = config.clone();
+                if payload.as_ref().is_some_and(|payload| {
+                    crate::services::whatsapp_native::callback::observe_relay_intake(
+                        &mut observed,
+                        &bot,
+                        payload,
+                    )
+                }) {
+                    let _ = state
+                        .db
+                        .collection::<crate::models::channel_whatsapp_native::NativeWhatsapp>(
+                            crate::models::channel_whatsapp_native::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {
+                                "_id": &config.bot_id,
+                                "revision": config.revision,
+                                "callback.phase": "awaiting_relay",
+                            },
+                            doc! {
+                                "$set": {
+                                    "callback.intake_seen_at": observed.callback.intake_seen_at,
+                                    "callback.relay_observed_at": observed.callback.relay_observed_at,
+                                    "updated_at": bson::DateTime::now(),
+                                }
+                            },
+                        )
+                        .await;
+                }
+            }
+            crate::models::channel_whatsapp_native::CallbackPhase::Gateway => {
+                if crate::services::whatsapp_native::callback::suppress_relay_messages(&config)
+                    && payload.as_ref().is_some_and(|payload| {
+                        crate::services::whatsapp_native::callback::relay_message_evidence(
+                            &config, &bot, payload,
+                        )
+                    })
+                {
+                    crate::services::channel_bot_service::record_webhook_error(
+                        state.db,
+                        &bot.id,
+                        crate::services::channel_bot_health::codes::NATIVE_RELAY_CONFLICT,
+                    )
+                    .await?;
+                    let mut facts = crate::services::channel_bot_health::HealthFacts::for_bot(
+                        &bot,
+                        chrono::Utc::now(),
+                        true,
+                    );
+                    facts.failure_reason =
+                        Some(crate::services::channel_bot_health::codes::NATIVE_RELAY_CONFLICT);
+                    let recommendation = crate::services::channel_bot_health::recommend(&facts);
+                    crate::services::channel_bot_health::notify_failure(
+                        state.db,
+                        &bot,
+                        &recommendation,
+                    );
+                    return Ok(None);
+                }
+            }
+            crate::models::channel_whatsapp_native::CallbackPhase::Unknown
+                if crate::services::whatsapp_native::callback::suppress_relay_messages(&config) =>
+            {
+                return Ok(None);
+            }
+            _ => {}
+        }
+    }
+
     let messages = adapter.parse_inbound(&prepared.body).await.map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
             tracing::warn!(platform = %bot.platform, bot_id, stage = "payload", "channel webhook payload rejected");

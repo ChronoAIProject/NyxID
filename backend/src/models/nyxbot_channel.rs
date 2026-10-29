@@ -15,6 +15,15 @@ pub enum GatewaySource {
     Discord {
         bot_id: String,
     },
+    /// Verified identity for a dedicated-app BYO WhatsApp bot. These are
+    /// provider identifiers only; access tokens and app secrets never live in
+    /// the channel row.
+    #[serde(rename = "whatsapp")]
+    WhatsApp {
+        app_id: String,
+        waba_id: String,
+        phone_number_id: String,
+    },
     /// A newer source remains readable during a rolling deployment, but never executable.
     #[serde(other)]
     Unsupported,

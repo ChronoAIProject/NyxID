@@ -118,6 +118,13 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<bson::Document>(crate::models::channel_whatsapp_native::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"owner_id": 1, "_id": 1})
+                .build(),
+        )
+        .await?;
     ensure_lark_base_write_indexes(db).await?;
     db.collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
         crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,

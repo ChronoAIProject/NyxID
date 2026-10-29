@@ -54,6 +54,7 @@ mod channel_managed_tests;
 pub mod channel_relay;
 pub mod channel_relay_request;
 pub mod channel_webhooks;
+pub mod channel_whatsapp_native;
 pub mod cli_pairings;
 pub mod codex_connection;
 pub mod connect_links;
