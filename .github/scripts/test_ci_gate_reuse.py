@@ -1,3 +1,4 @@
+import copy
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from ci_gate_reuse import (
     decide_from_api,
     newest_completed_successful_run,
     strict_load_workflow,
+    _has_event_sensitive_steps,
+    _load_workflow_bundle,
 )
 
 
@@ -69,6 +72,70 @@ def decision_jobs():
 
 
 class GateReuseTests(unittest.TestCase):
+    def test_real_rust_jobs_have_event_insensitive_exact_identities(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        workflow = workflows[".github/workflows/ci.yml"]
+        analysis = analyze_workflow(workflow, workflows)
+        expected = {
+            "rust-clippy": ("Rust Clippy",),
+            "rust-features": ("Rust Features (aws-kms)", "Rust Features (gcp-kms)",
+                              "Rust Features (aws-and-gcp-kms)"),
+            "cli-test": ("CLI Test",),
+            "permissions-test": ("Google Permissions",),
+            "coverage-cli": ("Coverage (CLI)",),
+        }
+        for job_id, names in expected.items():
+            with self.subTest(job=job_id):
+                self.assertFalse(_has_event_sensitive_steps(workflow["jobs"][job_id]))
+                self.assertEqual(analysis.reusable[job_id].exact_names, names)
+        self.assertEqual(len(analysis.leaf_names), len(set(analysis.leaf_names)))
+        self.assertNotIn("claude-plugin-validate", analysis.reusable)
+        self.assertTrue(_has_event_sensitive_steps(workflow["jobs"]["claude-plugin-validate"]))
+        for job_id in ("backend-image-smoke", "coverage-cli-base", "coverage-cli-summary"):
+            self.assertNotIn(job_id, analysis.candidates)
+
+    def test_real_feature_matrix_requires_every_exact_successful_variant(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        workflow = workflows[".github/workflows/ci.yml"]
+        names = analyze_workflow(workflow, workflows).reusable["rust-features"].exact_names
+        for conclusion in ("success", "failure", "skipped", "cancelled", None):
+            observed = [job(name) for name in names[:-1]] + [job(names[-1], conclusion)]
+            decision = assess_tree_and_jobs(
+                workflow=workflow, reusable_workflows=workflows,
+                current_tree="tree", tested_tree="tree", jobs=observed,
+                source="pull_request", run={"id": 7},
+            )
+            self.assertEqual("rust-features" in decision.jobs, conclusion == "success")
+        # A result under the old display name cannot stand in for the new one.
+        decision = assess_tree_and_jobs(
+            workflow=workflow, reusable_workflows=workflows,
+            current_tree="tree", tested_tree="tree",
+            jobs=[job(name) for name in names[:-1]] + [job("Rust Features (aws-kms,gcp-kms)")],
+            source="pull_request", run={"id": 7},
+        )
+        self.assertNotIn("rust-features", decision.jobs)
+
+    def test_real_rust_jobs_lose_reuse_if_event_sensitive_saves_return(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        for job_id in ("rust-clippy", "rust-features", "cli-test", "permissions-test"):
+            workflow = copy.deepcopy(workflows[".github/workflows/ci.yml"])
+            workflow["jobs"][job_id]["steps"].append({
+                "if": "github.ref == 'refs/heads/main' && success()",
+                "uses": "actions/cache/save@v4",
+            })
+            self.assertNotIn(job_id, analyze_workflow(workflow, workflows).reusable)
+
+    def test_real_nested_eight_shards_and_billing_leaf_stay_exact(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        analysis = analyze_workflow(workflows[".github/workflows/ci.yml"], workflows)
+        for job_id, label in (("backend-test", "Backend Test"),
+                              ("coverage-backend", "Coverage (Backend)")):
+            names = analysis.reusable[job_id].exact_names
+            for shard in range(1, 9):
+                self.assertEqual(names.count(f"{label} / Test shard {shard}"), 1)
+        self.assertIn("Backend Test / Billing route coverage smoke",
+                      analysis.reusable["backend-test"].exact_names)
+
     def test_nested_input_condition_excludes_ordinary_only_coverage_leaf(self):
         analysis = analyze_workflow(WORKFLOW, WORKFLOWS)
         backend = analysis.reusable["backend-test"].exact_names

@@ -297,6 +297,7 @@ jobs:
           components: rustfmt, clippy
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'false'
           shared-key: permissions-test
           incremental: 'true'
       - run: cargo fmt -p nyxid-permissions --check
@@ -312,14 +313,6 @@ jobs:
           cargo test -p nyxid-permissions --locked --no-run
       - name: Run permissions tests
         run: cargo test -p nyxid-permissions --locked
-      - name: Save incremental build cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            target/debug/incremental
-          key: v0-rust-incremental-permissions-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
       - run: python3 scripts/test-drive-permissions-poc.py
 
   # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
@@ -460,6 +453,7 @@ jobs:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'false'
           shared-key: rust-clippy
           incremental: 'true'
       - name: Check Clippy with resource samples
@@ -467,14 +461,6 @@ jobs:
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/clippy.log" --
           python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
-      - name: Save incremental build cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            target/debug/incremental
-          key: v0-rust-incremental-rust-clippy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
 
   # ---------------------------------------------------------------------------
   # Rust: backend tests
@@ -509,6 +495,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'false'
           shared-key: backend-image-inputs-backend-image-inputs
       - name: Check dependency recipe invariants
         run: python3 scripts/test-docker-dependency-recipe.py
@@ -628,6 +615,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'false'
           shared-key: cli-cli-test
           incremental: 'true'
       - uses: taiki-e/install-action@v2
@@ -653,15 +641,6 @@ jobs:
           cargo nextest run --no-run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
       - name: Run CLI tests
         run: cargo nextest run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
-      - name: Save incremental build cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            target/debug/incremental
-          key: v0-rust-incremental-cli-cli-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
-
       - name: Publish test summary
         if: always()
         uses: test-summary/action@v2.6
@@ -681,7 +660,7 @@ jobs:
   # Rust: build with feature flags (KMS providers). Backend-only build.
   # ---------------------------------------------------------------------------
   rust-features:
-    name: Rust Features (${{ matrix.features }})
+    name: Rust Features (${{ matrix.variant }})
     needs: changes
     if: >-
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'rust-features')) &&
@@ -695,13 +674,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - features: aws-kms
-            cache-suffix: aws-kms
-          - features: gcp-kms
-            cache-suffix: gcp-kms
-          - features: aws-kms,gcp-kms
-            cache-suffix: aws-and-gcp-kms
+        variant: [aws-kms, gcp-kms, aws-and-gcp-kms]
     steps:
       - uses: actions/checkout@v6
       - name: Prepare backend memory reserve
@@ -712,28 +685,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
-          shared-key: features-${{ matrix.cache-suffix }}-rust-features
+          save-if: 'false'
+          shared-key: features-${{ matrix.variant }}-rust-features
           incremental: 'true'
-      - name: Build with --features ${{ matrix.features }}
+      - name: Build feature set
+        env:
+          FEATURES: ${{ fromJSON('{"aws-kms":"aws-kms","gcp-kms":"gcp-kms","aws-and-gcp-kms":"aws-kms,gcp-kms"}')[matrix.variant] }}
         run: >-
           python3 .github/scripts/retry_incremental.py
-          --log-file "$RUNNER_TEMP/features-${{ matrix.cache-suffix }}.log" --
-          python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }}
-          cargo build -p nyxid --features ${{ matrix.features }}
-      - name: Save incremental build cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            target/debug/incremental
-          key: v0-rust-incremental-features-${{ matrix.cache-suffix }}-rust-features-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          --log-file "$RUNNER_TEMP/features-${{ matrix.variant }}.log" --
+          python3 .github/scripts/ci_resources.py features-${{ matrix.variant }}
+          cargo build -p nyxid --features "$FEATURES"
       - name: Upload resource samples
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: resources-rust-features-${{ matrix.cache-suffix }}
+          name: resources-rust-features-${{ matrix.variant }}
           path: ${{ runner.temp }}/nyxid-ci-resources
           if-no-files-found: ignore
           retention-days: 14
@@ -1037,6 +1005,7 @@ jobs:
           components: llvm-tools-preview
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'false'
           shared-key: coverage-cli-coverage-cli
           incremental: 'true'
       - uses: taiki-e/install-action@v2
@@ -1061,8 +1030,44 @@ jobs:
             cli "CLI (nyxid-cli)" 64 \
             coverage-cli.raw.json coverage-cli.json
 
+      # Enforce the threshold LAST (see backend job for rationale).
+      - name: Enforce coverage gate (head)
+        run: cargo llvm-cov report --package nyxid-cli --fail-under-lines 64
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-coverage-head
+          path: |
+            coverage-cli.lcov
+            coverage-cli.json
+          if-no-files-found: warn
+
+  # CLI base measurement is informational and PR-only. Run it alongside the
+  # head gate; keeping it separate makes Coverage (CLI) event-insensitive.
+  coverage-cli-base:
+    name: Coverage (CLI Base)
+    needs: changes
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
       - name: Measure base branch
-        if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
@@ -1071,29 +1076,41 @@ jobs:
           ( cd ../base-coverage && cargo llvm-cov --package nyxid-cli --no-report \
               && cargo llvm-cov report --package nyxid-cli --json --summary-only \
                  --output-path "$GITHUB_WORKSPACE/coverage-cli.base.json" )
+      - name: Upload base report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-base-report
+          path: coverage-cli.base.json
+          if-no-files-found: ignore
 
+  # Preserve the existing PR coverage artifact and delta without making the
+  # head test/threshold job depend on PR-only reporting.
+  coverage-cli-summary:
+    name: Coverage (CLI Summary)
+    needs: [changes, coverage-cli, coverage-cli-base]
+    if: always() && github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download head report
+        id: head-report
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-coverage-head
+        continue-on-error: true
+      - name: Download base report
+        if: steps.head-report.outcome == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-base-report
+        continue-on-error: true
       - name: Merge base line % into summary
-        if: github.event_name == 'pull_request'
+        if: steps.head-report.outcome == 'success'
         run: |
           python3 .github/scripts/coverage_merge_base.py \
             coverage-cli.json coverage-cli.base.json
-
-      # Enforce the threshold LAST (see backend job for rationale).
-      - name: Enforce coverage gate (head)
-        run: cargo llvm-cov report --package nyxid-cli --fail-under-lines 64
-
-      - name: Save incremental build cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            target/debug/incremental
-            target/llvm-cov-target/debug/incremental
-          key: v0-rust-incremental-coverage-cli-coverage-cli-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
-
       - name: Upload coverage artifact
-        if: always()
+        if: steps.head-report.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-cli
@@ -1213,7 +1230,7 @@ jobs:
     if: always() && github.event_name == 'pull_request'
     needs:
       - coverage-backend-summary
-      - coverage-cli
+      - coverage-cli-summary
       - coverage-frontend
     runs-on: ubuntu-latest
     permissions:
