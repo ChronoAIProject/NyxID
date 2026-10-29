@@ -4384,11 +4384,7 @@ async fn handle_artifact_delivery(
         return tool_result(id, "Artifact recovery accepts no arguments", true);
     }
     // Both direct and wrapped calls use the same owner acknowledgement gate.
-    let facts = acks::ActionFacts {
-        class: acks::OwnerActionClass::Change,
-        read_only: false,
-        destructive: false,
-    };
+    let facts = acks::ActionFacts::of(acks::OwnerActionClass::Change);
     let summary = "Recover the saved cloud attachments on the preceding reply";
     let confirmation_args =
         match crate::services::generated_artifacts::recovery_confirmation_arguments(&state.db, chat)
