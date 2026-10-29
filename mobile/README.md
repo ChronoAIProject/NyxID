@@ -10,7 +10,7 @@ The first Web-to-RN increment and remaining migration work are documented in [RN
 - **Connects services.** Browse the catalog, connect supported API-key, token-exchange, OAuth, or platform-key services, and manage existing connections under the server's permissions.
 - **Manages agents.** Create personal specialists, edit authorized profiles and grants, manage memory, and open agent conversations.
 - **Reviews approvals.** Receive push notifications, scan login QR codes, inspect the server's tool arguments and expiry, approve or deny requests, and revoke granted permissions.
-- **Customizes chat appearance.** Settings → Display offers Gray, Lavender, and Graphite light-mode bubbles with a live preview. The choice is saved on the device and applies to individual, specialist, and group chats, including messages being sent. User bubbles share three 18pt corners and a 4pt bottom-right corner.
+- **Customizes chat appearance.** Settings → Display offers Gray, Lavender, and Graphite bubbles, each with a light and a dark version, with live previews of both. The choice is saved on the device and applies to individual, specialist, and group chats, including messages being sent. User bubbles share three 18pt corners and a 4pt bottom-right corner.
 - **Manages account security.** Edit profile information, revoke sessions, set up TOTP, and sign in with a password and authenticator code.
 - **Stays signed in securely.** Tokens persist in OS-secure storage through `expo-secure-store`; refresh and account changes fence stale responses and queued credential writes.
 
@@ -81,13 +81,11 @@ Each field falls back to the other profile if its primary is empty. Both empty f
 
 ### Production domain migration
 
-`PROD_USE_NEW_DOMAINS=false` (the default when unset) uses the existing `PROD_API_BASE_URL`, `PROD_FRONTEND_URL`, and `PROD_LEGAL_BASE_URL`. Set the flag to `true` to select `PROD_NEW_API_BASE_URL`, `PROD_NEW_FRONTEND_URL`, and `PROD_NEW_LEGAL_BASE_URL` together. All three new URLs must be configured as HTTPS URLs; an incomplete selection aborts the build.
+Production builds embed the existing `PROD_API_BASE_URL`, `PROD_FRONTEND_URL` and `PROD_LEGAL_BASE_URL` plus an optional second set, `PROD_NEW_API_BASE_URL`, `PROD_NEW_FRONTEND_URL` and `PROD_NEW_LEGAL_BASE_URL` (all three HTTPS URLs or none). The NyxID admin feature flag `mobile:new-domains` (global only, default off) selects the set at every launch: before the app renders, it asks both API hosts' `/public/config` and applies the first valid answer, falling back to the last saved answer, then the original domains, within 5 seconds. Switching the flag needs no rebuild; users restart or reload the app.
 
-The API's iOS association follows the selected API host. The existing `PROD_UNIVERSAL_LINK_HOST` and `PROD_UNIVERSAL_LINK_PATH_PREFIX` stay in use in both modes, preserving OneLink routing without claiming ordinary frontend web pages. New-mode production QR scanning also trusts the configured legacy `PROD_FRONTEND_URL` so it works before the backend changes its QR origin. App identifiers, signing, and version numbers continue to use the existing variables. Production domain selection happens before the existing DEV↔PROD fallback, so explicit dev URLs keep their values and missing dev fields fall back to the selected production values.
+QR login, iOS associated domains and React Navigation accept both embedded sets. The existing `PROD_UNIVERSAL_LINK_HOST` and `PROD_UNIVERSAL_LINK_PATH_PREFIX` stay unchanged. App identifiers, signing and version numbers keep using the existing variables. See [Domain migration](docs/DOMAIN_MIGRATION.md) for the selection rules, backend requirements, rollout and rollback.
 
-This is a **build-time flag**. Persist it in `.env.prod` for releases; changing it requires rebuilding and distributing the app. See [Domain migration](docs/DOMAIN_MIGRATION.md) for configuration preview, rollout ordering, checks, and rollback steps.
-
-The runtime API URL is resolved once in `src/lib/api/baseUrl.ts`. HTTP requests, token refresh, and social login use its `buildApiUrl(path)` helper; QR trust and app linking receive the same normalized base through `src/lib/env.ts`. The resolver trims surrounding whitespace and trailing slashes and supports the legacy `/mobile` suffix. Missing configuration raises an error before an API request. API callers pass endpoint paths, so each feature uses the backend selected by the build configuration.
+The active API URL lives in `src/lib/domains.ts`; HTTP requests, token refresh and social login use `buildApiUrl(path)` from `src/lib/api/baseUrl.ts`. The resolver trims surrounding whitespace and trailing slashes and supports the legacy `/mobile` suffix. Missing configuration raises an error before an API request.
 
 ### App identity (single value, defaults if unset)
 
@@ -335,7 +333,7 @@ All under `/api/v1` on the configured `*_API_BASE_URL`. The workspace API famili
 - The QR scanner accepts HTTPS or `nyxid://` login URLs but extracts only `user_code`; API calls always use `*_API_BASE_URL`
 - Supported push payload fields: `deeplink`, `url`, `challenge_id`, `challengeId`
 - Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. The host of `*_API_BASE_URL` is also auto-added to iOS `associatedDomains` so backend-issued links open in the app.
-- React Navigation accepts the configured app scheme and selected API/frontend/link origins. New-domain production builds preserve the existing universal-link settings as described in [Domain migration](docs/DOMAIN_MIGRATION.md).
+- React Navigation accepts the configured app scheme and every embedded API/frontend origin plus the link host; the universal-link settings are the same for both domain sets (see [Domain migration](docs/DOMAIN_MIGRATION.md)).
 
 ## Session
 

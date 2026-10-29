@@ -150,6 +150,11 @@ callback/client URLs where supported. Existing API hostnames must remain live
 until their users and integrations have migrated; this server PR does not alter
 those defaults, app builds, agent prompts, sitemaps or production configuration.
 
+Mobile builds that embed both production domain sets switch between them with
+the global admin flag `mobile:new-domains`, read from `/api/v1/public/config`
+on both API hosts at each app launch. See
+[mobile/docs/DOMAIN_MIGRATION.md](../mobile/docs/DOMAIN_MIGRATION.md).
+
 For rollback, restore canonical URLs and keep the other origins as aliases on
 all replicas. Leave issuer/audience pinned and retain the same keys and data.
 Hosted-spec normalization can safely run again in the opposite direction.

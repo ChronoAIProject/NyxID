@@ -1,19 +1,33 @@
-export const lightBubblePalettes = {
-  gray: { label: "Gray", background: "#E0E0E5", foreground: "#18181B" },
-  lavender: { label: "Lavender", background: "#E4DBFA", foreground: "#281A46" },
-  graphite: { label: "Graphite", background: "#303036", foreground: "#FFFFFF" },
-} as const;
+type BubbleColors = { readonly background: string; readonly foreground: string };
 
-export type LightBubblePalette = keyof typeof lightBubblePalettes;
+/** One choice styles user bubbles in both themes; each has a light and a dark version. */
+export const bubblePalettes = {
+  gray: {
+    label: "Gray",
+    light: { background: "#E0E0E5", foreground: "#18181B" },
+    dark: { background: "#2C2C30", foreground: "#EFEFF1" },
+  },
+  lavender: {
+    label: "Lavender",
+    light: { background: "#E4DBFA", foreground: "#281A46" },
+    dark: { background: "#3A2E5E", foreground: "#EEE8FF" },
+  },
+  graphite: {
+    label: "Graphite",
+    light: { background: "#303036", foreground: "#FFFFFF" },
+    dark: { background: "#4A4A52", foreground: "#FFFFFF" },
+  },
+} as const satisfies Record<string, { label: string; light: BubbleColors; dark: BubbleColors }>;
 
-export function normalizeLightBubblePalette(value: unknown): LightBubblePalette {
+export type BubblePalette = keyof typeof bubblePalettes;
+
+export function normalizeBubblePalette(value: unknown): BubblePalette {
   return value === "lavender" || value === "graphite" ? value : "gray";
 }
 
-export function chatBubbleColors(mode: string, palette: unknown) {
-  return mode === "dark"
-    ? { background: "#2C2C30", foreground: "#EFEFF1" }
-    : lightBubblePalettes[normalizeLightBubblePalette(palette)];
+export function chatBubbleColors(mode: string, palette: unknown): BubbleColors {
+  const choice = bubblePalettes[normalizeBubblePalette(palette)];
+  return mode === "dark" ? choice.dark : choice.light;
 }
 
 export const userBubbleCorners = {
