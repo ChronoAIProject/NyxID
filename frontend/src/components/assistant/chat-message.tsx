@@ -28,6 +28,7 @@ import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
@@ -608,9 +609,9 @@ export function ChatMessageBubble({
   if (message.role === "user") {
     return (
       <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
-        <div className="rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+        <UserMessageBubble>
           {message.steering && (
-            <p className="mb-1 text-11 text-muted-foreground" role="note">
+            <p className="mb-1 text-11" role="note">
               Steering ·{" "}
               {steeringNotice(message.steering.code, message.steering.outcome)}
             </p>
@@ -623,7 +624,7 @@ export function ChatMessageBubble({
             </div>
           ) : null}
           {content}
-        </div>
+        </UserMessageBubble>
         <div className="flex max-w-full flex-wrap items-center justify-end gap-x-2 gap-y-1 opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:none)]:opacity-100">
           <MessageTime value={message.timestamp} />
           <MessageCopyAction text={content} />

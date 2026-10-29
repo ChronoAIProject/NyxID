@@ -53,10 +53,12 @@ export function AssistantAttachmentView({
   attachment,
   conversationId,
   groupId,
+  captionColor,
 }: {
   attachment: AssistantAttachment;
   conversationId?: string;
   groupId?: string;
+  captionColor?: string;
 }) {
   const { colors } = useTheme();
   const { isAuthenticated } = useAuthSession();
@@ -332,12 +334,12 @@ export function AssistantAttachmentView({
         ) : null}
       </Pressable>
       {(unavailable || error) && (
-        <Label muted accessibilityLiveRegion="polite" style={styles.detail}>
+        <Label muted accessibilityLiveRegion="polite" style={[styles.detail, captionColor ? { color: captionColor } : undefined]}>
           {unavailable ? ATTACHMENT_EXPIRED_MESSAGE : error}
         </Label>
       )}
       {!unavailable && attachment.image_input === "unavailable" && (
-        <Label muted style={styles.detail}>
+        <Label muted style={[styles.detail, captionColor ? { color: captionColor } : undefined]}>
           {attachment.origin === "user_upload"
             ? IMAGE_INPUT_UNAVAILABLE_MESSAGE
             : "The agent couldn't view this image."}

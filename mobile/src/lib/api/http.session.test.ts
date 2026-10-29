@@ -13,6 +13,7 @@ function setup() {
   const filename = fileURLToPath(new URL("./http.ts", import.meta.url));
   const localRequire = createRequire(filename);
   const mocks: Record<string, unknown> = {
+    "./baseUrl": { buildApiUrl: (path: string) => `https://api.test/api/v1${path}` },
     "expo-constants": {
       __esModule: true,
       default: { expoConfig: { version: "test" } },

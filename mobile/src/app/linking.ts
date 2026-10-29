@@ -9,6 +9,14 @@ import { navigationLinkingConfig } from "./navigationLinking";
 import { workspaceStateFromPath } from "./workspaceCanonicalLinks";
 import { capture } from "../lib/telemetry";
 import type { LinkType } from "../lib/telemetry-schema";
+import {
+  IS_DEV_BUILD,
+  NYXID_API_BASE_URL,
+  NYXID_APP_SCHEME,
+  NYXID_FRONTEND_URL,
+  NYXID_UNIVERSAL_LINK_HOST,
+} from "../lib/env";
+import { buildLinkingPrefixes } from "../lib/linkingPrefixes";
 
 type NotificationData = {
   deeplink?: unknown;
@@ -24,7 +32,7 @@ type NotificationData = {
 };
 
 function buildChallengeUrl(challengeId: string): string {
-  return `nyxid://challenge/${encodeURIComponent(challengeId)}`;
+  return `${NYXID_APP_SCHEME}://challenge/${encodeURIComponent(challengeId)}`;
 }
 
 export function extractChallengeIdFromUrl(url: string): string | null {
@@ -192,13 +200,19 @@ function reportDeepLinkOpened(url: string): void {
 function rewriteChallengeUrl(url: string): string {
   const challengeId = extractChallengeIdFromUrl(url);
   if (challengeId) {
-    return `nyxid://activity?challengeId=${encodeURIComponent(challengeId)}`;
+    return `${NYXID_APP_SCHEME}://activity?challengeId=${encodeURIComponent(challengeId)}`;
   }
   return url;
 }
 
 export const appLinking: LinkingOptions<RootStackParamList> = {
-  prefixes: ["nyxid://"],
+  prefixes: buildLinkingPrefixes({
+    appScheme: NYXID_APP_SCHEME,
+    apiBaseUrl: NYXID_API_BASE_URL,
+    frontendUrl: NYXID_FRONTEND_URL,
+    universalLinkHost: NYXID_UNIVERSAL_LINK_HOST,
+    allowHttp: IS_DEV_BUILD,
+  }),
   config: navigationLinkingConfig,
   getStateFromPath: (path, options) =>
     workspaceStateFromPath(path, (next) => getStateFromPath(next, options)),

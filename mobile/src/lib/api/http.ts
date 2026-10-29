@@ -13,6 +13,7 @@ import { ACCOUNT_DELETION_POLICY_VERSION } from "../accountDeletionPolicy";
 
 import { ApiError } from "./ApiError";
 import { mfaChallengeFromResponse } from "../auth/mfaChallenge";
+import { buildApiUrl } from "./baseUrl";
 import {
   clearStoredAuthSession,
   commitRefreshedAuthSession,
@@ -33,7 +34,6 @@ import {
   UpdateNotificationSettingsInput,
 } from "./types";
 
-const DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1";
 const ACTIVITY_PAGE_SIZE = 20;
 const REFRESH_CONFLICT_RETRY_COUNT = 1;
 const REFRESH_CONFLICT_RETRY_DELAY_MS = 160;
@@ -135,26 +135,6 @@ type MessageResponse = {
 };
 
 type BackendNotificationSettingsResponse = NotificationSettings;
-
-function getApiBaseUrl(): string {
-  const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL;
-  const normalized = rawBaseUrl.replace(/\/+$/, "");
-
-  if (normalized.endsWith("/mobile")) {
-    return normalized.slice(0, -"/mobile".length);
-  }
-
-  return normalized;
-}
-
-function buildUrl(path: string): string {
-  if (path.startsWith("http://") || path.startsWith("https://")) {
-    return path;
-  }
-
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${getApiBaseUrl()}${normalizedPath}`;
-}
 
 async function readJsonSafely(response: Response): Promise<unknown> {
   const text = await response.text();
@@ -308,7 +288,7 @@ async function requestRefreshAccessToken(
   max409Retries = REFRESH_CONFLICT_RETRY_COUNT
 ): Promise<RefreshResponse | null> {
   for (let attempt = 0; attempt <= max409Retries; attempt += 1) {
-    const response = await fetch(buildUrl("/auth/refresh"), {
+    const response = await fetch(buildApiUrl("/auth/refresh"), {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -396,7 +376,7 @@ async function invalidateSession() {
  * fetch can buffer the entire response. Both paths share secure admission. */
 export async function requestAuthenticatedResponse(path: string, options: RequestOptions = {}) {
   const { response } = await executeAuthenticatedRequest({
-    url: buildUrl(path), options, clientHeaders: clientHeaders(),
+    url: buildApiUrl(path), options, clientHeaders: clientHeaders(),
     transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init), init.signal ?? undefined), loadSession: loadStoredAuthSession,
     refresh: refreshAccessTokenWithSingleFlight, invalidate: invalidateSession,
     toError: buildApiError, getAuthEpoch,
@@ -453,7 +433,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
 
   const send = () => {
     guard();
-    return assistantConnection.observe(() => fetch(buildUrl(path), {
+    return assistantConnection.observe(() => fetch(buildApiUrl(path), {
       method,
       headers,
       signal: options.signal,
@@ -493,7 +473,7 @@ export async function requestBinaryJson<T>(
   } = {},
 ): Promise<T> {
   const { response, assertOwner } = await executeAuthenticatedRequest({
-    url: buildUrl(path),
+    url: buildApiUrl(path),
     options: {
       method: "POST",
       headers: options.headers,
@@ -574,7 +554,7 @@ export async function requestAuthenticatedBytes(
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
   const { response, assertOwner } = await executeAuthenticatedRequest({
-    url: buildUrl(path),
+    url: buildApiUrl(path),
     options: { signal },
     clientHeaders: clientHeaders(),
     transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init), init.signal ?? undefined),

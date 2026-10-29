@@ -199,7 +199,7 @@ test("crew schema retains typed machine/failure metadata for notice and agent ro
     assert.equal(row.activities[0]?.failure?.kind, "tool_error");
   }
 });
-function imageHarness() {
+function imageHarness(captionColor?: string) {
   let epoch = 1,
     focused = true;
   let deleted = 0;
@@ -232,6 +232,7 @@ function imageHarness() {
       image_input: "unavailable",
     },
     conversationId: "chat",
+    captionColor,
   };
   const x = setup(
     "./AssistantAttachmentView.tsx",
@@ -335,6 +336,14 @@ test("late inline image reads cannot write files after blur or account switch", 
     assert.equal(x.writes(), 0);
     x.h.unmount();
   }
+});
+
+test("attachment captions on a user bubble retain the chosen foreground", () => {
+  const x = imageHarness("#FFFFFF");
+  const caption = x.nodes().find((node) => node.type === "Label" && words(node).includes("agent couldn't view"));
+  assert.ok(caption);
+  assert.equal(Object.assign({}, ...[caption.props.style].flat()).color, "#FFFFFF");
+  x.h.unmount();
 });
 
 test("real crew receipt renderer supports notice/agent rows and removes duplicate screenshot attachments", () => {

@@ -286,6 +286,7 @@ describe("delivered message recipients", () => {
     expect(
       screen.getByText("to researcher, retired, a removed agent"),
     ).toBeInTheDocument();
+    expect(screen.getByText("to researcher, retired, a removed agent").parentElement).toHaveClass("bg-chat-bubble", "text-chat-bubble-foreground");
     expect(screen.queryByText(new RegExp(RESEARCHER))).toBeNull();
   });
 });

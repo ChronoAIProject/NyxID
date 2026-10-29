@@ -7,7 +7,7 @@ import { lockDesktopLandscape, restorePortrait } from '../../../lib/desktopOrien
 import { getAuthEpoch } from '../../../lib/auth/authEpoch';
 import { loadStoredAuthSession } from '../../../lib/auth/sessionStore';
 import { refreshAccessTokenIfNeeded, requestJson } from '../../../lib/api/http';
-import { NYXID_API_BASE_URL } from '../../../lib/env';
+import { getApiBaseUrl } from '../../../lib/api/baseUrl';
 import { canvasDocument } from './canvasDocument';
 import { createCompositor } from './compositor';
 import { desktopSocketUrl, type MachineDesktopParams } from './desktopRoutes';
@@ -122,7 +122,7 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
         const NativeWebSocket = WebSocket as unknown as {
           new(url: string, protocols: string[], options: { headers: Record<string, string> }): ViewSocket;
         };
-        return new NativeWebSocket(desktopSocketUrl(NYXID_API_BASE_URL || 'http://localhost:3001/api/v1', { nodeId, conversationId, contextId, display }), [], { headers: { Authorization: `Bearer ${session.accessToken}` } });
+        return new NativeWebSocket(desktopSocketUrl(getApiBaseUrl(), { nodeId, conversationId, contextId, display }), [], { headers: { Authorization: `Bearer ${session.accessToken}` } });
       },
     });
     viewer.current = activeViewer; clear(); activeViewer.start();

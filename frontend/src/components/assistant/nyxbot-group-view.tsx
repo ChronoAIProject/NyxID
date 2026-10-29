@@ -33,6 +33,7 @@ import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { AccessModeSwitcher } from "@/components/assistant/nyxbot-access-controls";
 import { Button } from "@/components/ui/button";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
@@ -162,10 +163,10 @@ export function GroupMessageRow({
   if (message.role === "user") {
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
-        <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
-          {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
+        <UserMessageBubble className="max-w-[78%]">
+          {message.author ? <p className="mb-1 text-11 font-medium">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
-            <p className="mb-1 text-11 text-muted-foreground">
+            <p className="mb-1 text-11">
               {recipientLine(message.recipient_agent_ids, members)}
             </p>
           ) : null}
@@ -184,7 +185,7 @@ export function GroupMessageRow({
               }}
             />
           ))}
-        </div>
+        </UserMessageBubble>
         <div className="flex items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
