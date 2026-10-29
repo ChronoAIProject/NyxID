@@ -154,6 +154,9 @@ pub struct AssistantAgent {
     pub model: String,
     #[serde(default)]
     pub owner_model_route: Option<Box<OwnerModelRoute>>,
+    /// Closed-reason notification timestamps; BSON datetimes, never guest text.
+    #[serde(default)]
+    pub guest_model_notices: std::collections::BTreeMap<String, bson::DateTime>,
     /// Optional per-agent approval policy; absent inherits the owner's mode.
     #[serde(default)]
     pub access_mode_override: Option<super::assistant_settings::AccessMode>,

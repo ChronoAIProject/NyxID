@@ -2511,3 +2511,22 @@ and templates are unavailable until a separate bridge is implemented. The
 integration must wire explicit unavailable-media feedback and display native
 delivery status from CMA Activity, not NyxID adapter hooks or
 local receipt rows. Free-form replies retain WhatsApp's 24-hour window.
+
+### Guest model setup status
+
+Open channel Chats settings fetch `status`, `reason`, and `fix` from the dedicated
+owner-only agent guest-readiness endpoint, with a conversation-specific check
+only for a different profile/route. Ordinary channel/chat lists do no readiness
+work. Audience-setting writes retain optional `guest_readiness`; NyxBot's list
+tool memoizes by agent and checks only channels open to visitors. Enabling private chats or group members for everyone does
+not bypass model readiness or guest service grants. The same model admission
+and safe setup refusal apply to relay and gateway transports. Guest model and
+service usage remain attributed to the agent owner.
+
+A setup-caused refusal tells the visitor that the owner has not finished setup
+and has been notified. NyxID queues a metadata-only, 24-hour deduplicated owner
+notice. It appears as fixed text in the agent home and is sent only to verified
+owner private chats on bots linked to that exact agent with posting available,
+never to another agent's bot, the guest's reply channel or group. Non-setup or
+unknown refusal reasons never claim an owner was notified. Existing channel send journals and uncertain-send barriers apply.
+See `docs/chat/08-nyxagent-engine.md` for diagnostics and readiness semantics.

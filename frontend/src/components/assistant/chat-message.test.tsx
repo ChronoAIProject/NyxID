@@ -374,13 +374,13 @@ describe("canonical chat presentation", () => {
 
   it("explains a missing guest model route only in the owner's diagnostic details", () => {
     render(<ChatMessageBubble message={{ ...BASE, status: "error",
-      error: "This assistant isn't available to guests yet.",
+      error: "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.",
       errorDetail: { stage: "stream", turnId: "turn-guest", continuations: 0, failureReason: {
         source: "nyxid", stage: "model_proxy", code: "guest_model_route_required",
         http_status: 403, nyxid_error_code: 9000,
       } },
     }} />);
-    expect(screen.getByText("This assistant isn't available to guests yet.")).toBeVisible();
+    expect(screen.getByText("The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.")).toBeVisible();
     fireEvent.click(screen.getByText("Details"));
     expect(screen.getByText("Send one message to this agent as its owner using its configured model to record the route for guest replies.")).toBeVisible();
   });

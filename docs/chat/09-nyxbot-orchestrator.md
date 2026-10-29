@@ -1584,3 +1584,23 @@ when a resource moves or a contract changes. Search/list operations need either
 a proven constrained upstream query or server-side filtering; response fields,
 indirect references, batches, alternate encodings and MIME/upload routes all
 need adversarial tests. No owner-specific values belong in audit metadata.
+
+### Guest model readiness
+
+Opening `private_chats` or group `members` to everyone changes the audience, not
+model setup or service grants. The dedicated owner-only agent readiness read
+serves the open Grants and channel Chats settings; ordinary lists do no readiness
+work. Audience-setting writes include optional `guest_readiness`. The NyxBot
+channel-list tool memoizes by effective agent and checks only channels open to
+visitors (private chats or group members). NyxBot must report `not_ready` and its exact
+`fix` instead of claiming visitors can already receive replies. The owner UI
+shows the same status beside audience controls and specialist guest access.
+Older replicas may omit the field; absence is unknown, never proof of readiness.
+
+Setup failures queue a fixed owner notice in the assistant's home and, when
+available, its verified owner private chat on a bot linked to that exact agent.
+An absent bot agent binding means NyxBot. Agent/reason claims are transactional
+and limited to one per 24 hours; metadata receipts expire after 48 hours. No
+model wake-up is needed, no visitor content is included, and no group receives
+the owner's diagnostic. See the engine's guest model route section for the
+closed reasons, runtime fixtures and model-routes.json maintenance contract.

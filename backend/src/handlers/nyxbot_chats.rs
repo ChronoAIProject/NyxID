@@ -1055,6 +1055,7 @@ async fn reconcile_gateway_groups(
 
 #[derive(Serialize)]
 pub struct ChannelChatResponse {
+    guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     parent_chat_id: Option<String>,
     id: String,
     channel_agent_id: String,
@@ -1109,6 +1110,7 @@ impl ChannelChatResponse {
 
 fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatResponse {
     ChannelChatResponse {
+        guest_readiness: None,
         parent_chat_id: chat.follow.parent_chat_id.clone(),
         has_thread_history: chat.follow.has_thread_history,
         follow_guidance: None,
@@ -1228,19 +1230,15 @@ pub(crate) async fn list_chats(
         &chats.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
     )
     .await?;
-    Ok(chats
-        .iter()
-        .filter_map(|chat| {
-            let row = channels.iter().find(|row| row.id == chat.channel_id)?;
-            Some(follow_response(
-                state,
-                row,
-                chat,
-                on,
-                *counts.get(&chat.id).unwrap_or(&0),
-            ))
-        })
-        .collect())
+    let mut responses = Vec::new();
+    for chat in &chats {
+        let Some(row) = channels.iter().find(|r| r.id == chat.channel_id) else {
+            continue;
+        };
+        let dto = follow_response(state, row, chat, on, *counts.get(&chat.id).unwrap_or(&0));
+        responses.push(dto);
+    }
+    Ok(responses)
 }
 
 async fn load_chat(
@@ -1412,6 +1410,16 @@ pub(crate) async fn update_chat(
     )
     .await?;
     let mut result = json!({"chat": follow_response(state,&row,&updated,on,*counts.get(&updated.id).unwrap_or(&0))});
+    result["chat"]["guest_readiness"] = json!(
+        crate::services::assistant_service_execution::guest_readiness(
+            &state.db,
+            &state.encryption_keys,
+            owner,
+            updated.agent_id.as_deref().or(row.agent_id.as_deref()),
+            updated.conversation_id.as_deref()
+        )
+        .await?
+    );
     if let Some(code) = gateway_error {
         result["warning"] = json!(format!(
             "Saved, but the gateway did not accept the change ({code}); the bot keeps \
@@ -1477,7 +1485,17 @@ pub(crate) async fn set_private_chats(
         json!({"channel_agent_id": &row.id, "private_chats": private_chats}),
     )
     .await;
-    Ok(json!({"channel_agent_id": row.id, "private_chats": private_chats}))
+    let readiness = crate::services::assistant_service_execution::guest_readiness(
+        &state.db,
+        &state.encryption_keys,
+        owner,
+        row.agent_id.as_deref(),
+        None,
+    )
+    .await?;
+    Ok(
+        json!({"channel_agent_id": row.id, "private_chats": private_chats, "guest_readiness":readiness}),
+    )
 }
 
 /// Validate an automation destination with the same posting ACL as native tools.
@@ -2770,4 +2788,35 @@ mod gateway_policy_tests {
             &requested,
         ));
     }
+}
+
+/// Fixed setup notices go only to a verified owner's private chat. They never
+/// inherit the visitor's group/reply destination.
+pub(super) async fn setup_notice(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    text: &str,
+    notice: &str,
+) -> AppResult<()> {
+    let target = prepare_post(state, owner, chat_id, None).await?;
+    if !target.thread.owner_chat || target.thread.kind.as_deref() != Some("private") {
+        return Err(AppError::Forbidden("Owner chat required".into()));
+    }
+    send_post_planned(
+        state,
+        &target,
+        crate::services::channel_platform::OutboundReply {
+            text: Some(text.into()),
+            metadata: None,
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+        },
+        None,
+        notice,
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
 }

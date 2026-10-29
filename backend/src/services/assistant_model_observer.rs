@@ -260,7 +260,14 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
     let classified = TurnError::new(code);
     attributed.code = classified.code;
     attributed.message = classified.message;
-    attributed
+    let reason = turn
+        .model_route_diagnostic
+        .as_ref()
+        .filter(|fact| {
+            fact.attempt_id.is_some() && fact.attempt_id == turn.model_attempt_id && recent(fact.at)
+        })
+        .map(|fact| fact.reason.as_str());
+    attributed.with_model_route_reason(reason)
 }
 
 /// A recent, unambiguous failure of this turn's exact model attempt explains a
@@ -271,6 +278,19 @@ pub fn failure_reason(
     now: DateTime<Utc>,
 ) -> Option<Box<crate::models::assistant_message::TurnFailureReason>> {
     use crate::models::assistant_message::TurnFailureReason;
+    let model_route = turn
+        .model_route_diagnostic
+        .as_ref()
+        .filter(|fact| {
+            !turn.model_attribution_uncertain
+                && fact.attempt_id.is_some()
+                && fact.attempt_id == turn.model_attempt_id
+                && fact.at <= now
+                && now.signed_duration_since(fact.at)
+                    <= chrono::Duration::from_std(MODEL_ATTRIBUTION_WINDOW).expect("bounded window")
+        })
+        .cloned()
+        .map(Box::new);
     if matches!(error.stage, "stream" | "upstream_response")
         && matches!(
             error.upstream_code.as_deref(),
@@ -287,6 +307,7 @@ pub fn failure_reason(
         })
     {
         return Some(Box::new(TurnFailureReason {
+            model_route: model_route.clone(),
             source: "nyxid".into(),
             stage: "model_proxy".into(),
             code: fact.code.clone(),
@@ -296,6 +317,7 @@ pub fn failure_reason(
     }
     error.upstream_code.as_ref().map(|code| {
         Box::new(TurnFailureReason {
+            model_route: model_route.clone(),
             source: "nyxagent".into(),
             stage: error.stage.into(),
             code: code.to_string(),

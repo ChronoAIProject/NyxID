@@ -169,6 +169,40 @@ impl Drop for ReplyGuard {
     }
 }
 
+async fn distinct_notice_bot(
+    state: &AppState,
+    channel: &mut NyxbotChannel,
+    platform: &'static str,
+    replies: &Calls,
+) -> ReplyGuard {
+    let bots = state.db.collection::<bson::Document>("channel_bots");
+    let mut bot = bots
+        .find_one(doc! {"_id": &channel.channel_bot_id})
+        .await
+        .unwrap()
+        .unwrap();
+    // Channel lists intentionally collapse attempts for the same bot. These
+    // fixtures represent separate attached bots, not competing connection rows.
+    channel.channel_bot_id = Uuid::new_v4().to_string();
+    bot.insert("_id", &channel.channel_bot_id);
+    bot.insert(
+        "platform_bot_id",
+        format!("fixture-{}", channel.channel_bot_id),
+    );
+    bots.insert_one(bot).await.unwrap();
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(
+            channel.channel_bot_id.clone(),
+            Arc::new(ReplyAdapter {
+                platform,
+                sent: replies.clone(),
+            }),
+        );
+    ReplyGuard(channel.channel_bot_id.clone())
+}
+
 async fn connection(
     state: &AppState,
     owner: &str,
@@ -688,7 +722,7 @@ async fn channel_model_turns_for(
         };
         if matches!(scenario, Scenario::RefusedByok) {
             assert!(
-                delivered.contains("This assistant isn't available to guests yet."),
+                delivered.contains("The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."),
                 "{platform}/{transport}: {delivered}"
             );
             assert!(!delivered.contains("secret provider detail"));
@@ -710,6 +744,247 @@ async fn channel_model_turns_for(
                 agent.owner_model_route.as_ref().unwrap().profile,
                 "nyxagent/research"
             );
+        }
+    }
+    let readiness = crate::services::assistant_service_execution::guest_readiness(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        Some(&specialist.id),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        readiness.status,
+        if matches!(scenario, Scenario::RefusedByok) {
+            "not_ready"
+        } else {
+            "ready"
+        },
+        "{platform}/{transport}/{scenario:?}: {}",
+        serde_json::to_string(&readiness).unwrap()
+    );
+    let settings = list_tool(&state, OWNER).await.unwrap();
+    let entry = settings["channel_agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == channel.id)
+        .unwrap();
+    assert_eq!(entry["guest_readiness"]["status"], readiness.status);
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    crate::services::assistant_service_execution::readiness::READS
+        .scope(reads.clone(), async {
+            let chat_settings = chats::list_chats(&state, OWNER, Some(&channel.id))
+                .await
+                .unwrap();
+            assert!(!chat_settings.is_empty());
+            for chat in chat_settings {
+                assert!(serde_json::to_value(chat).unwrap()["guest_readiness"].is_null());
+            }
+            let Json(channels) = list_channels(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(OWNER),
+            )
+            .await
+            .unwrap();
+            assert!(
+                channels["channel_agents"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["guest_readiness"].is_null())
+            );
+            if platform == "telegram-new" && !group {
+                let Json(dto) = crate::handlers::assistant_team::get_agent(
+                    State(state.clone()),
+                    crate::test_utils::test_auth_user(OWNER),
+                    Path(specialist.id.clone()),
+                )
+                .await
+                .unwrap();
+                assert!(dto["agent"]["guest_readiness"].is_null());
+            }
+        })
+        .await;
+    assert_eq!(
+        reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "list paths do no readiness reads"
+    );
+    let Json(dto) = crate::handlers::assistant_team::guest_readiness(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+        Path(specialist.id.clone()),
+        axum::extract::Query(Default::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(dto).unwrap()["status"],
+        readiness.status
+    );
+    if matches!(scenario, Scenario::RefusedByok) {
+        let notices = state
+            .db
+            .collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
+            .count_documents(doc! {"kind":"guest_model_setup_notice","agent_id":&specialist.id})
+            .await
+            .unwrap();
+        assert_eq!(
+            notices, 1,
+            "one metadata-only owner notification per setup reason"
+        );
+        assert!(
+            readiness
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("Send one message")
+        );
+        if transport == "direct" {
+            let mut private = state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .find_one(doc! {"channel_id":&channel.id})
+                .await
+                .unwrap()
+                .unwrap();
+            private.id = Uuid::new_v4().to_string();
+            private.partition = format!("owner-notice-{}", private.id);
+            private.relay_partition = None;
+            private.owner_chat = true;
+            private.kind = Some("private".into());
+            private.platform_chat_id = Some("owner-notice-chat".into());
+            private.platform_thread_id = None;
+            private.telegram_topic = None;
+            private.allow_posts = true;
+            private.conversation_id = None;
+            private.follow = Default::default();
+            state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .insert_one(&private)
+                .await
+                .unwrap();
+            let mut notice_bot_guards = Vec::new();
+            // Same owner, different linked agents: none means NyxBot, not this specialist.
+            if platform == "lark" && !group {
+                let nyxbot =
+                    crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+                        .await
+                        .unwrap();
+                for binding in [None, Some(nyxbot.id), Some(Uuid::new_v4().to_string())] {
+                    let mut other_channel = channel.clone();
+                    other_channel.id = Uuid::new_v4().to_string();
+                    other_channel.agent_id = binding;
+                    other_channel.private_chats = Some("owner".into());
+                    notice_bot_guards.push(
+                        distinct_notice_bot(&state, &mut other_channel, platform, &replies).await,
+                    );
+                    state
+                        .db
+                        .collection::<NyxbotChannel>(CHANNELS)
+                        .insert_one(&other_channel)
+                        .await
+                        .unwrap();
+                    let mut other_chat = private.clone();
+                    other_chat.id = Uuid::new_v4().to_string();
+                    other_chat.channel_id = other_channel.id;
+                    other_chat.partition = format!("other-{}", other_chat.id);
+                    other_chat.platform_chat_id = Some(format!("wrong-agent-{}", other_chat.id));
+                    let other_chat_id = other_chat.id.clone();
+                    state
+                        .db
+                        .collection::<NyxbotThread>(THREADS)
+                        .insert_one(other_chat)
+                        .await
+                        .unwrap();
+                    assert!(
+                        chats::prepare_post(&state, OWNER, &other_chat_id, None)
+                            .await
+                            .is_ok(),
+                        "unrelated-agent owner destinations must otherwise be deliverable"
+                    );
+                }
+                // Two open channels for one specialist compute readiness once;
+                // closed channels for other agents compute none.
+                let mut same = channel.clone();
+                same.id = Uuid::new_v4().to_string();
+                notice_bot_guards
+                    .push(distinct_notice_bot(&state, &mut same, platform, &replies).await);
+                state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .insert_one(&same)
+                    .await
+                    .unwrap();
+                reads.store(0, std::sync::atomic::Ordering::SeqCst);
+                crate::services::assistant_service_execution::readiness::READS
+                    .scope(reads.clone(), async {
+                        let listed = list_tool(&state, OWNER).await.unwrap();
+                        assert_eq!(listed["channel_agents"].as_array().unwrap().len(), 5);
+                    })
+                    .await;
+                assert_eq!(
+                    reads.load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "memoized per open-channel agent"
+                );
+                // Group audience also requests readiness when private chats are owner-only.
+                state
+                    .db
+                    .collection::<bson::Document>(CHANNELS)
+                    .update_many(
+                        doc! {"user_id":OWNER},
+                        doc! {"$set":{"private_chats":"owner"}},
+                    )
+                    .await
+                    .unwrap();
+                state
+                    .db
+                    .collection::<bson::Document>(THREADS)
+                    .update_one(
+                        doc! {"_id":&private.id},
+                        doc! {"$set":{"kind":"group","members":"everyone"}},
+                    )
+                    .await
+                    .unwrap();
+                reads.store(0, std::sync::atomic::Ordering::SeqCst);
+                crate::services::assistant_service_execution::readiness::READS
+                    .scope(reads.clone(), async {
+                        list_tool(&state, OWNER).await.unwrap();
+                    })
+                    .await;
+                assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+                state
+                    .db
+                    .collection::<bson::Document>(THREADS)
+                    .update_one(
+                        doc! {"_id":&private.id},
+                        doc! {"$set":{"kind":"private","members":"owner"}},
+                    )
+                    .await
+                    .unwrap();
+                reads.store(0, std::sync::atomic::Ordering::SeqCst);
+                crate::services::assistant_service_execution::readiness::READS
+                    .scope(reads.clone(), async {
+                        list_tool(&state, OWNER).await.unwrap();
+                    })
+                    .await;
+                assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+            }
+            let before = replies.lock().await.len();
+            guest_model_notices::sweep(&state).await.unwrap();
+            guest_model_notices::sweep(&state).await.unwrap();
+            let sent = replies.lock().await;
+            assert_eq!(sent.len(), before + 1, "one owner setup notice");
+            let note = sent.last().unwrap();
+            assert_eq!(note["chat"], "owner-notice-chat");
+            assert!(note["text"].as_str().unwrap().contains("Send one message"));
+            assert!(note["text"].as_str().unwrap().contains("/assistant?agent="));
+            assert!(!note["text"].as_str().unwrap().contains("@helper_bot hello"));
         }
     }
     let seen = seen.lock().await;

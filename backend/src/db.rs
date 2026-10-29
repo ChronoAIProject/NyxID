@@ -230,6 +230,13 @@ pub(crate) async fn ensure_lark_base_write_indexes(
 
 async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"kind":1,"pending":1,"created_at":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
         .create_indexes([
             IndexModel::builder().keys(doc! {"expires_at": 1})
                 .options(IndexOptions::builder().expire_after(Duration::ZERO).build()).build(),

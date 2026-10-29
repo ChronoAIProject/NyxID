@@ -1,4 +1,5 @@
 //! Guests may reuse an owner-established model route, never choose one.
+use super::model_diagnostic::{Reason, refuse};
 use super::*;
 use crate::models::{
     assistant_agent::{AssistantAgent, OwnerModelRoute},
@@ -102,41 +103,50 @@ pub(super) async fn require(
     operation: &mut Value,
 ) -> AppResult<()> {
     if is_shared_chat(chat) {
-        return Err(AppError::GuestModelRouteRequired);
+        return refuse(db, chat, Reason::SharedChat).await;
     }
     let row = conversation(db, chat).await?;
-    let admitted = input(db, chat)
-        .await?
-        .ok_or(AppError::GuestModelRouteRequired)?;
+    let Some(admitted) = input(db, chat).await? else {
+        return refuse(db, chat, Reason::NoAdmission).await;
+    };
     if operation
         .get("input_admission")
         .is_some_and(|value| value != &json!(admitted))
     {
-        return Err(AppError::GuestModelRouteRequired);
+        return refuse(db, chat, Reason::NoAdmission).await;
     }
     operation["input_admission"] = json!(admitted);
-    let agent = db
+    let Some(agent) = db
         .collection::<AssistantAgent>("assistant_agents")
         .find_one(doc! {"_id":&chat.agent_id,"user_id":&chat.user_id,"destroyed_at":null})
         .await?
-        .ok_or(AppError::GuestModelRouteRequired)?;
+    else {
+        return refuse(db, chat, Reason::AgentUnavailable).await;
+    };
     if let Some(bound) = row.owner_model_route.as_deref().or_else(|| {
         agent
             .owner_model_route
             .as_deref()
             .filter(|bound| bound.profile == row.model)
     }) {
-        if bound == &route(db, chat, &row.model, connection, target, operation).await? {
+        let actual = match route(db, chat, &row.model, connection, target, operation).await {
+            Ok(route) => route,
+            Err(AppError::GuestModelRouteRequired) => {
+                return refuse(db, chat, Reason::ConnectionNotPlatform).await;
+            }
+            Err(error) => return Err(error),
+        };
+        if bound == &actual {
             return Ok(());
         }
-    } else if super::guest_model_defaults::matches(
-        db, chat, &row.model, connection, target, operation,
-    )
-    .await?
-    {
-        return Ok(());
+        return refuse(db, chat, Reason::RouteMismatch).await;
     }
-    Err(AppError::GuestModelRouteRequired)
+    match super::guest_model_defaults::matches(db, chat, &row.model, connection, target, operation)
+        .await?
+    {
+        None => Ok(()),
+        Some(reason) => refuse(db, chat, reason).await,
+    }
 }
 
 /// Only normal owner model admission establishes a route. Each thread retains
