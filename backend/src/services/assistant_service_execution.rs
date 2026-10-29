@@ -371,6 +371,7 @@ async fn check_inner(
             refusal: None,
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
+                model_control: None,
                 shared_permit: permit,
                 connection: connection_id.into(),
                 binding,
