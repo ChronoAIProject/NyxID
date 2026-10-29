@@ -11,6 +11,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const r = resolveProfile(appEnv, env, { warnOnFrontendUrlFallback: true });
   const ident = appIdentity(env);
 
+  // Keep public env inputs covered by the profile/identity cache key in metro.config.js.
   process.env.EXPO_PUBLIC_API_BASE_URL = r.apiBaseUrl;
   process.env.EXPO_PUBLIC_FRONTEND_URL = r.frontendUrl;
   process.env.EXPO_PUBLIC_LEGACY_FRONTEND_URL = r.legacyFrontendUrl;
