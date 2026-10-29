@@ -896,7 +896,7 @@ mod tests {
             let workspace = gate.join("workspace");
             std::fs::create_dir(&workspace).unwrap();
             std::fs::write(workspace.join("private"), uid.to_string()).unwrap();
-            std::os::unix::fs::chown(&workspace.join("private"), Some(uid), Some(uid)).unwrap();
+            std::os::unix::fs::chown(workspace.join("private"), Some(uid), Some(uid)).unwrap();
             std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::os::unix::fs::chown(&workspace, Some(uid), Some(uid)).unwrap();
         }
@@ -916,7 +916,7 @@ mod tests {
             .output()
             .await
             .unwrap();
-        let roots = Roots::new(&[workspace.clone()], &[]).unwrap();
+        let roots = Roots::new(std::slice::from_ref(&workspace), &[]).unwrap();
         let pinned = roots.cwd(None);
         println!(
             "contexts_mode={:o} worker_path_success={} supervisor_pin_success={} worker_stderr={}",

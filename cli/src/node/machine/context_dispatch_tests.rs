@@ -445,12 +445,12 @@ fn legacy_home_transition_rejects_unsafe_targets_and_parents() {
     let link = root.path().join("link");
     std::os::unix::fs::symlink(&target, &link).unwrap();
     identity.home = link.clone();
-    assert!(protect_legacy_roots(&[link.clone()], &identity).is_err());
+    assert!(protect_legacy_roots(std::slice::from_ref(&link), &identity).is_err());
     assert!(protect_legacy_browser_home(&identity).is_err());
     assert_eq!(fs::metadata(&target).unwrap().mode() & 0o777, 0o700);
     std::os::unix::fs::chown(&target, Some(1002), Some(1002)).unwrap();
     identity.home = target.clone();
-    assert!(protect_legacy_roots(&[target.clone()], &identity).is_err());
+    assert!(protect_legacy_roots(std::slice::from_ref(&target), &identity).is_err());
     assert!(protect_legacy_browser_home(&identity).is_err());
     assert_eq!(
         fs::metadata(&target).unwrap().uid(),
@@ -459,7 +459,7 @@ fn legacy_home_transition_rejects_unsafe_targets_and_parents() {
     );
     std::os::unix::fs::chown(&target, Some(1000), Some(1000)).unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o777)).unwrap();
-    assert!(protect_legacy_roots(&[target.clone()], &identity).is_err());
+    assert!(protect_legacy_roots(std::slice::from_ref(&target), &identity).is_err());
     assert!(protect_legacy_browser_home(&identity).is_err());
     assert_eq!(fs::metadata(&target).unwrap().uid(), 1000);
     hardened_envelope();
