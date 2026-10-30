@@ -932,6 +932,63 @@ async fn automation_stop_preserves_unrelated_turn_and_rereads_idle_membership() 
 }
 
 #[tokio::test]
+async fn automation_idle_stop_cleanup_failure_cannot_acknowledge_resumable_work() {
+    let (state, calls, server) = setup("automation_idle_stop_cleanup_error").await;
+    let (_, run, row) = Box::pin(completion_coordinator(&state)).await;
+    completion_queue(&state, &row, &run).await;
+    Box::pin(completion_reply(&state, &row, &run)).await;
+    let idle = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert!(idle.active_turn.is_none());
+    assert!(idle.coordinator_run_ids.contains(&run.id));
+    assert_eq!(
+        completion_load(&state, &run.id).await.outcome,
+        RunOutcome::Waiting
+    );
+    // Reject the real terminal write, just as the active-turn failure control
+    // below does. No production failpoint replaces the Stop implementation.
+    state
+        .db
+        .run_command(doc! {
+            "collMod": RUNS,
+            "validator": {"outcome": {"$ne": "failed"}},
+            "validationLevel": "strict", "validationAction": "error"
+        })
+        .await
+        .unwrap();
+    let stop = engine::request_stop_target(&state.db, OWNER, &row.id).await;
+    // Recovery cannot revive work that Stop acknowledged successfully.
+    state
+        .db
+        .run_command(doc! {"collMod": RUNS, "validator": {}})
+        .await
+        .unwrap();
+    let claim = continuation_v2::claim_event(&state.db, OWNER, &row.id, &run.id)
+        .await
+        .unwrap();
+    let resumed = if let Some(claim) = claim {
+        Box::pin(engine::begin_turn(
+            &state.db,
+            OWNER,
+            completion_start(&row.id, TurnOrigin::Event, Some(claim)),
+            &state.encryption_keys,
+        ))
+        .await
+        .is_ok()
+    } else {
+        false
+    };
+    assert!(
+        calls.lock().await.is_empty(),
+        "admission probe must not invoke provider"
+    );
+    server.abort();
+    assert!(
+        stop.is_err() || !resumed,
+        "idle Stop returned success but its run admitted a fresh coordinator turn after cleanup recovered"
+    );
+}
+
+#[tokio::test]
 async fn automation_stop_cleanup_failure_cannot_block_actual_turn_stop() {
     let (state, _, server) = setup("automation_stop_cleanup_error").await;
     let (_, run, row) = Box::pin(completion_coordinator(&state)).await;

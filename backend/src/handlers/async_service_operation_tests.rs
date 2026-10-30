@@ -763,6 +763,92 @@ async fn async_submit_mcp_polls_once_across_replicas_and_quotes_encrypted_result
 }
 
 #[tokio::test]
+async fn async_idle_stop_cancellation_write_failure_is_not_acknowledged() {
+    async_stop_write_failure(false).await;
+}
+
+#[tokio::test]
+async fn async_expired_legacy_stop_cancellation_write_failure_is_not_acknowledged() {
+    async_stop_write_failure(true).await;
+}
+
+async fn async_stop_write_failure(expired_legacy_turn: bool) {
+    let a = AsyncFixture::new().await;
+    a.submit().await;
+    if expired_legacy_turn {
+        a.f.state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &a.f.row.id},
+                doc! {"$set": {"active_turn.lease_expires_at": bson::DateTime::from_millis(0)},
+                "$unset": {"active_turn.heartbeat_at": ""}},
+            )
+            .await
+            .unwrap();
+    } else {
+        engine::finish_turn(
+            &a.f.state.db,
+            &a.f.row,
+            &a.f.row.credential_api_key_id,
+            &uuid::Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "submitted".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let row = engine::get(&a.f.state.db, &a.f.owner, &a.f.row.id)
+        .await
+        .unwrap();
+    assert!(engine::live_turn(&row, chrono::Utc::now()).is_none());
+    assert_eq!(row.active_turn.is_some(), expired_legacy_turn);
+    assert_eq!(a.watch().await.state, "waiting");
+    a.f.state
+        .db
+        .run_command(doc! {
+            "collMod": WATCHES,
+            "validator": {"state": {"$ne": "cancelling"}},
+            "validationLevel": "strict", "validationAction": "error"
+        })
+        .await
+        .unwrap();
+    // Exercise the actual HTTP handler's result, not an imitation of Stop.
+    let result = crate::handlers::assistant_nyxagent::stop(
+        State(a.f.state.clone()),
+        crate::test_utils::test_auth_user(&a.f.owner),
+        axum::extract::Path(a.f.row.id.clone()),
+    )
+    .await;
+    a.f.state
+        .db
+        .run_command(doc! {"collMod": WATCHES, "validator": {}})
+        .await
+        .unwrap();
+    assert_eq!(a.watch().await.state, "waiting");
+    assert!(
+        !a.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.ends_with("/cancel")),
+        "failed persistence must not pretend an upstream cancellation happened"
+    );
+    assert!(
+        result.is_err(),
+        "Stop acknowledged success while an uncancelled ordinary watch remained waiting (expired legacy turn: {expired_legacy_turn})"
+    );
+    assert!(matches!(
+        result,
+        Err(crate::errors::AppError::DatabaseError(_))
+    ));
+}
+
+#[tokio::test]
 async fn async_stop_cancels_upstream_and_suppresses_wake() {
     let a = AsyncFixture::new().await;
     let original = a.submit().await;

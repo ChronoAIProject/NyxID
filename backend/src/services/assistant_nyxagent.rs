@@ -3566,10 +3566,7 @@ pub async fn request_stop_target(
     let row = if let Some(turn) = &existing.active_turn {
         // Preserve the pre-heartbeat lease boundary.
         if turn.heartbeat_at.is_none() && live_turn(&existing, now).is_none() {
-            if let Err(error) = super::async_service_operation::cancel_for_stop(db, &existing).await
-            {
-                tracing::warn!(conversation_id=%id,%error,"Legacy async stop cleanup deferred");
-            }
+            super::async_service_operation::cancel_for_stop(db, &existing).await?;
             return Ok(None);
         }
         let Some(row) = db
@@ -3610,13 +3607,24 @@ pub async fn request_stop_target(
     } else {
         existing
     };
-    // Auxiliary cleanup must not suppress the persisted Stop, forced settlement,
-    // or the handler's subsequent upstream/machine cancellation attempts.
+    // After an active-turn Stop is durable, auxiliary cleanup must not suppress
+    // forced settlement or subsequent upstream/machine cancellation attempts.
+    // An idle Stop has no such durable flag, so failed cleanup must be reported.
+    let mut cleanup_error = None;
     if let Err(error) = super::trigger_schedule::continuation::cancel_thread(db, &row).await {
         tracing::warn!(conversation_id=%id,%error,"Automation stop cleanup deferred");
+        cleanup_error = Some(error);
     }
     if let Err(error) = super::async_service_operation::cancel_for_stop(db, &row).await {
         tracing::warn!(conversation_id=%id,%error,"Async stop cleanup deferred");
+        if cleanup_error.is_none() {
+            cleanup_error = Some(error);
+        }
+    }
+    if row.active_turn.is_none()
+        && let Some(error) = cleanup_error
+    {
+        return Err(error);
     }
     Ok(Some(row))
 }
