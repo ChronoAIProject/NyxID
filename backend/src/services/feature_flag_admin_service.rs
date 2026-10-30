@@ -282,17 +282,15 @@ async fn mutate_in_session(
                 .find_one(identity.clone())
                 .session(&mut *session)
                 .await?;
-            if let Mutation::Metadata(patch) = mutation {
-                if let Some(expected) = &patch.expected_tags {
-                    if before
-                        .as_ref()
-                        .map(|row| row.tags.as_slice())
-                        .unwrap_or_default()
-                        != expected.as_slice()
-                    {
-                        return Err(AppError::Conflict("Flag tags changed. Close this review and use Load latest values in the organization editor before saving again.".into()));
-                    }
-                }
+            if let Mutation::Metadata(patch) = mutation
+                && let Some(expected) = &patch.expected_tags
+                && before
+                    .as_ref()
+                    .map(|row| row.tags.as_slice())
+                    .unwrap_or_default()
+                    != expected.as_slice()
+            {
+                return Err(AppError::Conflict("Flag tags changed. Close this review and use Load latest values in the organization editor before saving again.".into()));
             }
             if metadata_set.is_empty() {
                 output.metadata = before;

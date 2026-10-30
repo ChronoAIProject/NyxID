@@ -655,10 +655,8 @@ pub async fn list_feature_flag_history(
 ) -> AppResult<Json<FlagHistoryResponse>> {
     let access = require_feature_flag_access(&state, &auth).await?;
     let def = feature_flag_service::get_definition(&state.db, &key).await?;
-    if !access.read_all
-        && !(access.manage_own
-            && def.created_by.as_deref() == Some(auth.user_id.to_string().as_str()))
-    {
+    let created_by_actor = def.created_by.as_deref() == Some(auth.user_id.to_string().as_str());
+    if !(access.read_all || access.manage_own && created_by_actor) {
         return Err(AppError::Forbidden(
             "You may only view history for flags you created".into(),
         ));
