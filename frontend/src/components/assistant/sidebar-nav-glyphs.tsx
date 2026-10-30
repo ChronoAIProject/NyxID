@@ -108,6 +108,7 @@ function easeInOutCubic(t: number): number {
 }
 
 const SVG_ATTRS = {
+  "data-ui-icon": "",
   "aria-hidden": true,
   focusable: false,
   width: 24,

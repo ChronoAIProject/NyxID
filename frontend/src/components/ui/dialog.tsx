@@ -92,6 +92,7 @@ const DialogContent = React.forwardRef<
         {children}
       </div>
       <DialogPrimitive.Close
+        data-icon-button=""
         className="absolute right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground"
         style={{ top: "max(1rem, var(--sat, env(safe-area-inset-top, 0px)))" }}
       >

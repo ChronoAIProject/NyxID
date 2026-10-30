@@ -193,11 +193,10 @@ export function ThreadHeader({
             {controls}
             {onOpenDetails ? (
               <Button
-                size="sm"
+                size={compact ? "icon" : "sm"}
                 variant="ghost"
                 aria-label="Agent details"
                 title="Agent details"
-                className={compact ? "h-7 w-7 px-0" : undefined}
                 onClick={onOpenDetails}
               >
                 <PanelRightOpen aria-hidden="true" />

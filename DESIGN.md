@@ -89,8 +89,16 @@ portaled menus and account settings: `text-9`/`text-10` resolve to 12px,
 and the composer use `text-16` (16px), with unitless line heights. Markdown
 headings use 16–24px, and code blocks and tables use 14px. These values all
 follow the selected text multiplier; spacing remains independent. Controls
-reserve room for their line height and at least a 24px pointer target, even at
-compact spacing. Settings rows wrap according to the space their content needs.
+reserve room for their line height and a 1.5rem minimum pointer target.
+Settings rows wrap according to the space their content needs.
+Assistant interface icons use the surrounding label's font size (`1.125em`),
+including sidebar glyphs, portaled menus, and dialog controls. Icon gaps and
+padding use `em` multiplied by the user's density, so increasing text size
+also increases the space around each icon. Controls use automatic height and
+content width, with relative minimum targets; labelled controls and settings
+rows wrap within the available width. Avoid fixed dimensions on icon buttons.
+Use unitless line heights for helper text. Attachment cards grow with their
+labels and controls; thumbnail limits must not constrain the card's text.
 On iOS, inputs have a 16px minimum to prevent focus zoom and still grow with
 larger text preferences.
 

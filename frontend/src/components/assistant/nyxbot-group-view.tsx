@@ -499,9 +499,8 @@ function GroupHeader({
           ) : null}
           {group ? <HeaderItem className="ml-auto">
             <Button
-              size="sm"
+              size={compact ? "icon" : "sm"}
               variant="ghost"
-              className={compact ? "h-7 w-7 px-0" : undefined}
               aria-label="Group settings"
               title="Group settings"
               onClick={onOpenSettings}

@@ -261,6 +261,7 @@ html.theme-dark {
 /* Assistant reading scale, shared by the shell and its portaled settings,
    menus and dialogs. Rem values preserve the full user-selected text scale. */
 html.assistant-display {
+  --assistant-density: 1;
   --text-9: 0.75rem;
   --text-10: 0.75rem;
   --text-11: 0.8125rem;
@@ -275,21 +276,70 @@ html.assistant-display body {
 /* Compact spacing must still leave room for enlarged labels and usable
    pointer targets. The tab strip must contain the same padding as its tabs. */
 html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tablist"], input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
-  min-height: max(24px, calc(1lh + var(--spacing) * 2));
+  height: auto;
+  min-height: max(1.5rem, calc(1lh + var(--spacing) * 2));
 }
 
 html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) {
-  min-width: 24px;
+  min-width: max(1.5rem, calc(1lh + var(--spacing) * 2));
+}
+
+/* Interface icons follow the surrounding text, independently of density.
+   Brand marks and illustrations retain their own proportions. */
+html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) svg.lucide,
+html.assistant-display svg[data-ui-icon] {
+  width: max(0.75rem, 1.125em);
+  height: max(0.75rem, 1.125em);
+  flex-shrink: 0;
+}
+
+html.assistant-display :where(button, a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]):not(:where([data-icon-button], .assistant-icon-button)):has(> :is(svg.lucide, svg[data-ui-icon])) {
+  column-gap: calc(0.5em * var(--assistant-density));
+  padding-inline: calc(0.75em * var(--assistant-density));
+  padding-block: calc(0.375em * var(--assistant-density));
+  height: auto;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+html.assistant-display button:has(> svg.lucide):not([data-icon-button]) {
+  flex-wrap: wrap;
+}
+
+html.assistant-display :is([data-icon-button], .assistant-icon-button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: auto;
+  height: auto;
+  padding: calc(0.5em * var(--assistant-density));
+}
+
+html.assistant-display .assistant-icon-button {
+  min-width: max(1.5rem, calc(1lh + var(--spacing) * 2));
+  min-height: max(1.5rem, calc(1lh + var(--spacing) * 2));
+}
+
+html.assistant-display [role="option"]:has(> [data-select-indicator]) {
+  padding-right: calc(1.125em + 1.25em * var(--assistant-density));
+}
+
+html.assistant-display [data-select-indicator] {
+  right: calc(0.75em * var(--assistant-density));
+  width: max(0.75rem, 1.125em);
+  height: max(0.75rem, 1.125em);
 }
 
 html.assistant-display [role="tablist"] {
   height: auto;
   flex-shrink: 0;
-  min-height: max(24px, calc(1lh + var(--spacing) * 4));
+  min-height: max(1.5rem, calc(1lh + var(--spacing) * 4));
 }
 
 html.assistant-display input[type="range"] {
-  min-height: 24px;
+  min-height: 1.5rem;
 }
 
 /* Helper-class light variants — these effects were authored as white-on-dark

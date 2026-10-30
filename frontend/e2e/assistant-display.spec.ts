@@ -11,6 +11,11 @@ test.afterEach(async ({ page }, testInfo) => {
 
 async function openDisplay(page: Page) {
   await openAccountMenu(page);
+  const menu = page.getByRole("menu");
+  await expectContained(menu);
+  const bounds = await menu.boundingBox();
+  expect(bounds!.y).toBeGreaterThanOrEqual(0);
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
   await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Account Settings" });
   await dialog.getByRole("tab", { name: "Display", exact: true }).click();
@@ -37,6 +42,27 @@ async function expectContained(element: Locator) {
   expect(bounds.scrollWidth, JSON.stringify(bounds.overflowing)).toBeLessThanOrEqual(bounds.width + 1);
 }
 
+async function expectPaddedIcon(control: Locator, density: number, iconOnly = false) {
+  const size = await control.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const icon = element.querySelector("svg")!.getBoundingClientRect();
+    return {
+      font: parseFloat(style.fontSize),
+      rootFont: parseFloat(getComputedStyle(document.documentElement).fontSize),
+      icon: icon.width,
+      width: element.clientWidth,
+      height: element.clientHeight,
+      horizontalPadding: parseFloat(style.paddingLeft),
+      verticalPadding: parseFloat(style.paddingTop),
+    };
+  });
+  expect(size.icon).toBeCloseTo(Math.max(0.75 * size.rootFont, 1.125 * size.font), 1);
+  expect(size.horizontalPadding).toBeCloseTo(size.font * (iconOnly ? 0.5 : 0.75) * density, 1);
+  expect(size.verticalPadding).toBeCloseTo(size.font * (iconOnly ? 0.5 : 0.375) * density, 1);
+  expect(size.width).toBeGreaterThanOrEqual(size.icon + size.horizontalPadding * 2 - 1);
+  expect(size.height).toBeGreaterThanOrEqual(size.icon + size.verticalPadding * 2 - 1);
+}
+
 for (const width of [320, 1280]) {
   for (const [textScale, spacing] of [[0.5, 2], [1, 1], [1.83, 0.83], [2, 0.5], [2, 2]]) {
     test(`display choices remain usable at ${width}px, text ${textScale}× and spacing ${spacing}×`, async ({ page }, testInfo) => {
@@ -59,16 +85,20 @@ for (const width of [320, 1280]) {
         await expect(button).toHaveAttribute("aria-checked", "true");
         const size = await button.evaluate((el) => ({ height: el.clientHeight, lineHeight: parseFloat(getComputedStyle(el).lineHeight) }));
         expect(size.height).toBeGreaterThanOrEqual(size.lineHeight);
+        await expectPaddedIcon(button, spacing);
       }
       const displayTab = dialog.getByRole("tab", { name: "Display", exact: true });
       const tabBounds = await displayTab.boundingBox();
       const stripBounds = await dialog.getByRole("tablist").boundingBox();
       expect(tabBounds!.height).toBeLessThanOrEqual(stripBounds!.height + 1);
       await dialog.getByRole("button", { name: "Reset display settings" }).scrollIntoViewIfNeeded();
-      if (textScale === 2 && spacing === 0.5) {
-        const screenshot = testInfo.outputPath("large-text-compact-spacing.png");
+      await expectPaddedIcon(dialog.getByRole("button", { name: "Reset display settings" }), spacing);
+      await expectPaddedIcon(dialog.getByRole("button", { name: "Close", exact: true }), spacing, true);
+      if ((textScale === 2 && spacing === 0.5) || (width === 1280 && textScale === 1 && spacing === 1)) {
+        const label = textScale === 1 ? "default-display" : "large-text-compact-spacing";
+        const screenshot = testInfo.outputPath(`${label}.png`);
         await page.screenshot({ path: screenshot });
-        await testInfo.attach("large-text-compact-spacing", { path: screenshot, contentType: "image/png" });
+        await testInfo.attach(label, { path: screenshot, contentType: "image/png" });
       }
       await page.keyboard.press("Escape");
 
@@ -87,6 +117,7 @@ for (const width of [320, 1280]) {
       expect(send!.x).toBeGreaterThanOrEqual(0);
       expect(send!.x + send!.width).toBeLessThanOrEqual(width);
       expect(send!.y + send!.height).toBeLessThanOrEqual(900);
+      await expectPaddedIcon(page.getByRole("button", { name: "Send message", exact: true }), spacing, true);
 
       await page.reload();
       await expect.poll(() => composerInput(page).evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBe(16 * textScale);

@@ -245,7 +245,7 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
     <span
       title={decisionTitle(row)}
       className={cn(
-        "shrink-0 rounded border px-1 font-sans text-9 leading-4",
+        "shrink-0 rounded border px-1 font-sans text-9 leading-normal",
         denied
           ? "border-warning/30 bg-warning/10 text-warning"
           : "border-hairline bg-overlay text-text-tertiary",

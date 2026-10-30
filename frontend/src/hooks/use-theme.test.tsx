@@ -24,6 +24,7 @@ describe("useApplyTheme", () => {
     expect(root.classList.contains("assistant-display")).toBe(true);
     expect(root.style.fontSize).toBe("125%");
     expect(root.style.getPropertyValue("--spacing")).toBe("5.48px");
+    expect(root.style.getPropertyValue("--assistant-density")).toBe("1.37");
     expect(root.classList.contains("motion-reduce")).toBe(true);
     expect(document.getElementById("nyxid-custom-colors")?.textContent).toContain("--color-border: #123456;");
 
@@ -32,6 +33,7 @@ describe("useApplyTheme", () => {
     expect(root.classList.contains("assistant-display")).toBe(false);
     expect(root.style.fontSize).toBe("");
     expect(root.style.getPropertyValue("--spacing")).toBe("");
+    expect(root.style.getPropertyValue("--assistant-density")).toBe("");
     expect(root.classList.contains("motion-reduce")).toBe(false);
     expect(document.getElementById("nyxid-custom-colors")).toBeNull();
   });

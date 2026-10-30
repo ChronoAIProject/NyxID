@@ -123,12 +123,13 @@ export function AssistantShell({
           <OfflineBanner />
           {/* Mobile only: the drawer opener. On desktop the sidebar column
               carries the brand and there is no top row. */}
-          <header className="flex min-h-[max(52px,calc(1.5rem+var(--spacing)*6))] shrink-0 items-center gap-2 px-3 py-1 sm:px-4 md:hidden">
+          <header className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center gap-2 px-3 py-1 sm:px-4 md:hidden">
             <button
               type="button"
               onClick={() => setMobileSidebarOpen(true)}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
+              className="flex shrink-0 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
               aria-label="Open chats"
+              data-icon-button=""
               data-assistant-account-fallback="drawer"
             >
               <Menu className="h-4 w-4" />
@@ -144,7 +145,7 @@ export function AssistantShell({
             {sidebarHidden ? (
               // Hidden sidebar: a slim rail with home, the sidebar toggle and
               // search, then the sidebar itself drawn as icons and avatars.
-              <aside className="hidden w-14 shrink-0 flex-col items-center bg-sidebar md:flex">
+              <aside className="hidden w-max shrink-0 flex-col items-center bg-sidebar px-2 md:flex">
                 <div className="flex shrink-0 flex-col items-center gap-1 pt-2.5 pb-1">
                   <Link
                     to="/assistant"
@@ -167,7 +168,7 @@ export function AssistantShell({
                 className="relative hidden shrink-0 flex-col bg-sidebar md:flex"
                 style={{ width: sidebarWidth }}
               >
-                <div className="flex min-h-[max(52px,calc(1.5rem+var(--spacing)*6))] shrink-0 items-center gap-1 pl-4 pr-3 py-1">
+                <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center gap-1 pl-4 pr-3 py-1">
                   <Link to="/assistant" search={{}} aria-label="Assistant home" className="mr-auto">
                     <NyxidLogo className="h-5 w-auto" />
                   </Link>
@@ -234,21 +235,22 @@ export function AssistantShell({
                 aria-label="Close chats"
               />
               <aside
-                className="relative flex h-full w-[min(320px,88vw)] flex-col border-r border-border bg-sidebar shadow-xl"
+                className="relative flex h-full w-[min(20rem,88vw)] flex-col border-r border-border bg-sidebar shadow-xl"
                 style={{
                   paddingTop: "var(--sat)",
                   paddingBottom: "var(--sab)",
                   paddingLeft: "var(--sal)",
                 }}
               >
-                <div className="flex min-h-[max(52px,calc(1.5rem+var(--spacing)*6))] shrink-0 items-center gap-1 border-b border-border/60 px-4 py-1">
+                <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center gap-1 border-b border-border/60 px-4 py-1">
                   <NyxidLogo className="mr-auto h-5 w-auto" />
                   <AssistantSearchButton onOpen={openSearch} />
                   <button
                     type="button"
                     onClick={() => setMobileSidebarOpen(false)}
-                    className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary"
+                    className="flex items-center justify-center rounded-lg text-text-tertiary"
                     aria-label="Close chats"
+                    data-icon-button=""
                   >
                     <X className="h-4 w-4" />
                   </button>
@@ -380,8 +382,9 @@ function SidebarToggle({ hidden, onToggle }: { readonly hidden: boolean; readonl
       type="button"
       onClick={onToggle}
       aria-label={label}
+      data-icon-button=""
       title={label}
-      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+      className="flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
     >
       {hidden ? <PanelLeftOpen aria-hidden="true" className="h-4 w-4" /> : <PanelLeftClose aria-hidden="true" className="h-4 w-4" />}
     </button>

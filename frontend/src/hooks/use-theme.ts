@@ -63,10 +63,12 @@ export function useApplyTheme(surface?: "assistant"): void {
     const root = document.documentElement;
     if (density === 1) root.style.removeProperty("--spacing");
     else root.style.setProperty("--spacing", `${4 * density}px`);
+    if (surface === "assistant") root.style.setProperty("--assistant-density", String(density));
     return () => {
       root.style.removeProperty("--spacing");
+      if (surface === "assistant") root.style.removeProperty("--assistant-density");
     };
-  }, [density]);
+  }, [density, surface]);
 
   useLayoutEffect(() => {
     const root = document.documentElement;

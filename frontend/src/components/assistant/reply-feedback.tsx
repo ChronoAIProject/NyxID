@@ -65,6 +65,7 @@ export function ReplyFeedbackVotes({ feedback }: { readonly feedback: ReplyFeedb
             type="button"
             aria-label={next === "up" ? "Helpful" : "Not helpful"}
             aria-pressed={feedback.vote === next}
+            data-icon-button=""
             disabled={feedback.pending}
             onClick={() => void feedback.toggle(next)}
             className={cn(
@@ -77,7 +78,7 @@ export function ReplyFeedbackVotes({ feedback }: { readonly feedback: ReplyFeedb
         );
       })}
       {feedback.vote ? (
-        <button type="button" aria-label={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} title={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} disabled={feedback.pending} onClick={feedback.edit} className="rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50">
+        <button type="button" data-icon-button="" aria-label={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} title={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} disabled={feedback.pending} onClick={feedback.edit} className="rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50">
           <MessageSquare className="h-3.5 w-3.5" />
         </button>
       ) : null}

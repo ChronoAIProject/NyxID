@@ -1362,7 +1362,7 @@ function DraftedChatComposer({
                     <div
                       data-composer-settings
                       ref={settingsRef}
-                      className="min-w-0 max-w-[72px] sm:max-w-[160px]"
+                      className="min-w-0 max-w-[4.5rem] sm:max-w-[10rem]"
                     >
                       {footerControls}
                     </div>

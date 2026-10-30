@@ -35,7 +35,7 @@ export function WorkingContextPanel({
   return (
     <Sheet open={open} onOpenChange={(next) => { setOpen(next); setConfirming(false); }}>
       <SheetTrigger asChild>
-        <Button size="sm" variant="ghost" aria-label="Working context" title="Working context" className={compact ? "h-7 w-7 px-0" : undefined}>
+        <Button size={compact ? "icon" : "sm"} variant="ghost" aria-label="Working context" title="Working context">
           <NotebookText aria-hidden="true" />
           <span className={compact ? "sr-only" : undefined}>Working context</span>
         </Button>
