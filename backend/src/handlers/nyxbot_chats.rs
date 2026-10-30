@@ -1548,12 +1548,27 @@ pub(crate) async fn post(
 }
 
 /// This gate is unconditional, including when the general turn-gate flag is off.
-pub(super) async fn post_turn_is_live(
+pub(crate) async fn post_turn_is_live(
     state: &AppState,
     chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
 ) -> AppResult<bool> {
     if chat.guest || chat.turn_id.is_none() {
         return Ok(false);
+    }
+    if let Some(original) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        let live = crate::services::shared_agent_service::require(
+            &state.db,
+            &chat.user_id,
+            original.agent(),
+        )
+        .await?;
+        if live.revision() != original.revision()
+            || crate::services::shared_agent_consent::behavior(&live)
+                != crate::services::shared_agent_consent::behavior(original)
+        {
+            return Ok(false);
+        }
     }
     let active_key = state
         .db
@@ -1612,9 +1627,18 @@ pub(crate) async fn post_current_turn(
         state,
         &chat.user_id,
         chat_id,
-        (!chat.is_orchestrator()).then_some(chat.agent_id.as_str()),
+        (!chat.is_orchestrator()
+            && !crate::services::assistant_service_execution::is_shared_chat(chat))
+        .then_some(chat.agent_id.as_str()),
     )
     .await?;
+    if crate::services::assistant_service_execution::is_shared_chat(chat)
+        && target.bot.user_id != chat.user_id
+    {
+        return Err(AppError::Forbidden(
+            "Shared agents can post only to your own destinations".into(),
+        ));
+    }
     let mut report = super::images::ImageReport::default();
     if include_images {
         let turn_id = chat
@@ -1711,18 +1735,14 @@ pub(crate) async fn post_current_turn(
                 "unattempted":row.parts.iter().filter(|p|p.state==TextPartState::Pending).count(),
                 "refused":row.parts.iter().filter(|p|p.state==TextPartState::Refused).count()})
         });
-    audit(
-        state,
-        &chat.user_id,
-        "nyxbot_channel_chat_posted",
-        json!({
-            "channel_agent_id": target.channel.id,
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text_status": status,
-        }),
-    )
-    .await;
+    let mut event = json!({
+        "channel_agent_id": target.channel.id,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text_status": status,
+    });
+    crate::services::shared_agent_transport::annotate_chat(&mut event, chat);
+    audit(state, &chat.user_id, "nyxbot_channel_chat_posted", event).await;
     Ok(json!({
         "status": if status == "sent" { "posted" } else { status },
         "text": status,
@@ -2148,6 +2168,14 @@ async fn send_post_one_impl(
         target.thread.created_at,
         &mut outbound.metadata,
     );
+    if let Some(chat) = fence
+        && crate::services::assistant_service_execution::is_shared_chat(chat)
+        && (bot.user_id != chat.user_id || target.channel.user_id != chat.user_id)
+    {
+        return Err(AppError::Forbidden(
+            "Shared agents can post only to your own destinations".into(),
+        ));
+    }
     if let Some(chat) = fence
         && !post_turn_is_live(state, chat).await?
     {

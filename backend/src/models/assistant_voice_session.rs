@@ -19,6 +19,8 @@ pub enum SessionState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

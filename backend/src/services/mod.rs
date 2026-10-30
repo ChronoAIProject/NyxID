@@ -239,6 +239,7 @@ pub mod service_pool_health_service;
 pub mod service_pool_service;
 pub mod shared_agent_consent;
 pub mod shared_agent_service;
+pub(crate) mod shared_agent_transport;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;
 pub mod sse_parser;

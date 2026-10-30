@@ -756,3 +756,242 @@ async fn actual_managed_catalog_only_call_keeps_final_turn_and_scope_fences() {
         ));
     }
 }
+
+#[tokio::test]
+async fn shared_transports_managed_actor_funding_once_consent_and_pre_dispatch_revocation() {
+    use crate::models::assistant_sharing::{AgentConsent, ConsentDecision};
+    use crate::services::{
+        assistant_team_service as team, feature_flag_service as flags,
+        shared_agent_consent as consent, shared_agent_service as sharing,
+    };
+    for outcome in ["success", "pre_dispatch", "in_flight"] {
+        let revoke = outcome == "pre_dispatch";
+        let (mut f, id, _catalog) = fixture(false).await;
+        crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+        sharing::ensure_indexes(&f.state.db).await.unwrap();
+        flags::set_platform_override(
+            &f.state.db,
+            sharing::FLAG,
+            &flags::FlagTarget::Global,
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        let publisher = Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection("users")
+            .insert_one(test_utils::test_user(&publisher, UserType::Person))
+            .await
+            .unwrap();
+        let (agent, _) = team::create_specialist(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &publisher,
+            team::CreateRequest {
+                name: "managed-specialist".into(),
+                description: "Managed service".into(),
+                display_name: None,
+                persona: None,
+                targets: Default::default(),
+                account_read: false,
+                machines: None,
+                logins: None,
+                specialty: None,
+                created_by: "user",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        f.state
+            .db
+            .collection::<Document>("assistant_agents")
+            .update_one(
+                doc! {"_id":&agent.id},
+                doc! {"$set":{"grants.platform_service_ids":[&_catalog]}},
+            )
+            .await
+            .unwrap();
+        let user = f
+            .state
+            .db
+            .collection::<crate::models::user::User>("users")
+            .find_one(doc! {"_id":&f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+        sharing::update(
+            &f.state.db,
+            &publisher,
+            &agent.id,
+            sharing::SharingUpdate {
+                expected_version: 0,
+                enabled: true,
+                audience: vec![
+                    serde_json::from_value(
+                        json!({"subject_kind":"person","email":user.email,"role":"user"}),
+                    )
+                    .unwrap(),
+                ],
+                shared_access: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.owner, &agent)
+            .await
+            .unwrap();
+        f.row = crate::services::assistant_authority_tests::pin_assignment(
+            &f.state.db,
+            &f.owner,
+            &row.id,
+            None,
+        )
+        .await;
+        let key = crate::services::key_service::get_api_key(
+            &f.state.db,
+            &f.owner,
+            &f.row.credential_api_key_id,
+        )
+        .await
+        .unwrap();
+        f.auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        f.chat = f.auth.assistant_chat.as_deref().unwrap().clone();
+        let first = call(&f, &id, false).await;
+        assert!(
+            first.is_err() || first.unwrap() != 200,
+            "private connection consent is mandatory"
+        );
+        let card = f
+            .state
+            .db
+            .collection::<AgentConsent>("assistant_agent_consents")
+            .find_one(doc! {"agent_id":&agent.id,"decision":"pending"})
+            .await
+            .unwrap()
+            .expect("managed consent");
+        consent::decide(&f.state.db, &f.owner, &card.id, ConsentDecision::Once)
+            .await
+            .unwrap();
+        let (mut provider, dispatched, release) =
+            nyxid_service_adapters::test_support::scripted_fixture_paused(
+                "api.telnyx.com",
+                vec![response(true)],
+            )
+            .await;
+        if outcome != "in_flight" {
+            release.notify_one();
+        }
+        let gate = pause();
+        let hooks = telnyx::TestHooks {
+            client: provider
+                .builder
+                .take()
+                .unwrap()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            funded: revoke.then(|| gate.clone()),
+            admitted: None,
+            completed: None,
+        };
+        let pending = telnyx::TEST_HOOKS.scope(hooks, call(&f, &id, false));
+        tokio::pin!(pending);
+        if revoke {
+            tokio::select! {result=&mut pending=>panic!("ended before funding fence: {result:?}"),()=gate.entered.notified()=>{}}
+            sharing::update(
+                &f.state.db,
+                &publisher,
+                &agent.id,
+                sharing::SharingUpdate {
+                    expected_version: 1,
+                    enabled: false,
+                    audience: vec![],
+                    shared_access: Default::default(),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+            gate.resume.notify_one();
+            assert!(pending.await.is_err());
+            assert_eq!(execution(&f).await.state, ManagedExecutionState::Released);
+            assert!(provider.requests.try_recv().is_err());
+        } else if outcome == "in_flight" {
+            tokio::select! {
+                result = &mut pending => panic!("ended before provider response: {result:?}"),
+                () = dispatched.notified() => {}
+            }
+            sharing::update(
+                &f.state.db,
+                &publisher,
+                &agent.id,
+                sharing::SharingUpdate {
+                    expected_version: 1,
+                    enabled: false,
+                    audience: vec![],
+                    shared_access: Default::default(),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
+                .await
+                .unwrap();
+            assert!(matches!(result, Err(AppError::ManagedExecutionPending(_))));
+            let saved = execution(&f).await;
+            assert_eq!(saved.billing_owner_id, f.owner);
+            assert_eq!(saved.shared_execution.as_ref().unwrap().owner, publisher);
+            assert!(
+                wallet(&f).await.reserved_credits > Credits::ZERO,
+                "dispatched liability must be retained"
+            );
+            assert!(provider.requests.try_recv().is_ok());
+            assert!(
+                provider.requests.try_recv().is_err(),
+                "no redispatch after revocation"
+            );
+            release.notify_one();
+        } else {
+            assert_eq!(pending.await.unwrap(), 200);
+            let saved = execution(&f).await;
+            assert_eq!(saved.state, ManagedExecutionState::Settled);
+            assert_eq!(saved.billing_owner_id, f.owner);
+            assert_eq!(saved.actor_user_id, f.owner);
+            assert_eq!(saved.shared_execution.as_ref().unwrap().owner, publisher);
+            assert_eq!(
+                wallet(&f).await.pending_lago_debits,
+                Credits::from_pico(105).unwrap()
+            );
+            let usage: Vec<UsageMeterRow> = f
+                .state
+                .db
+                .collection(crate::models::usage_meter::COLLECTION_NAME)
+                .find(doc! {})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(usage.len(), 3);
+            assert!(
+                usage
+                    .iter()
+                    .all(|r| r.billing_owner_id == f.owner && r.actor_user_id == f.owner)
+            );
+            assert!(provider.requests.try_recv().is_ok());
+            let again = call(&f, &id, false).await;
+            assert!(
+                again.is_err() || again.unwrap() != 200,
+                "Once never authorizes a second detached job"
+            );
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}

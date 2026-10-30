@@ -30,9 +30,17 @@ async fn call(
         "x-api-key",
         credential.raw_key.as_str().parse().map_err(|_| denied())?,
     );
-    let mut auth = authenticate_mcp(state, &headers, false)
-        .await
-        .map_err(|_| denied())?;
+    let mut auth = if watch.shared_execution.is_some() {
+        let key =
+            crate::services::key_service::get_api_key(&state.db, &watch.user_id, &watch.api_key_id)
+                .await?;
+        let auth = crate::mw::auth::api_key_auth_user_for_watch(&state.db, &key, watch).await?;
+        McpAuthContext::from_watch_auth(auth)
+    } else {
+        authenticate_mcp(state, &headers, false)
+            .await
+            .map_err(|_| denied())?
+    };
     // This watch was admitted only for an owner turn. A later guest message
     // on the same thread neither owns nor changes this background request.
     if let Some(chat) = auth.chat.as_mut() {

@@ -230,13 +230,18 @@ pub async fn pool_aliases(
     auth.ensure_llm_proxy_access()?;
     let actor = auth.proxy_resolution_user_id();
     let mut owners = vec![actor.clone()];
-    owners.extend(
-        crate::services::org_service::find_active_memberships_with_timeout(&state.db, &actor)
-            .await?
-            .into_iter()
-            .filter(|m| m.role.can_proxy())
-            .map(|m| m.org_user_id),
-    );
+    if let Some(shared) = auth.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        owners.push(shared.owner().to_owned());
+    } else {
+        owners.extend(
+            crate::services::org_service::find_active_memberships_with_timeout(&state.db, &actor)
+                .await?
+                .into_iter()
+                .filter(|m| m.role.can_proxy())
+                .map(|m| m.org_user_id),
+        );
+    }
     let offset = query.offset.unwrap_or(0);
     if offset > 1_000_000 {
         return Err(AppError::BadRequest("Invalid alias offset".into()));
@@ -265,7 +270,7 @@ pub async fn pool_aliases(
         {
             continue;
         }
-        let plan = crate::services::service_pool_service::plan_candidates_with_allowlist(
+        let plan = crate::services::service_pool_service::plan_candidates_with_access(
             &state.db,
             &state.encryption_keys,
             &actor,
@@ -278,6 +283,7 @@ pub async fn pool_aliases(
             Some(br#"{"messages":[{"role":"user","content":""}]}"#),
             allowed.as_ref(),
             nodes.as_ref(),
+            auth.org_agent_access.as_deref(),
         )
         .await;
         let available = match plan {

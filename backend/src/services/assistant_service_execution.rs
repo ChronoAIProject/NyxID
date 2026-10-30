@@ -55,8 +55,9 @@ mod resolution;
 mod selection;
 use availability::verified_unavailable;
 pub use availability::{NodeFailureEvidence, observe_transport};
+pub(crate) use guest_model::is_shared_chat;
 #[cfg(test)]
-pub(crate) use guest_model::{is_shared_chat, owner_model_route_allowed};
+pub(crate) use guest_model::owner_model_route_allowed;
 #[cfg(test)]
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
@@ -173,6 +174,7 @@ async fn check_job_http_inner(
         refusal: None,
         automatic: None,
         admission: Some(Admission {
+            shared_detached: None,
             shared_permit: None,
             connection: id.to_owned(),
             binding: connection_binding(&state.db, id, &chat.api_key_id).await?,
@@ -302,7 +304,7 @@ async fn check_inner(
             operation["kind"].as_str(),
             Some("raw_inference" | "legacy_inference")
         ) && access.allows_model_connection(&service);
-        if pool || !(access.allows_connection(&service) || model) {
+        if !(access.allows_connection(&service) || model) {
             return Err(AppError::Forbidden(
                 "Shared connection is unavailable".into(),
             ));
@@ -322,6 +324,10 @@ async fn check_inner(
             return Err(AppError::Forbidden("Use the person's exact selected connection; choose a new connection before changing accounts".into()));
         }
         let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
+        if pool {
+            super::shared_agent_transport::require_ready(db).await?;
+            pools::pin_shared_pool(db, chat, connection_id, &binding, operation).await?;
+        }
         if service.user_id == chat.user_id
             && let Some(refusal) =
                 super::shared_agent_consent::prompt(db, chat, access, &service, &binding, operation)
@@ -372,6 +378,7 @@ async fn check_inner(
             refusal: None,
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
+                shared_detached: None,
                 shared_permit: permit,
                 connection: connection_id.into(),
                 binding,
@@ -713,6 +720,7 @@ async fn check_inner(
         return Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                shared_detached: None,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
@@ -785,7 +793,7 @@ async fn check_inner(
         }
         Ok(Decision {
             refusal: None,
-            admission: Some(Admission {
+            admission: Some(Admission { shared_detached: None,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,

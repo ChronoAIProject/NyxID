@@ -671,7 +671,16 @@ pub(crate) async fn create_voice_task_thread(
     parent_conversation_id: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    let mut row = create_automation_thread(db, keys, actor, agent, title, session).await?;
+    let access = super::org_agent_service::resolve_agent_access(db, actor, agent).await?;
+    // A shared voice task is a private child, never automation authority. The
+    // parent marker hides it from ordinary lists; no group admission is changed.
+    let mut row = if access.as_ref().is_some_and(|a| a.shared().is_some()) {
+        super::shared_agent_transport::require_ready(db).await?;
+        create_thread_for_with_access(db, keys, actor, agent, title, session, access.as_ref())
+            .await?
+    } else {
+        create_automation_thread(db, keys, actor, agent, title, session).await?
+    };
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &row.id, "user_id": actor},

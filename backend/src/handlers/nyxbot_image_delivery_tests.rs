@@ -3195,3 +3195,199 @@ async fn nyxbot_multipart_scheduler_recovers_rate_limits_and_crashes_without_rep
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn shared_transports_channel_posts_only_to_actor_allowed_chats_and_stop_after_revocation() {
+    use crate::models::assistant_sharing::{ShareRole, ShareSubject};
+    use crate::services::assistant_team_service as team;
+    use crate::services::{feature_flag_service as flags, shared_agent_service as sharing};
+    let (f, server) = image_fixture("telegram", "direct").await;
+    crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+    sharing::ensure_indexes(&f.state.db).await.unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        sharing::FLAG,
+        &flags::FlagTarget::Global,
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let publisher = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection("users")
+        .insert_one(crate::test_utils::test_user(
+            &publisher,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let (agent, _) = team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &publisher,
+        team::CreateRequest {
+            name: "shared-publisher".into(),
+            description: "Specialist".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            machines: None,
+            logins: None,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let user = f
+        .state
+        .db
+        .collection::<crate::models::user::User>("users")
+        .find_one(doc! {"_id":OWNER})
+        .await
+        .unwrap()
+        .unwrap();
+    sharing::update(
+        &f.state.db,
+        &publisher,
+        &agent.id,
+        sharing::SharingUpdate {
+            expected_version: 0,
+            enabled: true,
+            audience: vec![sharing::Audience {
+                subject_kind: ShareSubject::Person,
+                subject_id: format!("email:{}", user.email),
+                role: ShareRole::User,
+            }],
+            shared_access: Default::default(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, OWNER, &agent)
+        .await
+        .unwrap();
+    let row = crate::services::assistant_authority_tests::pin_assignment(
+        &f.state.db,
+        OWNER,
+        &row.id,
+        None,
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, OWNER, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let target = thread(&f).await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(100))
+                .set_body_json(json!({"ok":true,"result":{"message_id":900}})),
+        )
+        .mount(&server)
+        .await;
+    assert_eq!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Allowed", false)
+            .await
+            .unwrap()["text"],
+        "sent"
+    );
+    assert!(
+        chats::post_current_turn(
+            &f.state,
+            &chat,
+            &Uuid::new_v4().to_string(),
+            "Other person's destination",
+            false
+        )
+        .await
+        .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"_id":&target.id}, doc! {"$set":{"allow_posts":false}})
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Not allowed", false)
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"_id":&target.id}, doc! {"$set":{"allow_posts":true}})
+        .await
+        .unwrap();
+    // A recipient-owned chat record cannot donate the publisher's bot authority.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.channel.channel_bot_id},
+            doc! {"$set":{"user_id":&publisher}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Publisher bot", false)
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.channel.channel_bot_id},
+            doc! {"$set":{"user_id":OWNER}},
+        )
+        .await
+        .unwrap();
+    let revoke = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while server.received_requests().await.unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        sharing::update(
+            &f.state.db,
+            &publisher,
+            &agent.id,
+            sharing::SharingUpdate {
+                expected_version: 1,
+                enabled: false,
+                audience: vec![],
+                shared_access: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    };
+    let text = "multi part text ".repeat(900);
+    let (result, ()) = tokio::join!(
+        chats::post_current_turn(&f.state, &chat, &target.id, &text, false),
+        revoke
+    );
+    assert!(result.is_err() || result.unwrap()["text"] != "sent");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "no next part after revocation"
+    );
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Revoked", false)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}

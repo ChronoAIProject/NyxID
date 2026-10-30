@@ -81,9 +81,11 @@ impl OwnedHttpEgressGuard {
             &str,
             Option<&acks::ChatAuthority>,
         ),
-    ) -> Self {
+    ) -> AppResult<Self> {
         let authority = if let Some(admission) = admission {
-            Some(OwnedEgressAuthority::Assistant(Box::new(admission.clone())))
+            let mut detached = admission.clone();
+            detached.shared_detached = admission.shared_execution()?;
+            Some(OwnedEgressAuthority::Assistant(Box::new(detached)))
         } else if let Some(ingress) = ingress {
             if let Some(job) = ingress.assistant_job_id() {
                 Some(OwnedEgressAuthority::AssistantCatalogJob {
@@ -103,7 +105,7 @@ impl OwnedHttpEgressGuard {
                 .2
                 .map(|chat| OwnedEgressAuthority::AssistantCatalog(Box::new(chat.clone())))
         };
-        Self {
+        Ok(Self {
             db: db.clone(),
             keys,
             authority,
@@ -111,6 +113,15 @@ impl OwnedHttpEgressGuard {
             resource_owner: context.1.to_owned(),
             method: operation.0.to_owned(),
             path: operation.1.to_owned(),
+        })
+    }
+
+    pub(crate) fn shared_execution(
+        &self,
+    ) -> Option<&crate::models::assistant_sharing::SharedExecution> {
+        match &self.authority {
+            Some(OwnedEgressAuthority::Assistant(admission)) => admission.shared_detached.as_ref(),
+            _ => None,
         }
     }
 
@@ -142,8 +153,10 @@ impl OwnedHttpEgressGuard {
                 .await?
                 .ok_or_else(|| AppError::NotFound("Managed service unavailable".into()))?;
             crate::services::telnyx_platform_service::validate_catalog(&current)?;
-            let actor =
-                crate::services::proxy_service::EffectiveActor::from_user_id(&self.resource_owner);
+            let actor = crate::services::proxy_service::EffectiveActor::from_user_id(
+                self.shared_execution()
+                    .map_or(self.resource_owner.as_str(), |s| s.actor.as_str()),
+            );
             let authorized = crate::services::proxy_service::authorize_master_credential(
                 &self.db, &current, &actor,
             )
@@ -263,6 +276,15 @@ impl Admission {
     }
 }
 impl<'a> HttpEgressGuard<'a> {
+    pub(crate) fn shared_stream(
+        &self,
+    ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {
+        match &self.authority {
+            EgressAuthority::Assistant(guard) => guard.admission.shared_execution(),
+            _ => Ok(None),
+        }
+    }
+
     pub(super) fn for_lark(
         guard: &'a super::LarkManagedGuard<'a>,
         row: &'a crate::models::lark_base_write::LarkBaseWrite,

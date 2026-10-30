@@ -6026,7 +6026,7 @@ async fn execute_tool_resolved_inner(
                 &target,
                 (method.as_str(), &path),
                 (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
-            );
+            )?;
             destination_audit.dispatch();
             let managed = match box_mcp_forwarding(|| super::telnyx_platform_service::execute(
                 db,

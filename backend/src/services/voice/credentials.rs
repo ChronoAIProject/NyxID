@@ -93,7 +93,21 @@ pub(crate) async fn resolve_audio(
         dictation,
     )
     .await?;
-    let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(user);
+    let resource_owner = if thread.shared_agent_thread {
+        selected_connection
+            .and_then(|id| {
+                authority
+                    .0
+                    .org_agent_access
+                    .as_ref()
+                    .and_then(|a| a.shared())
+                    .and_then(|a| a.connections().get(id))
+                    .map(|s| s.user_id.as_str())
+            })
+            .unwrap_or(user)
+    } else {
+        thread.agent_owner_id.as_deref().unwrap_or(user)
+    };
     let (mut target, class, owner, key_id, revision) = match p.key_source {
         VoiceKeySource::Platform => {
             // Paid enablement is a separate, default-off operator gate.
@@ -148,7 +162,8 @@ pub(crate) async fn resolve_audio(
                 proxy::ProxyExecutionContext::new(
                     Some(&state.connection_expiry_notifier),
                     state.platform_user_rate_limit,
-                ),
+                )
+                .with_assistant_access(authority.0.org_agent_access.as_deref()),
             ))
             .await?
             .ok_or(AppError::VoiceProviderUnavailable)?;
@@ -179,7 +194,12 @@ pub(crate) async fn resolve_audio(
     let payer = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(user, &owner, class)
+        .resolve_for_assistant_execution(
+            user,
+            &owner,
+            class,
+            authority.0.org_agent_access.as_deref(),
+        )
         .await
         .map_err(|e| Stage::BillingReservation.error(e))?;
     let billing = BillingRouteContext::new(
@@ -254,10 +274,33 @@ pub(crate) async fn own_snapshot(
     service: &DownstreamService,
     id: &str,
 ) -> AppResult<proxy::UserServiceResolution> {
-    let owner = thread.agent_owner_id.as_deref().unwrap_or(&thread.user_id);
+    let shared_auth = if thread.shared_agent_thread {
+        Some(crate::mw::auth::api_key_auth_user_for_voice(db, thread).await?)
+    } else {
+        None
+    };
+    let owner = if let Some(auth) = &shared_auth {
+        let shared = auth
+            .org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .ok_or(AppError::VoiceProviderUnavailable)?;
+        let connection = shared
+            .catalog_connections(&service.id, true)
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or(AppError::VoiceProviderUnavailable)?;
+        connection.user_id
+    } else {
+        thread
+            .agent_owner_id
+            .as_deref()
+            .unwrap_or(&thread.user_id)
+            .to_owned()
+    };
     let connection = db
         .collection::<UserService>(CONNECTIONS)
-        .find_one(doc! {"_id":id,"user_id":owner,"is_active":true,
+        .find_one(doc! {"_id":id,"user_id":&owner,"is_active":true,
         "catalog_service_id":&service.id,"deleted_at":mongodb::bson::Bson::Null})
         .await?
         .ok_or(AppError::VoiceProviderUnavailable)?;
@@ -268,12 +311,15 @@ pub(crate) async fn own_snapshot(
     {
         return Err(AppError::VoiceProviderUnavailable);
     }
-    let snapshot = Box::pin(proxy::read_proxy_authority_snapshot_by_user_service_id(
+    let snapshot = Box::pin(proxy::read_proxy_authority_snapshot_with_access(
         db,
         keys,
         &thread.user_id,
         id,
         None,
+        shared_auth
+            .as_ref()
+            .and_then(|auth| auth.org_agent_access.as_deref()),
     ))
     .await?
     .ok_or(AppError::VoiceProviderUnavailable)?;
@@ -359,10 +405,7 @@ pub(crate) async fn inference_authority(
     thread: &crate::models::assistant_conversation::AssistantConversation,
 ) -> AppResult<InferenceAuthority> {
     super::super::assistant_voice::private_thread(thread)?;
-    let key =
-        super::super::key_service::get_api_key(db, &thread.user_id, &thread.credential_api_key_id)
-            .await?;
-    let auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None).await?;
+    let auth = crate::mw::auth::api_key_auth_user_for_voice(db, thread).await?;
     auth.ensure_llm_proxy_access()?;
     // Model transport uses the normal assistant inference exception, bounded
     // here to this exact private thread and its live durable credential. A draft
@@ -414,11 +457,18 @@ async fn authorize_operation(
     dictation: bool,
 ) -> AppResult<()> {
     let auth = &authority.0;
+    let shared = auth.org_agent_access.as_ref().and_then(|a| a.shared());
     // Platform audio is inference, independent of tool grants. BYOK must hold
     // the selected UserService grant, never a catalog-ID substitute.
     if connection.is_some_and(|id| {
         auth.api_key_service_scope()
             .is_some_and(|ids| !ids.iter().any(|allowed| allowed == id))
+            && !shared.is_some_and(|access| {
+                access
+                    .catalog_connections(&service.id, true)
+                    .iter()
+                    .any(|s| s.id == id && access.allows_model_connection(s))
+            })
     }) {
         return Err(AppError::Forbidden(
             "This agent cannot use the selected voice service".into(),
@@ -430,12 +480,12 @@ async fn authorize_operation(
         .and_then(|i| i.voice.as_ref())
         .is_some_and(|v| v.protocol == VoiceProtocol::XaiRealtime);
     let method = if grok || dictation { "GET" } else { "POST" };
-    let path =
-        super::super::proxy_authorization::CanonicalPath::from_mcp_literal(if grok || dictation {
-            "/realtime"
-        } else {
-            "/live/sessions"
-        })?;
+    let policy_path = if grok || dictation {
+        "/realtime"
+    } else {
+        "/live/sessions"
+    };
+    let path = super::super::proxy_authorization::CanonicalPath::from_mcp_literal(policy_path)?;
     super::super::proxy_authorization::authorize_proxy_operation(service, method, &path)?;
     // Resolve the selected connection's identity like proxy/LLM do, so a scope
     // saved on that connection applies; catalog-only intersects every scope
@@ -489,6 +539,47 @@ async fn authorize_operation(
         ),
     )
     .await?;
+    if let Some(access) = shared {
+        let selected = super::shared::connection(access, &service.id, connection)?;
+        crate::services::shared_agent_transport::require_stream_policy(
+            db,
+            access.actor(),
+            &selected,
+            service,
+        )
+        .await?;
+        let owner = &selected.user_id;
+        if owner != access.actor()
+            && access.level(&selected.id) != Some(crate::models::assistant_agent::GuestAccess::All)
+        {
+            return Err(AppError::Forbidden(
+                "Shared voice requires explicit full service access".into(),
+            ));
+        }
+        let descriptor =
+            crate::services::operation_descriptor::build_http_descriptor(method, policy_path, None);
+        let (outcome, _) = crate::services::approval_service::evaluate_for_chat(
+            db,
+            access.actor(),
+            owner,
+            &selected.id,
+            &descriptor,
+            Some("api_key"),
+            auth.api_key_id.as_deref().unwrap_or_default(),
+            false,
+            selected.source.as_deref() == Some("auto_provision"),
+            auth.assistant_chat.as_deref(),
+        )
+        .await?;
+        if !matches!(
+            outcome,
+            crate::services::approval_service::ApprovalOutcome::Allowed { .. }
+        ) {
+            return Err(AppError::Forbidden(
+                "The selected voice service requires approval".into(),
+            ));
+        }
+    }
     Ok(())
 }
 

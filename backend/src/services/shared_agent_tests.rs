@@ -2395,3 +2395,6 @@ async fn shared_agent_actor_connection_dispatch_requires_consumable_private_cons
     assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
     f.state.db.drop().await.unwrap();
 }
+
+#[path = "shared_agent_transport_tests.rs"]
+mod transports;

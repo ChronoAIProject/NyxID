@@ -52,7 +52,20 @@ async fn run_inner(exchange: Exchange) -> Result<ManagedResponse, ManagedExecuti
             None => attempt.await,
         }
     };
-    let result = tokio::time::timeout(std::time::Duration::from_secs(120), bounded).await;
+    let authority = async {
+        let Some(binding) = exchange.guard.shared_execution() else {
+            return std::future::pending::<AppResult<ManagedResponse>>().await;
+        };
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            crate::services::shared_agent_transport::revalidate(&exchange.db, binding).await?;
+        }
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        tokio::select! { value = bounded => value, value = authority => value }
+    })
+    .await;
     // The proof lives outside both cancellation boundaries. Neither a timeout
     // nor lease loss may erase a refusal already returned by the final sender.
     if let Some(error) = rejected {

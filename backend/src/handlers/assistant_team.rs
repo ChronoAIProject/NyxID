@@ -1121,7 +1121,12 @@ pub(crate) async fn execute_tool(
         .is_some_and(|a| a.shared().is_some())
         && !matches!(
             name,
-            "remember" | "forget" | "get_agent_skills" | "skill_read"
+            "remember"
+                | "forget"
+                | "get_agent_skills"
+                | "skill_read"
+                | "list_channel_chats"
+                | "post_to_chat"
         )
     {
         return refusal(
@@ -1129,7 +1134,14 @@ pub(crate) async fn execute_tool(
             "Shared agents cannot use account, team, machine or permission management tools. Ask the owner to change the agent's sharing settings.",
         );
     }
-    if !chat.is_orchestrator() && !assistant_team_tools::is_agent_tool(name) {
+    if !chat.is_orchestrator()
+        && !assistant_team_tools::is_agent_tool(name)
+        && !(name == "list_channel_chats"
+            && chat
+                .org_agent_access
+                .as_ref()
+                .is_some_and(|a| a.shared().is_some()))
+    {
         return refusal(
             "orchestrator_only",
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
@@ -2698,6 +2710,12 @@ async fn dispatch_channels(
         }
         "list_channel_agents" => (super::nyxbot::list_tool(state, owner).await?, false),
         "list_channel_chats" => {
+            if crate::services::assistant_service_execution::is_shared_chat(chat) {
+                crate::services::shared_agent_transport::require_ready(&state.db).await?;
+                if !super::nyxbot::chats::post_turn_is_live(state, chat).await? {
+                    return Err(AppError::AssistantTurnRequired);
+                }
+            }
             let chats = Box::pin(super::nyxbot::chats::list_chats(
                 state,
                 owner,
