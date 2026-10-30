@@ -2011,6 +2011,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let channel_bot_routes = Router::new()
         .route(
+            "/{id}/native-whatsapp/relay-verify-token",
+            post(handlers::channel_whatsapp_native::rollback::replace),
+        )
+        .route(
+            "/{id}/native-whatsapp",
+            get(handlers::channel_whatsapp_native::get).put(handlers::channel_whatsapp_native::put),
+        )
+        .route(
             "/{id}/activities",
             get(handlers::channel_activities::bot_activities),
         )

@@ -43,6 +43,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::channel_delivery::COLLECTION_NAME, doc! {"user_id":owner}),
         (
+            m::channel_whatsapp_native::COLLECTION_NAME,
+            doc! {"owner_id":owner},
+        ),
+        (
             m::service_account_key_read_grant::COLLECTION_NAME,
             doc! {"$or":[{"_id":owner},{"owner_id":owner}]},
         ),

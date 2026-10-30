@@ -578,8 +578,8 @@ provides Discord's receiving user identity; WhatsApp retains its own verified
 account/phone identity in its enum variant.
 Native credentials are assembled only for the management request. The common
 preparation, snapshot/replay, deduplication, status and retirement machinery
-stays shared. WhatsApp dedicated-app BYO eligibility and credential handoff are
-owned by Track 2; this change does not enable native WhatsApp enrollment.
+stays shared. Dedicated-app BYO WhatsApp is implemented as Track 2 on this
+extension point; managed Embedded Signup and shared-app bots remain relay-only.
 Existing gateway rows without a source selection remain relay definitions. To
 move an existing Discord relay definition to native Discord, turn its per-person
 flag off, let retirement finish, then turn it on again. Do not replace a live
@@ -842,7 +842,7 @@ The remaining platform surfaces need explicit parity before moving all traffic:
 | Slack | **CMA:** verify `app_mention`, structured bot/other-user mentions and broadcast tokens with native `thread_ts` | Incoming attachments rejected by generic verifier; outgoing link text only | **CMA:** use existing NyxID edit/upload APIs after implementing the raw verifier and target binding. |
 | Discord | **NyxID:** relay callbacks add versioned verified facts; provider group admission requires explicit addressing evidence or a known stored reply, never names or admission alone | Incoming attachments produce explicit unavailable-media feedback without URL fetches; outbound native images are unsupported and cannot use relay anchors | NyxID accepts original message activities, not edit activities. Immediate/delayed replies retain their original event reference, including threads; no fallback to a parent channel or newer event. Gateway-side support is owned by the CMA owner. |
 | Telegram / telegram-new | Bot mention/reply evidence exists, but **CMA** lacks the full other-user boolean and topic/chain contract | Text-only message ingress; outgoing attachments are link text | Native Telegram supports ordinary message edits; relay edits are limited to confirmed interactive cards. **CMA:** extend verified attachment transport and receipt-bound relay edits while retaining the forum topic. |
-| WhatsApp | **NyxID:** dedicated-app BYO native support is Track 2; no subscribable thread-follow claim | Native media/control mapping and receipt/window hooks require Track 2 validation | Gateway-side WhatsApp functionality belongs to the CMA owner; keep the flag off until NyxID-side validation is complete. |
+| WhatsApp | **NyxID:** dedicated-app BYO native support uses the shared source, admission and recovery contract; native groups remain disabled | Native media/control mapping remains text-only with explicit unavailable feedback; delivery status is consumed from CMA Activity and the 24-hour free-form window remains | Gateway-side WhatsApp runtime and scoped `non_human` policy belong to the CMA owner; managed/shared-app bots stay on the relay. |
 | X / Aurinko | **CMA:** no platform source; do not claim addressing or follow parity | Unsupported in gateway | **Both:** design verified sources and credential/receipt boundaries before migration; preserve email single-recipient barriers and keep X public follow excluded. |
 
 The thread PR did not implement media or edits. Owner Lark/Feishu inbound media
@@ -948,3 +948,139 @@ and their in-flight operations have drained**. Old transport-return, fallback,
 uncertain-create and stale pending-move paths can erase or never store remote
 identity. Before rollback to PR1, drain release workers; retain release records
 and continuity lineage fields.
+
+## Native WhatsApp: dedicated BYO apps (Track 2 checkpoint)
+
+Native WhatsApp is distinct from the existing `nyxid_relay` WhatsApp source.
+It remains behind default-off `nyxbot:gateway-whatsapp`. Independent settings
+and contract modules use the shared source-aware preparation, recovery,
+idempotency and activation machinery. Saving settings alone neither creates a
+gateway channel nor changes intake; the per-person flag and a successful,
+verified migration are both required.
+
+Only `credential_source = user` bots with their own dedicated Meta app are
+eligible. Embedded Signup bots (`platform`) share credentials and app-scoped
+callback fan-out, so return `dedicated_byo_app_required`. Connection-backed and
+unknown credential sources are also refused. The owner confirms dedication;
+this is not credential verification or a claim of global Meta app uniqueness.
+CMA verifies token ownership/scopes and WABA phone membership before creation.
+
+| Identity | NyxID storage | CMA native source |
+|---|---|---|
+| Real Meta App ID | `channel_whatsapp_native.meta_app_id` | `app_id` |
+| WhatsApp Business Account ID | native `waba_id`; legacy bot `app_id` remains WABA | `waba_id` |
+| Phone Number ID | bot `platform_bot_id`, bound native snapshot | `phone_number_id` |
+
+The settings record is keyed by bot UUID and binds owner and ownership
+version. Revision-fenced writes refuse changes during migration. An optional
+legacy WABA must match. Legacy credentials remain untouched. Callback state
+defaults to `relay`; unknown future phases fail closed. Debug omits IDs,
+callback URLs and gateway references. Audit includes bot UUID and revision.
+Settings lookups use the built-in `_id` index; an `owner_id, _id` index
+supports personal erasure, which also removes these records.
+
+Both `relay_authoring.native_whatsapp_writes_enabled` and
+`relay_authoring.native_whatsapp_auto_activation_enabled` must explicitly be
+true. Enrollment sends one atomic `credentials.whatsapp` bundle: `app_secret`,
+`access_token`, `verify_token`. Legacy BYO Verify Tokens are hash-only; generate
+and retain an encrypted fresh native token; never forward the relay hash or
+silently change the relay Verify Token. Omit source `group_ids` for private-only intake.
+
+During `awaiting_relay`, the owner can generate a replacement relay Verify Token
+from the rollback guidance, even with the gateway flag off. The first-party
+human-only `POST /channel-bots/{id}/native-whatsapp/relay-verify-token` requires
+live bot write access and the current settings revision. It issues 256 random
+bits, reveals the token once with `Cache-Control: private, no-store`, and stores
+only its SHA-256 hash, using the existing registration/handshake contract.
+The prior token stops verifying immediately. Token replacement, the settings
+revision fence and `channel_whatsapp_relay_verify_token_replaced` audit commit
+together. Audit contains bot ID, revision, rollback purpose, hash-only storage
+and `previous_token_invalidated_immediately: true`; no token or hash is logged.
+No read endpoint recovers a token, and the UI retains it only in the open reveal
+dialog. Lost tokens require another explicit replacement. The owner points
+Meta's callback back to the server-supplied relay URL with the new token.
+This action neither configures Meta nor changes transport or callback phase.
+
+Callback state progresses relay → awaiting_gateway → gateway → awaiting_relay
+→ relay. After CMA returns its per-channel endpoints.whatsapp_webhook_url,
+NyxID uses the dedicated app access token (app_id|app_secret) to POST Meta's
+/{app_id}/subscriptions with object=whatsapp_business_account,
+callback_url, verify_token and fields=messages. Meta performs CMA's GET
+handshake. The proof reads the app subscription using the app access token
+and the phone's `webhook_configuration` using the WhatsApp system token.
+Meta's effective callback is resolved in documented order:
+`webhook_configuration.phone_number`, then
+`webhook_configuration.whatsapp_business_account`, then
+`webhook_configuration.application`; empty strings and omitted fields are absent. NyxID requires
+that effective URL to match the expected URL. It always requires an active
+messages app subscription, and requires that subscription's callback URL to
+match when the application value wins. A matching phone override can therefore
+win over different WABA and application URLs. When the phone response reports
+a WABA override, NyxID cross-checks `subscribed_apps` with the system token:
+any non-empty `override_callback_uri` there must equal the reported
+`whatsapp_business_account` value, even when the phone override wins.
+Without a reported WABA override, this additional read is skipped.
+Missing or malformed webhook configuration is unverified; invalid field types
+never fall through to a lower-priority callback. No synthetic intake timestamp
+is accepted. Proof expires after 60 seconds and never fetches a callback URL
+or logs a secret. Activation and rollback use the same proof.
+A failed native activation is durably backed off for 15 minutes. If
+Meta accepted the native subscription but the subsequent proof or local fence
+fails, NyxID first moves the settings row to `awaiting_relay`, generates a
+fresh relay token, and attempts the same verified relay restoration before
+retiring the provisional CMA channel. A failed restoration remains
+owner-visible in `awaiting_relay` for the one-time replacement-token recovery
+flow.
+
+Flag-off requests restoration, **not** immediate gateway deletion. NyxID
+generates a fresh relay Verify Token and stores only its hash in the fenced
+settings/bot write, then POSTs Meta's subscription back to the server-supplied
+relay URL and repeats the effective-routing proof. If the Graph write fails,
+the owner can use the one-time replacement-token UI and point Meta back
+manually. While awaiting_relay, an authenticated private relay message is
+admitted through the normal atomic WAMID path and records restoration evidence,
+which fences native admission; status/receipt events alone do not. A signed
+relay message during gateway is dropped explicitly, records
+native_gateway_relay_conflict, and sends the owner a diagnostic notice.
+Uncertain remote cleanup remains the shared foundation's responsibility.
+
+Native actor `unknown` proves a WhatsApp account, not a human owner. The scoped
+validator requires the authenticated channel, exact app/WABA/phone snapshot,
+private conversation equal to the exact numeric `wa_id`, ordinary message kind
+and sealed event reference. Preserve leading digits in `wa_id`. Reactions
+(`event`) and controls (`interaction`) are excluded before owner linking or
+approval handling. Account admission still needs the existing one-time link
+proof for owner authority. Never globally map unknown actors to humans.
+
+**CMA operator policy:** after deploying NyxBot's durable provider recovery,
+set `routing.default_consumer.non_human: true` only for the `nyxbot`
+consumer of these dedicated native WhatsApp channels. Use only the WhatsApp source, no custom source or hand-off
+publishing, and replies bound to origin. Keep global
+`CMAEG_NON_HUMAN_PROVIDERS` unchanged. This exception admits verified WhatsApp
+accounts to NyxID's strict validator; it grants no owner authority. The checked
+manifest has only `cma_codex` in that global list and no NyxBot recovery paths.
+The CMA owner applies the scoped policy and provider recovery configuration.
+NyxID adds no environment variables.
+
+Receipt UI must consume the authenticated exact-channel CMA Activity snapshot:
+50 retained events, 16 observations per consumer, seven-day retention. Project
+only `default` / `nyxbot`, exact native source and private recipient,
+`platform_status` (`sent`, `delivered`, `read`, `played`) or `platform_failure`
+(`failed`). Keep each component's message ID and `confirmed_at`. A read does
+not invent delivered timestamps; one component never proves whole-reply
+delivery. Label these **CMA receipts**, not local NyxID receipts. Completed
+agent work or Graph acceptance is not recipient delivery. Status observations
+never start turns or resends. The 24-hour free-form window still applies.
+
+The native media contract requires explicit unavailable-media feedback in both
+directions until a bridge exists; dispatch wiring follows in the integration.
+Never fetch attachment locators or fall back to local
+adapter sends for attachments, templates or controls. Native groups and
+templates remain out of scope. The relay parser rejects group-addressed
+messages rather than interpreting the participant as a DM.
+
+References: CMA `CMAEG_Native_WhatsApp.md`, `CMAEG_Native_WhatsApp_Groups.md`,
+`CMAEG_Native_WhatsApp_Status.md`, Protocol/Operations, SDK activity/source
+types at CMA `5b23e23a7aadead851ca2651a220eda4825b2335`, and merged
+#1152, #1156, #1157, #1159. CMA's broader features do not
+imply NyxID support for media, templates, reactions, controls or groups.

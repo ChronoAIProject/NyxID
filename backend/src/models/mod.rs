@@ -34,6 +34,7 @@ pub mod channel_send_claim;
 pub mod channel_text_delivery;
 pub mod channel_thread;
 pub mod channel_thread_follow;
+pub mod channel_whatsapp_native;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;

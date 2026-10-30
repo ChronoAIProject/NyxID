@@ -25,7 +25,7 @@ pub(super) async fn evidence(
         result.addressed = true;
         return Ok(result);
     }
-    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+    let bot = Box::pin(channel_bot_service::get_bot(&state.db, &row.channel_bot_id)).await?;
     let token =
         Zeroizing::new(channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?);
     let chat = activity["conversation"]["id"].as_str().unwrap_or_default();
@@ -104,13 +104,16 @@ pub(super) async fn evidence(
     if !matches!(facts.kind, ThreadKind::Native | ThreadKind::ReplyChain) {
         return Ok(result);
     }
-    let Some(response) = state
-        .db
-        .collection::<crate::models::nyxbot_gateway_response::GatewayResponse>(
-            crate::models::nyxbot_gateway_response::COLLECTION_NAME,
-        )
-        .find_one(doc! {"event_key":event,"channel_id":&row.id})
-        .await?
+    let Some(response) = Box::pin(async {
+        state
+            .db
+            .collection::<crate::models::nyxbot_gateway_response::GatewayResponse>(
+                crate::models::nyxbot_gateway_response::COLLECTION_NAME,
+            )
+            .find_one(doc! {"event_key":event,"channel_id":&row.id})
+            .await
+    })
+    .await?
     else {
         return Ok(result);
     };
@@ -121,12 +124,15 @@ pub(super) async fn evidence(
     "content_type":"text","thread_id":&facts.native_thread_id,"agent_api_key_id":&row.route_api_key_id,
     "thread_context":bson::to_bson(&facts).map_err(|_|AppError::OAuthAuthorityUnavailable)?,
     "native_gateway":true,"created_at":bson::DateTime::now()};
-    state
-        .db
-        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
-        .update_one(doc! {"_id":&source_id}, doc! {"$setOnInsert":source})
-        .upsert(true)
-        .await?;
+    Box::pin(async {
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .update_one(doc! {"_id":&source_id}, doc! {"$setOnInsert":source})
+            .upsert(true)
+            .await
+    })
+    .await?;
     result.source_message = Some(source_id);
     Ok(result)
 }
