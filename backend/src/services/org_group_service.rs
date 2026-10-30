@@ -1062,10 +1062,25 @@ pub async fn check_thread_participation(
         .ok_or_else(missing)?;
     // Personal groups may include org specialists; their original private ACL stays intact.
     if !is_org(&group) {
-        if group.user_id != row.user_id {
+        if group.user_id != row.user_id
+            || row
+                .agent_id
+                .as_ref()
+                .is_none_or(|id| !group.member_agent_ids.contains(id))
+            || (snapshot.shared().is_some()
+                && group
+                    .participant_user_ids
+                    .iter()
+                    .any(|id| id != &row.user_id))
+        {
             return Err(missing());
         }
         return Ok(());
+    }
+    if snapshot.shared().is_some() {
+        return Err(AppError::ValidationError(
+            "Shared agents cannot join organization groups".into(),
+        ));
     }
     if !snapshot.matches(&row.user_id, &group.user_id)
         || !group.participant_user_ids.contains(&row.user_id)

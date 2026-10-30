@@ -75,7 +75,8 @@ function pickerRows(
   group?: AssistantGroup,
 ): PickerRow[] {
   const live = agents
-    .filter((agent) => agent.status !== "destroyed")
+    .filter((agent) => agent.status !== "destroyed" && agent.can_use !== false
+      && !group?.members.some((member) => member.id === agent.id && member.unavailable))
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"))
     .map((agent) => ({
       id: agent.id,
@@ -84,7 +85,7 @@ function pickerRows(
       kind: agent.kind,
       description: [
         agentHandle(agent),
-        agent.kind === "nyxbot" ? "Your personal agent" : agent.description || "Specialist",
+        agent.share_role ? `Shared agent${agent.owner_name ? ` · ${agent.owner_name}` : ""}` : agent.kind === "nyxbot" ? "Your personal agent" : agent.description || "Specialist",
       ]
         .filter(Boolean)
         .join(" · "),
@@ -94,7 +95,7 @@ function pickerRows(
   const known = agents.length > 0;
   const gone = (group?.members ?? [])
     .filter(
-      (member) => member.destroyed || (known && !live.some((row) => row.id === member.id)),
+      (member) => member.destroyed || member.unavailable || (known && !live.some((row) => row.id === member.id)),
     )
     .map((member) => ({
       id: member.id,
@@ -364,10 +365,10 @@ export function GroupSettingsDialog({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string>();
   const liveAgentIds = new Set(
-    agents.filter((agent) => agent.status !== "destroyed").map((agent) => agent.id),
+    agents.filter((agent) => agent.status !== "destroyed" && agent.can_use !== false).map((agent) => agent.id),
   );
   const alive = (member: AssistantGroup["members"][number]) =>
-    !member.destroyed && (!agents.length || liveAgentIds.has(member.id));
+    !member.destroyed && !member.unavailable && (!agents.length || liveAgentIds.has(member.id));
   // Members that are gone leave on the next save (the server refuses them).
   const goneMembers = group.members.some((member) => !alive(member));
   const form = useAppForm<AssistantGroupForm>({

@@ -303,6 +303,22 @@ is not woken by those direct chats.
 
 ### 10a. Group chats
 
+Personal crews also support specialists shared with the sole human owner.
+They are listed and selectable with a Shared agent label, and use the same
+recipient-owned hidden thread, key, billing, human cards, consent, pinned skills
+and private notes as a private shared chat. NyxBot's group presence and handoffs
+do not transfer its authority to a shared member. Live access is rechecked for
+every turn and callback. Revoked/destroyed members remain unavailable in the
+roster, disappear from mention/recipient choices, and addressed attempts post
+“Ask this agent's owner to share it with you.” without a model call or charge.
+Re-sharing restores the stored member without recreating the crew. Recipient
+UUIDs and `@UUID` are exact; ambiguous `@name` text never selects a namesake.
+The picker and agent instructions use UUIDs for collisions. Human ambiguous
+text without explicit recipients is refused; ambiguous handoff tokens are ignored.
+Organization groups, automation and platform/channel threads still reject shared
+agents. Multi-person collaboration remains Phase 2 of
+[the shared-agent design](12-shared-agents-and-groups.md).
+
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
 `assistant_group_messages` holds the shared transcript (`user`, `agent`,
 `notice`). A user message goes to the recipients picked in the composer's pills
