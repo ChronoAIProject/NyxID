@@ -75,6 +75,7 @@ test.beforeEach(async ({ page, context }) => {
   }
   await context.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
   await context.route("**/api/v1/orgs", (route) => route.fulfill({ json: { orgs: [] } }));
+  await context.route("**/api/v1/onboarding/bindings", (route) => route.fulfill({ json: [] }));
   await context.route("**/api/v1/channel-bots?**", (route) => route.fulfill({ json: { bots: [], total: 0 } }));
 });
 

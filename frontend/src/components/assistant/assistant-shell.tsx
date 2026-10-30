@@ -48,7 +48,7 @@ export function AssistantShell({
       }),
     [router, dismissDrawer],
   );
-  useApplyTheme();
+  useApplyTheme("assistant");
 
   useEffect(() => {
     document.title = `nyxid - ${title}`;
@@ -82,7 +82,7 @@ export function AssistantShell({
             paddingRight: "var(--sar)",
           }}
         >
-          <header className="flex h-[52px] shrink-0 items-center border-b border-border/60">
+          <header className="flex min-h-[max(52px,calc(1.5rem+var(--spacing)*6))] shrink-0 items-center border-b border-border/60 py-1">
             <div
               className="hidden h-full shrink-0 items-center px-4 md:flex"
               style={{ width: sidebarWidth }}
@@ -163,7 +163,7 @@ export function AssistantShell({
                   paddingLeft: "var(--sal)",
                 }}
               >
-                <div className="flex h-[52px] shrink-0 items-center justify-between border-b border-border/60 px-4">
+                <div className="flex min-h-[max(52px,calc(1.5rem+var(--spacing)*6))] shrink-0 items-center justify-between border-b border-border/60 px-4 py-1">
                   <NyxidLogo className="h-5 w-auto" />
                   <button
                     type="button"

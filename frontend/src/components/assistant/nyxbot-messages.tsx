@@ -123,7 +123,7 @@ export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatM
         <AgentAvatar agent={NYXBOT_MARK} size="xs" />
         From NyxBot
       </div>
-      <div className="ml-auto max-w-[78%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-12 leading-relaxed text-foreground">
+      <div className="ml-auto max-w-[90%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-16 leading-relaxed text-foreground [overflow-wrap:anywhere] sm:max-w-[78%]">
         {message.content}
       </div>
       <MessageTime value={message.timestamp} reveal />

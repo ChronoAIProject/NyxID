@@ -456,31 +456,6 @@ function DraftedChatComposer({
     };
   }, [flushDraft]);
 
-  useLayoutEffect(() => {
-    const composer = composerRef.current;
-    const controls = controlsRef.current;
-    const textMeasure = textMeasureRef.current;
-    if (
-      !composer ||
-      !controls ||
-      !textMeasure ||
-      typeof ResizeObserver === "undefined"
-    ) {
-      return;
-    }
-
-    let frame = 0;
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => syncComposerLayout());
-    });
-    observer.observe(composer);
-    observer.observe(controls);
-    observer.observe(textMeasure);
-    if (settingsRef.current) observer.observe(settingsRef.current);
-    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
-  }, [syncComposerLayout]);
-
   // Grow to the draft, bounded by the chosen maximum and available viewport.
   const syncEditorHeight = useCallback(() => {
     const element = editorRef.current?.element;
@@ -508,6 +483,28 @@ function DraftedChatComposer({
     element.style.overflowY = natural > maxHeight ? "scroll" : "hidden";
     setScrollEdges(getScrollEdges(element));
   }, [maxTextHeight]);
+
+  useLayoutEffect(() => {
+    const composer = composerRef.current;
+    const controls = controlsRef.current;
+    const textMeasure = textMeasureRef.current;
+    if (!composer || !controls || !textMeasure || typeof ResizeObserver === "undefined") return;
+
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        syncComposerLayout();
+        // Text and spacing changes can alter line height without changing width.
+        syncEditorHeight();
+      });
+    });
+    observer.observe(composer);
+    observer.observe(controls);
+    observer.observe(textMeasure);
+    if (settingsRef.current) observer.observe(settingsRef.current);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, [syncComposerLayout, syncEditorHeight]);
 
   useLayoutEffect(() => {
     syncComposerLayout(content);
@@ -1013,7 +1010,7 @@ function DraftedChatComposer({
             ref={textMeasureRef}
             data-composer-text-measure
             aria-hidden
-            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
+            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-16 leading-relaxed"
           >
             {tokenSegments(content, tokens).map((part, index) => part.token
               ? <span key={index} className="composer-mention" data-composer-mention={part.token.kind}>{part.token.kind === "agent" ? "@" : ""}{part.token.label}</span>
@@ -1067,7 +1064,7 @@ function DraftedChatComposer({
                      ? (activePlaceholder ?? "Steer active task...")
                      : (placeholder ?? "Message NyxID Assistant...")
               }
-              className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+              className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-16 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
             />
             <div
               aria-hidden

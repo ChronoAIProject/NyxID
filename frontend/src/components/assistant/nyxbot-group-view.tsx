@@ -156,7 +156,7 @@ export function GroupMessageRow({
   if (message.role === "user") {
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
-        <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
+        <div className="max-w-[90%] whitespace-pre-wrap rounded-lg bg-overlay-strong px-3 py-2 text-16 leading-relaxed text-foreground [overflow-wrap:anywhere] sm:max-w-[78%]">
           {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
             <p className="mb-1 text-11 text-muted-foreground">
@@ -236,7 +236,7 @@ export function GroupMessageRow({
             />
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
-          <div className="mt-2 flex gap-1">
+          <div className="mt-2 flex max-w-full flex-wrap gap-1">
             {(["up", "down"] as const).map((next) => (
               <button
                 key={next}

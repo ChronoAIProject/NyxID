@@ -485,8 +485,8 @@ export function ChatMessageBubble({
   }
   if (message.role === "user") {
     return (
-      <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
-        <div className="rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+      <div className="group/message ml-auto flex min-w-0 max-w-[90%] flex-col items-end gap-1 sm:max-w-[78%]">
+        <div className="max-w-full rounded-lg bg-overlay-strong px-3 py-2 text-16 leading-relaxed text-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
           {message.steering && (
             <p className="mb-1 text-11 text-muted-foreground" role="note">
               Steering ·{" "}
@@ -740,7 +740,7 @@ export function ChatMessageBubble({
             {showFeedback ? (
               <div
                 role="group"
-                className="flex items-center gap-1"
+                className="flex max-w-full flex-wrap items-center gap-1"
                 aria-label="Reply feedback"
               >
                 <button

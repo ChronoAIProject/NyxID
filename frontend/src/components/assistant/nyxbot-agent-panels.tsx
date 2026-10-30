@@ -81,10 +81,10 @@ export function ThreadHeader({
 }) {
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size="md" />
         <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">{name}</h2>
-        {handle ? <span className="shrink-0 text-11 text-text-tertiary">{handle}</span> : null}
+        {handle ? <span className="max-w-full break-words text-11 text-text-tertiary [overflow-wrap:anywhere]">{handle}</span> : null}
         <AgentKindBadge kind={kind} />
         {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
         {controls ? <div className="flex flex-wrap items-center gap-1.5">{controls}</div> : null}
@@ -143,7 +143,7 @@ export function TeamStrip({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-12 text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full flex-wrap items-center gap-2 px-4 py-2.5 text-left text-12 text-muted-foreground transition-colors hover:text-foreground"
       >
         <ChevronRight className={cn("h-3 w-3 transition-transform", open && "rotate-90")} />
         <Users aria-hidden="true" className="h-3.5 w-3.5 text-text-tertiary" />

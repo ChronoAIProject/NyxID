@@ -55,16 +55,29 @@ function SegmentedChoice<T extends string | number>({
   readonly onChange: (value: T) => void;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="flex flex-wrap gap-1 rounded-lg border border-hairline p-0.5">
-      {options.map((option) => (
+    <div role="radiogroup" aria-label={label} className="flex max-w-full flex-wrap gap-1 rounded-lg border border-hairline p-0.5">
+      {options.map((option, index) => (
         <button
           key={option.value}
           type="button"
           role="radio"
           aria-checked={value === option.value}
+          tabIndex={value === option.value ? 0 : -1}
           onClick={() => onChange(option.value)}
+          onKeyDown={(event) => {
+            const direction = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
+              : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+            if (!direction && event.key !== "Home" && event.key !== "End") return;
+            event.preventDefault();
+            const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
+              : (index + direction + options.length) % options.length;
+            const nextOption = options[next];
+            if (!nextOption) return;
+            onChange(nextOption.value);
+            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
+          }}
           className={cn(
-            "min-h-control h-7 rounded-md px-3 text-12 transition-colors",
+            "min-h-control rounded-md px-3 py-1 text-12 transition-colors",
             value === option.value
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:text-foreground",
@@ -87,8 +100,8 @@ function SettingRow({
   readonly children: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
-      <div className="min-w-0 flex-1">
+    <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+      <div className="min-w-[min(100%,18rem)] flex-1">
         <p className="text-12 font-medium">{title}</p>
         <p className="text-12 text-muted-foreground">{description}</p>
       </div>
@@ -147,7 +160,7 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
   const width = useThemeStore((s) => s.sidebarWidths[sidebar]);
   const setSidebarWidth = useThemeStore((s) => s.setSidebarWidth);
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
       <input
         type="range"
         aria-label={label}
@@ -156,9 +169,9 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
         step={4}
         value={width}
         onChange={(e) => setSidebarWidth(sidebar, Number(e.target.value))}
-        className="w-40 accent-primary"
+        className="h-6 w-[10rem] min-w-0 max-w-full flex-1 accent-primary"
       />
-      <span className="w-12 text-right font-mono text-11 text-muted-foreground">{width}px</span>
+      <span className="min-w-[5ch] text-right font-mono text-11 text-muted-foreground">{width}px</span>
       <Button
         variant="ghost"
         size="icon"
@@ -184,12 +197,10 @@ function ScaleControl({ id, label, scale, onChange }: {
   const dragPointer = useRef<number | null>(null);
   const value = draft ?? scale;
   const multiplier = `${value}×`;
-  const defaultPosition =
-    ((DISPLAY_SCALE_DEFAULT - DISPLAY_SCALE_MIN) / (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN)) * 100;
 
   return (
     <div className="flex w-full max-w-full flex-wrap items-center gap-3 sm:w-auto">
-      <div className="flex w-64 max-w-full flex-1 items-start gap-3">
+      <div className="flex w-[16rem] max-w-full flex-1 items-start gap-3">
         <div className="min-w-0 flex-1 space-y-1">
           <input
             id={id}
@@ -227,11 +238,11 @@ function ScaleControl({ id, label, scale, onChange }: {
             }}
             className="block h-6 w-full cursor-pointer rounded accent-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
           />
-          <div className="relative flex justify-between text-11 text-muted-foreground" aria-hidden="true">
+          <div className="flex flex-wrap justify-between gap-x-2 text-11 text-muted-foreground" aria-hidden="true">
             <span>{DISPLAY_SCALE_MIN}×</span>
-            <span className="absolute -translate-x-1/2" style={{ left: `${defaultPosition}%` }}>{DISPLAY_SCALE_DEFAULT}×</span>
             <span>{DISPLAY_SCALE_MAX}×</span>
           </div>
+          <p className="text-11 text-muted-foreground">Default: {DISPLAY_SCALE_DEFAULT}×</p>
         </div>
         <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-11 text-muted-foreground">
           {multiplier}

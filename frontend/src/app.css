@@ -127,6 +127,7 @@
   --text-13: 0.8125rem;
   --text-14: 0.875rem;
   --text-15: 0.9375rem;
+  --text-16: 1rem;
   --text-17: 1.0625rem;
   --text-20: 1.25rem;
   --text-22: 1.375rem;
@@ -246,6 +247,40 @@ html.theme-dark {
   --color-hairline-strong: rgba(255, 255, 255, 0.24);
   --color-overlay: rgba(255, 255, 255, 0.05);
   --color-overlay-strong: rgba(255, 255, 255, 0.095);
+}
+
+/* Assistant reading scale, shared by the shell and its portaled settings,
+   menus and dialogs. Rem values preserve the full user-selected text scale. */
+html.assistant-display {
+  --text-9: 0.75rem;
+  --text-10: 0.75rem;
+  --text-11: 0.8125rem;
+  --text-12: 0.875rem;
+  --text-13: 0.9375rem;
+}
+
+html.assistant-display body {
+  line-height: 1.5;
+}
+
+/* Compact spacing must still leave room for enlarged labels and usable
+   pointer targets. The tab strip must contain the same padding as its tabs. */
+html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tablist"], input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  min-height: max(24px, calc(1lh + var(--spacing) * 2));
+}
+
+html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) {
+  min-width: 24px;
+}
+
+html.assistant-display [role="tablist"] {
+  height: auto;
+  flex-shrink: 0;
+  min-height: max(24px, calc(1lh + var(--spacing) * 4));
+}
+
+html.assistant-display input[type="range"] {
+  min-height: 24px;
 }
 
 /* Helper-class light variants — these effects were authored as white-on-dark
@@ -424,15 +459,16 @@ input[type="number"] {
   -moz-appearance: textfield;
 }
 
-/* ── iOS: prevent input zoom and keep custom selects at the same text size ── */
-@supports (-webkit-touch-callout: none) {
+/* ── Touch: prevent iOS input zoom while respecting larger text settings ── */
+@media (pointer: coarse) {
   input,
   select,
   textarea,
+  [data-composer-textbox],
   [data-composer-text-measure],
   [role="combobox"],
   [role="option"] {
-    font-size: 16px !important;
+    font-size: max(16px, 1rem) !important;
   }
 }
 

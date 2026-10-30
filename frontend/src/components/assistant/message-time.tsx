@@ -21,7 +21,7 @@ export function MessageTime({
     <time
       dateTime={time.iso}
       className={cn(
-        "whitespace-nowrap font-mono text-11 tabular-nums text-text-tertiary",
+        "max-w-full whitespace-normal font-mono text-11 tabular-nums text-text-tertiary [overflow-wrap:anywhere]",
         reveal &&
           "opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:none)]:opacity-100",
         className,

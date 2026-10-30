@@ -86,7 +86,7 @@ const SANITIZE_SCHEMA = {
 
 // Inter-block rhythm without a container `space-y-*` — that would also push the
 // trailing streaming caret onto its own line. First block hugs the top.
-const BLOCK = "mt-2 first:mt-0";
+const BLOCK = "mt-[max(0.75em,calc(var(--spacing)*3))] first:mt-0";
 
 function allowedHref(href: string | undefined): string | null {
   if (!href) return null;
@@ -165,7 +165,7 @@ function MarkdownHeadingTwo({ children }: ComponentProps<"h2">) {
   return insideFootnotes ? (
     <h2 className="sr-only">{children}</h2>
   ) : (
-    <h2 className={`${BLOCK} text-14 font-semibold text-foreground`}>
+    <h2 className={`${BLOCK} text-20 leading-snug font-semibold text-foreground`}>
       {children}
     </h2>
   );
@@ -187,28 +187,28 @@ const COMPONENTS: Components = {
     <del className="text-muted-foreground line-through">{children}</del>
   ),
   h1: ({ children }) => (
-    <h1 className={`${BLOCK} text-15 font-semibold text-foreground`}>
+    <h1 className={`${BLOCK} text-24 leading-snug font-semibold text-foreground`}>
       {children}
     </h1>
   ),
   h2: MarkdownHeadingTwo,
   h3: ({ children }) => (
-    <h3 className={`${BLOCK} text-[0.84375rem] font-semibold text-foreground`}>
+    <h3 className={`${BLOCK} text-17 leading-snug font-semibold text-foreground`}>
       {children}
     </h3>
   ),
   h4: ({ children }) => (
-    <h4 className={`${BLOCK} text-13 font-medium text-foreground`}>
+    <h4 className={`${BLOCK} text-16 leading-snug font-semibold text-foreground`}>
       {children}
     </h4>
   ),
   h5: ({ children }) => (
-    <h5 className={`${BLOCK} text-[0.78125rem] font-semibold text-foreground`}>
+    <h5 className={`${BLOCK} text-16 leading-snug font-medium text-foreground`}>
       {children}
     </h5>
   ),
   h6: ({ children }) => (
-    <h6 className={`${BLOCK} text-12 font-medium text-foreground`}>
+    <h6 className={`${BLOCK} text-16 leading-snug font-medium text-foreground`}>
       {children}
     </h6>
   ),
@@ -243,7 +243,7 @@ const COMPONENTS: Components = {
   hr: () => <hr className={`${BLOCK} border-hairline`} />,
   pre: ({ children }) => (
     <pre
-      className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono text-11 leading-relaxed text-foreground`}
+      className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono text-14 leading-relaxed text-foreground [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit`}
     >
       {children}
     </pre>
@@ -254,7 +254,7 @@ const COMPONENTS: Components = {
       return <code className={className}>{children}</code>;
     }
     return (
-      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-11 text-foreground">
+      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.875em] text-foreground">
         {children}
       </code>
     );
@@ -263,13 +263,13 @@ const COMPONENTS: Components = {
     <div
       className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline`}
     >
-      <table className="w-full border-collapse text-left text-12 text-foreground/90">
+      <table className="w-full border-collapse text-left text-14 text-foreground/90">
         {children}
       </table>
     </div>
   ),
   thead: ({ children }) => (
-    <thead className="border-b border-hairline bg-overlay text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+    <thead className="border-b border-hairline bg-overlay font-medium text-text-tertiary">
       {children}
     </thead>
   ),
@@ -287,7 +287,7 @@ const COMPONENTS: Components = {
   ),
   td: ({ children, style, align }) => (
     <td
-      className="px-3 py-2 align-top text-12"
+      className="px-3 py-2 align-top"
       style={tableCellStyle(style, align)}
     >
       {children}
@@ -413,7 +413,7 @@ export const TextBlock = memo(function TextBlock({
 
   return (
     <div
-      className={`text-12 ${streaming ? "[&>p:has(+_[data-streaming-caret])]:inline" : ""}`}
+      className={`min-w-0 break-words text-16 leading-relaxed [overflow-wrap:anywhere] ${streaming ? "[&>p:has(+_[data-streaming-caret])]:inline" : ""}`}
     >
       {prefix ? (
         <>
