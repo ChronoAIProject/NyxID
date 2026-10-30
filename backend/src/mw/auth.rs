@@ -720,6 +720,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
             | ["nyxbot", "responses", _]
             | ["nyxbot", "responses", _, "events"]
             | ["users", "me", "oauth-consent-requests", _]
+            | ["keys", _, "monitoring"]
             | ["api-keys", _, "machine-grant"]
             | ["users", "me", "consents", _, "machine-grant"]
     ) {
@@ -2434,6 +2435,7 @@ mod tests {
         let headers = HeaderMap::new();
         let denied_paths = [
             "/api/v1/admin/users",
+            "/api/v1/keys/service-id/monitoring",
             "/api/v1/ssh/service-id",
             "/api/v1/ssh/service-id/terminal",
             "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",

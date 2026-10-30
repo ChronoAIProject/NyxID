@@ -84,6 +84,14 @@ const REMOTE_MACHINES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+/// Acting-person rollout for connected-service health and readiness monitoring.
+pub const SERVICE_MONITORING_FLAG_KEY: &str = "services:monitoring";
+const SERVICE_MONITORING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SERVICE_MONITORING_FLAG_KEY,
+    description: "Enable connected-service monitoring status, configuration and explicit checks through chrono-probe for the acting person.",
+    default_enabled: false,
+};
+
 /// Operator gate for the Aevatar chat wire-log diagnostic. Off by default and
 /// toggled at runtime (platform-global, org cohort, or per user) so enabling a
 /// browser-side capture of raw assistant payloads never needs a redeploy.
@@ -369,6 +377,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     REMOTE_MACHINES_FLAG,
+    SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -412,6 +421,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     REMOTE_MACHINES_FLAG,
+    SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -2946,6 +2956,7 @@ mod tests {
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:remote-machines",
+                "services:monitoring",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
                 "nyxbot:gateway-lark",
@@ -3328,6 +3339,54 @@ mod tests {
             .await
             .unwrap();
         assert!(!mobile_mfa_required(&db, &person).await.unwrap());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_monitoring_is_default_off_and_follows_live_actor_overrides() {
+        let db = crate::test_utils::connect_transaction_test_database("monitoring_flag").await;
+        let flag = SERVICE_MONITORING_FLAG_KEY;
+        assert!(!find_flag(flag).unwrap().default_enabled);
+        let person = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        for (id, kind) in [(&person, UserType::Person), (&org, UserType::Org)] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, kind))
+                .await
+                .unwrap();
+        }
+        db.collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                &person,
+                OrgRole::Member,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
+        set_platform_org_override(&db, &org, flag, true, &person)
+            .await
+            .unwrap();
+        assert!(personal_flag_enabled(&db, &person, flag).await.unwrap());
+        let other = Uuid::new_v4().to_string();
+        assert!(!personal_flag_enabled(&db, &other, flag).await.unwrap());
+        set_platform_override(&db, flag, &FlagTarget::User(person.clone()), false, &person)
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
+        clear_platform_override(&db, flag, &FlagTarget::User(person.clone()))
+            .await
+            .unwrap();
+        assert!(personal_flag_enabled(&db, &person, flag).await.unwrap());
+        db.collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"org_user_id": &org, "member_user_id": &person},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
         db.drop().await.unwrap();
     }
 

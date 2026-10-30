@@ -135,6 +135,7 @@ describe("feature flag catalog", () => {
       SHARED_AGENTS: "assistant:shared-agents",
       BILLING: "experimental:billing",
       REMOTE_MACHINES: "experimental:remote-machines",
+      SERVICE_MONITORING: "services:monitoring",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
       NYXBOT_ADAPTERS: "nyxbot:service-adapters",

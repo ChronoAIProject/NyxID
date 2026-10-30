@@ -1753,7 +1753,25 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_history::get_history),
         )
         .route("/", post(handlers::keys::create_key))
-        .route("/{key_id}", delete(handlers::keys::delete_key));
+        .route("/{key_id}", delete(handlers::keys::delete_key))
+        .merge(
+            Router::new()
+                .route(
+                    "/{key_id}/monitoring",
+                    get(handlers::monitoring::get)
+                        .put(handlers::monitoring::save)
+                        .delete(handlers::monitoring::clear),
+                )
+                .route(
+                    "/{key_id}/monitoring/validate",
+                    post(handlers::monitoring::validate),
+                )
+                .route(
+                    "/{key_id}/monitoring/probe",
+                    post(handlers::monitoring::probe),
+                )
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        );
 
     let service_preference_reads = Router::new()
         .route(

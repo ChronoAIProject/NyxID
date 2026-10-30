@@ -3399,6 +3399,21 @@ curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef12
 
 ### Unified Keys (Streamlined Services)
 
+Connected-service health/readiness is exposed through the five fixed
+`/api/v1/keys/{id}/monitoring` routes. See [Service monitoring](SERVICE_MONITORING.md)
+for payloads, caller-token authority, revisions, timeouts and deployment requirements.
+The default-off `services:monitoring` flag resolves for the acting person,
+including live organization overrides. When off, every route returns a generic
+404 `not_found` before any service lookup or chrono-probe call; the frontend
+hides the section without requesting it. When on but `CHRONO_PROBE_URL` is unset
+or invalid, routes return 404 `monitoring_not_configured` (13301) and the UI hides
+the section. A configured upstream failure returns 503 `monitoring_unavailable`
+(13300). Explicit Check now and draft checks use the normal proxy with the
+caller's authority: **All requests** approval settings prompt per check, and a
+priced platform service bills each check to the caller. Status reads do not run
+checks.
+
+
 #### Agent discovery order per service group
 
 `GET /api/v1/service-preferences` returns only `{ "groups": [{ "group":
