@@ -22,6 +22,18 @@ pub(crate) enum Reason {
     RouteMismatch,
 }
 impl Reason {
+    pub(crate) fn needs_owner_setup(code: &str) -> bool {
+        matches!(
+            code,
+            "profile_unknown"
+                | "connection_not_platform"
+                | "connection_override"
+                | "catalog_inactive_or_not_master"
+                | "target_mismatch"
+                | "header_mismatch"
+                | "route_mismatch"
+        )
+    }
     pub(crate) fn fix(self) -> &'static str {
         match self {
             Self::ConnectionNotPlatform
@@ -30,7 +42,7 @@ impl Reason {
             | Self::RouteMismatch
             | Self::TargetMismatch
             | Self::HeaderMismatch => {
-                "Send one message to this assistant yourself to confirm its model route, then ask the visitor to try again."
+                "Check this assistant's configured model and model connection. Visitor setup retries automatically."
             }
             Self::CatalogInactiveOrNotMaster => {
                 "Ask your NyxID administrator to restore this assistant's platform model connection."
@@ -43,22 +55,6 @@ impl Reason {
             }
         }
     }
-    pub(crate) fn setup(self) -> bool {
-        !matches!(
-            self,
-            Self::NoAdmission
-                | Self::SharedChat
-                | Self::MethodOverride
-                | Self::Pool
-                | Self::HandlePresent
-        )
-    }
-    pub(crate) fn setup_code(code: &str) -> bool {
-        serde::Deserialize::deserialize(
-            serde::de::value::StrDeserializer::<serde::de::value::Error>::new(code),
-        )
-        .is_ok_and(Self::setup)
-    }
     pub(crate) fn code(self) -> String {
         serde_json::to_value(self)
             .expect("closed enum")
@@ -66,6 +62,32 @@ impl Reason {
             .expect("string")
             .into()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn guest_setup_2092_only_route_drift_requests_owner_setup() {
+    for reason in [
+        Reason::RouteMismatch,
+        Reason::ConnectionNotPlatform,
+        Reason::HeaderMismatch,
+    ] {
+        assert!(Reason::needs_owner_setup(&reason.code()));
+    }
+    for reason in [
+        Reason::NoAdmission,
+        Reason::SharedChat,
+        Reason::RequestShape,
+        Reason::UnknownField,
+        Reason::HandlePresent,
+        Reason::ToolShape,
+        Reason::MethodOverride,
+        Reason::Pool,
+        Reason::AgentUnavailable,
+    ] {
+        assert!(!Reason::needs_owner_setup(&reason.code()));
+    }
+    assert!(!Reason::needs_owner_setup("unknown_future_reason"));
 }
 
 #[derive(Clone, Debug)]
@@ -117,9 +139,8 @@ pub(super) async fn record(
         }}}]
     ).await?;
     if changed.modified_count > 0 {
-        if chat.guest && diagnostic.reason.setup() {
-            super::readiness_notice::enqueue(db, chat, diagnostic.reason).await?;
-        }
+        // Setup owns owner notifications. A first guest callback may reveal
+        // mapping drift and is automatically retried after an owner setup turn.
         tracing::warn!(target:"nyxid::assistant_model_route", conversation_id=%chat.conversation_id,
             agent_id=%chat.agent_id, guest=chat.guest, reason=%diagnostic.reason.code(),
             unknown_fields=?diagnostic.unknown_fields, "Model route admission diagnostic");

@@ -4390,6 +4390,18 @@ async fn execute_resolved_proxy_inner<'a>(
         (bytes, None, None, None)
     };
 
+    // Only an authenticated, server-created setup thread gets this projection.
+    // The exact same bounded body reaches admission, billing and provider egress.
+    let body_bytes = crate::services::assistant_guest_model_setup::restrict_callback(
+        &state.db,
+        auth_user.assistant_chat.as_deref(),
+        &target,
+        &method_str,
+        path,
+        body_bytes,
+    )
+    .await?;
+
     // Guest and webhook limits classify by method, so neither may disguise it.
     let effect_limited_chat = auth_user
         .assistant_chat
