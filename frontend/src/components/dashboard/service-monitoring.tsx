@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Activity, RefreshCw } from "lucide-react";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useMonitoring } from "@/hooks/use-monitoring";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -263,6 +265,11 @@ function ConfigurationForm({
 }
 
 export function ServiceMonitoring({ serviceId }: { serviceId: string }) {
+  const enabled = useFeature(FEATURE_FLAG.SERVICE_MONITORING);
+  return enabled ? <MonitoringCard serviceId={serviceId} /> : null;
+}
+
+function MonitoringCard({ serviceId }: { serviceId: string }) {
   const { query, operation } = useMonitoring(serviceId);
   const [editing, setEditing] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -281,6 +288,8 @@ export function ServiceMonitoring({ serviceId }: { serviceId: string }) {
   const result = data?.status;
   const error = operation.error;
   const conflict = error instanceof ApiError && error.status === 409;
+  if ([query.error, error].some((failure) => failure instanceof ApiError
+    && failure.errorResponse.error === "monitoring_not_configured")) return null;
   return (
     <Card>
       <CardHeader>

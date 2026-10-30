@@ -1228,7 +1228,8 @@ it.each([true, false])("offers Advanced to an authorized catalog owner for a pla
 });
 
 
-it("shows Monitoring only for usable HTTP service overview", () => {
+it("shows Monitoring only for flagged people and usable HTTP service overview", () => {
+  useAuthStore.setState({ user: { ...useAuthStore.getState().user!, capabilities: { enabled_features: ["services:monitoring"] } } });
   hooks.key.data = makeKey();
   const view = render(<KeyDetailPage />);
   expect(screen.getByTestId("service-monitoring")).toHaveTextContent("key-1");
@@ -1240,5 +1241,11 @@ it("shows Monitoring only for usable HTTP service overview", () => {
   expect(screen.queryByTestId("service-monitoring")).not.toBeInTheDocument();
   hooks.key.data = makeKey({ credential_source: { type: "org", org_id: "org", org_name: "Org", role: "viewer", allowed: false } });
   view.rerender(<KeyDetailPage />);
+  expect(screen.queryByTestId("service-monitoring")).not.toBeInTheDocument();
+});
+
+it("hides Monitoring on the service overview when the flag is off", () => {
+  hooks.key.data = makeKey();
+  render(<KeyDetailPage />);
   expect(screen.queryByTestId("service-monitoring")).not.toBeInTheDocument();
 });

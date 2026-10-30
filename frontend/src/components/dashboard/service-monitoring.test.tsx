@@ -22,7 +22,19 @@ import type {
 } from "@/schemas/monitoring";
 let response: MonitoringResponse;
 let calls: { path: string; method: string; body: unknown }[];
-let failure: { status: number; message: string } | undefined;
+let failure: { status: number; message: string; error?: string; code?: number } | undefined;
+const monitoringUser = (id = "owner", enabled = true): User => ({
+  id,
+  email: `${id}@example.com`,
+  display_name: null,
+  avatar_url: null,
+  email_verified: true,
+  mfa_enabled: false,
+  is_admin: false,
+  is_active: true,
+  created_at: "2026-01-01T00:00:00Z",
+  capabilities: { enabled_features: enabled ? ["services:monitoring"] : [] },
+});
 const observation = (): MonitoringResult => ({
   service: { id: "exact-id" },
   health: {
@@ -41,7 +53,7 @@ const observation = (): MonitoringResult => ({
 beforeEach(() => {
   calls = [];
   failure = undefined;
-  useAuthStore.setState({ user: { id: "owner" } as User });
+  useAuthStore.setState({ user: monitoringUser() });
   response = {
     service_id: "exact-id",
     can_manage: true,
@@ -69,8 +81,8 @@ beforeEach(() => {
       const failed = failure;
       const data = failed
         ? {
-            error: "monitoring_error",
-            error_code: 13300,
+            error: failed.error ?? "monitoring_unavailable",
+            error_code: failed.code ?? 13300,
             message: failed.message,
           }
         : method === "GET"
@@ -227,7 +239,7 @@ it("account changes cannot publish late owner authority", async () => {
   );
   mount();
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
-  act(() => useAuthStore.setState({ user: { id: "next-owner" } as User }));
+  act(() => useAuthStore.setState({ user: monitoringUser("next-owner") }));
   response.can_manage = false;
   response.configuration = null;
   await act(async () => {
@@ -425,4 +437,30 @@ it("reserves Not configured for explicit upstream readiness metadata", async () 
     await screen.findByRole("region", { name: "Readiness" }),
   );
   expect(readiness.getByText("Not configured")).toBeVisible();
+});
+
+it("flag off hides monitoring without making a monitoring request", async () => {
+  useAuthStore.setState({ user: { id: "owner" } as User });
+  mount();
+  await act(async () => {});
+  expect(screen.queryByText("Monitoring")).not.toBeInTheDocument();
+  expect(calls).toEqual([]);
+});
+
+it("not configured hides monitoring after one discovery read with no follow-up requests", async () => {
+  failure = { status: 404, error: "monitoring_not_configured", code: 13301, message: "Service monitoring is not configured" };
+  mount();
+  await waitFor(() => expect(screen.queryByText("Monitoring")).not.toBeInTheDocument());
+  expect(screen.queryByText(/Monitoring is unavailable/)).not.toBeInTheDocument();
+  expect(calls).toEqual([{ path: "/api/v1/keys/exact-id/monitoring", method: "GET", body: undefined }]);
+  await act(async () => { onlineManager.setOnline(false); onlineManager.setOnline(true); });
+  expect(calls).toHaveLength(1);
+});
+
+it("revoking the flag removes the card and makes no further monitoring requests", async () => {
+  mount();
+  await screen.findByText("Healthy");
+  act(() => useAuthStore.setState({ user: monitoringUser("owner", false) }));
+  expect(screen.queryByText("Monitoring")).not.toBeInTheDocument();
+  expect(calls).toHaveLength(1);
 });

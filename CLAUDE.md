@@ -62,6 +62,8 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12700 `ToolOperationNotPublished` (HTTP 404): unpublished or unknown operation on a tool offering.
 - 12800-12801: 12800 `ManagedExecutionPending` (HTTP 409), 12801 `ErasurePreparing` (HTTP 409, `erasure_preparing`).
 - 12900 `OAuthAuthorityUnavailable` (HTTP 503, `oauth_authority_unavailable`): a live OAuth authority read could not complete; retry the request without discarding tokens or reauthorizing.
+- 13300 `MonitoringUnavailable` (HTTP 503, `monitoring_unavailable`): configured chrono-probe failed or returned an unusable response.
+- 13301 `MonitoringNotConfigured` (HTTP 404, `monitoring_not_configured`): `CHRONO_PROBE_URL` is unset or invalid; monitoring UI stays hidden.
 - 12500-12501 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503).
 
 ### 4. Frontend Patterns
@@ -540,6 +542,9 @@ TELEGRAM_BOT_USERNAME=              # Without @
 APPROVAL_EXPIRY_INTERVAL_SECS=5     # Interval between expiry sweeps
 CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS=60  # Service-link expiry and bot-link recovery sweeps; 0 disables both
 AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS=60    # Revoke expired undelivered Agent Key credentials; 0 disables
+
+# Service monitoring (optional; requires services:monitoring for the acting person)
+CHRONO_PROBE_URL=                   # Trusted internal HTTP(S) origin; unset/invalid hides Monitoring
 
 # OAuth token refresh (optional)
 OAUTH_REFRESH_SWEEP_INTERVAL_SECS=600  # Proactive refresh sweep for expiring multi-connection OAuth

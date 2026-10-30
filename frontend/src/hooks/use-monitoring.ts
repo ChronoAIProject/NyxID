@@ -1,4 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { apiClient } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import type {
@@ -14,17 +16,21 @@ type Operation =
   | { kind: "probe" };
 
 export function useMonitoring(serviceId: string) {
+  const enabled = useFeature(FEATURE_FLAG.SERVICE_MONITORING);
   const identity = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   const queryKey = ["monitoring", serviceId, identity] as const;
   const path = `/keys/${encodeURIComponent(serviceId)}/monitoring`;
   const authorityGuard = () => {
-    if (!identity || useAuthStore.getState().user?.id !== identity)
+    const current = useAuthStore.getState().user;
+    if (!enabled || !userHasFeature(current, FEATURE_FLAG.SERVICE_MONITORING))
+      throw new Error("Monitoring is not enabled.");
+    if (!identity || current?.id !== identity)
       throw new Error("Account changed. Reload monitoring before continuing.");
   };
   const query = useQuery({
     queryKey,
-    enabled: Boolean(identity && serviceId),
+    enabled: Boolean(enabled && identity && serviceId),
     retry: false,
     gcTime: 0,
     refetchOnWindowFocus: false,

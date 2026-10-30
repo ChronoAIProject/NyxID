@@ -8,11 +8,24 @@ work to normal REST, LLM, or MCP invocations.
 
 ## Deployment
 
+The `services:monitoring` feature flag is default off. Enable it for the acting
+person through the existing global, organization or user overrides. Resolution
+includes live organization membership overrides, matching `/users/me` and the
+frontend flag mechanism. When off, all five routes return the same generic
+404 `not_found` before service lookup, authorization details, callback-token
+minting or chrono-probe traffic. The frontend hides Monitoring and sends no
+monitoring request while the flag is off.
+
 Set the backend's optional `CHRONO_PROBE_URL` to the internal HTTP(S) origin of
 chrono-probe, for example `http://chrono-probe:8080`. Use a trusted private
 network for HTTP, or HTTPS where the network is not trusted. The origin must
 have no path, userinfo, query, or fragment. Redirects and ambient HTTP proxies
-are disabled. Unset or unavailable chrono-probe affects only Monitoring.
+are disabled. When the flag is on, an unset or invalid origin returns 404
+`monitoring_not_configured` (13301) on every monitoring route. The frontend hides
+the section after this read and does not poll or retry it. A configured but
+unreachable or failing chrono-probe instead returns 503 `monitoring_unavailable`
+(13300), retaining the “Monitoring is unavailable” message. These conditions
+affect only Monitoring.
 
 Deploy a chrono-probe version implementing
 [chrono-probe #8](https://github.com/ChronoAIProject/chrono-probe/issues/8)
@@ -90,6 +103,12 @@ without scheduled observations. Existing scheduled evidence expires at
 `stale_at`; stale, missing, invalid-time, and `no_health_path` evidence never
 renders a current healthy/unhealthy badge. Readiness without configured checks
 is labeled Not configured only when that is known.
+
+Check now and Test draft execute through the normal NyxID proxy with the
+caller's authority, including ordinary approvals and billing. Owners with
+approvals set to **All requests** receive an approval prompt per check. Each
+check of a priced platform service bills the caller; page load and Refresh
+only read observations and do not execute or bill a check.
 
 Check now and Test draft render their responses in component memory for the
 current page. Manual evidence expires after 60 seconds. These responses do not

@@ -197,7 +197,7 @@ fn ensure_human(auth: &AuthUser) -> AppResult<()> {
 /// This address is operator configuration, never request input. Redirects and
 /// ambient HTTP proxies are disabled before any caller token is transmitted.
 pub fn validate_base_url(value: &str) -> AppResult<url::Url> {
-    let url = url::Url::parse(value).map_err(|_| AppError::MonitoringUnavailable)?;
+    let url = url::Url::parse(value).map_err(|_| AppError::MonitoringNotConfigured)?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -206,9 +206,19 @@ pub fn validate_base_url(value: &str) -> AppResult<url::Url> {
         || url.fragment().is_some()
         || url.path() != "/"
     {
-        return Err(AppError::MonitoringUnavailable);
+        return Err(AppError::MonitoringNotConfigured);
     }
     Ok(url)
+}
+
+/// Check operator configuration before resolving a service or minting a callback token.
+pub fn configured_base_url(config: &AppConfig) -> AppResult<url::Url> {
+    validate_base_url(
+        config
+            .chrono_probe_url
+            .as_deref()
+            .ok_or(AppError::MonitoringNotConfigured)?,
+    )
 }
 
 pub struct Client {
@@ -227,12 +237,7 @@ impl Client {
         execute: bool,
     ) -> AppResult<Self> {
         ensure_human(auth)?;
-        let base = validate_base_url(
-            config
-                .chrono_probe_url
-                .as_deref()
-                .ok_or(AppError::MonitoringUnavailable)?,
-        )?;
+        let base = configured_base_url(config)?;
         if execute {
             auth.ensure_rest_proxy_access()?;
         }

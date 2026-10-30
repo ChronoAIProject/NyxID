@@ -14,6 +14,7 @@ use crate::{
     services::{
         audit_service,
         coordination_service::TokenBucketStore,
+        feature_flag_service,
         monitoring_service::{
             self as monitoring, Access, Client, Configuration, OwnerConfig, ProbeResult,
             WriteConfig,
@@ -37,6 +38,18 @@ pub struct RevisionQuery {
 }
 
 async fn access(state: &AppState, auth: &AuthUser, id: &str) -> AppResult<Access> {
+    // Gate every route before service existence, authorization details, or any
+    // token/transport work. Resolve for the actor, including live org overrides.
+    if !feature_flag_service::personal_flag_enabled(
+        &state.db,
+        &auth.user_id.to_string(),
+        feature_flag_service::SERVICE_MONITORING_FLAG_KEY,
+    )
+    .await?
+    {
+        return Err(AppError::NotFound("Not found".into()));
+    }
+    monitoring::configured_base_url(&state.config)?;
     super::login_client_context::require_first_party_human(auth)?;
     monitoring::authorize(&state.db, auth, id).await
 }
@@ -93,7 +106,7 @@ fn audit(state: &AppState, auth: &AuthUser, service_id: &str, action: &str, revi
     );
 }
 
-#[utoipa::path(get, path = "/api/v1/keys/{id}/monitoring", params(("id" = String, Path, description = "Exact UserService UUID")), responses((status = 200, body = MonitoringResponse), (status = 503, description = "Monitoring unavailable")), tag = "Keys")]
+#[utoipa::path(get, path = "/api/v1/keys/{id}/monitoring", params(("id" = String, Path, description = "Exact UserService UUID")), responses((status = 200, body = MonitoringResponse), (status = 404, description = "Not found or monitoring_not_configured"), (status = 503, description = "Monitoring unavailable")), tag = "Keys")]
 pub async fn get(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -241,6 +254,21 @@ mod tests {
         let id = Uuid::new_v4().to_string();
         state
             .db
+            .collection::<User>(USERS)
+            .insert_one(test_user(&user, UserType::Person))
+            .await
+            .unwrap();
+        feature_flag_service::set_platform_override(
+            &state.db,
+            feature_flag_service::SERVICE_MONITORING_FLAG_KEY,
+            &feature_flag_service::FlagTarget::Global,
+            true,
+            &user,
+        )
+        .await
+        .unwrap();
+        state
+            .db
             .collection::<UserService>(SERVICES)
             .insert_one(test_user_service(
                 &id,
@@ -288,6 +316,143 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    // Exercise the actual entry points, including write/probe admission, and
+    // compare serialized responses rather than only a helper's return value.
+    async fn route_errors(
+        state: &AppState,
+        auth: &AuthUser,
+        id: &str,
+    ) -> Vec<(axum::http::StatusCode, Value)> {
+        use axum::{body::to_bytes, response::IntoResponse};
+        let responses = vec![
+            get(State(state.clone()), auth.clone(), Path(id.into()))
+                .await
+                .into_response(),
+            save(
+                State(state.clone()),
+                auth.clone(),
+                Path(id.into()),
+                Json(WriteConfig {
+                    revision: 0,
+                    health: None,
+                    readiness: None,
+                }),
+            )
+            .await
+            .into_response(),
+            clear(
+                State(state.clone()),
+                auth.clone(),
+                Path(id.into()),
+                Query(RevisionQuery { revision: 0 }),
+            )
+            .await
+            .into_response(),
+            validate(
+                State(state.clone()),
+                auth.clone(),
+                Path(id.into()),
+                Json(OwnerConfig::default()),
+            )
+            .await
+            .into_response(),
+            probe(State(state.clone()), auth.clone(), Path(id.into()))
+                .await
+                .into_response(),
+        ];
+        let mut errors = Vec::new();
+        for response in responses {
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+            errors.push((status, serde_json::from_slice(&body).unwrap()));
+        }
+        errors
+    }
+
+    #[tokio::test]
+    async fn flag_off_hides_all_routes_before_service_or_upstream_access_even_for_owner() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let (mut state, auth, id, server) = fixture().await;
+        feature_flag_service::clear_platform_override(
+            &state.db,
+            feature_flag_service::SERVICE_MONITORING_FLAG_KEY,
+            &feature_flag_service::FlagTarget::Global,
+        )
+        .await
+        .unwrap();
+        let service_calls = Arc::new(AtomicUsize::new(0));
+        let count = service_calls.clone();
+        let observed = crate::test_utils::connect_test_database_with_command_handler(
+            "monitoring_disabled_reads",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event
+                    && event.command.get_str(&event.command_name) == Ok(SERVICES)
+                {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        state.db = observed.client().database(state.db.name());
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let mut nonhuman = auth.clone();
+        nonhuman.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        let outsider = test_auth_user(&Uuid::new_v4().to_string());
+        let expected = AppError::NotFound("Not found".into());
+        for caller in [&auth, &outsider, &nonhuman] {
+            for target in [&id, &Uuid::new_v4().to_string(), "not-a-uuid"] {
+                for (status, body) in route_errors(&state, caller, target).await {
+                    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+                    assert_eq!(body["error"], "not_found");
+                    assert_eq!(body["error_code"], expected.error_code());
+                    assert_eq!(body["message"], expected.to_string());
+                }
+            }
+        }
+        assert_eq!(service_calls.load(Ordering::SeqCst), 0);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        observed.drop().await.unwrap();
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn not_configured_is_distinct_on_every_route_and_does_not_contact_upstream() {
+        let (mut state, auth, id, server) = fixture().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        for origin in [
+            None,
+            Some(""),
+            Some("not a URL"),
+            Some("https://probe/internal"),
+            Some("https://user:secret@probe"),
+        ] {
+            let mut config = state.config.clone();
+            config.chrono_probe_url = origin.map(str::to_owned);
+            state.config = config;
+            for (status, body) in route_errors(&state, &auth, &id).await {
+                assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+                assert_eq!(body["error"], "monitoring_not_configured");
+                assert_eq!(body["error_code"], 13301);
+                assert_eq!(body["message"], "Service monitoring is not configured");
+            }
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+        state.db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -417,15 +582,26 @@ mod tests {
 
     #[tokio::test]
     async fn upstream_outage_is_a_monitoring_error_and_does_not_mutate_service() {
+        use axum::{body::to_bytes, response::IntoResponse};
+
         let (state, auth, id, server) = fixture().await;
-        Mock::given(method("GET"))
+        Mock::given(wiremock::matchers::any())
             .respond_with(ResponseTemplate::new(503).set_body_string("private upstream failure"))
+            .expect(1)
             .mount(&server)
             .await;
-        assert!(matches!(
-            get(State(state.clone()), auth, Path(id.clone())).await,
-            Err(AppError::MonitoringUnavailable)
-        ));
+        let response = get(State(state.clone()), auth, Path(id.clone()))
+            .await
+            .into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+        assert_eq!(body["error"], "monitoring_unavailable");
+        assert_eq!(body["error_code"], 13300);
+        assert_eq!(body["message"], "Service monitoring is unavailable");
         let service = state
             .db
             .collection::<UserService>(SERVICES)
