@@ -7,7 +7,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-interface AddCtaButtonProps {
+interface AddCtaButtonProps extends Pick<
+  React.ComponentProps<"button">,
+  "id" | "aria-expanded" | "aria-controls"
+> {
   readonly label: string;
   readonly onClick: () => void;
   readonly disabled?: boolean;
@@ -36,10 +39,12 @@ export function AddCtaButton({
   compactLabel,
   icon: Icon = Plus,
   variant = "primary",
+  ...disclosureProps
 }: AddCtaButtonProps) {
   if (variant === "primary") {
     const button = (
       <Button
+        {...disclosureProps}
         variant="primary"
         size={compact ? (compactLabel ? "default" : "icon") : "lg"}
         aria-label={label}
@@ -77,6 +82,7 @@ export function AddCtaButton({
 
   return (
     <button
+      {...disclosureProps}
       type="button"
       onClick={onClick}
       disabled={disabled}

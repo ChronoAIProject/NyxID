@@ -1072,6 +1072,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::admin_feature_flags::patch_feature_flag_metadata),
         )
         .route(
+            "/feature-flags/{flag_key}/history",
+            get(handlers::admin_feature_flags::list_feature_flag_history),
+        )
+        .route(
             "/users",
             get(handlers::admin::list_users).post(handlers::admin::create_user),
         )

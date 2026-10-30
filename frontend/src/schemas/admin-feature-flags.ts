@@ -35,6 +35,24 @@ export const MAX_FEATURE_FLAG_DESCRIPTION_LENGTH = 512;
 /** Mirrors `feature_flag_service::MAX_FLAG_OWNER_LEN`. */
 export const MAX_FEATURE_FLAG_OWNER_LENGTH = 128;
 
+export const MAX_FEATURE_FLAG_GROUP_LENGTH = 80;
+export const MAX_FEATURE_FLAG_TAG_LENGTH = 40;
+export const MAX_FEATURE_FLAG_TAGS = 12;
+
+export const featureFlagTagsSchema = z
+  .array(
+    z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_FEATURE_FLAG_TAG_LENGTH)
+      .regex(
+        /^[a-z0-9][a-z0-9_-]*$/,
+        "Use lowercase letters, digits, hyphens or underscores.",
+      ),
+  )
+  .max(MAX_FEATURE_FLAG_TAGS);
+
 export const adminFeatureFlagSchema = z.object({
   key: z.string(),
   /** Effective description: the admin-authored one when set, else the code one. */
@@ -44,6 +62,9 @@ export const adminFeatureFlagSchema = z.object({
   /** The admin-authored description, when one exists. */
   custom_description: z.string().nullable(),
   owner: z.string().nullable(),
+  group: z.string().nullable().optional(),
+  tags: z.array(z.string()).optional(),
+  sunset: z.boolean().optional(),
   metadata_updated_at: z.string().nullable(),
   metadata_updated_by: z.string().nullable(),
   default_enabled: z.boolean(),
@@ -66,6 +87,10 @@ export const updateAdminFeatureFlagMetadataRequestSchema = z
       .max(MAX_FEATURE_FLAG_DESCRIPTION_LENGTH)
       .nullable(),
     owner: z.string().trim().max(MAX_FEATURE_FLAG_OWNER_LENGTH).nullable(),
+    group: z.string().trim().max(MAX_FEATURE_FLAG_GROUP_LENGTH).nullable(),
+    tags: featureFlagTagsSchema,
+    expected_tags: featureFlagTagsSchema,
+    sunset: z.boolean(),
   })
   .partial()
   .strict();
@@ -114,4 +139,29 @@ export interface FeatureFlagTarget {
   email: string;
   display_name: string | null;
   slug: string | null;
+}
+
+export const featureFlagHistoryEntrySchema = z.object({
+  id: z.string(),
+  actor_id: z.string().nullable(),
+  actor_name: z.string().nullable(),
+  actor_email: z.string().nullable(),
+  target_name: z.string().nullable().optional(),
+  event_type: z.string(),
+  details: z.record(z.string(), z.unknown()),
+  created_at: z.string(),
+  legacy: z.boolean().optional(),
+});
+export type FeatureFlagHistoryEntry = z.infer<
+  typeof featureFlagHistoryEntrySchema
+>;
+export interface FeatureFlagHistoryResponse {
+  entries: FeatureFlagHistoryEntry[];
+  next_cursor: string | null;
+  legacy_ambiguous_omitted: boolean;
+  origin: {
+    created_by: string | null;
+    creator_name: string | null;
+    created_at: string | null;
+  };
 }
