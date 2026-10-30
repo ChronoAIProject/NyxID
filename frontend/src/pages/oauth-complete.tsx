@@ -80,7 +80,12 @@ export function OAuthCompletePage() {
     OAuthActionMessage["action"] | null
   >(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
-  const validCompletion = Boolean(search.status && search.flow && search.nonce);
+  // CLI connections (`wz`) have no opener tab to signal: the CLI polls the
+  // placeholder itself, so the page needs no nonce.
+  const cliFlow = search.flow === "wz";
+  const validCompletion = Boolean(
+    search.status && search.flow && (search.nonce || cliFlow),
+  );
 
   useEffect(() => {
     const channel = search.nonce ? openOAuthChannel(search.nonce) : null;
@@ -183,6 +188,24 @@ export function OAuthCompletePage() {
 
   const success = search.status === "complete";
   const errorCopy = search.code ? ERROR_COPY[search.code] : undefined;
+  if (cliFlow) {
+    return (
+      <OAuthResultShell
+        icon={success ? "neutral" : "error"}
+        title={
+          success
+            ? "Authorization response received"
+            : (errorCopy?.[0] ?? "Authorization failed")
+        }
+      >
+        <p role="status" aria-live="polite">
+          {success
+            ? "Return to your terminal. The NyxID CLI confirms the connection, and you can close this window."
+            : "Return to your terminal for details, then run the command again."}
+        </p>
+      </OAuthResultShell>
+    );
+  }
   const retryable =
     search.code !== "session_mismatch" &&
     search.code !== "session_required" &&

@@ -1,4 +1,5 @@
 frontend/src/app.css
+frontend/src/components/brand/nyxid-icon.tsx
 frontend/src/components/brand/nyxid-logo.tsx
 frontend/src/components/cli-wizard/access-scope-card.tsx
 frontend/src/components/cli-wizard/ai-key-confirm-panel.tsx
@@ -119,6 +120,7 @@ frontend/src/components/shared/async-option-select.tsx
 frontend/src/components/shared/copyable-url-callout.tsx
 frontend/src/components/shared/credential-binding-choice.tsx
 frontend/src/components/shared/not-found-page.tsx
+frontend/src/components/shared/oauth-client-source-choice.tsx
 frontend/src/components/shared/org-scope-select.tsx
 frontend/src/components/shared/platform-service-scope.tsx
 frontend/src/components/shared/twitter-oauth-guidance.tsx

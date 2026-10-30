@@ -544,14 +544,14 @@ async fn generic_oauth_callback_impl(
         let mut connect_link_error_recorded = false;
         let mut state_lookup_error: Option<String> = None;
         let mut redirect_path: Option<String> = None;
-        let mut chat_completion = false;
-        let mut chat_nonce: Option<String> = None;
+        let mut completion_flow: Option<OAuthFlowKind> = None;
+        let mut completion_nonce: Option<String> = None;
         if let Some(state_param) = query.state.as_deref().filter(|s| !s.is_empty()) {
             match user_token_service::peek_oauth_state(&state.db, state_param).await {
                 Ok(oauth_state) => {
                     redirect_path = oauth_state.redirect_path.clone();
-                    chat_completion = is_chat_connect_state(&oauth_state);
-                    chat_nonce = oauth_state.attempt_nonce.clone();
+                    completion_flow = completion_page_flow(&oauth_state);
+                    completion_nonce = oauth_state.attempt_nonce.clone();
                     let owner_id = oauth_state
                         .target_user_id
                         .as_deref()
@@ -586,8 +586,8 @@ async fn generic_oauth_callback_impl(
                     if let Some(nonce) =
                         user_token_service::chat_attempt_nonce_from_state(state_param)
                     {
-                        chat_completion = true;
-                        chat_nonce = Some(nonce.to_string());
+                        completion_flow = Some(OAuthFlowKind::ChatConnect);
+                        completion_nonce = Some(nonce.to_string());
                     }
                 }
             }
@@ -612,7 +612,7 @@ async fn generic_oauth_callback_impl(
             auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
             auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
         );
-        if chat_completion {
+        if let Some(flow) = completion_flow {
             let code = if normalized_oauth_error_code(error) == "access_denied" {
                 "access_denied"
             } else {
@@ -621,9 +621,9 @@ async fn generic_oauth_callback_impl(
             return redirect_to_oauth_completion(
                 frontend_url,
                 "error",
-                OAuthFlowKind::ChatConnect.as_wire(),
+                flow.as_wire(),
                 Some(code),
-                chat_nonce.as_deref(),
+                completion_nonce.as_deref(),
             );
         }
         return if let Some(path) = redirect_path {
@@ -691,8 +691,8 @@ async fn generic_oauth_callback_impl(
     };
 
     let provider_id = &oauth_state.provider_config_id;
-    let chat_completion = is_chat_connect_state(&oauth_state);
-    let chat_nonce = oauth_state.attempt_nonce.as_deref();
+    let completion_flow = completion_page_flow(&oauth_state);
+    let completion_nonce = oauth_state.attempt_nonce.as_deref();
 
     if let Err(_e) = ensure_callback_user_matches_state(auth_user.as_ref(), &oauth_state.user_id) {
         let browser_session_user_id = auth_user.as_ref().map(|u| u.user_id.to_string());
@@ -750,13 +750,13 @@ async fn generic_oauth_callback_impl(
             auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
             auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
         );
-        if chat_completion {
+        if let Some(flow) = completion_flow {
             return redirect_to_oauth_completion(
                 frontend_url,
                 "error",
-                OAuthFlowKind::ChatConnect.as_wire(),
+                flow.as_wire(),
                 Some("session_mismatch"),
-                chat_nonce,
+                completion_nonce,
             );
         }
         return redirect_callback(frontend_url, "error", Some(&message));
@@ -851,13 +851,13 @@ async fn generic_oauth_callback_impl(
                     auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
                     auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
                 );
-                if chat_completion {
+                if let Some(flow) = completion_flow {
                     return redirect_to_oauth_completion(
                         frontend_url,
                         "error",
-                        OAuthFlowKind::ChatConnect.as_wire(),
+                        flow.as_wire(),
                         Some("exchange_failed"),
-                        chat_nonce,
+                        completion_nonce,
                     );
                 }
                 if let Some(ref path) = redirect_path {
@@ -921,13 +921,13 @@ async fn generic_oauth_callback_impl(
                 }
             }
 
-            if chat_completion {
+            if let Some(flow) = completion_flow {
                 redirect_to_oauth_completion(
                     frontend_url,
                     "complete",
-                    OAuthFlowKind::ChatConnect.as_wire(),
+                    flow.as_wire(),
                     None,
-                    chat_nonce,
+                    completion_nonce,
                 )
             } else if let Some(ref path) = redirect_path {
                 redirect_to_path(frontend_url, path, "success", None)
@@ -976,7 +976,7 @@ async fn generic_oauth_callback_impl(
                 auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
             );
             // Sanitize error for user-facing redirect -- never leak internal details
-            if chat_completion {
+            if let Some(flow) = completion_flow {
                 let code = if oauth_state.expires_at < chrono::Utc::now() {
                     "state_expired"
                 } else if oauth_state.consumed {
@@ -987,9 +987,9 @@ async fn generic_oauth_callback_impl(
                 redirect_to_oauth_completion(
                     frontend_url,
                     "error",
-                    OAuthFlowKind::ChatConnect.as_wire(),
+                    flow.as_wire(),
                     Some(code),
-                    chat_nonce,
+                    completion_nonce,
                 )
             } else if let Some(ref path) = redirect_path {
                 redirect_to_path(frontend_url, path, "error", Some(&user_msg))
@@ -1002,6 +1002,20 @@ async fn generic_oauth_callback_impl(
 
 fn is_chat_connect_state(oauth_state: &OAuthState) -> bool {
     oauth_state.flow_kind.as_deref() == Some(OAuthFlowKind::ChatConnect.as_wire())
+}
+
+/// Flows whose callback lands on the standalone `/oauth-complete` page rather
+/// than `redirect_path`: chat popups and CLI-started connections. CLI callers
+/// keep sending `redirect_path` so older servers still have a destination.
+fn completion_page_flow(oauth_state: &OAuthState) -> Option<OAuthFlowKind> {
+    match oauth_state
+        .flow_kind
+        .as_deref()
+        .and_then(OAuthFlowKind::parse)
+    {
+        Some(flow @ (OAuthFlowKind::ChatConnect | OAuthFlowKind::WizardConnect)) => Some(flow),
+        _ => None,
+    }
 }
 
 async fn fail_callback_placeholders(
@@ -2545,6 +2559,157 @@ mod tests {
             Some(nonce.as_str())
         );
         assert!(!location.contains("/providers/callback"));
+    }
+
+    #[test]
+    fn completion_page_flow_covers_chat_and_cli_wizard_only() {
+        let mut oauth_state = test_oauth_state("state", "user", "provider");
+        assert_eq!(completion_page_flow(&oauth_state), None);
+        for (token, expected) in [
+            ("cc", Some(OAuthFlowKind::ChatConnect)),
+            ("wz", Some(OAuthFlowKind::WizardConnect)),
+            ("kc", None),
+            ("pc", None),
+            ("sa", None),
+            ("sl", None),
+            ("unknown", None),
+        ] {
+            oauth_state.flow_kind = Some(token.to_string());
+            assert_eq!(completion_page_flow(&oauth_state), expected, "{token}");
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_denial_cli_wizard_lands_on_completion_page() {
+        let Some(db) = connect_test_database("oauth_callback_cli_wizard_denial").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let frontend_url = state.config.frontend_url.clone();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let mut oauth_state = test_oauth_state(&state_id, &user_id, &provider_id);
+        oauth_state.flow_kind = Some(OAuthFlowKind::WizardConnect.as_wire().to_string());
+        oauth_state.redirect_path = Some(format!("/keys/{key_id}"));
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(oauth_state)
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(&key_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+
+        let location = redirect_location(
+            generic_oauth_callback_impl(
+                state,
+                None,
+                GenericOAuthCallbackQuery {
+                    code: None,
+                    state: Some(state_id),
+                    error: Some("access_denied".to_string()),
+                    error_description: Some("provider-controlled text".to_string()),
+                },
+            )
+            .await,
+        );
+
+        assert!(location.starts_with(&format!(
+            "{}/oauth-complete?",
+            frontend_url.trim_end_matches('/')
+        )));
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "flow").as_deref(),
+            Some("wz")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "code").as_deref(),
+            Some("access_denied")
+        );
+        assert!(redirect_query_param(&location, "nonce").is_none());
+        assert!(redirect_query_param(&location, "message").is_none());
+        assert!(!location.contains("/keys/"));
+        // The CLI reads the failure from the placeholder, not the browser.
+        let api_key = get_api_key(&db, &key_id).await;
+        assert_eq!(api_key.status, "failed");
+        assert_eq!(
+            api_key.error_message.as_deref(),
+            Some(safe_provider_error_message("access_denied", None).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_session_mismatch_cli_wizard_lands_on_completion_page() {
+        let Some(db) = connect_test_database("oauth_callback_cli_wizard_session_mismatch").await
+        else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let frontend_url = state.config.frontend_url.clone();
+        let cli_user_id = Uuid::new_v4().to_string();
+        let browser_user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let mut oauth_state = test_oauth_state(&state_id, &cli_user_id, &provider_id);
+        oauth_state.flow_kind = Some(OAuthFlowKind::WizardConnect.as_wire().to_string());
+        oauth_state.redirect_path = Some(format!("/keys/{key_id}"));
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(oauth_state)
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(
+                &key_id,
+                &cli_user_id,
+                &provider_id,
+            ))
+            .await
+            .unwrap();
+        let mut auth_user = test_auth_user();
+        auth_user.user_id = Uuid::parse_str(&browser_user_id).unwrap();
+
+        let location = redirect_location(
+            generic_oauth_callback_impl(
+                state,
+                Some(auth_user),
+                GenericOAuthCallbackQuery {
+                    code: Some("oauth-code".to_string()),
+                    state: Some(state_id),
+                    error: None,
+                    error_description: None,
+                },
+            )
+            .await,
+        );
+
+        assert!(location.starts_with(&format!(
+            "{}/oauth-complete?",
+            frontend_url.trim_end_matches('/')
+        )));
+        assert_eq!(
+            redirect_query_param(&location, "flow").as_deref(),
+            Some("wz")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "code").as_deref(),
+            Some("session_mismatch")
+        );
+        assert!(redirect_query_param(&location, "message").is_none());
+        let api_key = get_api_key(&db, &key_id).await;
+        assert_eq!(api_key.status, "failed");
+        assert!(
+            api_key
+                .error_message
+                .as_deref()
+                .is_some_and(|msg| msg.starts_with("This OAuth flow was started by"))
+        );
     }
 
     #[tokio::test]
