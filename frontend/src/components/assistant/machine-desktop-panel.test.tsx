@@ -68,15 +68,30 @@ it("can manually reconnect when the initial connection never finishes", () => {
   act(() => Socket.instances[1]!.message({ type: "connected", session_id: "id", controller: "agent" }));
   expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
 });
-it("offers reconnect immediately on an error and cancels the stall timer on connection", () => {
+it("offers reconnect immediately on an error and when no first frame arrives", () => {
   vi.useFakeTimers();
   render(<MachineDesktopPanel nodeId="node" />);
   act(() => Socket.instances[0]!.onerror?.());
   expect(screen.getByRole("button", { name: "Reconnect" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
   act(() => Socket.instances[1]!.message({ type: "connected", session_id: "id", controller: "agent" }));
-  act(() => vi.advanceTimersByTime(9000));
+  act(() => vi.advanceTimersByTime(8000));
+  expect(screen.getByRole("button", { name: "Reconnect" })).toBeVisible();
+});
+it("shows a waiting state until the connected desktop sends its first frame", () => {
+  vi.useFakeTimers();
+  render(<MachineDesktopPanel nodeId="node" />);
+  const socket = Socket.instances[0]!;
+  act(() => socket.message({ type: "connected", session_id: "id", controller: "agent" }));
+
+  expect(screen.getByText("Waiting for desktop frame…", { selector: "p" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+
+  act(() => vi.advanceTimersByTime(8000));
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Desktop connected, but no screen frame has arrived.",
+  );
+  expect(screen.getByRole("button", { name: "Reconnect" })).toBeVisible();
 });
 it("watches, requests control, protects owner input, and hands back with a note", async () => {
   const view = render(
