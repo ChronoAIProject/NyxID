@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node"]
+  },
+  "include": [
+    "e2e/machine-detail.spec.ts",
+    "e2e/machine-detail-fixtures.ts",
+    "e2e/remote-machines.spec.ts",
+    "playwright.machine-detail.config.ts",
+    "playwright.remote-machine.config.ts"
+  ]
+}

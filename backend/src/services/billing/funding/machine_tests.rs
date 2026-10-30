@@ -23,6 +23,8 @@ fn layer(seconds: i64) -> LayerReservation {
         reserved_credits: Credits::ZERO,
         allowance_reservations: vec![],
         grant_reservations: vec![],
+        tax_cache_ttl_secs: 900,
+        applied_tax: None,
     }
 }
 
@@ -81,6 +83,7 @@ async fn fixture(name: &str, balance_seconds: i64) -> mongodb::Database {
         })
         .await
         .unwrap();
+    crate::services::billing::taxes::seed_test_profiles(&db).await;
     db
 }
 
@@ -125,6 +128,8 @@ fn row(id: &str, reservation: &BillingReservation) -> UsageMeterRow {
         "funding": bson::to_bson(&UsageFunding {
             credits_per_unit_micros: 40, credits_per_unit_pico: Some(RATE_PICO),
             settlement_rate: Some(credits(1)),
+            tax_accounting: true,
+            applied_tax: layer.applied_tax.clone(),
             allowance_reservations: layer.allowance_reservations.clone(),
             grant_reservations: layer.grant_reservations.clone(),
             ..UsageFunding::default()
@@ -355,21 +360,24 @@ async fn concurrent_machine_and_service_reservations_conserve_shared_grant() {
                     Err(error) => panic!("Machine grant reservation failed: {error}"),
                 }
             } else {
-                // This is the actual ordinary-service grant reservation
-                // primitive called by reserve_estimated_funding/reserve_layer.
-                super::super::reserve_grants(
+                match super::super::tests::ordinary(
                     &db,
                     OWNER,
                     None,
                     Some("ordinary-service"),
-                    credits(10),
+                    BillingMetric::Requests,
+                    10,
+                    credits(1),
                 )
                 .await
-                .unwrap()
-                .iter()
-                .map(|allocation| allocation.amount)
-                .try_fold(Credits::ZERO, Credits::checked_add)
-                .unwrap()
+                {
+                    Ok(hold) => Credits::checked_sum(
+                        hold.layers[0].grant_reservations.iter().map(|a| a.amount),
+                    )
+                    .unwrap(),
+                    Err(AppError::InsufficientCredits) => Credits::ZERO,
+                    Err(error) => panic!("Ordinary admission failed: {error}"),
+                }
             };
             (is_machine, reserved)
         })
@@ -691,6 +699,120 @@ async fn machine_background_settlement_recovers_failed_claim_and_benefit_crash_b
             .await
             .unwrap(),
         1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn capped_machine_window_and_pending_reclaim_retain_evidence_boundary() {
+    let db = fixture("machine_allocation_caps", 100).await;
+    benefits(&db).await;
+    db.collection::<Document>(ALLOWANCES)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let rule = crate::models::credit_service_limit::CreditServiceLimit {
+        key: "runtime".into(),
+        service_ids: vec!["runtime-catalog".into()],
+        service_slugs: vec![SKU.into()],
+        label: Some("Runtime".into()),
+        limit: credits(3),
+        consumed: Credits::ZERO,
+        reserved: Credits::ZERO,
+    };
+    db.collection::<Document>(GRANTS)
+        .update_one(
+            doc! { "_id": "grant" },
+            doc! { "$set": { "service_limits": bson::to_bson(&vec![rule]).unwrap() } },
+        )
+        .await
+        .unwrap();
+    let reservation = reserve(&db, 10, "cap-window").await.unwrap();
+    assert_eq!(
+        reservation.layers[0].grant_reservations[0].amount,
+        credits(3)
+    );
+    assert_eq!(reservation.total_reserved_credits, credits(7));
+    let pending = super::super::super::grants::request_revoke_grant(&db, "grant", Some("admin"))
+        .await
+        .unwrap();
+    assert!(pending.revoke_requested_at.is_some());
+    let usage = usage(&db, "cap-window").await;
+    assert!(
+        super::super::release_usage_reservations(&db, &usage)
+            .await
+            .is_err()
+    );
+    assert!(
+        super::super::settle_usage_funding(&db, &usage)
+            .await
+            .is_err()
+    );
+    let next = reserve(&db, 2, "next-window").await.unwrap();
+    assert!(next.layers[0].grant_reservations.is_empty());
+    let grant = db
+        .collection::<CreditGrant>(GRANTS)
+        .find_one(doc! { "_id": "grant" })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.reserved, credits(3));
+    assert_eq!(grant.service_limits[0].reserved, credits(3));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_wallet_windows_hold_gross_tax_and_benefits_skip_profiles() {
+    let db = fixture("machine_gross_tax", 1).await;
+    let mut config = crate::services::billing::taxes::zero_config();
+    config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":"9"}]);
+    let profile =
+        crate::services::billing::taxes::resolve_config(OWNER, "subscription", &config).unwrap();
+    db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    db.collection::<crate::models::billing_tax_profile::BillingTaxProfile>(
+        crate::models::billing_tax_profile::COLLECTION_NAME,
+    )
+    .insert_one(profile)
+    .await
+    .unwrap();
+    assert!(matches!(
+        reserve(&db, 1, "short-tax").await,
+        Err(AppError::InsufficientCredits)
+    ));
+    let gross =
+        crate::services::billing::taxes::gross_ceiling(credits(1), "9".parse().unwrap()).unwrap();
+    db.collection::<Document>(WALLETS)
+        .update_one(doc! {"_id":WALLET}, doc! {"$set":{"balance_credits":gross}})
+        .await
+        .unwrap();
+    let reservation = reserve(&db, 1, "gross-window").await.unwrap();
+    assert_eq!(reservation.total_reserved_credits, gross);
+    assert_eq!(wallet(&db).await.reserved_credits, gross);
+    assert_eq!(
+        reservation.layers[0]
+            .applied_tax
+            .as_ref()
+            .unwrap()
+            .rate_percent,
+        "9".parse().unwrap()
+    );
+    db.drop().await.unwrap();
+
+    let db = fixture("machine_benefits_no_tax_profile", 0).await;
+    benefits(&db).await;
+    db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let reservation = reserve(&db, 5, "benefit-window").await.unwrap();
+    assert_eq!(reservation.total_reserved_credits, Credits::ZERO);
+    assert_eq!(reservation.layers[0].allowance_reservations[0].quantity, 2);
+    assert_eq!(
+        reservation.layers[0].grant_reservations[0].amount,
+        credits(3)
     );
     db.drop().await.unwrap();
 }

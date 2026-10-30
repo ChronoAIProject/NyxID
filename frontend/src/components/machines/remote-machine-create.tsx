@@ -575,9 +575,11 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
           </p>
           <p>
             Job metadata remains for 30 days and terminal operation history for
-            90 days. Deletion permanently removes the workspace, targets cleanup
+            90 days. Deletion queues workspace cleanup, targets completion
             within 24 hours, and retains necessary billing, cleanup and
-            idempotency evidence. Paused workspace storage is free.
+            idempotency evidence. Underlying storage follows its reclaim policy;
+            physical storage release is not verified. Paused workspace storage
+            is free.
           </p>
           {policy || saved ? (
             <p>

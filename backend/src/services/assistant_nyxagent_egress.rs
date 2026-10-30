@@ -38,13 +38,61 @@ use crate::{
 pub fn producer(
     state: AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
+    skills: Arc<dyn super::agent_skill_preload::ContextProvider>,
 ) -> Arc<dyn NyxAgentEgress> {
-    Arc::new(Egress { state, identity })
+    Arc::new(Egress {
+        state,
+        identity: Some(identity),
+        skills: Some(skills),
+        channel: None,
+        #[cfg(test)]
+        dispatch_boundary: None,
+    })
+}
+
+pub(crate) fn channel(
+    state: AppState,
+    session: crate::models::channel_adapter::CallSession,
+) -> Arc<dyn NyxAgentEgress> {
+    Arc::new(Egress {
+        state,
+        identity: None,
+        channel: Some(session),
+        // Phone-channel sessions are guest turns and never preload private skills.
+        skills: None,
+        #[cfg(test)]
+        dispatch_boundary: None,
+    })
+}
+
+#[cfg(test)]
+pub(crate) struct DispatchBoundary {
+    pub entered: tokio::sync::Semaphore,
+    pub release: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+pub(crate) fn channel_at_dispatch_boundary(
+    state: AppState,
+    session: crate::models::channel_adapter::CallSession,
+    boundary: Arc<DispatchBoundary>,
+) -> Arc<dyn NyxAgentEgress> {
+    Arc::new(Egress {
+        state,
+        identity: None,
+        channel: Some(session),
+        dispatch_boundary: Some(boundary),
+        skills: None,
+    })
 }
 
 struct Egress {
     state: AppState,
-    identity: Arc<dyn ManagerIdentityProducer>,
+    identity: Option<Arc<dyn ManagerIdentityProducer>>,
+    channel: Option<crate::models::channel_adapter::CallSession>,
+    #[cfg(test)]
+    dispatch_boundary: Option<Arc<DispatchBoundary>>,
+    skills: Option<Arc<dyn super::agent_skill_preload::ContextProvider>>,
 }
 
 /// Validate server-built operations again at the egress boundary. Handles are
@@ -90,6 +138,20 @@ fn valid_handle(handle: &str) -> bool {
 
 #[async_trait]
 impl NyxAgentEgress for Egress {
+    async fn preload_skills(
+        &self,
+        row: &AssistantConversation,
+        agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        self.skills
+            .as_ref()
+            .ok_or_else(|| {
+                AppError::Forbidden("Skill preloading unavailable for this transport".into())
+            })?
+            .prepare(row, agent)
+            .await
+    }
+
     async fn request(
         &self,
         authority: &NyxAgentExecutionContext,
@@ -113,11 +175,13 @@ impl NyxAgentEgress for Egress {
                 platform_origin,
             } => (user_id, turn, platform_origin),
         };
-        let Some(platform_origin) = platform_origin.as_ref() else {
-            return Err(AppError::Forbidden(
-                "Ordinary turns require original HTTP approval provenance".into(),
-            ));
-        };
+        let mut request = request;
+        if self.channel.is_some() && request.idempotency_key.is_empty() {
+            request.idempotency_key = format!("{}:metadata:{}", turn.turn_id, uuid::Uuid::new_v4());
+        }
+        if self.channel.is_none() && platform_origin.is_none() {
+            return Err(AppError::AssistantTurnRequired);
+        }
         validate_operation(&request)?;
         let permit = route_inventory::enforce_billing_egress_classification(
             request.billing_policy,
@@ -134,9 +198,20 @@ impl NyxAgentEgress for Egress {
         {
             return Err(AppError::Unauthorized("Invalid turn credential".into()));
         }
-        let row = self
-            .fence_owner(user_id, turn, credential, platform_origin)
-            .await?;
+        let row = if let Some(session) = &self.channel {
+            self.fence_channel(user_id, turn, credential, session)
+                .await?
+        } else {
+            self.fence_owner(
+                user_id,
+                turn,
+                credential,
+                platform_origin
+                    .as_ref()
+                    .ok_or(AppError::AssistantTurnRequired)?,
+            )
+            .await?
+        };
         if let Some(handle) = request
             .relative_path
             .strip_prefix("v1/sessions/")
@@ -272,6 +347,7 @@ impl NyxAgentEgress for Egress {
             .http_operation(&context, request.method.as_str(), &request.relative_path)
             .await?;
         let context = context
+            .with_assistant_provenance(false, true, false)
             .with_operation(priced_operation.as_deref())
             .with_request_body((!payload.is_empty()).then_some(payload.as_slice()));
         let lease =
@@ -283,10 +359,23 @@ impl NyxAgentEgress for Egress {
         let metered = state.billing.open(&context).await?;
         // Revalidate after target/policy/billing awaits and immediately before
         // marking dispatch. Platform fencing always joins a real transaction.
-        if let Err(error) = self
-            .fence_owner(user_id, turn, credential, platform_origin)
+        let dispatch_fence = if let Some(session) = &self.channel {
+            self.fence_channel(user_id, turn, credential, session)
+                .await
+                .map(|_| ())
+        } else {
+            self.fence_owner(
+                user_id,
+                turn,
+                credential,
+                platform_origin
+                    .as_ref()
+                    .ok_or(AppError::AssistantTurnRequired)?,
+            )
             .await
-        {
+            .map(|_| ())
+        };
+        if let Err(error) = dispatch_fence {
             state
                 .billing
                 .fail(&metered, "personal authority changed before dispatch")
@@ -323,6 +412,32 @@ impl NyxAgentEgress for Egress {
             ),
             ("idempotency-key".into(), request.idempotency_key),
         ];
+        #[cfg(test)]
+        if let Some(boundary) = &self.dispatch_boundary {
+            boundary.entered.add_permits(1);
+            boundary.release.acquire().await.unwrap().forget();
+        }
+        if let Some(session) = &self.channel
+            && let Err(error) = self.fence_channel(user_id, turn, credential, session).await
+        {
+            // The forwarded marker precedes this await, but transport has not
+            // begun. Persist zero usage so recovery releases the admitted hold.
+            state
+                .billing
+                .settle(
+                    &metered,
+                    crate::models::service_billing::PlatformUsage::default(),
+                    context.resale.as_ref().map(|spec| {
+                        crate::models::service_billing::ResaleUsage {
+                            metric: spec.metric,
+                            quantity: 0,
+                        }
+                    }),
+                    None,
+                )
+                .await?;
+            return Err(error);
+        }
         let downstream_started = std::time::Instant::now();
         let result = crate::downstream_disconnect::until_client_disconnect(
             &cancellation,
@@ -452,6 +567,39 @@ impl NyxAgentEgress for Egress {
 }
 
 impl Egress {
+    async fn fence_channel(
+        &self,
+        user_id: &str,
+        turn: &TurnRef,
+        credential: &RuntimeCredential,
+        session: &crate::models::channel_adapter::CallSession,
+    ) -> AppResult<AssistantConversation> {
+        let state = &self.state;
+        super::call_channels::session::fence(state, session).await?;
+        let (owner, key, child) =
+            key_service::validate_api_key(&state.db, &credential.raw_key).await?;
+        if owner != user_id
+            || key.id != credential.api_key_id
+            || child.is_some()
+            || key.purpose != ApiKeyPurpose::General
+        {
+            return Err(AppError::Unauthorized("Invalid turn credential".into()));
+        }
+        let row=state.db.collection::<AssistantConversation>(CONVERSATIONS).find_one(doc!{"_id":&turn.conversation_id,"user_id":user_id,"credential_api_key_id":&credential.api_key_id}).await?.ok_or(AppError::AssistantTurnRequired)?;
+        let active = engine::live_turn(&row, Utc::now())
+            .filter(|t| t.turn_id == turn.turn_id && row.guest_turn && !t.stop_requested)
+            .ok_or(AppError::AssistantTurnRequired)?;
+        if active.platform_origin.is_some()
+            || row.id != session.conversation_id
+            || row.channel.as_ref().is_none_or(|c| {
+                c.nyxbot_channel_id != session.binding_id || c.partition != session.id
+            })
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        Ok(row)
+    }
+
     async fn fence_owner(
         &self,
         user_id: &str,
@@ -466,7 +614,11 @@ impl Egress {
         // runtime secret material never enters the retryable transaction.
         let context = (
             db,
-            Arc::clone(&self.identity),
+            Arc::clone(
+                self.identity
+                    .as_ref()
+                    .ok_or(AppError::AssistantTurnRequired)?,
+            ),
             user_id.to_owned(),
             credential.api_key_id.clone(),
             turn.clone(),

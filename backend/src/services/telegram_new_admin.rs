@@ -3,7 +3,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
-use super::channel_adapters::telegram_new::{MANAGER_TOKEN, PLATFORM, credential_descriptor};
+use super::channel_adapters::telegram_new::{MANAGER_TOKEN, PLATFORM};
 use super::{platform_credential_service as credentials, telegram_new_service::TelegramNewService};
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::{COLLECTION_NAME as BOTS, ChannelBot};
@@ -22,8 +22,11 @@ pub(super) const MANAGER_ALLOWED_UPDATES: [&str; 5] = [
 pub(super) fn validate_manager_webhook(
     webhook: &serde_json::Value,
     callback: &str,
+    config: &crate::config::AppConfig,
 ) -> AppResult<()> {
-    if webhook["url"] != callback
+    if !webhook["url"]
+        .as_str()
+        .is_some_and(|url| config.same_base_url(url, callback))
         || !MANAGER_ALLOWED_UPDATES.iter().all(|kind| {
             webhook["allowed_updates"]
                 .as_array()
@@ -79,12 +82,30 @@ impl TelegramNewService<'_> {
         {
             return Err(AppError::ValidationError("Supply a manager bot token, or use Clear configuration when no managed bots remain.".into()));
         }
-        let old = credentials::load_decrypted(
-            self.db,
-            self.keys,
-            &super::channel_adapters::telegram_new::credential_descriptor(),
-        )
-        .await?;
+        if self.manager_id.is_some() {
+            if !first_party {
+                return Err(AppError::Forbidden(
+                    "First-party human administrator required".into(),
+                ));
+            }
+            let mut session = self.db.client().start_session().await?;
+            session.start_transaction().await?;
+            super::platform_bot_config_service::fence_admin(self.db, actor, &mut session).await?;
+            session.commit_transaction().await?;
+        }
+        let old = self.manager_values().await?;
+        if old.get(MANAGER_TOKEN).is_none()
+            && self
+                .db
+                .collection::<PlatformCredential>(CREDENTIALS)
+                .count_documents(doc! {"provider":{"$regex":"^telegram-new(?:/[0-9]+)?$"}})
+                .await?
+                >= 100
+        {
+            return Err(AppError::Conflict(
+                "At most 100 Telegram managers are supported.".into(),
+            ));
+        }
         if let Some(manager) = old.get("manager_bot_id") {
             super::platform_bot_config_service::admit_manager_admin(
                 self.db,
@@ -111,10 +132,19 @@ impl TelegramNewService<'_> {
             super::telegram_new_service::bot_identity(&identity).ok_or_else(|| {
                 AppError::ValidationError("Telegram returned an invalid manager identity".into())
             })?;
+        if self.manager_id.is_some_and(|expected| expected != id) {
+            return Err(AppError::Conflict(
+                "Manager token belongs to a different bot".into(),
+            ));
+        }
         super::telegram_new_service::with_operation(
             self.db,
             &format!("telegram-manager-identity:{id}"),
             async {
+        if super::telegram_manager_registry::load(self.db, Some(&id.to_string())).await?
+            .is_some_and(|r| r.provider != self.manager_provider()) {
+            return Err(AppError::Conflict("This bot is already configured as a different manager entry.".into()));
+        }
         if identity["can_manage_bots"] != true {
             return Err(AppError::ValidationError(
                 "Enable management of other bots in BotFather for this manager first.".into(),
@@ -152,30 +182,22 @@ impl TelegramNewService<'_> {
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
         if webhook["url"]
             .as_str()
-            .is_some_and(|existing| !existing.is_empty() && existing != callback)
+            .is_some_and(|existing| !existing.is_empty() && !self.config.same_base_url(existing, &callback))
         {
             return Err(AppError::Conflict("This manager already has a webhook for another application or environment. Use a dedicated manager.".into()));
         }
         super::platform_bot_config_service::admit_manager_admin(self.db, actor, first_party, &id.to_string()).await?;
-        credentials::update(
-            self.db,
-            self.keys,
-            &credential_descriptor(),
-            actor,
-            fields,
-            false,
-        )
-        .await?;
+        self.save_manager_fields(actor, fields).await?;
         let observation_id = old.get("observation_id").map(str::to_owned).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        self.db.collection::<PlatformCredential>(CREDENTIALS).update_one(doc! {"provider": PLATFORM}, doc! {"$set": {"fields.manager_bot_id": id.to_string(), "fields.manager_username": username, "fields.webhook_ready": "false", "fields.observation_id": observation_id}}).await?;
-        let saved = credentials::load_decrypted(self.db, self.keys, &super::channel_adapters::telegram_new::credential_descriptor()).await?;
+        self.db.collection::<PlatformCredential>(CREDENTIALS).update_one(doc! {"provider": self.manager_provider()}, doc! {"$set": {"fields.manager_bot_id": id.to_string(), "fields.manager_username": username, "fields.webhook_ready": "false", "fields.observation_id": observation_id}}).await?;
+        let saved = self.manager_values().await?;
         let secret = saved
             .get(credentials::VERIFY_TOKEN_FIELD)
             .ok_or_else(|| AppError::Internal("Manager webhook secret is missing".into()))?;
         super::platform_bot_config_service::admit_manager_admin(self.db, actor, first_party, &id.to_string()).await?;
         self.api.call(token, "setWebhook", json!({"url": callback, "secret_token": secret, "allowed_updates": MANAGER_ALLOWED_UPDATES, "max_connections": 1})).await?;
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
-        validate_manager_webhook(&webhook, &callback)?;
+        validate_manager_webhook(&webhook, &callback, self.config)?;
         super::platform_bot_config_service::finalize_manager_delivery(self.db, actor, first_party, &id.to_string(),
             old.get("observation_started_at").map(str::to_owned).unwrap_or_else(|| chrono::Utc::now().timestamp().to_string())).await?;
         Ok(())
@@ -185,22 +207,49 @@ impl TelegramNewService<'_> {
 
     pub fn manager_callback(&self) -> String {
         format!(
-            "{}/api/v1/webhooks/channel/telegram-new/manager",
-            self.config.base_url.trim_end_matches('/')
+            "{}/api/v1/webhooks/channel/telegram-new/manager{}",
+            self.config.base_url.trim_end_matches('/'),
+            self.manager_id
+                .map(|id| format!("/{id}"))
+                .unwrap_or_default()
         )
     }
 
     pub async fn clear_manager(&self) -> AppResult<()> {
+        if self.manager_id.is_some() {
+            return Err(AppError::Forbidden(
+                "Additional manager cleanup requires a human administrator".into(),
+            ));
+        }
         super::telegram_new_service::with_operation(
             self.db,
             "telegram-new-manager-configuration",
-            self.clear_manager_inner(),
+            self.clear_manager_inner(None),
         )
         .await
     }
 
-    async fn clear_manager_inner(&self) -> AppResult<()> {
-        let row = credentials::load(self.db, &credential_descriptor()).await?;
+    pub async fn clear_manager_as(&self, actor: &str) -> AppResult<()> {
+        super::telegram_new_service::with_operation(
+            self.db,
+            "telegram-new-manager-configuration",
+            self.clear_manager_inner(Some(actor)),
+        )
+        .await
+    }
+
+    async fn clear_manager_inner(&self, actor: Option<&str>) -> AppResult<()> {
+        if let Some(actor) = actor {
+            let mut session = self.db.client().start_session().await?;
+            session.start_transaction().await?;
+            super::platform_bot_config_service::fence_admin(self.db, actor, &mut session).await?;
+            session.commit_transaction().await?;
+        }
+        let row = self
+            .db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .find_one(doc! {"provider":self.manager_provider()})
+            .await?;
         let id = row
             .as_ref()
             .and_then(|row| row.fields.get("manager_bot_id"));
@@ -208,47 +257,51 @@ impl TelegramNewService<'_> {
             return super::telegram_new_service::with_operation(
                 self.db,
                 &format!("telegram-manager-identity:{id}"),
-                self.clear_manager_configuration(),
+                self.clear_manager_configuration(actor),
             )
             .await;
         }
-        self.clear_manager_configuration().await
+        self.clear_manager_configuration(actor).await
     }
 
-    async fn clear_manager_configuration(&self) -> AppResult<()> {
+    async fn clear_manager_configuration(&self, actor: Option<&str>) -> AppResult<()> {
         self.expire().await?;
-        if self
-            .db
-            .collection::<ChannelBot>(BOTS)
-            .find_one(doc! {
-                "credential_source": "telegram_manager", "is_active": true,
-            })
-            .await?
-            .is_some()
-        {
-            return Err(AppError::Conflict("Delete the manager's channel connection before clearing the Telegram manager configuration. Its channel routes depend on this configuration.".into()));
-        }
-        if self
-            .db
-            .collection::<ChannelBot>(BOTS)
-            .count_documents(doc! {"platform": PLATFORM, "is_active": true})
-            .await?
-            > 0
-            || self
+        let values = self.manager_values().await?;
+        if let Some(manager) = values.get("manager_bot_id") {
+            let id = manager
+                .parse::<i64>()
+                .map_err(|_| AppError::Conflict("Invalid manager identity".into()))?;
+            if self.db.collection::<ChannelBot>(BOTS).find_one(doc! {
+                "credential_source":"telegram_manager", "platform_bot_id":manager, "is_active":true
+            }).await?.is_some() {
+                return Err(AppError::Conflict("Delete this manager's channel connection before clearing its configuration.".into()));
+            }
+            let requests = self
                 .db
-                .collection::<bson::Document>(crate::models::telegram_bot_request::COLLECTION_NAME)
-                .count_documents(doc! {"active": true})
+                .collection::<bson::Document>(crate::models::telegram_bot_request::COLLECTION_NAME);
+            if requests
+                .find_one(doc! {"manager_bot_id":id,"active":true})
                 .await?
-                > 0
-        {
-            return Err(AppError::Conflict("Delete the managed channel bots and finish or cancel creation requests before clearing the manager.".into()));
+                .is_some()
+            {
+                return Err(AppError::Conflict(
+                    "Finish or cancel this manager's creation requests before clearing it.".into(),
+                ));
+            }
+            // A created channel retains its setup request UUID after completion.
+            let mut children = requests.aggregate(vec![
+                doc! {"$match":{"manager_bot_id":id}},
+                doc! {"$lookup":{"from":BOTS,"localField":"_id","foreignField":"_id","as":"channel"}},
+                doc! {"$match":{"channel":{"$elemMatch":{"is_active":true,"platform":PLATFORM}}}},
+                doc! {"$limit":1}, doc! {"$project":{"_id":1}}
+            ]).await?;
+            use futures::TryStreamExt;
+            if children.try_next().await?.is_some() {
+                return Err(AppError::Conflict(
+                    "Delete this manager's managed channel bots before clearing it.".into(),
+                ));
+            }
         }
-        let values = credentials::load_decrypted(
-            self.db,
-            self.keys,
-            &super::channel_adapters::telegram_new::credential_descriptor(),
-        )
-        .await?;
         if let Some(token) = values.get(MANAGER_TOKEN)
             && let Err(error) = self.remove_manager_webhook(token).await
         {
@@ -257,7 +310,18 @@ impl TelegramNewService<'_> {
         if let Some(manager) = values.get("manager_bot_id") {
             super::platform_bot_config_service::invalidate_manager(self.db, manager).await?;
         }
-        credentials::delete(self.db, &credential_descriptor()).await
+        let mut session = self.db.client().start_session().await?;
+        session.start_transaction().await?;
+        if let Some(actor) = actor {
+            super::platform_bot_config_service::fence_admin(self.db, actor, &mut session).await?;
+        }
+        self.db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .delete_one(doc! {"provider":self.manager_provider()})
+            .session(&mut session)
+            .await?;
+        session.commit_transaction().await?;
+        Ok(())
     }
 
     async fn remove_manager_webhook(&self, token: &str) -> AppResult<()> {
@@ -272,5 +336,25 @@ impl TelegramNewService<'_> {
                 .await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod domain_alias_tests {
+    use super::*;
+    #[test]
+    fn domain_alias_manager_webhook_requires_the_exact_callback_and_updates() {
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        let callback = "https://new.example/api/v1/channels/telegram/manager";
+        let mut webhook = json!({"url":"https://old.example/api/v1/channels/telegram/manager", "allowed_updates":MANAGER_ALLOWED_UPDATES});
+        assert!(validate_manager_webhook(&webhook, callback, &config).is_err());
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        assert!(validate_manager_webhook(&webhook, callback, &config).is_ok());
+        webhook["url"] = json!("https://old.example/api/v1/channels/telegram/other");
+        assert!(validate_manager_webhook(&webhook, callback, &config).is_err());
+        webhook["url"] = json!(callback);
+        webhook["allowed_updates"] = json!([]);
+        assert!(validate_manager_webhook(&webhook, callback, &config).is_err());
     }
 }

@@ -58,6 +58,8 @@ pub mod codes {
     pub const SUBSCRIPTION_CHECK_FAILED: &str = "subscription_check_failed";
     /// An authenticated delivery arrived for a bot whose subscription is not recorded.
     pub const UNREGISTERED: &str = "unregistered";
+    /// Meta delivered a signed relay message while native WhatsApp owned intake.
+    pub const NATIVE_RELAY_CONFLICT: &str = "native_gateway_relay_conflict";
     /// Unexpected internal error.
     pub const INTERNAL: &str = "internal";
 }
@@ -171,6 +173,12 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
         "verify"
     };
     Some(match code {
+        "discord_event_webhooks_wrong_endpoint" => advice("verify", "Move the callback URL from Event Webhooks to General Information > Interactions Endpoint URL. Event Webhooks do not deliver ordinary bot chat messages. For ordinary chat, enable channel:discord-gateway in NyxID and Message Content Intent in Discord.".into()),
+        "discord_gateway_intents_required" => advice("verify", "Enable Message Content Intent in Discord Developer Portal > Bot > Privileged Gateway Intents (verified apps need approval). NyxID retries automatically within five minutes.".into()),
+        "discord_gateway_invalid_token" | "discord_gateway_identity_mismatch" => advice("reconnect", "Replace this Discord bot's token in NyxID with the token for the same bot. The Gateway session will restart automatically.".into()),
+        "discord_gateway_capacity" => advice("contact_admin", "Discord ingress capacity is full on this replica. Another replica can claim this bot; add capacity if it keeps waiting.".into()),
+        "discord_gateway_sharding_required" => advice("contact_admin", "This Discord bot requires sharding, which this bounded single-session ingress does not support.".into()),
+        code if code.starts_with("discord_gateway_") => advice("verify", "Discord Gateway ingress is unavailable or reconnecting. NyxID retries automatically. Check the Gateway status, bot token, channel permissions and privileged Message Content Intent.".into()),
         codes::BILLING_SUSPENDED => advice(
             "enable_billing",
             "NyxID billing stopped this channel. Restore credits or the service's billing configuration, then select Verify.".into(),
@@ -199,6 +207,10 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
             subscription_action,
             format!("The {name} webhook subscription is missing or incomplete. Register it again."),
         ),
+        codes::NATIVE_RELAY_CONFLICT => advice(
+            "verify",
+            "Meta delivered a relay callback while native WhatsApp gateway intake was active. NyxID kept native intake authoritative; verify the dedicated app callback and gateway status.".into(),
+        ),
         codes::RATE_LIMITED if outbound => advice(
             "wait_rate_limit",
             format!("{name} rate-limited the last reply. Later replies resume automatically."),
@@ -221,6 +233,16 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
 
 /// The single recovery recommendation used by health, audit and notices.
 pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
+    if let Some(code) = facts
+        .failure_reason
+        .filter(|code| code.starts_with("discord_"))
+        && let Some(found) = for_code(code, facts, false)
+    {
+        return found;
+    }
+    if facts.failure_reason == Some(codes::NATIVE_RELAY_CONFLICT) {
+        return for_code(codes::NATIVE_RELAY_CONFLICT, facts, false).expect("mapped code");
+    }
     if facts.gateway {
         return advice(
             "gateway",
@@ -437,3 +459,31 @@ pub(crate) fn reset_rejection_throttle() {
 #[cfg(test)]
 #[path = "channel_bot_health_tests.rs"]
 mod tests;
+
+/// Bounded read projection shared by NyxBot discovery and diagnostic surfaces.
+/// These are observed facts, not a provider probe or a setup-completion promise.
+pub fn setup_evidence(bot: &ChannelBot, gateway: bool) -> serde_json::Value {
+    use serde_json::json;
+    let facts = HealthFacts::for_bot(bot, Utc::now(), gateway);
+    let action = recommend(&facts);
+    let d = &bot.diagnostics;
+    json!({
+        "contract_version": 1, "observed_at": Utc::now().to_rfc3339(),
+        "bot_id": bot.id, "platform": bot.platform, "platform_bot_username": bot.platform_bot_username,
+        "credential_source": bot.credential_source, "credential_connection_id": bot.connection_id,
+        "provider_slug": if is_x(&bot.platform) { Some("twitter") } else { None },
+        "authorization": "not_probed", "mode": facts.mode(), "gateway": gateway,
+        "webhook_registered": bot.webhook_registered,
+        "subscription": d.subscription_state.as_ref().map(|s| json!({
+            "registered": s.registered, "checked_at": s.checked_at.to_rfc3339(), "last_error": s.last_error,
+        })),
+        "last_authenticated_inbound_at": d.last_inbound_at.map(|t| t.to_rfc3339()),
+        "last_authenticated_inbound_source": d.last_inbound_source,
+        "last_outbound_attempt_at": d.last_outbound_at.map(|t| t.to_rfc3339()),
+        "last_outbound_error": d.last_outbound_error.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
+        "failure_reason": d.failure_reason,
+        "recommended_action": action.action, "recommended_action_text": action.text,
+        "automatic_reply": "not_verified",
+        "evidence_note": "Configured credentials, a registered subscription and historical traffic are separate evidence. No Verify, Resubscribe or test send was run. Gateway support and end-to-end automatic replies need their own evidence.",
+    })
+}

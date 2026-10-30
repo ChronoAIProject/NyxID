@@ -20,11 +20,13 @@ use zeroize::Zeroizing;
 /// and resource garbage collection advance separately, as real observations do.
 struct LocalKube {
     object: Mutex<Option<Value>>,
-    apply_updates: AtomicBool,
+    controller_observes_updates: AtomicBool,
+    observed_generation: AtomicUsize,
     suspended: AtomicBool,
     cleanup: AtomicBool,
     delete_requested: AtomicBool,
     generation: AtomicUsize,
+    revision: AtomicUsize,
     sandbox_uid: String,
     pod_uid: Mutex<String>,
     pvc_uid: String,
@@ -38,13 +40,20 @@ impl LocalKube {
         }
         let mut value = self.object.lock().unwrap().clone()?;
         let generation = value["metadata"]["generation"].as_i64().unwrap();
+        let observed_generation = if self.controller_observes_updates.load(Ordering::SeqCst) {
+            self.observed_generation
+                .store(generation as usize, Ordering::SeqCst);
+            generation
+        } else {
+            self.observed_generation.load(Ordering::SeqCst) as i64
+        };
         let requested = value["spec"]["operatingMode"] == "Suspended";
         let applied = requested && self.suspended.load(Ordering::SeqCst);
         value["status"]["conditions"] = json!([
             {"type":"Ready","status":if requested {"False"} else {"True"},
-                "observedGeneration":generation,"reason":"FixtureControllerObserved"},
+                "observedGeneration":observed_generation,"reason":"FixtureControllerObserved"},
             {"type":"Suspended","status":if applied {"True"} else {"False"},
-                "observedGeneration":generation,"reason":if applied {"PodTerminated"} else {"PodTerminating"}}
+                "observedGeneration":observed_generation,"reason":if applied {"PodTerminated"} else {"PodTerminating"}}
         ]);
         Some(value)
     }
@@ -229,11 +238,13 @@ async fn fixture_http(label: &str) -> Journey {
     let sandbox = MockServer::start().await;
     let kube = Arc::new(LocalKube {
         object: Mutex::new(None),
-        apply_updates: AtomicBool::new(true),
+        controller_observes_updates: AtomicBool::new(true),
+        observed_generation: AtomicUsize::new(0),
         suspended: AtomicBool::new(false),
         cleanup: AtomicBool::new(false),
         delete_requested: AtomicBool::new(false),
         generation: AtomicUsize::new(0),
+        revision: AtomicUsize::new(0),
         sandbox_uid: Uuid::new_v4().to_string(),
         pod_uid: Mutex::new(Uuid::new_v4().to_string()),
         pvc_uid: Uuid::new_v4().to_string(),
@@ -243,11 +254,47 @@ async fn fixture_http(label: &str) -> Journey {
     let kube_state = kube.clone();
     Mock::given(method("PATCH"))
         .respond_with(move |request: &wiremock::Request| {
-            if !kube_state.apply_updates.load(Ordering::SeqCst) {
-                return ResponseTemplate::new(503);
-            }
             let mut value: Value = serde_json::from_slice(&request.body).unwrap();
             let prior = kube_state.object.lock().unwrap().clone();
+            if let Some(patch) = value.as_array() {
+                let Some(mut original) = prior.clone() else {
+                    return ResponseTemplate::new(404);
+                };
+                for operation in patch {
+                    let path = operation["path"].as_str().unwrap();
+                    match operation["op"].as_str().unwrap() {
+                        "test" => {
+                            if original.pointer(path) != Some(&operation["value"]) {
+                                return ResponseTemplate::new(409);
+                            }
+                        }
+                        "add" => {
+                            assert!(matches!(
+                                path,
+                                "/metadata/labels/nyxid.dev~1operation-id" | "/spec/operatingMode"
+                            ));
+                            *original
+                                .pointer_mut(path)
+                                .expect("existing stop patch path") = operation["value"].clone();
+                        }
+                        "remove" => {
+                            assert_eq!(path, "/spec/shutdownTime");
+                            original["spec"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("shutdownTime");
+                        }
+                        other => panic!("unexpected stop patch operation {other}"),
+                    }
+                }
+                for template in ["podTemplate", "volumeClaimTemplates"] {
+                    assert_eq!(
+                        original["spec"][template],
+                        prior.as_ref().unwrap()["spec"][template]
+                    );
+                }
+                value = original;
+            }
             if prior
                 .as_ref()
                 .is_some_and(|old| old["spec"]["operatingMode"] == "Suspended")
@@ -256,10 +303,18 @@ async fn fixture_http(label: &str) -> Journey {
                 *kube_state.pod_uid.lock().unwrap() = Uuid::new_v4().to_string();
                 kube_state.suspended.store(false, Ordering::SeqCst);
             }
-            let generation = kube_state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let spec_changed = prior
+                .as_ref()
+                .is_none_or(|old| old["spec"] != value["spec"]);
+            let generation = if spec_changed {
+                kube_state.generation.fetch_add(1, Ordering::SeqCst) + 1
+            } else {
+                kube_state.generation.load(Ordering::SeqCst)
+            };
+            let revision = kube_state.revision.fetch_add(1, Ordering::SeqCst) + 1;
             value["metadata"]["uid"] = json!(kube_state.sandbox_uid);
             value["metadata"]["generation"] = json!(generation);
-            value["metadata"]["resourceVersion"] = json!(generation.to_string());
+            value["metadata"]["resourceVersion"] = json!(revision.to_string());
             value["metadata"]["annotations"]["agents.x-k8s.io/pod-name"] = json!("node");
             *kube_state.object.lock().unwrap() = Some(value);
             ResponseTemplate::new(200).set_body_json(kube_state.current().unwrap())
@@ -269,25 +324,43 @@ async fn fixture_http(label: &str) -> Journey {
     let kube_state = kube.clone();
     Mock::given(method("GET")).respond_with(move|request:&wiremock::Request| {
         let path=request.url.path();
+        if path == "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/local-node" {
+            return ResponseTemplate::new(200).set_body_json(json!({
+                "kind":"Lease","apiVersion":"coordination.k8s.io/v1",
+                "metadata":{"name":"local-node","namespace":"kube-node-lease","uid":"local-node-lease","resourceVersion":"10",
+                    "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":"local-node","uid":kube_state.node_uid}]},
+                "spec":{"holderIdentity":"local-node","renewTime":Utc::now().to_rfc3339(),"leaseDurationSeconds":40}
+            }));
+        }
         if path.ends_with("/nodes/local-node") {
-            return ResponseTemplate::new(200).set_body_json(json!({"metadata":{"name":"local-node","uid":kube_state.node_uid,"resourceVersion":"9"},
+            return ResponseTemplate::new(200).set_body_json(json!({"kind":"Node","apiVersion":"v1","metadata":{"name":"local-node","uid":kube_state.node_uid,"resourceVersion":"9"},
                 "status":{"nodeInfo":{"containerRuntimeVersion":"containerd://fixture-unverified"},"conditions":[{"type":"Ready","status":"True","lastHeartbeatTime":Utc::now().to_rfc3339()}]}}));
+        }
+        if path == "/api/v1/persistentvolumes" {
+            let items = if kube_state.current().is_some() {vec![json!({
+                "kind":"PersistentVolume","apiVersion":"v1","metadata":{"name":"local-pv","uid":kube_state.pv_uid,"resourceVersion":"13"},
+                "spec":{"claimRef":{"uid":kube_state.pvc_uid,"namespace":"nyxid-machine","name":"workspace"},"persistentVolumeReclaimPolicy":"Delete"},"status":{"phase":"Bound"}
+            })]} else {vec![]};
+            return ResponseTemplate::new(200).set_body_json(json!({"kind":"PersistentVolumeList","apiVersion":"v1","metadata":{"resourceVersion":"complete-fixture"},"items":items}));
+        }
+        if path == "/apis/storage.k8s.io/v1/volumeattachments" {
+            return ResponseTemplate::new(200).set_body_json(json!({"kind":"VolumeAttachmentList","apiVersion":"storage.k8s.io/v1","metadata":{"resourceVersion":"complete-fixture"},"items":[]}));
         }
         if path.ends_with("/persistentvolumes/local-pv") {
             if kube_state.current().is_none(){return ResponseTemplate::new(404);}
-            return ResponseTemplate::new(200).set_body_json(json!({"metadata":{"name":"local-pv","uid":kube_state.pv_uid,"resourceVersion":"13"},
+            return ResponseTemplate::new(200).set_body_json(json!({"kind":"PersistentVolume","apiVersion":"v1","metadata":{"name":"local-pv","uid":kube_state.pv_uid,"resourceVersion":"13"},
                 "spec":{"claimRef":{"uid":kube_state.pvc_uid,"namespace":"nyxid-machine","name":"workspace"},"persistentVolumeReclaimPolicy":"Delete"},"status":{"phase":"Bound"}}));
         }
         for (plural,kind) in [("pods","Pod"),("persistentvolumeclaims","PersistentVolumeClaim")] {
             if path.ends_with(&format!("/{plural}")) {
-                return ResponseTemplate::new(200).set_body_json(json!({"items":kube_state.resource(kind).into_iter().collect::<Vec<_>>() }));
+                return ResponseTemplate::new(200).set_body_json(json!({"kind":format!("{kind}List"),"apiVersion":"v1","metadata":{"resourceVersion":kube_state.revision.load(Ordering::SeqCst).to_string()},"items":kube_state.resource(kind).into_iter().collect::<Vec<_>>() }));
             }
             if path.contains(&format!("/{plural}/")) {
                 return kube_state.resource(kind).map(|v|ResponseTemplate::new(200).set_body_json(v)).unwrap_or_else(||ResponseTemplate::new(404));
             }
         }
         if path.ends_with("/sandboxes") {
-            return ResponseTemplate::new(200).set_body_json(json!({"items":kube_state.current().into_iter().collect::<Vec<_>>() }));
+            return ResponseTemplate::new(200).set_body_json(json!({"kind":"SandboxList","apiVersion":"agents.x-k8s.io/v1beta1","metadata":{"resourceVersion":kube_state.revision.load(Ordering::SeqCst).to_string()},"items":kube_state.current().into_iter().collect::<Vec<_>>() }));
         }
         kube_state.current().map(|v|ResponseTemplate::new(200).set_body_json(v)).unwrap_or_else(||ResponseTemplate::new(404))
     }).mount(&sandbox).await;
@@ -596,13 +669,34 @@ async fn action_http(j: &Journey, id: &str, action: &str) -> Value {
     assert_eq!(status, StatusCode::ACCEPTED, "{action}: {result}");
     result
 }
+async fn make_original_delete_due(j: &Journey, id: &str) {
+    let machine = current(&j.f, id).await;
+    assert_eq!(machine.resource_state, ResourceState::Deleting);
+    // Simulate the retry clock after explicit fixture controller/GC progress.
+    // Keep the original operation and every persisted evidence field intact.
+    let result =
+        j.f.db
+            .collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&machine.active_operation_id,"owner_id":&machine.owner_id,
+                "machine_id":&machine.node_id,"action":"delete","terminal_at":bson::Bson::Null},
+                doc! {"$set":{"next_attempt_at":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+    assert_eq!(result.matched_count, 1);
+}
 async fn cleanup(j: Journey) {
     let db = j.f.db.clone();
     drop(j);
     db.drop().await.unwrap();
 }
 
-async fn reach_renewal_margin(j: &Journey, id: &str, cutoff: chrono::DateTime<Utc>) {
+async fn reach_renewal_margin(
+    j: &Journey,
+    id: &str,
+    cutoff: chrono::DateTime<Utc>,
+) -> AppResult<()> {
     tokio::time::timeout(
         std::time::Duration::from_secs((window_seconds() + 30) as u64),
         async {
@@ -611,14 +705,13 @@ async fn reach_renewal_margin(j: &Journey, id: &str, cutoff: chrono::DateTime<Ut
                 if Utc::now() + Duration::seconds(renewal_margin_seconds()) >= cutoff {
                     break;
                 }
-                Box::pin(j.manager.observe(&current(&j.f, id).await))
-                    .await
-                    .unwrap();
+                Box::pin(j.manager.observe(&current(&j.f, id).await)).await?;
             }
+            Ok(())
         },
     )
     .await
-    .expect("UTC funding renewal margin reached within local fixture bound");
+    .expect("UTC funding renewal margin reached within local fixture bound")
 }
 
 #[tokio::test]
@@ -656,11 +749,27 @@ async fn local_journey_paid_http_manager_billing() {
     let original = current(&j.f, id).await;
     let prior_installed = effective_execution_cutoff(&original).unwrap();
     assert_eq!(Some(prior_installed), original.funded_until);
-    reach_renewal_margin(&j, id, original.funded_until.unwrap()).await;
-    j.kube.apply_updates.store(false, Ordering::SeqCst);
+    // observe() also renews at the margin. Block controller observation before
+    // waiting, so either observer or funding pass can commit only the funds.
+    j.kube
+        .controller_observes_updates
+        .store(false, Ordering::SeqCst);
+    if let Err(error) = reach_renewal_margin(&j, id, prior_installed).await {
+        assert!(
+            matches!(&error, AppError::Conflict(reason) if reason == "managed_platform_observation_pending"),
+            "unexpected observation failure code {}",
+            error.error_code()
+        );
+        assert!(Utc::now() + Duration::seconds(renewal_margin_seconds()) >= prior_installed);
+        let pending = current(&j.f, id).await;
+        assert_eq!(pending.resource_state, ResourceState::Ready);
+        assert!(pending.funded_until.is_some_and(|at| at > prior_installed));
+        assert_eq!(effective_execution_cutoff(&pending), Some(prior_installed));
+    }
     // The preceding observations keep admission fresh while requesting money.
     Box::pin(j.manager.funding_tick()).await.unwrap();
     let funded = current(&j.f, id).await;
+    assert_eq!(funded.resource_state, ResourceState::Ready);
     let newly_funded = funded.funded_until.unwrap();
     assert!(newly_funded > prior_installed);
     assert_eq!(
@@ -669,11 +778,31 @@ async fn local_journey_paid_http_manager_billing() {
         "committed funds cannot substitute for applied native shutdownTime"
     );
     Box::pin(j.manager.tick()).await.unwrap();
+    let controller_pending = j.kube.current().unwrap();
+    assert!(
+        controller_pending["status"]["conditions"][0]["observedGeneration"]
+            .as_i64()
+            .unwrap()
+            < controller_pending["metadata"]["generation"]
+                .as_i64()
+                .unwrap(),
+        "the API accepts the renewed spec before the controller observes it"
+    );
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(
+            controller_pending["spec"]["shutdownTime"].as_str().unwrap()
+        )
+        .unwrap()
+        .with_timezone(&Utc),
+        newly_funded
+    );
     assert_eq!(
         effective_execution_cutoff(&current(&j.f, id).await),
         Some(prior_installed)
     );
-    j.kube.apply_updates.store(true, Ordering::SeqCst);
+    j.kube
+        .controller_observes_updates
+        .store(true, Ordering::SeqCst);
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             Box::pin(j.manager.tick()).await.unwrap();
@@ -689,10 +818,31 @@ async fn local_journey_paid_http_manager_billing() {
     // Establish the UTC margin precondition without rewriting persisted money
     // intervals or assuming one monotonic sleep proves a wall-clock deadline.
     let cutoff = current(&j.f, id).await.funded_until.unwrap();
-    reach_renewal_margin(&j, id, cutoff).await;
+    if let Err(error) = reach_renewal_margin(&j, id, cutoff).await {
+        // observe() can cross the UTC margin during its awaits and attempt
+        // renewal before the explicit funding pass. Lago is already unavailable.
+        assert!(
+            matches!(&error, AppError::Conflict(reason) if reason == "managed_platform_observation_pending"),
+            "unexpected observation failure code {}",
+            error.error_code()
+        );
+        assert!(Utc::now() + Duration::seconds(renewal_margin_seconds()) >= cutoff);
+        let stopped = current(&j.f, id).await;
+        assert_eq!(stopped.resource_state, ResourceState::Stopping);
+        assert_eq!(
+            stopped.stop_reason.as_deref(),
+            Some("runtime_funding_unavailable")
+        );
+        assert_eq!(stopped.funded_until, Some(cutoff));
+    }
     Box::pin(j.manager.funding_tick()).await.unwrap();
     let stopping = current(&j.f, id).await;
     assert_eq!(stopping.resource_state, ResourceState::Stopping);
+    assert_eq!(
+        stopping.stop_reason.as_deref(),
+        Some("runtime_funding_unavailable")
+    );
+    assert_eq!(stopping.funded_until, Some(cutoff));
     assert!(
         effective_execution_cutoff(&stopping).is_none(),
         "stop removes execution coverage before native suspension completes"
@@ -790,7 +940,16 @@ async fn local_journey_paid_http_manager_billing() {
         ResourceState::Deleting,
         "observable resource cleanup remains pending after accounting closes"
     );
+    make_original_delete_due(&j, id).await;
+    Box::pin(j.manager.tick()).await.unwrap();
+    assert!(j.kube.delete_requested.load(Ordering::SeqCst));
+    assert_eq!(
+        current(&j.f, id).await.resource_state,
+        ResourceState::Deleting,
+        "native DELETE acceptance is not garbage collection completion"
+    );
     j.kube.cleanup.store(true, Ordering::SeqCst);
+    make_original_delete_due(&j, id).await;
     Box::pin(j.manager.tick()).await.unwrap();
     assert_eq!(
         current(&j.f, id).await.resource_state,
@@ -861,7 +1020,16 @@ async fn local_journey_free_http_cleanup_slot() {
     )
     .await;
     assert_eq!(entitlement["free_slot_available"], false);
+    make_original_delete_due(&j, id).await;
+    Box::pin(j.manager.tick()).await.unwrap();
+    assert!(j.kube.delete_requested.load(Ordering::SeqCst));
+    assert_eq!(
+        current(&j.f, id).await.resource_state,
+        ResourceState::Deleting,
+        "native DELETE acceptance is not garbage collection completion"
+    );
     j.kube.cleanup.store(true, Ordering::SeqCst);
+    make_original_delete_due(&j, id).await;
     Box::pin(j.manager.tick()).await.unwrap();
     assert_eq!(
         current(&j.f, id).await.resource_state,

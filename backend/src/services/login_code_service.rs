@@ -8,8 +8,8 @@ use zeroize::Zeroizing;
 
 use super::{
     api_key_credential_service as credentials, api_key_mutation_service as mutations,
-    audit_service, auth_agent_key_login_service as agent, auth_device_service as device,
-    login_client_context::sanitize_context, token_service,
+    approved_sign_in_policy as app_policy, audit_service, auth_agent_key_login_service as agent,
+    auth_device_service as device, login_client_context::sanitize_context, token_service,
 };
 use crate::{
     config::AppConfig,
@@ -78,29 +78,32 @@ pub async fn mint(
     db: &Database,
     key: &[u8],
     actor: &str,
-    selection: Option<Selection>,
+    mut selection: Option<Selection>,
     expiry: Option<DateTime<Utc>>,
+    authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<MintedCode> {
+    super::session_authority::require_derived_mfa(authority)?;
+    let mfa_assured = authority.verified;
     limit(db, "login-code-mint-owner", actor, 5).await?;
-    if let Some(Selection::Existing { api_key_id, .. }) = &selection {
-        let parent = agent::eligible_key(db, actor, api_key_id).await?;
-        credentials::credential_expiry(parent.expires_at, expiry)?;
-    }
-    if let Some(Selection::New(input)) = &selection {
-        let parent_expiry = super::key_service::validate_login_api_key(db, actor, input).await?;
-        credentials::credential_expiry(parent_expiry, expiry)?;
-    }
-    if selection.is_none() && expiry.is_some() {
-        return Err(AppError::ValidationError(
-            "Credential expiry requires an Agent Key grant".into(),
-        ));
-    }
+    let created_at = Utc::now();
+    let expiry = if let Some(selection) = &mut selection {
+        Some(agent::prepare_issuance(db, actor, selection, expiry, created_at).await?)
+    } else {
+        if expiry.is_some() {
+            return Err(AppError::ValidationError(
+                "Credential expiry requires an Agent Key grant".into(),
+            ));
+        }
+        None
+    };
     for _ in 0..8 {
         let code = Zeroizing::new(device::format_user_code(&device::generate_user_code()));
         let now = Utc::now();
         let row = LoginCode {
+            mfa_policy_revision: None,
             id: Uuid::new_v4().to_string(),
             user_id: actor.into(),
+            mfa_assured,
             code_hmac: hash(key, &code)?,
             status: Status::Pending,
             selection: selection.clone(),
@@ -248,15 +251,36 @@ pub async fn redeem(
     if let Some(error) = state_error(&row) {
         return Err(error);
     }
+    let user = db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.user_id, "is_active": true})
+        .await?
+        .ok_or(AppError::LoginCodeInvalid)?;
+    if row.mfa_policy_revision.is_some() && row.device_request_id.is_none() {
+        return Err(AppError::LoginCodeInvalid);
+    }
+    if let Some(revision) = row.mfa_policy_revision.as_deref()
+        && !app_policy::permits(&user, row.mfa_assured, Some(revision))
+    {
+        reject_policy_handoff(db, &row).await?;
+        return Err(AppError::LoginCodeInvalid);
+    }
+    if !(super::session_authority::may_derive(user.mfa_enabled, row.mfa_assured)
+        || row.device_request_id.is_some()
+            && app_policy::permits(&user, false, row.mfa_policy_revision.as_deref()))
+    {
+        return Err(AppError::MfaStepUpRequired);
+    }
     let account = if row.selection.is_none() && row.device_request_id.is_none() {
         Some(
-            token_service::prepare_session_tokens(
+            token_service::prepare_session_tokens_with_assurance(
                 db,
                 config,
                 jwt,
                 &row.user_id,
                 context.client_ip.as_deref(),
                 context.client_user_agent.as_deref(),
+                row.mfa_assured,
             )
             .await?,
         )
@@ -264,9 +288,19 @@ pub async fn redeem(
         None
     };
     let handoff = if let Some(id) = &row.device_request_id {
-        let request = handoff_request(db, doc! {"_id": id})
-            .await
-            .map_err(handoff_redeem_error)?;
+        let request = match handoff_request(db, doc! {"_id": id}).await {
+            Ok(request) => request,
+            Err(AppError::AuthDeviceCodeDenied) if row.mfa_policy_revision.is_some() => {
+                reject_policy_handoff(db, &row).await?;
+                return Err(AppError::LoginCodeInvalid);
+            }
+            Err(error) => return Err(handoff_redeem_error(error)),
+        };
+        if request.approved_user_id.as_deref() != Some(&row.user_id)
+            || request.mfa_policy_revision != row.mfa_policy_revision
+        {
+            return Err(AppError::LoginCodeInvalid);
+        }
         let grant = request
             .agent_key_grant
             .as_ref()
@@ -299,6 +333,10 @@ pub async fn redeem(
     let result = transaction.start_transaction().and_run2(async move |session| {
         let db = &db_owned; let row = &row_owned; let context = &context_owned;
         let result: AppResult<Delivery> = async {
+            if row.mfa_policy_revision.is_some() && row.device_request_id.is_none() {
+                return Err(AppError::LoginCodeInvalid);
+            }
+            app_policy::fence(db, &row.user_id, row.mfa_policy_revision.as_deref(), session).await?;
             let now = Utc::now();
             let claimed = db.collection::<LoginCode>(COLLECTION_NAME).find_one_and_update(doc! {
                 "_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
@@ -316,7 +354,8 @@ pub async fn redeem(
                     Some(tokens.session_id.clone()), None)
             } else if let Some(handoff) = &handoff {
                 let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {
-                    "_id": row.device_request_id.as_deref(), "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
+                    "_id": row.device_request_id.as_deref(), "approved_user_id": &row.user_id,
+                    "mfa_policy_revision": &row.mfa_policy_revision, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
                 }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
                     "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
                     "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}}).session(&mut *session).await?;
@@ -329,7 +368,7 @@ pub async fn redeem(
             } else {
                 let selection = row.selection.as_ref().ok_or(AppError::LoginCodeInvalid)?;
                 let parent = agent::issue_selected(db, &row.user_id, &row.id, context, profile.as_deref(), selection,
-                    row.credential_expires_at, &key_id, &child_id, &secret, &mut *session).await?;
+                    row.credential_expires_at, row.created_at, &key_id, &child_id, &secret, &mut *session).await?;
                 let summary = agent::key_summary(db, &parent, matches!(selection, Selection::New(_))).await?;
                 let child = db.collection::<crate::models::api_key_credential::ApiKeyCredential>(crate::models::api_key_credential::COLLECTION_NAME)
                     .find_one(doc! {"_id": &child_id}).session(&mut *session).await?.ok_or(AppError::AgentKeyCredentialNotFound)?;
@@ -342,7 +381,12 @@ pub async fn redeem(
             Ok(delivery)
         }.await;
         mutations::transaction_result(result)
-    }).await.map_err(mutations::map_transaction_error)?;
+    }).await.map_err(mutations::map_transaction_error);
+    if matches!(result, Err(AppError::AuthDeviceCodeDenied)) {
+        reject_policy_handoff(db, &row).await?;
+        return Err(AppError::LoginCodeInvalid);
+    }
+    let result = result?;
     audit_service::log_async(
         db.clone(),
         Some(row.user_id),
@@ -354,6 +398,19 @@ pub async fn redeem(
         None,
     );
     Ok(result)
+}
+
+async fn reject_policy_handoff(db: &Database, row: &LoginCode) -> AppResult<()> {
+    if let (Some(id), Some(revision)) = (&row.device_request_id, &row.mfa_policy_revision) {
+        app_policy::deny_undelivered(db, DEVICE_CODES, id, revision).await?;
+        db.collection::<LoginCode>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &row.id, "status": "pending"},
+                doc! {"$set": {"status": "cancelled"}},
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 /// Replaces only a pending handoff code. A concurrent redemption fences this
@@ -376,8 +433,10 @@ pub async fn browser_handoff(
     let now = Utc::now();
     let expires_at = request.approved_at.unwrap_or(now) + Duration::seconds(CODE_TTL_SECS);
     let row = LoginCode {
+        mfa_policy_revision: request.mfa_policy_revision.clone(),
         id: Uuid::new_v4().to_string(),
         user_id: actor.into(),
+        mfa_assured: request.mfa_assured,
         code_hmac: hash(key, &code)?,
         status: Status::Pending,
         selection: None,
@@ -394,9 +453,10 @@ pub async fn browser_handoff(
     let mut transaction = db.client().start_session().await?;
     let db_owned = db.clone();
     let row_owned = row.clone();
-    transaction.start_transaction().and_run2(async move |session| {
+    let result = transaction.start_transaction().and_run2(async move |session| {
         let db = &db_owned; let row = &row_owned;
         let result: AppResult<()> = async {
+            app_policy::fence(db, &row.user_id, row.mfa_policy_revision.as_deref(), session).await?;
             let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {"_id": &request.id,
                 "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
                 doc! {"$set": {"expires_at": bson::DateTime::from_chrono(expires_at)}, "$inc": {"handoff_version": 1}}).session(&mut *session).await?;
@@ -412,7 +472,11 @@ pub async fn browser_handoff(
             Ok(())
         }.await;
         mutations::transaction_result(result)
-    }).await.map_err(mutations::map_transaction_error)?;
+    }).await.map_err(mutations::map_transaction_error);
+    if matches!(result, Err(AppError::AuthDeviceCodeDenied)) {
+        reject_policy_handoff(db, &row).await?;
+    }
+    result?;
     Ok(MintedCode {
         id: row.id,
         code,
@@ -442,6 +506,7 @@ async fn handoff_request(db: &Database, filter: bson::Document) -> AppResult<Aut
     if row.agent_key_grant.is_none() {
         return Err(AppError::LoginCodeInvalid);
     }
+    device::require_delivery_mfa(db, &row).await?;
     Ok(row)
 }
 

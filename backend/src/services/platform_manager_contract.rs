@@ -4,6 +4,10 @@
 //! representations and validate every proof against live state before effects.
 //! This module registers no routes, enables no mode and supplies no runtime.
 
+pub use crate::models::platform_entry_projection::{
+    StoredEntryIdentity as EntryIdentity, StoredEventIdentity as EventIdentity,
+    StoredSenderIdentity as SenderIdentity,
+};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,18 +34,16 @@ pub enum ManagerCommandEligibility {
     Ineligible,
 }
 
-/// Constructed only from authenticated native Telegram ingress, never HTTP input.
+/// Constructed from authenticated original native ingress, never normalized HTTP input.
 #[derive(Clone, Debug)]
 pub struct VerifiedManagerUpdate {
     pub profile_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    pub entry: EntryIdentity,
     pub observation_id: String,
-    pub sender_id: i64,
-    pub chat_id: i64,
+    pub sender: SenderIdentity,
     pub chat_kind: ManagerChatKind,
-    pub update_id: i64,
-    pub message_id: i64,
+    pub event: EventIdentity,
     pub command_eligibility: ManagerCommandEligibility,
 }
 
@@ -75,7 +77,7 @@ impl OriginalManagerCommand {
 pub struct ManagerAuthority {
     pub profile_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    pub entry: EntryIdentity,
     pub manager_authority_epoch: i64,
 }
 
@@ -108,6 +110,7 @@ pub struct ExpectedRuntimeRevisions {
 
 #[derive(Clone, Debug)]
 pub struct RuntimePatch {
+    pub public_deployment_digest: Option<String>,
     pub initialize: bool,
     pub expected_profile_generation: Option<i64>,
     pub expected: ExpectedRuntimeRevisions,
@@ -136,8 +139,7 @@ pub struct PublicPolicyPatch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersonalBindingAuthority {
     pub manager: ManagerAuthority,
-    pub sender_id: i64,
-    pub chat_id: i64,
+    pub sender: SenderIdentity,
     pub binding_id: String,
     pub binding_generation: i64,
     pub personal_control_revision: i64,
@@ -165,7 +167,7 @@ pub struct PersonalThreadClaim {
 
 #[derive(Clone, Debug)]
 pub enum ThreadAuthorityResolution {
-    Personal(PersonalBindingAuthority),
+    Personal(Box<PersonalBindingAuthority>),
     WebOnly,
 }
 
@@ -173,7 +175,7 @@ pub enum ThreadAuthorityResolution {
 pub enum SenderResolution {
     Unlinked,
     Personal {
-        authority: PersonalBindingAuthority,
+        authority: Box<PersonalBindingAuthority>,
         nyxbot_agent_id: Option<String>,
         conversation_id: Option<String>,
     },
@@ -182,6 +184,10 @@ pub enum SenderResolution {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnavailableReason {
+    ConfirmationRejected,
+    ControlInvalid,
+    ControlRateLimited,
+    UnsupportedInput,
     ModeDisabled,
     ManagerUnavailable,
     EmergencyStopped,
@@ -197,6 +203,11 @@ pub enum UnavailableReason {
     PublicQuotaLimited,
     RuntimeUninitialized,
     SponsorUnavailable,
+    PublicContractUnsupported,
+    PublicAuthorityRejected,
+    ProfileUnavailable,
+    ProofExpired,
+    PublicTurnFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,8 +238,7 @@ pub struct AdmittedPersonalUpdate {
 pub struct PublicIngress {
     pub ingress: IngressClaim,
     pub manager: ManagerAuthority,
-    pub sender_id: i64,
-    pub chat_id: i64,
+    pub sender: SenderIdentity,
     pub public_policy_revision: i64,
 }
 
@@ -257,6 +267,7 @@ pub enum IngressAdmission {
 /// Server policy only: exact service, operation and model, with no destination URL.
 #[derive(Clone, Debug)]
 pub struct PublicModelOperation {
+    pub reasoning_effort: Option<String>,
     pub service_id: String,
     pub operation: String,
     pub method: Method,
@@ -295,6 +306,7 @@ pub struct PublicExecutionLimits {
 /// Part 3 derives this from admitted state. It carries no credential material.
 #[derive(Clone, Debug)]
 pub struct PublicExecutionContext {
+    pub proof_record_id: String,
     pub ingress: PublicIngress,
     pub public_session_id: String,
     pub turn: TurnRef,
@@ -317,12 +329,14 @@ pub enum NyxAgentExecutionContext {
 }
 
 /// Deliberately has no Debug/serde implementation: user text is private.
+#[derive(Default)]
 pub struct TurnInput {
+    pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
     pub text: String,
 }
 
 /// References existing retained replies; this is not a durable body replay queue.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplyRef {
     pub turn: TurnRef,
     pub reply_id: String,
@@ -359,8 +373,7 @@ pub enum ReplyAuthority {
 #[derive(Clone, Debug)]
 pub struct ReplyDestination {
     pub manager: ManagerAuthority,
-    pub sender_id: i64,
-    pub chat_id: i64,
+    pub sender: SenderIdentity,
     pub authority: ReplyAuthority,
     pub expires_at: DateTime<Utc>,
 }
@@ -471,22 +484,10 @@ pub struct PublicReadinessEvidence {
     pub manager: ManagerAuthority,
     pub public_policy_revision: i64,
     pub policy_digest: String,
-    #[expect(
-        dead_code,
-        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-    )]
     pub proof_record_id: String,
-    #[expect(
-        dead_code,
-        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-    )]
     pub candidate_digest: String,
     pub evidence_digest: String,
     pub sponsor_owner_user_id: String,
-    #[expect(
-        dead_code,
-        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-    )]
     pub nyxagent_build: String,
     pub nyxagent_profile: String,
     pub model_operations: Vec<PublicModelOperation>,
@@ -498,10 +499,6 @@ pub struct PublicReadinessEvidence {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // Readiness carries one bounded proof across the producer boundary.
 pub enum PublicReadiness {
-    #[expect(
-        dead_code,
-        reason = "Public activation awaits deployed-contract verification; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-    )]
     Ready(PublicReadinessEvidence),
     Unavailable(UnavailableReason),
 }
@@ -523,8 +520,7 @@ pub struct PublicProfileDiscovery {
 pub enum PublicRevocationScope {
     Sender {
         manager: ManagerAuthority,
-        sender_id: i64,
-        chat_id: i64,
+        sender: SenderIdentity,
     },
     Manager {
         manager: ManagerAuthority,
@@ -603,6 +599,7 @@ pub struct RecoveryBatch {
 #[derive(Clone, Debug)]
 pub enum DeliveryOutcome {
     Sent { telegram_message_ids: Vec<i64> },
+    NativeSent { platform_message_ids: Vec<String> },
     Duplicate,
     Deferred { retry_at: DateTime<Utc> },
     Refused(UnavailableReason),
@@ -801,8 +798,7 @@ pub trait PublicTurnProducer: Send + Sync {
         db: &Database,
         session: &mut ClientSession,
         manager: &ManagerAuthority,
-        sender_id: i64,
-        chat_id: i64,
+        sender: &SenderIdentity,
     ) -> AppResult<()>;
 
     async fn revoke_public_sessions_in_session(
@@ -817,6 +813,23 @@ pub trait PublicTurnProducer: Send + Sync {
 /// Part 3 supplies this service adapter over the existing metered proxy core.
 #[async_trait]
 pub trait NyxAgentEgress: Send + Sync {
+    async fn preload_skills(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+        _agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        Ok(String::new())
+    }
+
+    /// Optional progress task, cancelled when execution completes or stops.
+    /// Only the channel adapter implements delivery; other transports return None.
+    fn checking_notice(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
+
     /// Optional human-channel display note after the durable acknowledgement.
     /// The adapter owns delivery authorization; the runtime cancels this task on acceptance.
     fn admission_acknowledged(

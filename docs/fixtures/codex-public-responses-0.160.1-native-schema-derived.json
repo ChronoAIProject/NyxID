@@ -1,0 +1,1467 @@
+{
+  "calls": [
+    {
+      "callback": {
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": [
+              {
+                "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+                "type": "input_text"
+              },
+              {
+                "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+                "type": "input_text"
+              }
+            ],
+            "role": "developer",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "What is NyxID, and how can I sign up?",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          }
+        ],
+        "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+        "max_output_tokens": 512,
+        "model": "public-wire-review",
+        "parallel_tool_calls": false,
+        "reasoning": {
+          "effort": "low"
+        },
+        "store": false,
+        "stream": true,
+        "tools": [
+          {
+            "description": "Search the approved public NyxID FAQ.",
+            "name": "public_faq_search",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+            "name": "public_faq_read",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "article_id": {
+                  "maxLength": 80,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "Byte offset returned as next_offset; omit for the first page.",
+                  "maximum": 16384,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "article_id"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+            "name": "public_signup_link",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "codex": {
+        "client_metadata": {
+          "root_turn_id": "01a14593-d193-75c0-ba18-236a23622eec",
+          "session_id": "01a14593-d105-77c3-9abe-94e7667899a3",
+          "thread_id": "01a14593-d105-77c3-9abe-94e7667899a3",
+          "turn_id": "01a14593-d193-75c0-ba18-236a23622eec",
+          "x-codex-installation-id": "2230ff75-1b5c-4bc7-9e45-9b283f63f363",
+          "x-codex-turn-metadata": "{\"installation_id\":\"2230ff75-1b5c-4bc7-9e45-9b283f63f363\",\"session_id\":\"01a14593-d105-77c3-9abe-94e7667899a3\",\"thread_id\":\"01a14593-d105-77c3-9abe-94e7667899a3\",\"agent_name\":\"/root\",\"turn_id\":\"01a14593-d193-75c0-ba18-236a23622eec\",\"window_id\":\"01a14593-d105-77c3-9abe-94e7667899a3:0\",\"window_number\":0,\"context_window_id\":\"01a14593-d116-7322-ac8a-4f5b4a702083\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a14593-d193-75c0-ba18-236a23622eec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":true,\"turn_started_at_unix_ms\":1792168677786,\"analytics_enabled\":true,\"model\":\"public-wire-review\",\"reasoning_effort\":\"low\"}",
+          "x-codex-window-id": "01a14593-d105-77c3-9abe-94e7667899a3:0"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": [
+              {
+                "text": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+                "type": "input_text"
+              },
+              {
+                "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+                "type": "input_text"
+              },
+              {
+                "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1a4-7a82-9d21-4424fad5cbd2",
+            "role": "developer",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1a4-7a82-9d21-4436ecf3cd4b",
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "What is NyxID, and how can I sign up?",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1d7-79a1-a817-7b94a15c96d5",
+            "role": "user",
+            "type": "message"
+          }
+        ],
+        "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+        "model": "public-wire-review",
+        "parallel_tool_calls": true,
+        "prompt_cache_key": "01a14593-d105-77c3-9abe-94e7667899a3",
+        "reasoning": {
+          "effort": "low"
+        },
+        "store": false,
+        "stream": true,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Search the approved public NyxID FAQ.",
+            "name": "public_faq_search",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          },
+          {
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+            "name": "public_faq_read",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "article_id": {
+                  "type": "string"
+                },
+                "offset": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "article_id"
+              ],
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          },
+          {
+            "description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+            "name": "public_signup_link",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          }
+        ]
+      }
+    },
+    {
+      "callback": {
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": [
+              {
+                "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+                "type": "input_text"
+              },
+              {
+                "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+                "type": "input_text"
+              }
+            ],
+            "role": "developer",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "What is NyxID, and how can I sign up?",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review1",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"query\":\"NyxID\"}",
+            "call_id": "call_review1",
+            "name": "public_faq_search",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review1",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"articles\\\":[{\\\"article_id\\\":\\\"approvals\\\",\\\"title\\\":\\\"Reviewing actions\\\"},{\\\"article_id\\\":\\\"connect-services\\\",\\\"title\\\":\\\"Connecting services\\\"},{\\\"article_id\\\":\\\"personal-nyxbot\\\",\\\"title\\\":\\\"Using your personal NyxBot in Telegram\\\"},{\\\"article_id\\\":\\\"public-guide\\\",\\\"title\\\":\\\"What the public guide can do\\\"},{\\\"article_id\\\":\\\"signup-link\\\",\\\"title\\\":\\\"Opening a signup or linking link\\\"}]}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          }
+        ],
+        "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+        "max_output_tokens": 512,
+        "model": "public-wire-review",
+        "parallel_tool_calls": false,
+        "reasoning": {
+          "effort": "low"
+        },
+        "store": false,
+        "stream": true,
+        "tools": [
+          {
+            "description": "Search the approved public NyxID FAQ.",
+            "name": "public_faq_search",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+            "name": "public_faq_read",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "article_id": {
+                  "maxLength": 80,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "Byte offset returned as next_offset; omit for the first page.",
+                  "maximum": 16384,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "article_id"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+            "name": "public_signup_link",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "codex": {
+        "client_metadata": {
+          "root_turn_id": "01a14593-d193-75c0-ba18-236a23622eec",
+          "session_id": "01a14593-d105-77c3-9abe-94e7667899a3",
+          "thread_id": "01a14593-d105-77c3-9abe-94e7667899a3",
+          "turn_id": "01a14593-d193-75c0-ba18-236a23622eec",
+          "x-codex-installation-id": "2230ff75-1b5c-4bc7-9e45-9b283f63f363",
+          "x-codex-turn-metadata": "{\"installation_id\":\"2230ff75-1b5c-4bc7-9e45-9b283f63f363\",\"session_id\":\"01a14593-d105-77c3-9abe-94e7667899a3\",\"thread_id\":\"01a14593-d105-77c3-9abe-94e7667899a3\",\"agent_name\":\"/root\",\"turn_id\":\"01a14593-d193-75c0-ba18-236a23622eec\",\"window_id\":\"01a14593-d105-77c3-9abe-94e7667899a3:0\",\"window_number\":0,\"context_window_id\":\"01a14593-d116-7322-ac8a-4f5b4a702083\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a14593-d193-75c0-ba18-236a23622eec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":true,\"turn_started_at_unix_ms\":1792168677786,\"analytics_enabled\":true,\"model\":\"public-wire-review\",\"reasoning_effort\":\"low\"}",
+          "x-codex-window-id": "01a14593-d105-77c3-9abe-94e7667899a3:0"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": [
+              {
+                "text": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+                "type": "input_text"
+              },
+              {
+                "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+                "type": "input_text"
+              },
+              {
+                "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1a4-7a82-9d21-4424fad5cbd2",
+            "role": "developer",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1a4-7a82-9d21-4436ecf3cd4b",
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "What is NyxID, and how can I sign up?",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1d7-79a1-a817-7b94a15c96d5",
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review1",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"query\":\"NyxID\"}",
+            "call_id": "call_review1",
+            "id": "fc_review1",
+            "name": "public_faq_search",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review1",
+            "id": "fco_01a14593-d204-7e70-b4af-07cefa287b51",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"articles\\\":[{\\\"article_id\\\":\\\"approvals\\\",\\\"title\\\":\\\"Reviewing actions\\\"},{\\\"article_id\\\":\\\"connect-services\\\",\\\"title\\\":\\\"Connecting services\\\"},{\\\"article_id\\\":\\\"personal-nyxbot\\\",\\\"title\\\":\\\"Using your personal NyxBot in Telegram\\\"},{\\\"article_id\\\":\\\"public-guide\\\",\\\"title\\\":\\\"What the public guide can do\\\"},{\\\"article_id\\\":\\\"signup-link\\\",\\\"title\\\":\\\"Opening a signup or linking link\\\"}]}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          }
+        ],
+        "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+        "model": "public-wire-review",
+        "parallel_tool_calls": true,
+        "prompt_cache_key": "01a14593-d105-77c3-9abe-94e7667899a3",
+        "reasoning": {
+          "effort": "low"
+        },
+        "store": false,
+        "stream": true,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Search the approved public NyxID FAQ.",
+            "name": "public_faq_search",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          },
+          {
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+            "name": "public_faq_read",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "article_id": {
+                  "type": "string"
+                },
+                "offset": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "article_id"
+              ],
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          },
+          {
+            "description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+            "name": "public_signup_link",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          }
+        ]
+      }
+    },
+    {
+      "callback": {
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": [
+              {
+                "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+                "type": "input_text"
+              },
+              {
+                "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+                "type": "input_text"
+              }
+            ],
+            "role": "developer",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "What is NyxID, and how can I sign up?",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review1",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"query\":\"NyxID\"}",
+            "call_id": "call_review1",
+            "name": "public_faq_search",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review1",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"articles\\\":[{\\\"article_id\\\":\\\"approvals\\\",\\\"title\\\":\\\"Reviewing actions\\\"},{\\\"article_id\\\":\\\"connect-services\\\",\\\"title\\\":\\\"Connecting services\\\"},{\\\"article_id\\\":\\\"personal-nyxbot\\\",\\\"title\\\":\\\"Using your personal NyxBot in Telegram\\\"},{\\\"article_id\\\":\\\"public-guide\\\",\\\"title\\\":\\\"What the public guide can do\\\"},{\\\"article_id\\\":\\\"signup-link\\\",\\\"title\\\":\\\"Opening a signup or linking link\\\"}]}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review2",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"article_id\":\"what-is-nyxid\"}",
+            "call_id": "call_review2",
+            "name": "public_faq_read",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review2",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"article_id\\\":\\\"what-is-nyxid\\\",\\\"title\\\":\\\"What is NyxID?\\\",\\\"text\\\":\\\"NyxID manages sign-in and lets you connect services to an AI assistant through controlled credentials. You choose which accounts to connect and which access to allow. The public guide can explain NyxID and help you start linking your own account.\\\"}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          }
+        ],
+        "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+        "max_output_tokens": 512,
+        "model": "public-wire-review",
+        "parallel_tool_calls": false,
+        "reasoning": {
+          "effort": "low"
+        },
+        "store": false,
+        "stream": true,
+        "tools": [
+          {
+            "description": "Search the approved public NyxID FAQ.",
+            "name": "public_faq_search",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+            "name": "public_faq_read",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "article_id": {
+                  "maxLength": 80,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "Byte offset returned as next_offset; omit for the first page.",
+                  "maximum": 16384,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "article_id"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+            "name": "public_signup_link",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "codex": {
+        "client_metadata": {
+          "root_turn_id": "01a14593-d193-75c0-ba18-236a23622eec",
+          "session_id": "01a14593-d105-77c3-9abe-94e7667899a3",
+          "thread_id": "01a14593-d105-77c3-9abe-94e7667899a3",
+          "turn_id": "01a14593-d193-75c0-ba18-236a23622eec",
+          "x-codex-installation-id": "2230ff75-1b5c-4bc7-9e45-9b283f63f363",
+          "x-codex-turn-metadata": "{\"installation_id\":\"2230ff75-1b5c-4bc7-9e45-9b283f63f363\",\"session_id\":\"01a14593-d105-77c3-9abe-94e7667899a3\",\"thread_id\":\"01a14593-d105-77c3-9abe-94e7667899a3\",\"agent_name\":\"/root\",\"turn_id\":\"01a14593-d193-75c0-ba18-236a23622eec\",\"window_id\":\"01a14593-d105-77c3-9abe-94e7667899a3:0\",\"window_number\":0,\"context_window_id\":\"01a14593-d116-7322-ac8a-4f5b4a702083\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a14593-d193-75c0-ba18-236a23622eec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":true,\"turn_started_at_unix_ms\":1792168677786,\"analytics_enabled\":true,\"model\":\"public-wire-review\",\"reasoning_effort\":\"low\"}",
+          "x-codex-window-id": "01a14593-d105-77c3-9abe-94e7667899a3:0"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": [
+              {
+                "text": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+                "type": "input_text"
+              },
+              {
+                "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+                "type": "input_text"
+              },
+              {
+                "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1a4-7a82-9d21-4424fad5cbd2",
+            "role": "developer",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1a4-7a82-9d21-4436ecf3cd4b",
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "What is NyxID, and how can I sign up?",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1d7-79a1-a817-7b94a15c96d5",
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review1",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"query\":\"NyxID\"}",
+            "call_id": "call_review1",
+            "id": "fc_review1",
+            "name": "public_faq_search",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review1",
+            "id": "fco_01a14593-d204-7e70-b4af-07cefa287b51",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"articles\\\":[{\\\"article_id\\\":\\\"approvals\\\",\\\"title\\\":\\\"Reviewing actions\\\"},{\\\"article_id\\\":\\\"connect-services\\\",\\\"title\\\":\\\"Connecting services\\\"},{\\\"article_id\\\":\\\"personal-nyxbot\\\",\\\"title\\\":\\\"Using your personal NyxBot in Telegram\\\"},{\\\"article_id\\\":\\\"public-guide\\\",\\\"title\\\":\\\"What the public guide can do\\\"},{\\\"article_id\\\":\\\"signup-link\\\",\\\"title\\\":\\\"Opening a signup or linking link\\\"}]}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review2",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"article_id\":\"what-is-nyxid\"}",
+            "call_id": "call_review2",
+            "id": "fc_review2",
+            "name": "public_faq_read",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review2",
+            "id": "fco_01a14593-d20c-7500-96cb-9336f6fe8c0d",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"article_id\\\":\\\"what-is-nyxid\\\",\\\"title\\\":\\\"What is NyxID?\\\",\\\"text\\\":\\\"NyxID manages sign-in and lets you connect services to an AI assistant through controlled credentials. You choose which accounts to connect and which access to allow. The public guide can explain NyxID and help you start linking your own account.\\\"}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          }
+        ],
+        "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+        "model": "public-wire-review",
+        "parallel_tool_calls": true,
+        "prompt_cache_key": "01a14593-d105-77c3-9abe-94e7667899a3",
+        "reasoning": {
+          "effort": "low"
+        },
+        "store": false,
+        "stream": true,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Search the approved public NyxID FAQ.",
+            "name": "public_faq_search",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          },
+          {
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+            "name": "public_faq_read",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "article_id": {
+                  "type": "string"
+                },
+                "offset": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "article_id"
+              ],
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          },
+          {
+            "description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+            "name": "public_signup_link",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          }
+        ]
+      }
+    },
+    {
+      "callback": {
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": [
+              {
+                "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+                "type": "input_text"
+              },
+              {
+                "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+                "type": "input_text"
+              }
+            ],
+            "role": "developer",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "What is NyxID, and how can I sign up?",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review1",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"query\":\"NyxID\"}",
+            "call_id": "call_review1",
+            "name": "public_faq_search",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review1",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"articles\\\":[{\\\"article_id\\\":\\\"approvals\\\",\\\"title\\\":\\\"Reviewing actions\\\"},{\\\"article_id\\\":\\\"connect-services\\\",\\\"title\\\":\\\"Connecting services\\\"},{\\\"article_id\\\":\\\"personal-nyxbot\\\",\\\"title\\\":\\\"Using your personal NyxBot in Telegram\\\"},{\\\"article_id\\\":\\\"public-guide\\\",\\\"title\\\":\\\"What the public guide can do\\\"},{\\\"article_id\\\":\\\"signup-link\\\",\\\"title\\\":\\\"Opening a signup or linking link\\\"}]}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review2",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"article_id\":\"what-is-nyxid\"}",
+            "call_id": "call_review2",
+            "name": "public_faq_read",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review2",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"article_id\\\":\\\"what-is-nyxid\\\",\\\"title\\\":\\\"What is NyxID?\\\",\\\"text\\\":\\\"NyxID manages sign-in and lets you connect services to an AI assistant through controlled credentials. You choose which accounts to connect and which access to allow. The public guide can explain NyxID and help you start linking your own account.\\\"}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review3",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{}",
+            "call_id": "call_review3",
+            "name": "public_signup_link",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review3",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"status\\\":\\\"sent\\\",\\\"message\\\":\\\"The account review link was sent separately in this private chat. Website review and a final original confirmation are still required.\\\"}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          }
+        ],
+        "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+        "max_output_tokens": 512,
+        "model": "public-wire-review",
+        "parallel_tool_calls": false,
+        "reasoning": {
+          "effort": "low"
+        },
+        "store": false,
+        "stream": true,
+        "tools": [
+          {
+            "description": "Search the approved public NyxID FAQ.",
+            "name": "public_faq_search",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+            "name": "public_faq_read",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "article_id": {
+                  "maxLength": 80,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "Byte offset returned as next_offset; omit for the first page.",
+                  "maximum": 16384,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "article_id"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+            "name": "public_signup_link",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "codex": {
+        "client_metadata": {
+          "root_turn_id": "01a14593-d193-75c0-ba18-236a23622eec",
+          "session_id": "01a14593-d105-77c3-9abe-94e7667899a3",
+          "thread_id": "01a14593-d105-77c3-9abe-94e7667899a3",
+          "turn_id": "01a14593-d193-75c0-ba18-236a23622eec",
+          "x-codex-installation-id": "2230ff75-1b5c-4bc7-9e45-9b283f63f363",
+          "x-codex-turn-metadata": "{\"installation_id\":\"2230ff75-1b5c-4bc7-9e45-9b283f63f363\",\"session_id\":\"01a14593-d105-77c3-9abe-94e7667899a3\",\"thread_id\":\"01a14593-d105-77c3-9abe-94e7667899a3\",\"agent_name\":\"/root\",\"turn_id\":\"01a14593-d193-75c0-ba18-236a23622eec\",\"window_id\":\"01a14593-d105-77c3-9abe-94e7667899a3:0\",\"window_number\":0,\"context_window_id\":\"01a14593-d116-7322-ac8a-4f5b4a702083\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a14593-d193-75c0-ba18-236a23622eec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":true,\"turn_started_at_unix_ms\":1792168677786,\"analytics_enabled\":true,\"model\":\"public-wire-review\",\"reasoning_effort\":\"low\"}",
+          "x-codex-window-id": "01a14593-d105-77c3-9abe-94e7667899a3:0"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": [
+              {
+                "text": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+                "type": "input_text"
+              },
+              {
+                "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+                "type": "input_text"
+              },
+              {
+                "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1a4-7a82-9d21-4424fad5cbd2",
+            "role": "developer",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-n_t_029o/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1a4-7a82-9d21-4436ecf3cd4b",
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": [
+              {
+                "text": "What is NyxID, and how can I sign up?",
+                "type": "input_text"
+              }
+            ],
+            "id": "msg_01a14593-d1d7-79a1-a817-7b94a15c96d5",
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review1",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"query\":\"NyxID\"}",
+            "call_id": "call_review1",
+            "id": "fc_review1",
+            "name": "public_faq_search",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review1",
+            "id": "fco_01a14593-d204-7e70-b4af-07cefa287b51",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"articles\\\":[{\\\"article_id\\\":\\\"approvals\\\",\\\"title\\\":\\\"Reviewing actions\\\"},{\\\"article_id\\\":\\\"connect-services\\\",\\\"title\\\":\\\"Connecting services\\\"},{\\\"article_id\\\":\\\"personal-nyxbot\\\",\\\"title\\\":\\\"Using your personal NyxBot in Telegram\\\"},{\\\"article_id\\\":\\\"public-guide\\\",\\\"title\\\":\\\"What the public guide can do\\\"},{\\\"article_id\\\":\\\"signup-link\\\",\\\"title\\\":\\\"Opening a signup or linking link\\\"}]}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review2",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"article_id\":\"what-is-nyxid\"}",
+            "call_id": "call_review2",
+            "id": "fc_review2",
+            "name": "public_faq_read",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review2",
+            "id": "fco_01a14593-d20c-7500-96cb-9336f6fe8c0d",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"article_id\\\":\\\"what-is-nyxid\\\",\\\"title\\\":\\\"What is NyxID?\\\",\\\"text\\\":\\\"NyxID manages sign-in and lets you connect services to an AI assistant through controlled credentials. You choose which accounts to connect and which access to allow. The public guide can explain NyxID and help you start linking your own account.\\\"}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          },
+          {
+            "content": null,
+            "encrypted_content": null,
+            "id": "rs_review3",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{}",
+            "call_id": "call_review3",
+            "id": "fc_review3",
+            "name": "public_signup_link",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_review3",
+            "id": "fco_01a14593-d215-7620-bb4e-07c7920be324",
+            "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"status\\\":\\\"sent\\\",\\\"message\\\":\\\"The account review link was sent separately in this private chat. Website review and a final original confirmation are still required.\\\"}\"}],\"isError\":false}",
+            "type": "function_call_output"
+          }
+        ],
+        "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+        "model": "public-wire-review",
+        "parallel_tool_calls": true,
+        "prompt_cache_key": "01a14593-d105-77c3-9abe-94e7667899a3",
+        "reasoning": {
+          "effort": "low"
+        },
+        "store": false,
+        "stream": true,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Search the approved public NyxID FAQ.",
+            "name": "public_faq_search",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          },
+          {
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+            "name": "public_faq_read",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "article_id": {
+                  "type": "string"
+                },
+                "offset": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "article_id"
+              ],
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          },
+          {
+            "description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+            "name": "public_signup_link",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "compact": {
+    "callback": {
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-zn3qu0v3/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+              "type": "input_text"
+            },
+            {
+              "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+              "type": "input_text"
+            }
+          ],
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-zn3qu0v3/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-zn3qu0v3/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "What is NyxID, and how can I sign up?",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": null,
+          "encrypted_content": null,
+          "id": "rs_review1",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "arguments": "{\"query\":\"NyxID\"}",
+          "call_id": "call_review1",
+          "name": "public_faq_search",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_review1",
+          "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"articles\\\":[{\\\"article_id\\\":\\\"approvals\\\",\\\"title\\\":\\\"Reviewing actions\\\"},{\\\"article_id\\\":\\\"connect-services\\\",\\\"title\\\":\\\"Connecting services\\\"},{\\\"article_id\\\":\\\"personal-nyxbot\\\",\\\"title\\\":\\\"Using your personal NyxBot in Telegram\\\"},{\\\"article_id\\\":\\\"public-guide\\\",\\\"title\\\":\\\"What the public guide can do\\\"},{\\\"article_id\\\":\\\"signup-link\\\",\\\"title\\\":\\\"Opening a signup or linking link\\\"}]}\"}],\"isError\":false}",
+          "type": "function_call_output"
+        },
+        {
+          "content": null,
+          "encrypted_content": null,
+          "id": "rs_review2",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "arguments": "{\"article_id\":\"what-is-nyxid\"}",
+          "call_id": "call_review2",
+          "name": "public_faq_read",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_review2",
+          "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"article_id\\\":\\\"what-is-nyxid\\\",\\\"title\\\":\\\"What is NyxID?\\\",\\\"text\\\":\\\"NyxID manages sign-in and lets you connect services to an AI assistant through controlled credentials. You choose which accounts to connect and which access to allow. The public guide can explain NyxID and help you start linking your own account.\\\"}\"}],\"isError\":false}",
+          "type": "function_call_output"
+        },
+        {
+          "content": null,
+          "encrypted_content": null,
+          "id": "rs_review3",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "arguments": "{}",
+          "call_id": "call_review3",
+          "name": "public_signup_link",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_review3",
+          "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"status\\\":\\\"sent\\\",\\\"message\\\":\\\"The account review link was sent separately in this private chat. Website review and a final original confirmation are still required.\\\"}\"}],\"isError\":false}",
+          "type": "function_call_output"
+        },
+        {
+          "content": [
+            {
+              "text": "NyxID public FAQ answer.",
+              "type": "output_text"
+            }
+          ],
+          "role": "assistant",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.\n",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "instructions": "Summarize this public FAQ conversation as plain text, preserving approved FAQ facts and unresolved questions. Do not call tools or add private account information.",
+      "max_output_tokens": 512,
+      "model": "public-wire-review",
+      "parallel_tool_calls": false,
+      "reasoning": {
+        "effort": "low"
+      },
+      "store": false,
+      "stream": true,
+      "tools": []
+    },
+    "codex": {
+      "client_metadata": {
+        "root_turn_id": "01a14597-e014-70b1-b42e-d2c95684e3a6",
+        "session_id": "01a14597-df83-7031-8d92-e80d656c478f",
+        "thread_id": "01a14597-df83-7031-8d92-e80d656c478f",
+        "turn_id": "01a14597-e014-70b1-b42e-d2c95684e3a6",
+        "x-codex-installation-id": "b8344ed7-b33c-4d8e-af35-a3eb9e4b503d",
+        "x-codex-turn-metadata": "{\"installation_id\":\"b8344ed7-b33c-4d8e-af35-a3eb9e4b503d\",\"session_id\":\"01a14597-df83-7031-8d92-e80d656c478f\",\"thread_id\":\"01a14597-df83-7031-8d92-e80d656c478f\",\"agent_name\":\"/root\",\"turn_id\":\"01a14597-e014-70b1-b42e-d2c95684e3a6\",\"window_id\":\"01a14597-df83-7031-8d92-e80d656c478f:0\",\"window_number\":0,\"context_window_id\":\"01a14597-df84-7842-87ea-9d9bbd69b011\",\"request_kind\":\"compaction\",\"root_turn_id\":\"01a14597-e014-70b1-b42e-d2c95684e3a6\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":true,\"turn_started_at_unix_ms\":1792168943636,\"analytics_enabled\":true,\"compaction\":{\"trigger\":\"manual\",\"reason\":\"user_requested\",\"implementation\":\"responses\",\"phase\":\"standalone_turn\",\"strategy\":\"memento\"}}",
+        "x-codex-window-id": "01a14597-df83-7031-8d92-e80d656c478f:0"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+              "type": "input_text"
+            },
+            {
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/Users/chronoai/.agents/skills`\n- `r1` = `/private/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-zn3qu0v3/skills/.system`\n### Available skills\n- imagegen: (file: r1/imagegen/SKILL.md)\n- openai-docs: (file: r1/openai-docs/SKILL.md)\n- skill-creator: (file: r1/skill-creator/SKILL.md)\n- skill-installer: (file: r1/skill-installer/SKILL.md)\n- api-design: (file: r0/api-design/SKILL.md)\n- article-writing: (file: r0/article-writing/SKILL.md)\n- blueprint: (file: r0/blueprint/SKILL.md)\n- ckm:brand: (file: r0/ckm-brand/SKILL.md)\n- ckm:design-system: (file: r0/ckm-design-system/SKILL.md)\n- ckm:ui-styling: (file: r0/ckm-ui-styling/SKILL.md)\n- coding-standards: (file: r0/coding-standards/SKILL.md)\n- composio-cli: (file: r0/composio-cli/SKILL.md)\n</skills_instructions>",
+              "type": "input_text"
+            },
+            {
+              "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_01a14597-dfdc-7812-aeeb-1b60ddb0b13c",
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "<environment_context>\n  <cwd>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-zn3qu0v3/work</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><workspace_roots><root>/var/folders/jk/8w5kqy_507ncyl6hxl7dgph00000gn/T/nyxid-botfather-review-wire-zn3qu0v3/work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_01a14597-dfdc-7812-aeeb-1b7ddf05a2ca",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "What is NyxID, and how can I sign up?",
+              "type": "input_text"
+            }
+          ],
+          "id": "msg_01a14597-dffe-73b1-8a83-60f490afbf86",
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": null,
+          "encrypted_content": null,
+          "id": "rs_review1",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "arguments": "{\"query\":\"NyxID\"}",
+          "call_id": "call_review1",
+          "id": "fc_review1",
+          "name": "public_faq_search",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_review1",
+          "id": "fco_01a14597-e004-7bd1-ba8b-34a22d7eec7d",
+          "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"articles\\\":[{\\\"article_id\\\":\\\"approvals\\\",\\\"title\\\":\\\"Reviewing actions\\\"},{\\\"article_id\\\":\\\"connect-services\\\",\\\"title\\\":\\\"Connecting services\\\"},{\\\"article_id\\\":\\\"personal-nyxbot\\\",\\\"title\\\":\\\"Using your personal NyxBot in Telegram\\\"},{\\\"article_id\\\":\\\"public-guide\\\",\\\"title\\\":\\\"What the public guide can do\\\"},{\\\"article_id\\\":\\\"signup-link\\\",\\\"title\\\":\\\"Opening a signup or linking link\\\"}]}\"}],\"isError\":false}",
+          "type": "function_call_output"
+        },
+        {
+          "content": null,
+          "encrypted_content": null,
+          "id": "rs_review2",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "arguments": "{\"article_id\":\"what-is-nyxid\"}",
+          "call_id": "call_review2",
+          "id": "fc_review2",
+          "name": "public_faq_read",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_review2",
+          "id": "fco_01a14597-e009-7710-92e6-ac4dbfffcfaf",
+          "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"article_id\\\":\\\"what-is-nyxid\\\",\\\"title\\\":\\\"What is NyxID?\\\",\\\"text\\\":\\\"NyxID manages sign-in and lets you connect services to an AI assistant through controlled credentials. You choose which accounts to connect and which access to allow. The public guide can explain NyxID and help you start linking your own account.\\\"}\"}],\"isError\":false}",
+          "type": "function_call_output"
+        },
+        {
+          "content": null,
+          "encrypted_content": null,
+          "id": "rs_review3",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "arguments": "{}",
+          "call_id": "call_review3",
+          "id": "fc_review3",
+          "name": "public_signup_link",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_review3",
+          "id": "fco_01a14597-e00e-7e23-af0c-32a0be2d3143",
+          "output": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"status\\\":\\\"sent\\\",\\\"message\\\":\\\"The account review link was sent separately in this private chat. Website review and a final original confirmation are still required.\\\"}\"}],\"isError\":false}",
+          "type": "function_call_output"
+        },
+        {
+          "content": [
+            {
+              "text": "NyxID public FAQ answer.",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_review4",
+          "phase": "final_answer",
+          "role": "assistant",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.\n",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "instructions": "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.",
+      "model": "public-wire-review",
+      "parallel_tool_calls": false,
+      "prompt_cache_key": "01a14597-df83-7031-8d92-e80d656c478f",
+      "reasoning": {
+        "effort": "low"
+      },
+      "store": false,
+      "stream": true,
+      "tool_choice": "auto",
+      "tools": []
+    }
+  },
+  "compact_source": {
+    "binary_sha256": "09fa44fdc37a5fc70dc1ace31235f90468a2e193d0e85f7552eab068ea2582be",
+    "capture": "primary local synthetic Codex0.160.1 thread/compact/start"
+  },
+  "provenance": {
+    "binary_sha256": "09fa44fdc37a5fc70dc1ace31235f90468a2e193d0e85f7552eab068ea2582be",
+    "cli_version": "codex-cli 0.160.1",
+    "journey": "FAQ search, FAQ read, signup status, final answer",
+    "source": "primary local synthetic full-loop capture; no external calls"
+  },
+  "schema_adaptation": {
+    "kind": "derived-schema-adapted-historical-input-not-new-capture",
+    "source": "codex-public-responses-0.160.1.json",
+    "source_sha256": "1990572c7a859efbe4b0521e952fe716b08cdd3b344e44ce8ddde9c1228e5e64",
+    "changes": [
+      "/calls/0/codex/tools/public_signup_link/description",
+      "/calls/0/callback/tools/public_signup_link/description",
+      "/calls/1/codex/tools/public_signup_link/description",
+      "/calls/1/callback/tools/public_signup_link/description",
+      "/calls/2/codex/tools/public_signup_link/description",
+      "/calls/2/callback/tools/public_signup_link/description",
+      "/calls/3/codex/tools/public_signup_link/description",
+      "/calls/3/callback/tools/public_signup_link/description",
+      "/calls/0/codex/tools/public_faq_read/description",
+      "/calls/0/codex/tools/public_faq_read/parameters/properties/offset",
+      "/calls/0/callback/tools/public_faq_read/description",
+      "/calls/0/callback/tools/public_faq_read/parameters/properties/offset",
+      "/calls/1/codex/tools/public_faq_read/description",
+      "/calls/1/codex/tools/public_faq_read/parameters/properties/offset",
+      "/calls/1/callback/tools/public_faq_read/description",
+      "/calls/1/callback/tools/public_faq_read/parameters/properties/offset",
+      "/calls/2/codex/tools/public_faq_read/description",
+      "/calls/2/codex/tools/public_faq_read/parameters/properties/offset",
+      "/calls/2/callback/tools/public_faq_read/description",
+      "/calls/2/callback/tools/public_faq_read/parameters/properties/offset",
+      "/calls/3/codex/tools/public_faq_read/description",
+      "/calls/3/codex/tools/public_faq_read/parameters/properties/offset",
+      "/calls/3/callback/tools/public_faq_read/description",
+      "/calls/3/callback/tools/public_faq_read/parameters/properties/offset"
+    ],
+    "old_description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in Telegram.",
+    "new_description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
+    "warning": "Callback projections are schema-adapted expectations pending actual Rust normalization/size/cold-compaction replay; raw captures remain unchanged.",
+    "faq_read_pagination": {
+      "old_description": "Read one article returned by public_faq_search.",
+      "new_description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+      "offset_optional": true,
+      "maximum_offset": 16384
+    }
+  }
+}

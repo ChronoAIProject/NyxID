@@ -1,3 +1,5 @@
+use crate::crypto::secret_json::SecretJson;
+use crate::models::default_request_header::SecretHeaders;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -96,7 +98,7 @@ pub struct NodeProxyRequest {
     pub method: String,
     pub path: String,
     pub query: Option<String>,
-    pub headers: Vec<(String, String)>,
+    pub headers: SecretHeaders,
     /// Raw bytes (serialized to base64 in WS message)
     #[serde(default, with = "optional_base64_bytes")]
     pub body: Option<Vec<u8>>,
@@ -112,7 +114,7 @@ pub struct NodeSshTunnelRequest {
 }
 
 /// Response received from a node via WebSocket (non-streaming).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct NodeProxyResponse {
     pub request_id: String,
     pub status: u16,
@@ -121,7 +123,6 @@ pub struct NodeProxyResponse {
 }
 
 /// A chunk in a streaming proxy response.
-#[derive(Debug)]
 pub enum StreamChunk {
     /// Beginning of stream: status code and headers
     Start {
@@ -270,7 +271,7 @@ pub struct NodeWsProxyRequest {
     pub base_url: String,
     pub path: String,
     pub query: Option<String>,
-    pub headers: Vec<(String, String)>,
+    pub headers: SecretHeaders,
     pub ws_frame_injections: Vec<WsFrameInjection>,
 }
 
@@ -296,7 +297,7 @@ pub struct NodeSshExecRequest {
     pub host: String,
     pub port: u16,
     pub principal: String,
-    pub private_key_pem: String,
+    pub private_key_pem: zeroize::Zeroizing<String>,
     pub certificate_openssh: String,
     pub command: String,
     pub timeout_secs: u32,
@@ -347,7 +348,7 @@ pub struct NodeWebTerminalRequest {
 #[serde(rename_all = "snake_case")]
 pub enum NodeWebTerminalAuthMode {
     Cert {
-        private_key_pem: String,
+        private_key_pem: zeroize::Zeroizing<String>,
         certificate_openssh: String,
     },
     NodeKey,
@@ -373,9 +374,9 @@ impl fmt::Debug for NodeRequestSignature {
 }
 
 /// Outbound command for a node connection writer task.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) enum NodeOutboundMessage {
-    Text(String),
+    Text(zeroize::Zeroizing<String>),
     Binary(Vec<u8>),
     Close { code: u16, reason: String },
 }
@@ -507,7 +508,7 @@ impl Drop for NodeConnectionReservation {
 }
 
 /// JSON message sent from NyxID to a node for a proxy request.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_id: Option<String>,
@@ -523,7 +524,7 @@ struct WsProxyRequest {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
-    headers: serde_json::Value,
+    headers: SecretJson,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
     /// HMAC signing fields
@@ -559,7 +560,7 @@ struct WsSshTunnelOpen {
     signature: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsSshTunnelData {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -575,7 +576,7 @@ struct WsSshTunnelClose {
 }
 
 /// JSON ws_proxy_open sent to node.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyOpen {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -585,7 +586,7 @@ struct WsProxyOpen {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
-    headers: serde_json::Value,
+    headers: SecretJson,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ws_frame_injections: Vec<WsFrameInjection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -597,7 +598,7 @@ struct WsProxyOpen {
 }
 
 /// JSON ws_proxy_text sent to node.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyTextMsg {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -606,7 +607,7 @@ struct WsProxyTextMsg {
 }
 
 /// JSON ws_proxy_binary sent to node (base64-encoded payload).
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyBinaryMsg {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -626,7 +627,7 @@ struct WsProxyCloseMsg {
     reason: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsSshExec {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -635,7 +636,7 @@ struct WsSshExec {
     port: u16,
     principal: String,
     auth_mode: &'static str,
-    private_key_pem: String,
+    private_key_pem: zeroize::Zeroizing<String>,
     certificate_openssh: String,
     command: String,
     timeout_secs: u32,
@@ -701,7 +702,10 @@ fn send_proxy_cancel(
     }
     let message =
         serde_json::json!({ "type": "proxy_cancel", "request_id": request_id }).to_string();
-    if tx.try_send(NodeOutboundMessage::Text(message)).is_err() {
+    if tx
+        .try_send(NodeOutboundMessage::Text((message).into()))
+        .is_err()
+    {
         let _ = close_tx.send(Some(NodeOutboundMessage::Close {
             code: 1011,
             reason: "HTTP cancellation channel unavailable".into(),
@@ -768,7 +772,7 @@ impl Drop for PendingSshExecGuard {
         self.requests.remove(&self.request_id);
         self.streams.remove(&self.request_id);
 
-        let Ok(message) = serde_json::to_string(&WsSshExecCancel {
+        let Ok(message) = crate::crypto::secret_json::to_secret_string(&WsSshExecCancel {
             msg_type: "ssh_exec_cancel",
             request_id: self.request_id.clone(),
         }) else {
@@ -793,7 +797,7 @@ impl Drop for PendingSshExecGuard {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsWebTerminalOpen {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -805,7 +809,7 @@ struct WsWebTerminalOpen {
     port: u16,
     principal: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    private_key_pem: Option<String>,
+    private_key_pem: Option<zeroize::Zeroizing<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     certificate_openssh: Option<String>,
     cols: u32,
@@ -819,7 +823,7 @@ struct WsWebTerminalOpen {
     hmac: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsWebTerminalData {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -844,7 +848,7 @@ struct WsWebTerminalClose {
 }
 
 /// JSON proxy_response from node.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WsProxyResponseMsg {
     pub request_id: String,
     pub status: u16,
@@ -871,7 +875,7 @@ pub struct WsProxyErrorMsg {
 }
 
 /// JSON proxy_response_start from node (streaming).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WsProxyResponseStartMsg {
     pub request_id: String,
     pub status: u16,
@@ -880,7 +884,7 @@ pub struct WsProxyResponseStartMsg {
 }
 
 /// JSON proxy_response_chunk from node (streaming).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WsProxyResponseChunkMsg {
     pub request_id: String,
     #[serde(default)]
@@ -900,7 +904,7 @@ pub struct WsSshTunnelOpenedMsg {
 }
 
 /// JSON ssh_tunnel_data from node.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WsSshTunnelDataMsg {
     pub session_id: String,
     #[serde(default)]
@@ -2051,14 +2055,14 @@ impl NodeWsManager {
             method: request.method,
             path: request.path,
             query: request.query,
-            headers: serde_json::Value::Object(headers_map),
+            headers: SecretJson(serde_json::Value::Object(headers_map)),
             body: body_b64,
             timestamp,
             nonce,
             signature,
         };
 
-        let msg_json = serde_json::to_string(&ws_msg).map_err(|e| {
+        let msg_json = crate::crypto::secret_json::to_secret_string(&ws_msg).map_err(|e| {
             conn.pending.remove(&request_id);
             NodeProxyFailure::before_dispatch(AppError::Internal(format!(
                 "Failed to serialize proxy request: {e}"
@@ -2173,7 +2177,7 @@ impl NodeWsManager {
             .insert(request_id.clone(), PendingRequest::Awaiting(response_tx));
         let sender = conn.tx.clone();
         if sender
-            .try_send(NodeOutboundMessage::Text(value.to_string()))
+            .try_send(NodeOutboundMessage::Text((value.to_string()).into()))
             .is_err()
         {
             conn.pending.remove(&request_id);
@@ -2299,7 +2303,7 @@ impl NodeWsManager {
             })
             .unwrap_or((None, None, None));
 
-        let msg = serde_json::to_string(&WsSshTunnelOpen {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshTunnelOpen {
             msg_type: "ssh_tunnel_open",
             session_id: request.session_id,
             service_id: request.service_id,
@@ -2364,7 +2368,7 @@ impl NodeWsManager {
             )));
         }
 
-        let msg = serde_json::to_string(&WsSshTunnelData {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshTunnelData {
             msg_type: "ssh_tunnel_data",
             session_id: session_id.to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(data),
@@ -2386,7 +2390,7 @@ impl NodeWsManager {
             .connections
             .get(node_id)
             .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
-        let msg = serde_json::to_string(&WsSshTunnelClose {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshTunnelClose {
             msg_type: "ssh_tunnel_close",
             session_id: session_id.to_string(),
         })
@@ -2412,7 +2416,7 @@ impl NodeWsManager {
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
 
-        let msg = serde_json::to_string(&ping)
+        let msg = crate::crypto::secret_json::to_secret_string(&ping)
             .map_err(|e| AppError::Internal(format!("Failed to serialize heartbeat: {e}")))?;
 
         conn.tx
@@ -2463,7 +2467,7 @@ impl NodeWsManager {
             target_url: params.target_url.clone(),
         };
 
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             AppError::Internal(format!("Failed to serialize credential_update: {e}"))
         })?;
 
@@ -2528,7 +2532,7 @@ impl NodeWsManager {
             request_id: None,
             service_slug: service_slug.to_string(),
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             AppError::Internal(format!("Failed to serialize credential_remove: {e}"))
         })?;
 
@@ -2588,7 +2592,7 @@ impl NodeWsManager {
         let msg = WsPendingCredentialsAvailable {
             msg_type: "pending_credentials_available",
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             AppError::Internal(format!(
                 "Failed to serialize pending_credentials_available: {e}"
             ))
@@ -2656,7 +2660,7 @@ impl NodeWsManager {
             nonce: params.nonce,
             ciphertext: params.ciphertext,
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             AppError::Internal(format!(
                 "Failed to serialize pending_credential_ciphertext: {e}"
             ))
@@ -2746,7 +2750,7 @@ impl NodeWsManager {
             param_value: params.param_value.clone(),
             target_url: params.target_url.clone(),
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             conn.credential_acks.remove(&request_id);
             AppError::Internal(format!("Failed to serialize credential_update: {e}"))
         })?;
@@ -2865,7 +2869,7 @@ impl NodeWsManager {
             request_id: Some(request_id.clone()),
             service_slug: service_slug.to_string(),
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             conn.credential_acks.remove(&request_id);
             AppError::Internal(format!("Failed to serialize credential_remove: {e}"))
         })?;
@@ -3355,10 +3359,11 @@ impl NodeWsManager {
                         capacity = SSH_TUNNEL_BUFFER_CAPACITY,
                         "Dropping SSH tunnel due to full receive buffer"
                     );
-                    let close_msg = serde_json::to_string(&WsSshTunnelClose {
-                        msg_type: "ssh_tunnel_close",
-                        session_id: session_id.to_string(),
-                    });
+                    let close_msg =
+                        crate::crypto::secret_json::to_secret_string(&WsSshTunnelClose {
+                            msg_type: "ssh_tunnel_close",
+                            session_id: session_id.to_string(),
+                        });
                     if let Ok(close_msg) = close_msg {
                         // TODO: This close signal is best-effort because the node write queue is
                         // also bounded. If try_send fails here, the node-side tunnel relies on
@@ -3424,7 +3429,7 @@ impl NodeWsManager {
             })
             .unwrap_or((None, None, None));
 
-        let msg = serde_json::to_string(&WsSshExec {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshExec {
             msg_type: "ssh_exec",
             request_id: request.request_id,
             host: request.host,
@@ -3527,7 +3532,7 @@ impl NodeWsManager {
             })
             .unwrap_or((None, None, None));
 
-        let msg = serde_json::to_string(&WsSshNodeExecOpen {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshNodeExecOpen {
             msg_type: "ssh_node_exec_open",
             request_id: request.request_id,
             service_slug: request.service_slug,
@@ -3724,7 +3729,7 @@ impl NodeWsManager {
         }
         let _guard = Guard { pending, id };
         conn.tx
-            .try_send(NodeOutboundMessage::Text(message.to_string()))
+            .try_send(NodeOutboundMessage::Text((message.to_string()).into()))
             .map_err(|_| AppError::NodeOffline("Machine write buffer unavailable".into()))?;
         drop(conn);
         tokio::time::timeout(std::time::Duration::from_secs(timeout), rx)
@@ -3866,7 +3871,7 @@ impl NodeWsManager {
             })
             .unwrap_or((None, None, None));
 
-        let msg = serde_json::to_string(&WsWebTerminalOpen {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsWebTerminalOpen {
             msg_type: "web_terminal_open",
             session_id: request.session_id,
             service_id: request.service_id,
@@ -3941,7 +3946,7 @@ impl NodeWsManager {
             )));
         }
 
-        let msg = serde_json::to_string(&WsWebTerminalData {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsWebTerminalData {
             msg_type: "web_terminal_data",
             session_id: session_id.to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(data),
@@ -3970,7 +3975,7 @@ impl NodeWsManager {
             .get(node_id)
             .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
 
-        let msg = serde_json::to_string(&WsWebTerminalResize {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsWebTerminalResize {
             msg_type: "web_terminal_resize",
             session_id: session_id.to_string(),
             cols,
@@ -3993,7 +3998,7 @@ impl NodeWsManager {
             .connections
             .get(node_id)
             .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
-        let msg = serde_json::to_string(&WsWebTerminalClose {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsWebTerminalClose {
             msg_type: "web_terminal_close",
             session_id: session_id.to_string(),
         })
@@ -4056,10 +4061,11 @@ impl NodeWsManager {
                         capacity = WEB_TERMINAL_BUFFER_CAPACITY,
                         "Dropping web terminal due to full receive buffer"
                     );
-                    let close_msg = serde_json::to_string(&WsWebTerminalClose {
-                        msg_type: "web_terminal_close",
-                        session_id: session_id.to_string(),
-                    });
+                    let close_msg =
+                        crate::crypto::secret_json::to_secret_string(&WsWebTerminalClose {
+                            msg_type: "web_terminal_close",
+                            session_id: session_id.to_string(),
+                        });
                     if let Ok(close_msg) = close_msg {
                         let _ = conn.tx.try_send(NodeOutboundMessage::Text(close_msg));
                     }
@@ -4134,14 +4140,14 @@ impl NodeWsManager {
             .collect::<serde_json::Map<_, _>>()
             .into();
 
-        let msg = serde_json::to_string(&WsProxyOpen {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsProxyOpen {
             msg_type: "ws_proxy_open",
             session_id: request.session_id,
             service_slug: request.service_slug,
             base_url: request.base_url,
             path: request.path,
             query: request.query,
-            headers: headers_json,
+            headers: SecretJson(headers_json),
             ws_frame_injections: request.ws_frame_injections,
             timestamp,
             nonce,
@@ -4196,7 +4202,7 @@ impl NodeWsManager {
                 "WS proxy session {session_id} is not active"
             )));
         }
-        let msg = serde_json::to_string(&WsProxyTextMsg {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsProxyTextMsg {
             msg_type: "ws_proxy_text",
             session_id: session_id.to_string(),
             data: data.to_string(),
@@ -4226,7 +4232,7 @@ impl NodeWsManager {
                 "WS proxy session {session_id} is not active"
             )));
         }
-        let msg = serde_json::to_string(&WsProxyBinaryMsg {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsProxyBinaryMsg {
             msg_type: "ws_proxy_binary",
             session_id: session_id.to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(data),
@@ -4252,7 +4258,7 @@ impl NodeWsManager {
             .connections
             .get(node_id)
             .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
-        let msg = serde_json::to_string(&WsProxyCloseMsg {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsProxyCloseMsg {
             msg_type: "ws_proxy_close",
             session_id: session_id.to_string(),
             code,
@@ -4566,7 +4572,9 @@ mod tests {
             let conn = manager.connections.get("node").unwrap();
             let close = conn.close_tx.subscribe();
             conn.tx
-                .try_send(NodeOutboundMessage::Text("already queued".into()))
+                .try_send(NodeOutboundMessage::Text(
+                    "already queued".to_owned().into(),
+                ))
                 .unwrap();
             send_proxy_cancel(&conn.tx, &conn.close_tx, "request", &conn.capabilities);
             assert_eq!(close.borrow().is_some(), capable);
@@ -4591,7 +4599,7 @@ mod tests {
             method: "GET".into(),
             path: "/".into(),
             query: None,
-            headers: Vec::new(),
+            headers: Vec::new().into(),
             body: None,
         }
     }
@@ -4824,7 +4832,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/resource".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -4863,7 +4871,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/resource".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -4910,7 +4918,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/upload".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: Some(vec![0; 5]),
                 },
                 None,
@@ -4948,7 +4956,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/upload".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: Some(vec![0; LEGACY_NODE_PROXY_MAX_BODY_SIZE + 1]),
                 },
                 None,
@@ -5002,7 +5010,9 @@ mod tests {
         let (old_tx, _old_rx) = mpsc::channel(1);
         let retained_sender = old_tx.clone();
         old_tx
-            .try_send(NodeOutboundMessage::Text("queued request".to_string()))
+            .try_send(NodeOutboundMessage::Text(
+                ("queued request".to_string()).into(),
+            ))
             .unwrap();
         let (pending, mut close) =
             manager.register_connection_with_id("node-a", "old".to_string(), old_tx);
@@ -5119,7 +5129,7 @@ mod tests {
                         service_id: "service-1".to_string(),
                         service_slug: "ssh-service".to_string(),
                         auth_mode: NodeWebTerminalAuthMode::Cert {
-                            private_key_pem: "redacted-private-key".to_string(),
+                            private_key_pem: ("redacted-private-key".to_string()).into(),
                             certificate_openssh: "redacted-cert".to_string(),
                         },
                         host: "ssh.example".to_string(),
@@ -5411,7 +5421,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/stream".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -5456,7 +5466,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/executions".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: Some(b"{}".to_vec()),
                 },
                 None,
@@ -5487,7 +5497,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/executions".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: Some(b"{}".to_vec()),
                 },
                 None,
@@ -5542,7 +5552,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/stream".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -5610,7 +5620,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/models".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -5668,7 +5678,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/models".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -5889,7 +5899,7 @@ mod tests {
                         host: "ssh.internal".to_string(),
                         port: 22,
                         principal: "deploy".to_string(),
-                        private_key_pem: "private-key".to_string(),
+                        private_key_pem: ("private-key".to_string()).into(),
                         certificate_openssh: "certificate".to_string(),
                         command: "sleep 30".to_string(),
                         timeout_secs: 30,
@@ -6206,5 +6216,225 @@ mod tests {
 
         let err3 = map_retryable_node_failure("other".to_string(), Some("other_reason"));
         assert!(matches!(err3, AppError::NodeOffline(_)));
+    }
+}
+
+impl std::fmt::Debug for WsSshExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsSshExec").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsWebTerminalOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsWebTerminalOpen").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsProxyRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsProxyRequest").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsProxyOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsProxyOpen").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsSshTunnelData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsSshTunnelData").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsProxyTextMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsProxyTextMsg").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsProxyBinaryMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsProxyBinaryMsg").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsWebTerminalData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsWebTerminalData").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for NodeProxyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeProxyResponse").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for StreamChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamChunk").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for NodeOutboundMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeOutboundMessage")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod secret_formatting_tests {
+    use super::*;
+    #[test]
+    fn proxy_ssh_and_stream_envelopes_never_debug_payloads() {
+        let secret = "distinctive-node-header-private-key-ciphertext-89c4";
+        let request = WsProxyRequest {
+            target_id: None,
+            signature_version: None,
+            msg_type: "proxy_request",
+            request_id: "request".into(),
+            service_id: "service".into(),
+            service_slug: "service".into(),
+            base_url: format!("https://example.invalid/{secret}"),
+            method: "POST".into(),
+            path: secret.into(),
+            query: Some(secret.into()),
+            headers: SecretJson(serde_json::json!({"x-key":secret})),
+            body: Some(secret.into()),
+            timestamp: None,
+            nonce: None,
+            signature: Some(secret.into()),
+        };
+        assert!(!format!("{request:?}").contains(secret));
+        assert!(
+            crate::crypto::secret_json::to_secret_string(&request)
+                .unwrap()
+                .contains(secret)
+        );
+        let open = WsProxyOpen {
+            msg_type: "ws_proxy_open",
+            session_id: "session".into(),
+            service_slug: "service".into(),
+            base_url: "https://example.invalid".into(),
+            path: "/".into(),
+            query: Some(secret.into()),
+            headers: SecretJson(serde_json::json!({"x-key":secret})),
+            ws_frame_injections: vec![],
+            timestamp: None,
+            nonce: None,
+            signature: None,
+        };
+        assert!(!format!("{open:?}").contains(secret));
+        let ssh = WsSshExec {
+            msg_type: "ssh_exec",
+            request_id: "request".into(),
+            host: "host".into(),
+            port: 22,
+            principal: "user".into(),
+            auth_mode: "cert",
+            private_key_pem: secret.to_owned().into(),
+            certificate_openssh: secret.into(),
+            command: secret.into(),
+            timeout_secs: 10,
+            timestamp: None,
+            nonce: None,
+            hmac: None,
+        };
+        assert!(!format!("{ssh:?}").contains(secret));
+        let terminal = WsWebTerminalOpen {
+            msg_type: "web_terminal_open",
+            session_id: "session".into(),
+            service_id: "service".into(),
+            service_slug: "service".into(),
+            auth_mode: "cert",
+            host: "host".into(),
+            port: 22,
+            principal: "user".into(),
+            private_key_pem: Some(secret.to_owned().into()),
+            certificate_openssh: None,
+            cols: 80,
+            rows: 24,
+            term: "xterm".into(),
+            timestamp: None,
+            nonce: None,
+            hmac: None,
+        };
+        assert!(!format!("{terminal:?}").contains(secret));
+        assert!(
+            !format!("{:?}", NodeOutboundMessage::Text(secret.to_owned().into())).contains(secret)
+        );
+        assert!(!format!("{:?}", StreamChunk::Data(secret.as_bytes().to_vec())).contains(secret));
+        assert!(
+            !format!(
+                "{:?}",
+                NodeProxyResponse {
+                    request_id: "request".into(),
+                    status: 200,
+                    headers: vec![("set-cookie".into(), secret.into())],
+                    body: secret.as_bytes().to_vec()
+                }
+            )
+            .contains(secret)
+        );
+    }
+}
+
+impl std::fmt::Debug for WsProxyResponseMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsProxyResponseMsg([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for WsProxyResponseStartMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsProxyResponseStartMsg([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for WsProxyResponseChunkMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsProxyResponseChunkMsg([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for WsSshTunnelDataMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsSshTunnelDataMsg([REDACTED])")
+    }
+}
+
+#[cfg(test)]
+mod response_debug_tests {
+    use super::*;
+    #[test]
+    fn arbitrary_response_headers_and_bodies_are_redacted() {
+        let secret = "distinctive-response-cookie-body-18bed";
+        let headers = serde_json::json!({"set-cookie": secret});
+        let response = WsProxyResponseMsg {
+            request_id: "request".into(),
+            status: 200,
+            headers: headers.clone(),
+            body: Some(secret.into()),
+        };
+        let start = WsProxyResponseStartMsg {
+            request_id: "request".into(),
+            status: 200,
+            headers,
+        };
+        let chunk = WsProxyResponseChunkMsg {
+            request_id: "request".into(),
+            data: Some(secret.into()),
+        };
+        for debug in [
+            format!("{response:?}"),
+            format!("{start:?}"),
+            format!("{chunk:?}"),
+        ] {
+            assert!(!debug.contains(secret));
+        }
     }
 }

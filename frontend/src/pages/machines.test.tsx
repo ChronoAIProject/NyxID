@@ -59,8 +59,17 @@ vi.mock("@/components/machines/remote-machine-create", () => ({
     open ? <p>Review remote machine preflight</p> : null,
 }));
 vi.mock("@/components/machines/remote-machine-detail", () => ({
-  RemoteMachineDetail: ({ machineId }: { machineId: string }) => (
-    <p>Hosted details for {machineId}</p>
+  RemoteMachineDetail: ({
+    machineId,
+    onClose,
+  }: {
+    machineId: string;
+    onClose?: () => void;
+  }) => (
+    <div>
+      <p>Hosted details for {machineId}</p>
+      <button onClick={onClose}>Back to machines</button>
+    </div>
   ),
 }));
 vi.mock("@/components/machines/remote-machine-paid-start", () => ({
@@ -276,6 +285,18 @@ it("resolves a deleted machine deep link after it leaves the active list", () =>
   expect(
     screen.getByText("Hosted details for deleted-machine"),
   ).toBeInTheDocument();
+});
+
+it("returns from hosted detail to the machine list and clears the deep-link selection", async () => {
+  state.machine = "hosted-machine";
+  show();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Back to machines" }),
+  );
+  expect(state.navigate).toHaveBeenLastCalledWith({
+    to: "/assistant/machines",
+    search: {},
+  });
 });
 
 it("navigates the hosted shortcut to the shared setup form", async () => {

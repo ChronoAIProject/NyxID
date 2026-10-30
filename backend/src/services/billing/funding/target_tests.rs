@@ -116,6 +116,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             wallet_id: Some("wallet".into()),
             actor_user_id: "person".into(),
             api_key_id: None,
+            assistant_source: None,
             user_service_id: None,
             service_id: Some("service".into()),
             service_slug: Some("service".into()),
@@ -124,6 +125,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,
@@ -171,4 +173,27 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
         assert_eq!(period.consumed_quantity, 20);
         assert_eq!(settle_usage_funding(&db, &row).await.unwrap(), result);
     }
+}
+
+async fn reserve_allowances(
+    db: &mongodb::Database,
+    owner: &str,
+    service: Option<&str>,
+    slug: Option<&str>,
+    metric: BillingMetric,
+    quantity: i64,
+) -> AppResult<Vec<AllowanceReservationAllocation>> {
+    Ok(super::tests::ordinary(
+        db,
+        owner,
+        service,
+        slug,
+        metric,
+        quantity,
+        Credits::from_pico(1).unwrap(),
+    )
+    .await?
+    .layers
+    .remove(0)
+    .allowance_reservations)
 }

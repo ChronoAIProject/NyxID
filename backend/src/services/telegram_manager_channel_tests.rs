@@ -238,6 +238,7 @@ async fn check_channel(
         token,
         &bots::webhook_url(&state.config.base_url, channel),
         "",
+        &state.config,
     )
     .await
 }
@@ -316,8 +317,8 @@ async fn assert_invalid_webhook(state: &crate::AppState, server: &MockServer, in
             .unwrap()
             .unwrap();
         assert_eq!(
-            bson::to_document(&before).unwrap(),
-            bson::to_document(&after).unwrap()
+            bson::to_document(&*before).unwrap(),
+            bson::to_document(&*after).unwrap()
         );
     }
 }
@@ -368,6 +369,38 @@ async fn telegram_manager_channel_registration_and_verify_require_all_five_updat
     }
     assert_invalid_webhook(&state, &server, json!({"url": callback})).await;
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn domain_alias_manager_channel_registration_and_verify_keep_the_existing_webhook() {
+    let (mut state, actor, server) = fixture().await;
+    let created = pending_channel(&state, &actor, &server).await;
+    let channel = created.bot;
+    let callback = bots::webhook_url(&state.config.base_url, &channel);
+    state.config.domain_aliases.base_urls = vec![state.config.base_url.clone()];
+    state.config.base_url = "https://new.example".into();
+    server.reset().await;
+    webhook_info(
+        &server,
+        MANAGER,
+        json!({"url":callback,"allowed_updates":UPDATES}),
+    )
+    .await;
+    check_channel(&state, &server, &channel, MANAGER)
+        .await
+        .unwrap();
+    bot_identity_api(&server, MANAGER).await;
+    let verified = verify_channel(&state, &server, &channel).await.unwrap().0;
+    assert_eq!(verified.status, "active");
+    assert!(verified.webhook_registered);
+    assert_only_telegram_reads(&server, 2, 1).await;
+    state.config.domain_aliases.base_urls.clear();
+    assert!(
+        check_channel(&state, &server, &channel, MANAGER)
+            .await
+            .is_err()
+    );
+    assert_only_telegram_reads(&server, 3, 1).await;
 }
 
 #[tokio::test]
@@ -605,7 +638,7 @@ async fn telegram_manager_channel_unready_configuration_is_projected_without_lif
         state
             .db
             .collection::<PlatformCredential>(CREDENTIALS)
-            .replace_one(doc! {"_id": &original.id}, &original)
+            .replace_one(doc! {"_id": &original.id}, &*original)
             .await
             .unwrap();
         state
@@ -693,7 +726,7 @@ async fn telegram_manager_channel_unready_configuration_is_projected_without_lif
     state
         .db
         .collection::<PlatformCredential>(CREDENTIALS)
-        .insert_one(&original)
+        .insert_one(&*original)
         .await
         .unwrap();
     let detail = channel_bots::get_bot(
@@ -834,8 +867,8 @@ async fn telegram_manager_channel_get_me_failure_persists_safe_status_and_verify
         .unwrap()
         .unwrap();
     assert_eq!(
-        bson::to_document(&manager_before).unwrap(),
-        bson::to_document(&manager_after).unwrap()
+        bson::to_document(&*manager_before).unwrap(),
+        bson::to_document(&*manager_after).unwrap()
     );
     assert_only_telegram_reads(&server, 1, 1).await;
 
@@ -1034,6 +1067,7 @@ mod migration {
             MANAGER,
             &bots::webhook_url(&state.config.base_url, &created.bot),
             &created.webhook_secret,
+            &state.config,
         )
         .await
         .unwrap();
@@ -1106,7 +1140,8 @@ mod migration {
                 &old.id,
                 MANAGER,
                 &bots::webhook_url(&state.config.base_url, old),
-                "stale-secret"
+                "stale-secret",
+                &state.config,
             )
             .await
             .is_err()
@@ -1218,6 +1253,7 @@ mod migration {
                         MANAGER,
                         &bots::webhook_url(&task_state.config.base_url, &task_bot),
                         "registration-secret",
+                        &task_state.config,
                     )
                     .await
                 }
@@ -1296,7 +1332,8 @@ mod migration {
                 &old.id,
                 MANAGER,
                 &bots::webhook_url(&state.config.base_url, &old),
-                "wrong-identity-secret"
+                "wrong-identity-secret",
+                &state.config,
             )
             .await
             .is_err()
@@ -1344,7 +1381,8 @@ mod migration {
                 &old.id,
                 MANAGER,
                 &bots::webhook_url(&state.config.base_url, &old),
-                "wrong-secret"
+                "wrong-secret",
+                &state.config,
             )
             .await
             .is_err()

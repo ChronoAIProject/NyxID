@@ -1,3 +1,4 @@
+import { AccountErasureProgress } from "@/components/shared/account-erasure-progress";
 import {
   changedFields,
   describeChanges,
@@ -219,7 +220,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
       });
       toast.success(
         user.is_active
-          ? "User disabled. Existing access tokens may remain valid for up to 15 minutes."
+          ? "User disabled. Protected requests are rejected by the live account check."
           : "User enabled",
       );
     } catch (err) {
@@ -247,8 +248,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(userId);
-      toast.success("User deleted");
-      void navigate({ to: "/admin/users" });
+      toast.success("Account deletion accepted. Inspect erasure progress for verified completion.");
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to delete user",
@@ -275,7 +275,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
     try {
       const result = await revokeSessionsMutation.mutateAsync(userId);
       toast.success(
-        `${String(result.revoked_count)} session(s) revoked. Existing access tokens may remain valid for up to 15 minutes.`,
+        `${String(result.revoked_count)} session(s) revoked. Session-bound access is blocked on the next protected request. Credentials without a session binding have separate revocation controls.`,
       );
     } catch (err) {
       toast.error(
@@ -301,10 +301,10 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
         <h3 className="mb-2 font-display text-lg font-semibold">
-          User not found
+          Account source unavailable
         </h3>
         <p className="mb-4 text-sm text-muted-foreground">
-          The user you are looking for does not exist or has been deleted.
+          Source absence does not establish erasure completion. Inspect durable progress below.
         </p>
         <Button
           variant="outline"
@@ -312,12 +312,14 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         >
           Back to Users
         </Button>
+        <AccountErasureProgress userId={userId} />
       </div>
     );
   }
 
   return (
     <div className="space-y-8">
+      <AccountErasureProgress userId={userId} />
       <PageHeader
         title={user.display_name ?? user.email}
         description={user.display_name ? user.email : undefined}

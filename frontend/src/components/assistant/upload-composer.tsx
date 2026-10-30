@@ -1,5 +1,21 @@
-import { useEffect, useRef, useState, type ComponentProps } from "react";
-import { FileText, Paperclip, X } from "lucide-react";
+import { loadVoicePanel } from "@/lib/assistant/voice-panel-loader";
+import { PreparedMicrophone, microphoneDevice, microphoneError } from "@/lib/microphone-capture";
+import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
+import { FileText, Paperclip, Plus, X } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,12 +62,15 @@ type Pending = {
 };
 type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
-  readonly onVoice?: (conversationId: string) => Promise<void>;
+  readonly attachmentMenuItems?: ReactNode;
+  readonly onVoiceSettings?: () => void;
+  readonly onVoicePrepare?: () => boolean;
+  readonly onVoice?: (conversationId: string, preparation?: PreparedMicrophone) => Promise<void>;
   readonly onSend: (text: string, uploads?: UploadedMessage) => Promise<void>;
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
@@ -62,7 +81,9 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
   const uploadQueue = useRef(Promise.resolve());
-  const openingVoice = useRef(false);
+  const openingVoice = useRef<PreparedMicrophone | null>(null);
+  const [preparingVoice, setPreparingVoice] = useState(false);
+  const voiceGeneration = useRef(0);
   const scopeId = useRef<Promise<string> | undefined>(undefined);
   const resolved = useRef<UploadScope>(scope);
   const alive = useRef(true);
@@ -73,6 +94,9 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     const entries = pending.current;
     return () => {
       alive.current = false;
+      const preparation = openingVoice.current;
+      if (!preparation?.isTransferred) preparation?.close();
+      openingVoice.current = null;
       for (const file of entries.values()) {
         file.controller.abort();
         if (file.preview) URL.revokeObjectURL(file.preview);
@@ -196,25 +220,155 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     }
     return handles;
   }
-  async function openVoice() {
-    if (locked || openingVoice.current || pending.current.size || scope.kind !== "conversations" || !onVoice) return;
-    openingVoice.current = true;
+  const getDictationThread = useCallback(async () => {
+    scopeId.current ??= scope.id
+      ? Promise.resolve(scope.id)
+      : createUploadDraft(scope.agentId);
     try {
-      scopeId.current ??= scope.id ? Promise.resolve(scope.id) : createUploadDraft(scope.agentId);
       const id = await scopeId.current;
-      resolved.current = { ...scope, id };
-      if (alive.current) await onVoice(id);
-    } catch {
+      if (!alive.current) throw new Error("Composer closed");
+      resolved.current = { kind: scope.kind, agentId: scope.agentId, id };
+      return id;
+    } catch (error) {
       if (!resolved.current.id) scopeId.current = undefined;
-      if (alive.current) setNotice("Voice could not open. Please try again.");
-    } finally { openingVoice.current = false; }
+      throw error;
+    }
+  }, [scope.id, scope.agentId, scope.kind]);
+  function cancelVoicePreparation() {
+    voiceGeneration.current++;
+    if (!openingVoice.current?.isTransferred) openingVoice.current?.close();
+    openingVoice.current = null;
+    setPreparingVoice(false);
+  }
+  const voiceAvailable = Boolean(onVoice);
+  useEffect(() => {
+    if (props.disabled || !voiceAvailable) cancelVoicePreparation();
+  }, [props.disabled, voiceAvailable]);
+  async function openVoice(configureOnly = false) {
+    if (configureOnly && onVoiceSettings) {
+      onVoiceSettings();
+      return;
+    }
+    if (openingVoice.current) {
+      cancelVoicePreparation();
+      return;
+    }
+    if ((props.voiceActive || configureOnly) && scope.id && onVoice) {
+      await onVoice(scope.id);
+      return;
+    }
+    if (
+      locked ||
+      pending.current.size ||
+      scope.kind !== "conversations" ||
+      !onVoice
+    )
+      return;
+    if (!configureOnly && onVoicePrepare && !onVoicePrepare()) return;
+    void loadVoicePanel().catch(() => {});
+    // Permission and AudioContext originate in the actual waveform activation,
+    // before lazy loading, draft creation or catalog requests.
+    const ticket = ++voiceGeneration.current;
+    let preparation: PreparedMicrophone | undefined;
+    let granted = false;
+    try {
+      preparation = configureOnly
+        ? undefined
+        : new PreparedMicrophone(microphoneDevice(props.ownerUserId ?? ""));
+      openingVoice.current = preparation ?? null;
+      setPreparingVoice(!configureOnly);
+      setNotice(undefined);
+      await preparation?.ready;
+      granted = true;
+      if (
+        !alive.current ||
+        voiceGeneration.current !== ticket ||
+        preparation?.isClosed ||
+        openingVoice.current !== (preparation ?? null)
+      )
+        return;
+      scopeId.current ??= scope.id
+        ? Promise.resolve(scope.id)
+        : createUploadDraft(scope.agentId);
+      const id = await scopeId.current;
+      if (
+        !alive.current ||
+        voiceGeneration.current !== ticket ||
+        preparation?.isClosed ||
+        openingVoice.current !== (preparation ?? null)
+      )
+        return;
+      resolved.current = { ...scope, id };
+      if (!scope.id && props.ownerUserId && props.draftKey) {
+        const drafts = useAssistantDraftStore.getState();
+        if (drafts.ownerUserId === props.ownerUserId)
+          drafts.saveDraft(
+            props.ownerUserId,
+            `conv:${id}`,
+            drafts.getDraft(props.draftKey),
+          );
+      }
+      // The page explicitly marks transfer after its live navigation/account fence.
+      // Until then (including saved-model awaits), unmount still owns cleanup.
+      await onVoice(id, preparation);
+    } catch (error) {
+      preparation?.close();
+      if (!resolved.current.id) scopeId.current = undefined;
+      if (alive.current && voiceGeneration.current === ticket)
+        setNotice(
+          granted
+            ? "Voice could not open. Check your source and billing settings, then try again."
+            : microphoneError(error),
+        );
+    } finally {
+      if (openingVoice.current === preparation) openingVoice.current = null;
+      if (alive.current && voiceGeneration.current === ticket)
+        setPreparingVoice(false);
+    }
   }
   return (
     <ChatComposer
       {...props}
-      onVoice={onVoice ? () => { void openVoice(); } : undefined}
+      voiceActive={props.voiceActive || preparingVoice}
+      voiceControls={
+        <>
+          {preparingVoice && (
+            <div
+              role="status"
+              className="flex items-center justify-between gap-2 pb-2 text-12 text-text-secondary"
+            >
+              Allow microphone access…
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={cancelVoicePreparation}
+              >
+                Cancel
+              </Button>
+            </div>
+          )}
+          {props.voiceControls}
+        </>
+      }
+      dictationThreadId={scope.id}
+      onVoice={
+        onVoice
+          ? (configureOnly) => {
+              void openVoice(configureOnly);
+            }
+          : undefined
+      }
+      getDictationThread={
+        onVoice && scope.kind === "conversations"
+          ? getDictationThread
+          : undefined
+      }
       hasAttachments={files.some((file) => file.item)}
-      uploadBlocked={files.some((file) => !file.item) || Boolean(props.active && files.length)}
+      uploadBlocked={
+        files.some((file) => !file.item) ||
+        Boolean(props.active && files.length)
+      }
       onFiles={(items) => void add(items)}
       // Every chip, failed ones included: a reference goes only when its chip is removed.
       attachmentMentions={files.map((file) => ({
@@ -225,7 +379,10 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       onLongText={(text) => {
         if (locked || pending.current.size >= 10) return undefined;
         // Keep the descriptive filename separate from its short @text-N handle.
-        const file = pastedTextFile(text, handleCounts.current["pasted-text"] + 1);
+        const file = pastedTextFile(
+          text,
+          handleCounts.current["pasted-text"] + 1,
+        );
         return add([file], "pasted-text", text)[0];
       }}
       draftText={(content) =>
@@ -247,6 +404,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                 ref={attachmentStrip}
                 aria-label="Attachments"
                 tabIndex={0}
+                data-scroll-fade=""
                 className="assistant-scrollbar flex gap-2 overflow-x-auto overscroll-x-contain py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-xl"
               >
                 {files.map((file) => (
@@ -271,30 +429,62 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                     ) : (
                       <div className="flex h-full flex-col justify-between p-3">
                         {file.kind === "pasted-text" ? (
-                          <p className="line-clamp-2 pr-5 text-[10px] leading-3 text-muted-foreground">{file.text}</p>
+                          <p className="line-clamp-2 pr-5 text-[10px] leading-3 text-muted-foreground">
+                            {file.text}
+                          </p>
                         ) : (
-                          <FileText aria-hidden="true" className="h-6 w-6 text-muted-foreground" strokeWidth={1.5} />
+                          <FileText
+                            aria-hidden="true"
+                            className="h-6 w-6 text-muted-foreground"
+                            strokeWidth={1.5}
+                          />
                         )}
                         <div className="min-w-0">
                           <p className="truncate font-medium">
-                            {file.kind === "pasted-text" ? "Pasted text" : file.item?.label ?? file.name}
+                            {file.kind === "pasted-text"
+                              ? "Pasted text"
+                              : (file.item?.label ?? file.name)}
                           </p>
                           {!file.error && file.item && (
                             <p className="mt-0.5 text-[10px] text-muted-foreground">
-                              {file.kind === "pasted-text" ? "TEXT" : file.name.includes(".") ? file.name.split(".").pop()?.toUpperCase() : "FILE"}
-                              {" · "}{file.size < 1024 ? `${file.size} B` : file.size < 1024 * 1024 ? `${Math.ceil(file.size / 1024)} KB` : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+                              {file.kind === "pasted-text"
+                                ? "TEXT"
+                                : file.name.includes(".")
+                                  ? file.name.split(".").pop()?.toUpperCase()
+                                  : "FILE"}
+                              {" · "}
+                              {file.size < 1024
+                                ? `${file.size} B`
+                                : file.size < 1024 * 1024
+                                  ? `${Math.ceil(file.size / 1024)} KB`
+                                  : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
                             </p>
                           )}
                         </div>
                       </div>
                     )}
                     {file.error ? (
-                      <p role="alert" title={file.error} className="absolute inset-x-0 bottom-0 line-clamp-2 bg-card/95 px-2 py-1 text-[10px] leading-3 text-destructive">
+                      <p
+                        role="alert"
+                        title={file.error}
+                        className="absolute inset-x-0 bottom-0 line-clamp-2 bg-card/95 px-2 py-1 text-[10px] leading-3 text-destructive"
+                      >
                         {file.error}
                       </p>
                     ) : (
-                      <p role="status" className={file.item ? "sr-only" : "absolute inset-x-0 bottom-0 bg-card/95 px-2 py-1 text-[10px] text-muted-foreground"}>
-                        {file.item ? "Ready" : file.progress >= 99 ? "Checking file…" : `Uploading ${file.progress}%`}
+                      <p
+                        role="status"
+                        className={
+                          file.item
+                            ? "sr-only"
+                            : "absolute inset-x-0 bottom-0 bg-card/95 px-2 py-1 text-[10px] text-muted-foreground"
+                        }
+                      >
+                        {file.item
+                          ? "Ready"
+                          : file.progress >= 99
+                            ? "Checking file…"
+                            : `Uploading ${file.progress}%`}
                       </p>
                     )}
                     <button
@@ -322,7 +512,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             </div>
           )}
           {notice && (
-            <p role="status" className="text-xs text-muted-foreground">
+            <p role="alert" className="text-12 text-destructive">
               {notice}
             </p>
           )}
@@ -332,8 +522,13 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               if (!open) setPreview(undefined);
             }}
           >
-            <DialogContent aria-describedby={undefined} className="md:max-w-3xl">
-              <DialogTitle className="truncate pr-8">{preview?.name}</DialogTitle>
+            <DialogContent
+              aria-describedby={undefined}
+              className="md:max-w-3xl"
+            >
+              <DialogTitle className="truncate pr-8">
+                {preview?.name}
+              </DialogTitle>
               {preview?.preview && (
                 <img
                   src={preview.preview}
@@ -370,7 +565,22 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               event.target.value = "";
             }}
           />
-          <TooltipProvider>
+          {attachmentMenuItems ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button ref={attach} type="button" variant="ghost" size="icon"
+                  className="shrink-0 text-muted-foreground" aria-label="Add context" disabled={locked}>
+                  <Plus aria-hidden className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent side="top" align="start" collisionPadding={12} aria-label="Add context">
+                <DropdownMenuItem disabled={files.length >= 10} onSelect={() => input.current?.click()}>
+                  <Paperclip aria-hidden className="size-4" />Attach files
+                </DropdownMenuItem>
+                {attachmentMenuItems}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -391,7 +601,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                 Up to 20 MB each, 10 files per message.
               </TooltipContent>
             </Tooltip>
-          </TooltipProvider>
+          </TooltipProvider>}
         </>
       }
       onSend={async (text) => {
@@ -405,7 +615,11 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
           await onSend(
             resolveAttachmentMentions(
               text,
-              items.map((file) => ({ handle: file.handle, label: file.item!.label, kind: file.kind })),
+              items.map((file) => ({
+                handle: file.handle,
+                label: file.item!.label,
+                kind: file.kind,
+              })),
             ),
             items.length
               ? {

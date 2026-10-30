@@ -25,8 +25,8 @@ use crate::models::{
 };
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
-    approval_service, audit_service, node_routing_service, node_service, notification_service,
-    operation_descriptor, ssh_service, user_service_service,
+    approval_service, audit_service, node_service, notification_service, operation_descriptor,
+    ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -77,9 +77,26 @@ pub async fn issue_ssh_certificate(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(service_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<IssueSshCertificateRequest>,
-) -> AppResult<Json<IssueSshCertificateResponse>> {
-    let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
+) -> AppResult<Response> {
+    let connection = session_connection(&state, &auth_user, &service_id).await?;
+    let service_id = connection
+        .as_ref()
+        .and_then(|row| row.catalog_service_id.clone())
+        .unwrap_or(service_id);
+    let operation = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Tunnel,
+        None,
+    );
+    let auth_context = authorize_ssh_access_for_connection(
+        &state,
+        &auth_user,
+        &service_id,
+        &operation,
+        connection.as_ref(),
+    )
+    .await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     let service_slug = auth_context.service_slug.clone();
     let user_id = auth_user.user_id.to_string();
@@ -95,6 +112,38 @@ pub async fn issue_ssh_certificate(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    ssh_service::validate_principal(body.principal.trim())?;
+    if !ssh_service
+        .allowed_principals
+        .iter()
+        .any(|p| p == body.principal.trim())
+    {
+        return Err(AppError::Forbidden(
+            "Requested SSH principal is not allowed for this service".into(),
+        ));
+    }
+    ssh_key::PublicKey::from_openssh(body.public_key.trim())
+        .map_err(|_| AppError::ValidationError("Invalid OpenSSH public key".into()))?;
+    let session_admission = match crate::services::assistant_ssh_session::admit(
+        &state,
+        auth_user.assistant_chat.as_deref(),
+        connection.as_ref(),
+        &ssh_service,
+        &service_id,
+        "SSH certificate",
+        serde_json::json!({"public_key":body.public_key.trim(),"principal":body.principal.trim()}),
+        headers
+            .get(crate::services::assistant_service_execution::ACK_HEADER)
+            .and_then(|v| v.to_str().ok()),
+        u64::from(ssh_service.certificate_ttl_minutes) * 60,
+    )
+    .await?
+    {
+        Ok(admission) => admission,
+        Err(refusal) => {
+            return Ok((axum::http::StatusCode::CONFLICT, Json(refusal)).into_response());
+        }
+    };
     let issued = ssh_service::issue_certificate(
         &state.encryption_keys,
         &ssh_service,
@@ -106,6 +155,12 @@ pub async fn issue_ssh_certificate(
     )
     .await?;
 
+    if let Some(admission) = session_admission.as_ref() {
+        admission.revalidate(&state, None).await?;
+        if auth_context.approval_bypass.is_none() {
+            admission.receipt(&state).await;
+        }
+    }
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -134,7 +189,8 @@ pub async fn issue_ssh_certificate(
             service_slug,
             ttl_secs,
         },
-    );
+    )
+    .await;
 
     approval_service::record_chat_approval(
         &state.db,
@@ -156,7 +212,8 @@ pub async fn issue_ssh_certificate(
         ca_public_key: issued.ca_public_key,
         valid_after: issued.valid_after.to_rfc3339(),
         valid_before: issued.valid_before.to_rfc3339(),
-    }))
+    })
+    .into_response())
 }
 
 #[utoipa::path(
@@ -188,7 +245,23 @@ pub async fn ssh_tunnel_ws(
             Some(billing_route_policy),
             crate::services::billing::BillingIngress::SshTunnel,
         )?;
-    let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let connection = session_connection(&state, &auth_user, &service_id).await?;
+    let service_id = connection
+        .as_ref()
+        .and_then(|row| row.catalog_service_id.clone())
+        .unwrap_or(service_id);
+    let operation = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Tunnel,
+        None,
+    );
+    let auth_context = authorize_ssh_access_for_connection(
+        &state,
+        &auth_user,
+        &service_id,
+        &operation,
+        connection.as_ref(),
+    )
+    .await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     let service_slug = auth_context.service_slug.clone();
     if auth_context.mode == SshAuthMode::NodeKey {
@@ -198,6 +271,26 @@ pub async fn ssh_tunnel_ws(
         ));
     }
     validate_runtime_ssh_target(&service_id, &ssh_service).await?;
+    let session_admission = match crate::services::assistant_ssh_session::admit(
+        &state,
+        auth_user.assistant_chat.as_deref(),
+        connection.as_ref(),
+        &ssh_service,
+        &service_id,
+        "SSH tunnel session",
+        serde_json::json!({"host":ssh_service.host,"port":ssh_service.port}),
+        headers
+            .get(crate::services::assistant_service_execution::ACK_HEADER)
+            .and_then(|v| v.to_str().ok()),
+        state.config.ssh_max_tunnel_duration_secs,
+    )
+    .await?
+    {
+        Ok(admission) => admission,
+        Err(refusal) => {
+            return Ok((axum::http::StatusCode::CONFLICT, Json(refusal)).into_response());
+        }
+    };
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())
@@ -215,12 +308,7 @@ pub async fn ssh_tunnel_ws(
     // task) can carry the original `X-NyxID-Client` surface. Without this
     // the websocket task falls back to `TelemetryContext::default()` and
     // every SSH session gets recorded as `surface="backend"`.
-    let tele = TelemetryContext::from_headers(
-        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-        headers
-            .get("x-nyxid-client-version")
-            .and_then(|v| v.to_str().ok()),
-    );
+    let tele = TelemetryContext::from_request_headers(&headers);
 
     let concurrency = crate::services::service_concurrency_service::acquire_policy(
         &state.db,
@@ -229,31 +317,35 @@ pub async fn ssh_tunnel_ws(
     )
     .await?;
 
+    // Keep session state off the upgrade and lease polling frames.
     Ok(ws
-        .on_upgrade(move |socket| async move {
-            let work = async {
-                handle_ssh_socket(
-                    state,
-                    auth_user,
-                    service_id,
-                    service_slug,
-                    ssh_service,
-                    socket,
-                    session_guard,
-                    client_meta,
-                    tele,
-                    auth_context.owner_user_id,
-                    auth_context.approval_bypass,
-                    billing_egress_permit,
-                )
-                .await;
-                Ok(())
-            };
-            if let Some(lease) = concurrency {
-                let _ = lease.run(work).await;
-            } else {
-                let _ = work.await;
-            }
+        .on_upgrade(move |socket| {
+            Box::pin(async move {
+                let work = Box::pin(async {
+                    handle_ssh_socket(
+                        state,
+                        auth_user,
+                        service_id,
+                        service_slug,
+                        ssh_service,
+                        socket,
+                        session_guard,
+                        client_meta,
+                        tele,
+                        auth_context.owner_user_id,
+                        auth_context.approval_bypass,
+                        billing_egress_permit,
+                        session_admission,
+                    )
+                    .await;
+                    Ok(())
+                });
+                if let Some(lease) = concurrency {
+                    let _ = lease.run(work).await;
+                } else {
+                    let _ = work.await;
+                }
+            })
         })
         .into_response())
 }
@@ -272,6 +364,7 @@ async fn handle_ssh_socket(
     resource_owner_id: String,
     approval_auto: Option<crate::services::assistant_acknowledgement_service::AutoAllowed>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    session_admission: Option<crate::services::assistant_ssh_session::SessionAdmission>,
 ) {
     // Held for Drop-based session count cleanup for the tunnel lifetime.
     let _ = &session_guard;
@@ -280,14 +373,14 @@ async fn handle_ssh_socket(
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let session_id = uuid::Uuid::new_v4().to_string();
     let started_at = Instant::now();
-    let node_route = match node_routing_service::resolve_node_route(
-        &state.db,
+    let route_result = crate::services::assistant_ssh_session::route(
+        &state,
+        session_admission.as_ref(),
         &user_id,
         &service_id,
-        &state.node_ws_manager,
     )
-    .await
-    {
+    .await;
+    let node_route = match route_result {
         Ok(route) => route,
         Err(error) => {
             tracing::warn!(service_id = %service_id, error = %error, "Failed to resolve SSH node route");
@@ -383,11 +476,22 @@ async fn handle_ssh_socket(
             slot_cancel,
             auth_user.assistant_chat.clone(),
             approval_auto,
+            session_admission,
         )
         .await;
         return;
     }
 
+    if let Some(admission) = session_admission.as_ref()
+        && admission.revalidate(&state, None).await.is_err()
+    {
+        let _ = state
+            .billing
+            .fail(&metered, "assistant_authority_changed")
+            .await;
+        let _ = socket.close().await;
+        return;
+    }
     let connect_target = format!("{}:{}", ssh_service.host, ssh_service.port);
     let mut tcp_stream = match tokio::time::timeout(
         Duration::from_secs(state.config.ssh_connect_timeout_secs),
@@ -544,6 +648,12 @@ async fn handle_ssh_socket(
         None,
     );
 
+    if approval_auto.is_none()
+        && let Some(admission) = session_admission.as_ref()
+    {
+        admission.receipt(&state).await;
+    }
+
     approval_service::record_chat_approval(
         &state.db,
         auth_user.assistant_chat.as_deref(),
@@ -567,7 +677,8 @@ async fn handle_ssh_socket(
             service_slug: service_slug.clone(),
             mode: "tunnel".to_string(),
         },
-    );
+    )
+    .await;
 
     let mut read_buf = vec![0_u8; 16 * 1024];
     let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
@@ -575,8 +686,13 @@ async fn handle_ssh_socket(
     ));
     tokio::pin!(tunnel_timeout);
 
+    let authority_lost =
+        crate::services::assistant_ssh_session::monitor(&state, session_admission.as_ref(), None);
+    tokio::pin!(authority_lost);
     let disconnect_reason = loop {
         tokio::select! {
+            () = &mut authority_lost => { break Some("assistant_authority_changed"); }
+
             () = slot_cancel.cancelled() => {
                 break Some("capacity_slot_lost");
             }
@@ -677,7 +793,8 @@ async fn handle_ssh_socket(
             service_slug,
             duration_ms,
         },
-    );
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -701,6 +818,7 @@ async fn handle_node_ssh_socket(
         std::sync::Arc<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     >,
     approval_auto: Option<crate::services::assistant_acknowledgement_service::AutoAllowed>,
+    session_admission: Option<crate::services::assistant_ssh_session::SessionAdmission>,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -732,6 +850,16 @@ async fn handle_node_ssh_socket(
         } else {
             None
         };
+        if let Some(admission) = session_admission.as_ref()
+            && admission.revalidate(&state, Some(node_id)).await.is_err()
+        {
+            let _ = state
+                .billing
+                .fail(&metered, "assistant_authority_changed")
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
         match state
             .node_dispatch
             .open_ssh_tunnel(
@@ -924,6 +1052,12 @@ async fn handle_node_ssh_socket(
         None,
     );
 
+    if approval_auto.is_none()
+        && let Some(admission) = session_admission.as_ref()
+    {
+        admission.receipt(&state).await;
+    }
+
     approval_service::record_chat_approval(
         &state.db,
         approval_chat.as_deref(),
@@ -947,15 +1081,24 @@ async fn handle_node_ssh_socket(
             service_slug: service_slug.clone(),
             mode: "tunnel".to_string(),
         },
-    );
+    )
+    .await;
 
     let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
         state.config.ssh_max_tunnel_duration_secs,
     ));
     tokio::pin!(tunnel_timeout);
 
+    let authority_lost = crate::services::assistant_ssh_session::monitor(
+        &state,
+        session_admission.as_ref(),
+        Some(node_id.as_str()),
+    );
+    tokio::pin!(authority_lost);
     let disconnect_reason = loop {
         tokio::select! {
+            () = &mut authority_lost => { break Some("assistant_authority_changed"); }
+
             () = slot_cancel.cancelled() => {
                 break Some("capacity_slot_lost");
             }
@@ -1070,9 +1213,36 @@ async fn handle_node_ssh_socket(
             service_slug,
             duration_ms,
         },
-    );
+    )
+    .await;
 }
 
+pub(crate) async fn session_connection(
+    state: &AppState,
+    auth: &AuthUser,
+    reference: &str,
+) -> AppResult<Option<crate::models::user_service::UserService>> {
+    if auth.assistant_chat.is_some() {
+        match crate::services::assistant_native_execution::ssh_connection(
+            state,
+            &auth.proxy_resolution_user_id(),
+            reference,
+        )
+        .await
+        {
+            Ok(row) => Ok(Some(row)),
+            Err(AppError::NotFound(_)) => {
+                fetch_service(state, reference).await?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
 pub(crate) async fn authorize_ssh_access(
     state: &AppState,
     auth_user: &AuthUser,
@@ -1085,11 +1255,28 @@ pub(crate) async fn authorize_ssh_access(
     authorize_ssh_access_for_operation(state, auth_user, service_id, &operation).await
 }
 
+#[cfg(test)]
 pub(crate) async fn authorize_ssh_access_for_operation(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
     operation: &operation_descriptor::OperationDescriptor,
+) -> AppResult<ssh_service::ResolvedSshAuthContext> {
+    let connection = session_connection(state, auth_user, service_id).await?;
+    let catalog = connection
+        .as_ref()
+        .and_then(|row| row.catalog_service_id.as_deref())
+        .unwrap_or(service_id);
+    authorize_ssh_access_for_connection(state, auth_user, catalog, operation, connection.as_ref())
+        .await
+}
+
+pub(crate) async fn authorize_ssh_access_for_connection(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    operation: &operation_descriptor::OperationDescriptor,
+    connection: Option<&crate::models::user_service::UserService>,
 ) -> AppResult<ssh_service::ResolvedSshAuthContext> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let resolution_user_id = auth_user.proxy_resolution_user_id();
@@ -1110,13 +1297,34 @@ pub(crate) async fn authorize_ssh_access_for_operation(
     // The service creator and public catalog services (visibility != "private")
     // keep their existing access. NotFound (rather than Forbidden) avoids
     // leaking the existence of a private service the caller cannot see.
-    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
-        &state.db,
-        &resolution_user_id,
-        None,
-        Some(service_id),
-    )
-    .await?;
+    let effective_owner = if let Some(connection) = connection {
+        let access = crate::services::org_service::resolve_owner_access(
+            &state.db,
+            &resolution_user_id,
+            &connection.user_id,
+        )
+        .await?;
+        let allowed = match &access {
+            crate::services::org_service::OwnerAccess::Direct
+            | crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => true,
+            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                role.can_proxy() && !connection.admin_only
+            }
+            crate::services::org_service::OwnerAccess::Forbidden => false,
+        };
+        if !allowed || !access.allows_resource(&connection.id) {
+            return Err(AppError::Forbidden("SSH access revoked".into()));
+        }
+        Some(connection.user_id.clone())
+    } else {
+        crate::services::proxy_service::find_effective_service_owner(
+            &state.db,
+            &resolution_user_id,
+            None,
+            Some(service_id),
+        )
+        .await?
+    };
     let owner_for_resolution = match effective_owner.as_deref() {
         Some(owner) => owner,
         None => {
@@ -1135,9 +1343,21 @@ pub(crate) async fn authorize_ssh_access_for_operation(
             &resolution_user_id
         }
     };
-    let mut auth_context =
+    let mut auth_context = if let Some(connection) = connection {
+        if connection.catalog_service_id.as_deref() != Some(service.id.as_str()) {
+            return Err(AppError::Conflict("SSH catalog identity changed".into()));
+        }
+        ssh_service::ResolvedSshAuthContext {
+            approval_bypass: None,
+            concurrency_policy: service.concurrency_policy.clone(),
+            mode: connection.ssh_auth_mode,
+            service_slug: connection.slug.clone(),
+            owner_user_id: connection.user_id.clone(),
+        }
+    } else {
         ssh_service::resolve_ssh_auth_context_for_owner(&state.db, owner_for_resolution, &service)
-            .await?;
+            .await?
+    };
     let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
@@ -1153,6 +1373,11 @@ pub(crate) async fn authorize_ssh_access_for_operation(
         auth_user.assistant_chat.as_deref(),
     )
     .await?;
+    if let Some(connection) = connection {
+        auth_context.mode = connection.ssh_auth_mode;
+        auth_context.service_slug.clone_from(&connection.slug);
+        auth_context.owner_user_id.clone_from(&connection.user_id);
+    }
     auth_context.approval_bypass = automatic;
 
     let pending = match approval_outcome {
@@ -1442,6 +1667,7 @@ mod tests {
         validate_runtime_ssh_target(
             "svc-1",
             &SshServiceConfig {
+                ca_context_version: None,
                 host: "192.168.1.50".to_string(),
                 port: 22,
                 ssh_auth_mode: SshAuthMode::ProxyOnly,
@@ -1461,6 +1687,7 @@ mod tests {
         let error = validate_runtime_ssh_target(
             "svc-1",
             &SshServiceConfig {
+                ca_context_version: None,
                 host: "metadata.google.internal".to_string(),
                 port: 22,
                 ssh_auth_mode: SshAuthMode::ProxyOnly,
@@ -1486,6 +1713,7 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -1511,6 +1739,7 @@ mod tests {
             asyncapi_spec_url: None,
             streaming_supported: false,
             ssh_config: Some(SshServiceConfig {
+                ca_context_version: None,
                 host: "10.0.0.5".to_string(),
                 port: 22,
                 ssh_auth_mode: SshAuthMode::Cert,
@@ -1556,6 +1785,7 @@ mod tests {
             default_request_headers: None,
             ws_frame_injections: vec![],
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
             proxy_operation_policy: None,
@@ -1649,6 +1879,8 @@ mod tests {
 
         let catalog_author_id = uuid::Uuid::new_v4().to_string();
         let owner_id = uuid::Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &owner_id, false).await;
+
         let service_account_id = uuid::Uuid::new_v4().to_string();
         let service_id = uuid::Uuid::new_v4().to_string();
         let user_service_id = uuid::Uuid::new_v4().to_string();

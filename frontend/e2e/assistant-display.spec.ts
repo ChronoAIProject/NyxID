@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { composerInput, openAssistant, sendMessage } from "./helpers";
+import { composerInput, openAccountMenu, openAssistant, sendMessage } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
@@ -10,7 +10,7 @@ test.afterEach(async ({ page }, testInfo) => {
 });
 
 async function openDisplay(page: Page) {
-  await page.getByRole("button", { name: "User menu", exact: true }).click();
+  await openAccountMenu(page);
   await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Account Settings" });
   await dialog.getByRole("tab", { name: "Display", exact: true }).click();

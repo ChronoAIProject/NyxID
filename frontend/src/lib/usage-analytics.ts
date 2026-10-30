@@ -100,6 +100,7 @@ export function partialBucket(bucket: string, data: AnalyticsResult): boolean {
 }
 export const BREAKDOWN_LABELS = {
   service: "Service",
+  model: "Model",
   user: "Acting user",
   owner: "Billing account",
   credential_class: "Credential class",
@@ -196,7 +197,8 @@ export function newView(
               top: 10,
             }),
             newPanel({
-              title: "Token distribution",
+              title: "Tokens by model",
+              breakdown: "model",
               measure: "total_tokens",
               chart: "pie",
             }),

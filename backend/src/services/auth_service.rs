@@ -1,6 +1,7 @@
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto::password;
 use crate::crypto::token::{generate_random_token, hash_token};
@@ -10,6 +11,102 @@ use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
+
+fn validate_new_password(password: &str) -> AppResult<()> {
+    if !(8..=MAX_PASSWORD_LENGTH).contains(&password.len()) {
+        return Err(AppError::ValidationError(
+            "Password must be between 8 and 128 UTF-8 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Replace an existing human credential, retaining completed sessions and
+/// cancelling pending first factors.
+pub async fn change_password(
+    db: &mongodb::Database,
+    user_id: &str,
+    current_password: Zeroizing<String>,
+    new_password: Zeroizing<String>,
+) -> AppResult<()> {
+    if current_password.is_empty() || current_password.len() > MAX_PASSWORD_LENGTH {
+        return Err(AppError::ValidationError(
+            "Current password must be between 1 and 128 UTF-8 bytes".into(),
+        ));
+    }
+    validate_new_password(&new_password)?;
+    let mut user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": user_id, "platform_personal_deleting": {"$ne": true} })
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Account is unavailable".into()))?;
+    ensure_person_user(&user)?;
+    if !user.is_active {
+        return Err(AppError::Forbidden("Account is inactive".into()));
+    }
+    let old_hash =
+        Zeroizing::new(user.password_hash.take().ok_or_else(|| {
+            AppError::ValidationError("Account has no password to change".into())
+        })?);
+    let (old_hash, new_hash) = tokio::task::spawn_blocking(move || {
+        if !password::verify_password(&current_password, &old_hash)? {
+            return Err(AppError::ValidationError(
+                "Current password is incorrect".into(),
+            ));
+        }
+        let new_hash = Zeroizing::new(password::hash_password(&new_password)?);
+        Ok((old_hash, new_hash))
+    })
+    .await
+    .map_err(|_| AppError::Internal("Password hashing task failed".into()))??;
+    replace_verified_password(db, user_id, &old_hash, &new_hash).await
+}
+
+async fn replace_verified_password(
+    db: &mongodb::Database,
+    user_id: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> AppResult<()> {
+    let context = (db, user_id, old_hash, new_hash);
+    super::transaction_service::run_db_only(
+        db,
+        &context,
+        |transaction, &(db, user_id, old_hash, new_hash)| {
+            Box::pin(async move {
+                let result = db
+                    .collection::<User>(USERS)
+                    .update_one(
+                        doc! { "_id": user_id, "password_hash": old_hash,
+                        "user_type": "person", "is_active": true,
+                        "platform_personal_deleting": {"$ne": true} },
+                        doc! { "$set": {
+                            "password_hash": new_hash,
+                            "password_reset_token": null,
+                            "password_reset_expires_at": null,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        }},
+                    )
+                    .session(&mut *transaction)
+                    .await?;
+                if result.matched_count != 1 {
+                    return Err(AppError::Conflict(
+                        "Account or password changed; retry with the current password".into(),
+                    ));
+                }
+                // Password proof creation/completion also fences this user document.
+                // Completed sessions retain their authority; old first factors do not.
+                super::session_authority::revoke_pending(db, user_id, transaction).await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+#[path = "password_change_tests.rs"]
+mod password_change_tests;
 
 /// Reject any auth flow that lands on an org-type user.
 ///
@@ -27,9 +124,9 @@ pub fn ensure_person_user(user: &User) -> AppResult<()> {
 /// Result of a successful registration.
 pub struct RegisterResult {
     pub user_id: String,
-    /// Used in debug builds to log the verification token.
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
-    pub email_verification_token: String,
+    /// Raw material is exposed only to verification regressions, never handlers.
+    #[cfg(test)]
+    pub email_verification_token: Zeroizing<String>,
     /// `true` when a new user was actually inserted; `false` when the email
     /// already existed and a fake success was returned for email-enumeration
     /// protection. Callers that hold a reserved invite code must use this to
@@ -85,13 +182,14 @@ pub async fn register_user(
         tracing::warn!(email = %email, "Registration attempt for existing email");
         return Ok(RegisterResult {
             user_id: Uuid::new_v4().to_string(), // Fake ID, not stored
-            email_verification_token: generate_random_token(), // Fake token
+            #[cfg(test)]
+            email_verification_token: Zeroizing::new(generate_random_token()),
             actually_created: false,
         });
     }
 
     let password_hash = password::hash_password(password_raw)?;
-    let verification_token = generate_random_token();
+    let verification_token = Zeroizing::new(generate_random_token());
     // Store the hash of the verification token, not the raw token
     let verification_token_hash = hash_token(&verification_token);
     let now = Utc::now();
@@ -138,6 +236,7 @@ pub async fn register_user(
 
     Ok(RegisterResult {
         user_id,
+        #[cfg(test)]
         email_verification_token: verification_token,
         actually_created: true,
     })
@@ -285,6 +384,44 @@ pub async fn initiate_password_reset(
     Ok(Some(reset_token))
 }
 
+/// Bind a password already verified by authenticate_user to the live credential
+/// and MFA requirement. The write serializes installation of its authority with
+/// reset/deletion/enrollment. Never accept a stale verified User snapshot alone.
+pub(crate) async fn fence_password_proof(
+    db: &mongodb::Database,
+    user: &User,
+    transaction: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let hash = user.password_hash.as_deref().ok_or_else(|| {
+        AppError::AuthenticationFailed("Password authentication is unavailable".into())
+    })?;
+    let mut filter = doc! {"_id":&user.id,"password_hash":hash,"is_active":true,
+    "user_type":{"$ne":"org"},"platform_personal_deleting":{"$ne":true}};
+    filter.insert(
+        "mfa_enabled",
+        if user.mfa_enabled {
+            bson::Bson::Boolean(true)
+        } else {
+            bson::Bson::Document(doc! {"$ne":true})
+        },
+    );
+    let changed = db
+        .collection::<bson::Document>(USERS)
+        .update_one(
+            filter,
+            doc! {"$set":{"password_login_fence":Uuid::new_v4().to_string()}},
+        )
+        .session(transaction)
+        .await
+        .map_err(super::transaction_service::map_error)?;
+    if changed.matched_count != 1 {
+        return Err(AppError::AuthenticationFailed(
+            "Authentication changed; sign in again".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Complete a password reset with the token and new password.
 ///
 /// Hashes the incoming token for comparison against stored hash.
@@ -293,18 +430,7 @@ pub async fn reset_password(
     token: &str,
     new_password: &str,
 ) -> AppResult<()> {
-    if new_password.len() < 8 {
-        return Err(AppError::ValidationError(
-            "Password must be at least 8 characters".to_string(),
-        ));
-    }
-
-    if new_password.len() > MAX_PASSWORD_LENGTH {
-        return Err(AppError::ValidationError(format!(
-            "Password must be at most {} characters",
-            MAX_PASSWORD_LENGTH
-        )));
-    }
+    validate_new_password(new_password)?;
 
     let token_hash = hash_token(token);
 
@@ -316,33 +442,73 @@ pub async fn reset_password(
 
     ensure_person_user(&user)?;
 
+    if !user.is_active {
+        return Err(AppError::BadRequest(
+            "Invalid or expired reset token".into(),
+        ));
+    }
+
     // Check token expiration
     if let Some(expires_at) = user.password_reset_expires_at {
-        if expires_at < Utc::now() {
+        if expires_at <= Utc::now() {
             return Err(AppError::BadRequest("Reset token has expired".to_string()));
         }
     } else {
         return Err(AppError::BadRequest("Invalid reset token".to_string()));
     }
 
-    let new_hash = password::hash_password(new_password)?;
-    let now = Utc::now();
-
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user.id },
-            doc! { "$set": {
-                "password_hash": &new_hash,
-                "password_reset_token": null,
-                "password_reset_expires_at": null,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
+    let new_password = Zeroizing::new(new_password.to_owned());
+    let new_hash = tokio::task::spawn_blocking(move || {
+        password::hash_password(&new_password).map(Zeroizing::new)
+    })
+    .await
+    .map_err(|_| AppError::Internal("Password hashing task failed".into()))??;
+    finish_password_reset(db, &user.id, &token_hash, &new_hash).await?;
 
     tracing::info!(user_id = %user.id, "Password reset completed");
-
     Ok(())
+}
+
+async fn finish_password_reset(
+    db: &mongodb::Database,
+    user_id: &str,
+    token_hash: &str,
+    new_hash: &str,
+) -> AppResult<()> {
+    let context = (db, user_id, token_hash, new_hash);
+    super::transaction_service::run_db_only(
+        db,
+        &context,
+        |transaction, &(db, user_id, token_hash, new_hash)| {
+            Box::pin(async move {
+                let result = db
+                    .collection::<User>(USERS)
+                    .update_one(
+                        doc! { "_id": user_id, "user_type": "person", "is_active": true,
+                        "platform_personal_deleting": {"$ne": true},
+                        "password_reset_token": token_hash,
+                        "$expr": {"$gt": ["$password_reset_expires_at", "$$NOW"]} },
+                        doc! { "$set": {
+                            "password_hash": new_hash,
+                            "password_reset_token": null,
+                            "password_reset_expires_at": null,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        }},
+                    )
+                    .session(&mut *transaction)
+                    .await?;
+                if result.matched_count != 1 {
+                    return Err(AppError::BadRequest(
+                        "Invalid or expired reset token".into(),
+                    ));
+                }
+                super::session_authority::revoke_all_in_transaction(db, user_id, transaction)
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
 }
 
 /// Promote an existing user to admin by email address.

@@ -1,4 +1,5 @@
 import { DecisionReceipt } from "./decision-receipt";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { AuthoredSkillCard } from "./authored-skill-card";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -58,7 +59,7 @@ export function NyxAgentAcknowledgementCard({
   return (
     <section
       aria-label={label}
-      className="ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4"
+      className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}
     >
       {routed ? (
         <p className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">

@@ -307,7 +307,48 @@ async fn service_preference_http_scopes_stale_slug_config_and_validation() {
         .0,
         StatusCode::FORBIDDEN
     );
-    let oauth = crate::crypto::jwt::generate_oauth_access_token(
+    // Ordinary OAuth access binds a live registered client and consent.
+    let now = chrono::Utc::now();
+    state
+        .db
+        .collection::<crate::models::oauth_client::OauthClient>(
+            crate::models::oauth_client::COLLECTION_NAME,
+        )
+        .insert_one(crate::models::oauth_client::OauthClient {
+            id: "app".into(),
+            client_name: "Service preference fixture".into(),
+            client_secret_hash: String::new(),
+            redirect_uris: vec![],
+            allowed_scopes: "account:read proxy".into(),
+            scope_provenance: Default::default(),
+            grant_types: "authorization_code".into(),
+            client_type: "public".into(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            default_service_catalog_slugs: vec![],
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
+            connection_webhook_enabled: false,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let consent = crate::services::consent_service::grant_consent(
+        &state.db,
+        &owner,
+        "app",
+        "account:read proxy",
+    )
+    .await
+    .unwrap();
+    let reference = crate::services::consent_service::protected_reference(&consent).unwrap();
+    let oauth = crate::crypto::jwt::generate_oauth_access_token_with_consent(
         &state.jwt_keys,
         &state.config,
         &Uuid::parse_str(&owner).unwrap(),
@@ -318,6 +359,7 @@ async fn service_preference_http_scopes_stale_slug_config_and_validation() {
         None,
         None,
         "app",
+        Some(&reference),
     )
     .unwrap();
     assert_eq!(
@@ -1410,6 +1452,8 @@ async fn service_preference_slug_proxy_and_implicit_llm_execution_unchanged() {
         matchers::{method, path},
     };
     let (state, router, owner, token, ids) = fixture("preference_execution_unchanged").await;
+    crate::test_utils::set_test_approval_preference(&state.db, &owner, false).await;
+
     let a = MockServer::start().await;
     let b = MockServer::start().await;
     for (upstream, target) in [(&a, "alpha"), (&b, "beta")] {

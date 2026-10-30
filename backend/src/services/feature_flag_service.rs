@@ -7,11 +7,15 @@
 //! admins manage every flag. Creator identity is separate from editable metadata.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+#[cfg(test)]
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -80,6 +84,14 @@ const REMOTE_MACHINES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+/// Acting-person rollout for connected-service health and readiness monitoring.
+pub const SERVICE_MONITORING_FLAG_KEY: &str = "services:monitoring";
+const SERVICE_MONITORING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SERVICE_MONITORING_FLAG_KEY,
+    description: "Enable connected-service monitoring status, configuration and explicit checks through chrono-probe for the acting person.",
+    default_enabled: false,
+};
+
 /// Operator gate for the Aevatar chat wire-log diagnostic. Off by default and
 /// toggled at runtime (platform-global, org cohort, or per user) so enabling a
 /// browser-side capture of raw assistant payloads never needs a redeploy.
@@ -128,7 +140,20 @@ const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const DISCORD_GATEWAY_FLAG_KEY: &str = "channel:discord-gateway";
+const DISCORD_GATEWAY_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: DISCORD_GATEWAY_FLAG_KEY,
+    description: "Receive ordinary Discord messages through leased Gateway sessions. Interactions remain independent.",
+    default_enabled: false,
+};
+
 pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
+pub const NYXBOT_ADAPTERS_FLAG_KEY: &str = "nyxbot:service-adapters";
+const NYXBOT_ADAPTERS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: NYXBOT_ADAPTERS_FLAG_KEY,
+    description: "Phone/SMS/Custom LLM bindings. Enable only after every API replica enforces channel_adapter_origin at tool dispatch.",
+    default_enabled: false,
+};
 const NYXBOT_THREAD_FOLLOW_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXBOT_THREAD_FOLLOW_FLAG_KEY,
     description: "Staged direct-relay channel thread follow. Gateway follow remains unavailable until a compatible gateway is negotiated.",
@@ -149,11 +174,25 @@ const ASSISTANT_MODEL_CONTROLS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY: &str = "assistant:workspace-preview";
+const ASSISTANT_WORKSPACE_PREVIEW_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY,
+    description: "Shows the Activity and Artifacts workspace previews for an explicitly selected rollout audience.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
     description: "Routes assistant chat through NyxAgent (catalog slug llm-nyx) instead of Aevatar.",
     default_enabled: true,
+};
+
+pub const SHARED_AGENTS_FLAG_KEY: &str = "assistant:shared-agents";
+const SHARED_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SHARED_AGENTS_FLAG_KEY,
+    description: "Allows personal specialist sharing after all replicas enforce shared authority and consent.",
+    default_enabled: false,
 };
 
 const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -162,10 +201,37 @@ const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const GUEST_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:guest-operation-scopes";
+const GUEST_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: GUEST_OPERATION_SCOPES_FLAG_KEY,
+    description: "Configure guest-only operation limits after all replicas enforce them. Saved limits are always enforced.",
+    default_enabled: false,
+};
+
 pub const AGENT_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:operation-scopes";
 const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: AGENT_OPERATION_SCOPES_FLAG_KEY,
     description: "Allows configuring specialist operation scopes after every replica supports enforcement. Existing scopes are always enforced.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_CHANNEL_MEDIA_FLAG_KEY: &str = "assistant:channel-media";
+const ASSISTANT_CHANNEL_MEDIA_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+    description: "Admit owner Lark/Feishu media after every replica supports channel uploads.",
+    default_enabled: false,
+};
+pub const ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY: &str = "assistant:attachment-writes";
+const ASSISTANT_ATTACHMENT_WRITES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+    description: "Enable managed attachment writes after every replica supports their enforcement.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_INVOCATIONS_FLAG_KEY: &str = "assistant:owner-invocations";
+const ASSISTANT_INVOCATIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_INVOCATIONS_FLAG_KEY,
+    description: "Admit owner CLI/API invocations only after every replica supports their lineage. After first admission, use forward fixes; disabling admission and draining work do not permit older binaries to return.",
     default_enabled: false,
 };
 
@@ -195,6 +261,21 @@ const AGENT_LEARNING_FLAG: FeatureFlagDef = FeatureFlagDef {
     description: "Allows opt-in automatic learning proposals for assistant agents.",
     default_enabled: false,
 };
+
+pub const MOBILE_MFA_FLAG_KEY: &str = "auth:mobile-mfa";
+const MOBILE_MFA_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MOBILE_MFA_FLAG_KEY,
+    description: "Require MFA for mobile social sign-ins. While off, anyone holding the account's social first factor can sign in through mobile without an MFA code.",
+    default_enabled: false,
+};
+
+/// Resolve once for the signing-in person, including live org overrides.
+pub async fn mobile_mfa_required(db: &mongodb::Database, person: &str) -> AppResult<bool> {
+    Ok(resolve_personal_features(db, person)
+        .await?
+        .iter()
+        .any(|key| key == MOBILE_MFA_FLAG_KEY))
+}
 
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -247,7 +328,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-whatsapp",
-        "NyxBot reaches personal and linked org WhatsApp bots through the Agent Event Gateway once the gateway verifies WhatsApp; flag off returns them to NyxID's relay.",
+        "NyxBot can use native WhatsApp on the Agent Event Gateway for dedicated-app BYO bots after credential and callback verification. Managed Embedded Signup remains on the relay. Turning the flag off requires restoring and verifying the Meta relay callback.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-x",
@@ -262,16 +343,25 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
+    ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    DISCORD_GATEWAY_FLAG,
+    NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    GUEST_OPERATION_SCOPES_FLAG,
+    ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
+    ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
@@ -279,6 +369,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     REMOTE_MACHINES_FLAG,
+    SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -295,16 +386,25 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
+    ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    DISCORD_GATEWAY_FLAG,
+    NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    GUEST_OPERATION_SCOPES_FLAG,
+    ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
+    ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
@@ -312,6 +412,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     REMOTE_MACHINES_FLAG,
+    SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -336,6 +437,7 @@ pub fn find_flag(key: &str) -> Option<&'static FeatureFlagDef> {
 /// A resolved definition. Built-in definitions have no runtime creator.
 #[derive(Clone, Debug)]
 pub struct FlagDefinition {
+    pub created_at: Option<chrono::DateTime<Utc>>,
     pub id: Option<String>,
     pub key: String,
     pub description: String,
@@ -346,6 +448,7 @@ pub struct FlagDefinition {
 impl From<&FeatureFlagDef> for FlagDefinition {
     fn from(def: &FeatureFlagDef) -> Self {
         Self {
+            created_at: None,
             id: None,
             key: def.key.to_owned(),
             description: def.description.to_owned(),
@@ -358,6 +461,7 @@ impl From<&FeatureFlagDef> for FlagDefinition {
 impl From<FeatureFlagDefinition> for FlagDefinition {
     fn from(def: FeatureFlagDefinition) -> Self {
         Self {
+            created_at: Some(def.created_at),
             id: Some(def.id),
             key: def.flag_key,
             description: def.description,
@@ -408,6 +512,7 @@ pub fn validate_flag_key(key: &str) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn create_definition(
     db: &mongodb::Database,
     key: &str,
@@ -463,6 +568,7 @@ pub enum FlagTarget {
 }
 
 impl FlagTarget {
+    #[cfg(test)]
     pub fn kind(&self) -> FlagTargetKind {
         match self {
             Self::Global => FlagTargetKind::Global,
@@ -474,6 +580,7 @@ impl FlagTarget {
 
     /// Storage key: `None` for global/org scope, role string for role scope,
     /// user id for user scope.
+    #[cfg(test)]
     pub fn key(&self) -> Option<String> {
         match self {
             Self::Global | Self::Org => None,
@@ -711,7 +818,7 @@ pub fn resolve_personal_from_overrides(
     )
 }
 
-fn resolve_personal_definitions<'a>(
+pub(crate) fn resolve_personal_definitions<'a>(
     definitions: impl IntoIterator<Item = (&'a str, bool, Option<&'a str>)>,
     platform: &[FeatureFlagOverride],
     org_rows: &[FeatureFlagOverride],
@@ -891,10 +998,93 @@ pub async fn personal_flag_enabled(
     user_id: &str,
     flag_key: &str,
 ) -> AppResult<bool> {
-    Ok(resolve_personal_features(db, user_id)
+    let enabled = resolve_personal_features(db, user_id)
         .await?
         .iter()
-        .any(|key| key == flag_key))
+        .any(|key| key == flag_key);
+    if enabled && super::security_readiness_service::CAPABILITIES.contains(&flag_key) {
+        warn_if_flag_in_effect_unready(db, user_id, flag_key).await;
+    }
+    Ok(enabled)
+}
+
+const UNREADY_FLAG_EVENT: &str = "security_readiness_flag_in_effect_unready";
+const UNREADY_FLAG_INTERVAL: Duration = Duration::from_secs(60);
+static UNREADY_FLAG_THROTTLE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn reset_unready_flag_throttle() {
+    UNREADY_FLAG_THROTTLE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+/// Readiness gates admin activation; existing flag reads remain available.
+/// Throttle locally before diagnostic I/O, then share a one-minute emission
+/// window per flag across replicas so enabled unready flags remain visible.
+async fn warn_if_flag_in_effect_unready(db: &mongodb::Database, user_id: &str, flag_key: &str) {
+    let throttle_key = flag_key.to_owned();
+    // Isolated test databases model independent deployments in one process.
+    #[cfg(test)]
+    let throttle_key = format!("{}:{throttle_key}", db.name());
+    {
+        let mut attempts = UNREADY_FLAG_THROTTLE
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        if attempts
+            .get(&throttle_key)
+            .is_some_and(|last| now.duration_since(*last) < UNREADY_FLAG_INTERVAL)
+        {
+            return;
+        }
+        attempts.insert(throttle_key, now);
+    }
+    match super::coordination_service::RateWindowStore::admit(
+        db,
+        UNREADY_FLAG_EVENT,
+        flag_key,
+        1,
+        UNREADY_FLAG_INTERVAL,
+    )
+    .await
+    {
+        Ok(admission) if admission.allowed => {}
+        Ok(_) => return,
+        Err(error) => {
+            tracing::debug!(flag_key, %error, "Flag readiness diagnostic rate window unavailable");
+            return;
+        }
+    }
+    let report = match super::security_readiness_service::report(db, flag_key).await {
+        Ok(report) if !report.ready => report,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::debug!(flag_key, %error, "Flag readiness diagnostic unavailable");
+            return;
+        }
+    };
+    tracing::warn!(flag_key, user_id, blockers = ?report.blockers, "Readiness-gated flag {flag_key} is enabled but the fleet roster is not ready (blockers: {:?})", report.blockers);
+    let _ = super::audit_service::log_actor_event(
+        db.clone(),
+        &super::audit_service::AuditActor {
+            user_id: user_id.to_owned(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        UNREADY_FLAG_EVENT,
+        Some(serde_json::json!({
+            "flag_key": flag_key,
+            "user_id": user_id,
+            "blockers": report.blockers,
+        })),
+    )
+    .await;
 }
 
 /// Who a flag can be on for, so background work can skip a flag nobody has
@@ -1068,6 +1258,7 @@ pub async fn search_rollout_targets(
 
 /// The org-row upsert behind [`set_platform_org_override`]. Gates live on the
 /// caller.
+#[cfg(test)]
 async fn upsert_override_row(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1127,6 +1318,7 @@ async fn upsert_override_row(
 /// Upsert a platform-level override (staff-controlled). Only `Global` and
 /// personal `User` targets are valid — org/role scopes require an org, and are
 /// rejected here.
+#[cfg(test)]
 pub async fn set_platform_override(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1156,6 +1348,9 @@ pub async fn set_platform_override(
         }
     }
 
+    if enabled {
+        super::security_readiness_service::require(db, flag_key).await?;
+    }
     let now = bson::DateTime::from_chrono(Utc::now());
     let target_key = match target.key() {
         Some(k) => bson::Bson::String(k),
@@ -1204,6 +1399,7 @@ pub async fn set_platform_override(
 }
 
 /// Clear a platform-level override. Returns the removed row when present.
+#[cfg(test)]
 pub async fn clear_platform_override(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1230,6 +1426,7 @@ pub async fn clear_platform_override(
 /// Upsert an org-wide override on behalf of platform staff — rollout targeting
 /// for one org cohort. The target must be an existing org account (404
 /// otherwise).
+#[cfg(test)]
 pub async fn set_platform_org_override(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1244,6 +1441,9 @@ pub async fn set_platform_org_override(
         ));
     }
     ensure_org_exists(db, org_user_id).await?;
+    if enabled {
+        super::security_readiness_service::require(db, flag_key).await?;
+    }
     upsert_override_row(
         db,
         org_user_id,
@@ -1257,6 +1457,7 @@ pub async fn set_platform_org_override(
 
 /// Clear an org-wide override on behalf of platform staff. Returns the removed
 /// row when present (idempotent otherwise).
+#[cfg(test)]
 pub async fn clear_platform_org_override(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1276,7 +1477,7 @@ pub async fn clear_platform_org_override(
     Ok(row)
 }
 
-async fn ensure_org_exists(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
+pub(crate) async fn ensure_org_exists(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     let is_org = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": org_user_id })
@@ -1362,6 +1563,14 @@ pub async fn fetch_override_org_display(
 // Metadata (admin-authored documentation)
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub(crate) fn has_metadata(row: &FeatureFlagMetadata) -> bool {
+    row.description.is_some()
+        || row.owner.is_some()
+        || row.group.is_some()
+        || !row.tags.is_empty()
+        || row.sunset
+}
+
 /// Upper bound on an admin-written flag description.
 pub const MAX_FLAG_DESCRIPTION_LEN: usize = 512;
 /// Upper bound on an admin-written flag owner (a person, team, or contact).
@@ -1369,7 +1578,7 @@ pub const MAX_FLAG_OWNER_LEN: usize = 128;
 
 /// Trim a free-text metadata field, treating blank input as "cleared", and
 /// enforce its length budget.
-fn normalize_metadata_field(
+pub(crate) fn normalize_metadata_field(
     value: Option<&str>,
     max_len: usize,
     field: &str,
@@ -1406,7 +1615,7 @@ pub async fn list_metadata(
         .filter(|row| {
             keys.get(&row.flag_key)
                 .is_some_and(|id| id == &row.definition_id)
-                && (row.description.is_some() || row.owner.is_some())
+                && has_metadata(row)
         })
         .map(|row| (row.flag_key.clone(), row))
         .collect())
@@ -1418,6 +1627,7 @@ pub async fn list_metadata(
 /// blank or absent value clears that field. Clearing both fields deletes the
 /// row entirely (the flag falls back to its code-declared description with no
 /// owner) and returns `None`.
+#[cfg(test)]
 pub async fn set_metadata(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1474,6 +1684,7 @@ pub async fn set_metadata(
 
 /// Sparse metadata update. Keep empty rows internally so a concurrent disjoint
 /// write cannot be deleted by cleanup after the update.
+#[cfg(test)]
 pub async fn patch_metadata(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1522,7 +1733,7 @@ pub async fn patch_metadata(
             .return_document(ReturnDocument::After)
             .await?
     };
-    Ok(row.filter(|row| row.description.is_some() || row.owner.is_some()))
+    Ok(row.filter(has_metadata))
 }
 
 /// Cascade helper: drop every override for an org (used when the org is deleted).
@@ -1558,6 +1769,241 @@ mod tests {
             updated_at: Utc::now(),
             updated_by: "actor".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn security_readiness_gates_admin_enable_for_global_user_and_org_overrides() {
+        let db = connect_test_database("feature_flag_activation")
+            .await
+            .expect("configured Mongo required");
+        let user = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        for (id, kind) in [(&user, UserType::Person), (&org, UserType::Org)] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, kind))
+                .await
+                .unwrap();
+        }
+        for flag in FEATURE_FLAGS.iter().filter(|flag| {
+            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
+        }) {
+            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
+                assert!(matches!(
+                    set_platform_override(&db, flag.key, &target, true, &user).await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ));
+                assert!(
+                    !set_platform_override(&db, flag.key, &target, false, &user)
+                        .await
+                        .unwrap()
+                        .enabled
+                );
+            }
+            assert!(matches!(
+                set_platform_org_override(&db, &org, flag.key, true, &user).await,
+                Err(AppError::SecurityReadinessUnavailable)
+            ));
+            assert!(
+                !set_platform_org_override(&db, &org, flag.key, false, &user)
+                    .await
+                    .unwrap()
+                    .enabled
+            );
+        }
+        // Ordinary flags retain enable/disable behavior without readiness.
+        for enabled in [true, false] {
+            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
+                assert_eq!(
+                    set_platform_override(&db, "example_ui", &target, enabled, &user)
+                        .await
+                        .unwrap()
+                        .enabled,
+                    enabled
+                );
+            }
+            assert_eq!(
+                set_platform_org_override(&db, &org, "example_ui", enabled, &user)
+                    .await
+                    .unwrap()
+                    .enabled,
+                enabled
+            );
+        }
+        super::super::security_readiness_service::ready_test_replica(&db).await;
+        for flag in FEATURE_FLAGS.iter().filter(|flag| {
+            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
+        }) {
+            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
+                assert!(
+                    set_platform_override(&db, flag.key, &target, true, &user)
+                        .await
+                        .unwrap()
+                        .enabled
+                );
+            }
+            assert!(
+                set_platform_org_override(&db, &org, flag.key, true, &user)
+                    .await
+                    .unwrap()
+                    .enabled
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn personal_flag_enabled_when_unready_throttles_per_flag_and_ignores_report_errors() {
+        use super::super::security_readiness_service as readiness;
+        use crate::models::audit_log::AuditLog;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        struct CountDiagnostics {
+            warnings: Arc<AtomicUsize>,
+            errors: Arc<AtomicUsize>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountDiagnostics {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN
+                    && event.metadata().fields().field("blockers").is_some()
+                {
+                    self.warnings.fetch_add(1, Ordering::SeqCst);
+                }
+                if *event.metadata().level() == tracing::Level::DEBUG
+                    && event.metadata().fields().field("flag_key").is_some()
+                    && event.metadata().fields().field("error").is_some()
+                {
+                    self.errors.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let db = connect_test_database("personal_flag_unready")
+            .await
+            .expect("configured Mongo required");
+        reset_unready_flag_throttle();
+        let flag = ASSISTANT_LIVE_TURN_GATE_FLAG_KEY;
+        let user = Uuid::new_v4().to_string();
+        let other_user = Uuid::new_v4().to_string();
+        // Simulate an override enabled before PR #1976, with no local observation.
+        db.collection::<FeatureFlagOverride>(COLLECTION_NAME)
+            .insert_one(override_row(None, flag, FlagTargetKind::Global, None, true))
+            .await
+            .unwrap();
+        // Stay within a single shared rate window even when this suite starts
+        // near a minute boundary.
+        crate::test_utils::ensure_rate_window_headroom(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        readiness::ready_test_replica(&db).await;
+        let replicas =
+            db.collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME);
+        replicas.delete_many(doc! {}).await.unwrap();
+        assert!(!readiness::report(&db, flag).await.unwrap().ready);
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let errors = Arc::new(AtomicUsize::new(0));
+        let subscriber =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(CountDiagnostics {
+                warnings: warnings.clone(),
+                errors: errors.clone(),
+            }));
+        let reads =
+            futures::future::join_all((0..8).map(|_| personal_flag_enabled(&db, &user, flag)))
+                .with_subscriber(subscriber.clone())
+                .await;
+        assert!(reads.into_iter().all(|result| matches!(result, Ok(true))));
+        assert!(
+            personal_flag_enabled(&db, &other_user, flag)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        // Model a second replica by clearing only the local throttle. The
+        // shared flag-keyed window must still suppress a different user.
+        reset_unready_flag_throttle();
+        assert!(
+            personal_flag_enabled(&db, &other_user, flag)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(warnings.load(Ordering::SeqCst), 1);
+        assert_eq!(errors.load(Ordering::SeqCst), 0);
+        let audits = db.collection::<AuditLog>(crate::models::audit_log::COLLECTION_NAME);
+        let events: Vec<_> = audits
+            .find(doc! {"event_type": UNREADY_FLAG_EVENT})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "all users share one flag-keyed window");
+        assert_eq!(events[0].user_id.as_deref(), Some(user.as_str()));
+        assert_eq!(events[0].event_data.as_ref().unwrap()["flag_key"], flag);
+        assert_eq!(events[0].event_data.as_ref().unwrap()["user_id"], user);
+        // A malformed fresh observation makes report() fail independently of
+        // flag resolution. Diagnostic failures must still preserve the flag.
+        replicas
+            .insert_one(doc! {"_id": "malformed", "observed_at": bson::DateTime::now()})
+            .await
+            .unwrap();
+        assert!(readiness::report(&db, flag).await.is_err());
+        let windows = db
+            .collection::<bson::Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME);
+        windows
+            .update_one(
+                doc! {"namespace": UNREADY_FLAG_EVENT},
+                doc! {"$set": {"count": "malformed"}},
+            )
+            .await
+            .unwrap();
+        // The local throttle must skip both the malformed window and report.
+        assert!(
+            personal_flag_enabled(&db, &user, flag)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(errors.load(Ordering::SeqCst), 0);
+        reset_unready_flag_throttle();
+        assert!(
+            personal_flag_enabled(&db, &user, flag)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(errors.load(Ordering::SeqCst), 1);
+        reset_unready_flag_throttle();
+        windows
+            .delete_many(doc! {"namespace": UNREADY_FLAG_EVENT})
+            .await
+            .unwrap();
+        assert!(
+            personal_flag_enabled(&db, &user, flag)
+                .with_subscriber(subscriber)
+                .await
+                .unwrap()
+        );
+        assert_eq!(errors.load(Ordering::SeqCst), 2);
+        assert_eq!(warnings.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            audits
+                .count_documents(doc! {"event_type": UNREADY_FLAG_EVENT})
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
     }
 
     #[test]
@@ -2230,6 +2676,9 @@ mod tests {
         overrides.insert_one(stale).await.unwrap();
         metadata
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 id: Uuid::new_v4().to_string(),
                 flag_key: "example_ui".into(),
                 definition_id: Some(runtime_id.clone()),
@@ -2305,6 +2754,9 @@ mod tests {
             .unwrap();
         metadata
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 id: Uuid::new_v4().to_string(),
                 flag_key: key.into(),
                 definition_id: None,
@@ -2468,16 +2920,25 @@ mod tests {
             shipped,
             vec![
                 "auth:invitation-code",
+                "auth:mobile-mfa",
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
+                "assistant:workspace-preview",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
+                "channel:discord-gateway",
+                "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:guest-operation-scopes",
+                "assistant:channel-media",
+                "assistant:attachment-writes",
                 "assistant:live-turn-gate",
+                "assistant:owner-invocations",
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
                 "assistant:agent-learning",
                 "assistant:org-agents",
+                "assistant:shared-agents",
                 "assistant:voice",
                 "assistant:voice-openai-platform",
                 "assistant:voice-grok",
@@ -2485,6 +2946,7 @@ mod tests {
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:remote-machines",
+                "services:monitoring",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
                 "nyxbot:gateway-lark",
@@ -2598,6 +3060,77 @@ mod tests {
                 .await
                 .expect_err("unknown flag rejected");
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn workspace_preview_defaults_off_and_supports_targeted_user_rollout() {
+        let db = crate::test_utils::connect_transaction_test_database("workspace_preview_audience")
+            .await;
+        let actor = Uuid::new_v4().to_string();
+        let selected_id = Uuid::new_v4().to_string();
+        let ordinary_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&selected_id, UserType::Person),
+                test_user(&ordinary_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        for id in [&selected_id, &ordinary_id] {
+            assert!(
+                !resolve_personal_features(&db, id)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|key| key == ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY)
+            );
+        }
+        set_platform_override(
+            &db,
+            ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY,
+            &FlagTarget::User(selected_id.clone()),
+            true,
+            &actor,
+        )
+        .await
+        .unwrap();
+        for (id, expected) in [(&selected_id, true), (&ordinary_id, false)] {
+            assert_eq!(
+                resolve_personal_features(&db, id)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|key| key == ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY),
+                expected
+            );
+            assert_eq!(
+                resolve_enabled_features(&db, &org_id, id, OrgRole::Member)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|key| key == ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY),
+                expected
+            );
+        }
+        set_platform_override(
+            &db,
+            ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY,
+            &FlagTarget::User(selected_id.clone()),
+            false,
+            &actor,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !resolve_personal_features(&db, &selected_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|key| key == ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY)
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -2758,6 +3291,95 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn mobile_mfa_required_resolves_live_org_override_for_person() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("mobile_mfa_org_override").await;
+        let org = Uuid::new_v4().to_string();
+        let person = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&person, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &person,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert!(!mobile_mfa_required(&db, &person).await.unwrap());
+        set_platform_org_override(&db, &org, MOBILE_MFA_FLAG_KEY, true, &person)
+            .await
+            .unwrap();
+        assert!(mobile_mfa_required(&db, &person).await.unwrap());
+        db.collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"org_user_id": &org, "member_user_id": &person},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(!mobile_mfa_required(&db, &person).await.unwrap());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_monitoring_is_default_off_and_follows_live_actor_overrides() {
+        let db = crate::test_utils::connect_transaction_test_database("monitoring_flag").await;
+        let flag = SERVICE_MONITORING_FLAG_KEY;
+        assert!(!find_flag(flag).unwrap().default_enabled);
+        let person = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        for (id, kind) in [(&person, UserType::Person), (&org, UserType::Org)] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, kind))
+                .await
+                .unwrap();
+        }
+        db.collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                &person,
+                OrgRole::Member,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
+        set_platform_org_override(&db, &org, flag, true, &person)
+            .await
+            .unwrap();
+        assert!(personal_flag_enabled(&db, &person, flag).await.unwrap());
+        let other = Uuid::new_v4().to_string();
+        assert!(!personal_flag_enabled(&db, &other, flag).await.unwrap());
+        set_platform_override(&db, flag, &FlagTarget::User(person.clone()), false, &person)
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
+        clear_platform_override(&db, flag, &FlagTarget::User(person.clone()))
+            .await
+            .unwrap();
+        assert!(personal_flag_enabled(&db, &person, flag).await.unwrap());
+        db.collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"org_user_id": &org, "member_user_id": &person},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
+        db.drop().await.unwrap();
+    }
+
     #[test]
     fn metadata_fields_normalize_and_bound() {
         assert_eq!(normalize_metadata_field(None, 10, "owner").unwrap(), None);
@@ -2887,6 +3509,9 @@ mod tests {
         // registry must never surface as if the flag still existed.
         db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION)
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 definition_id: None,
                 id: Uuid::new_v4().to_string(),
                 flag_key: "retired_flag".to_string(),
@@ -2993,5 +3618,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(replaced.owner.is_none());
+    }
+
+    #[test]
+    fn channel_media_and_attachment_writes_are_registered_default_off() {
+        for key in [
+            ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+            ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+        ] {
+            let flag = FEATURE_FLAGS.iter().find(|flag| flag.key == key).unwrap();
+            assert!(!flag.default_enabled);
+        }
     }
 }

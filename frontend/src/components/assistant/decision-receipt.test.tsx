@@ -25,7 +25,7 @@ describe("DecisionReceipt", () => {
   });
   it.each([
     ["access_mode", ""], ["webhook", "bypassed automation confirmation"],
-    ["policy", "bypassed machine / saved-login confirmation"], ["approval", "bypassed service approval"],
+    ["policy", "bypassed policy confirmation"], ["approval", "bypassed service approval"],
   ] as const)("explains the automatic %s bypass", (reason, phrase) => {
     render(<DecisionReceipt acknowledgement={{ ...row, decided_by: "access_mode", confirmation: { risk: "change", access_mode: "autopilot", reason } }} />);
     expect(screen.getByRole("status")).toHaveTextContent("Allowed automatically · Full access");

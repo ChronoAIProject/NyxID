@@ -386,7 +386,10 @@ async fn sync_lane_price(
         let Some(code) = cleanup.as_deref().filter(|c| !c.is_empty()) else {
             return Ok(false);
         };
-        if lago.remove_standard_charge(plan_code, code).await.is_err() {
+        if super::taxes::remove_charge(db, lago, plan_code, code)
+            .await
+            .is_err()
+        {
             return Ok(false);
         }
         retire_rate(db, code).await?;
@@ -479,7 +482,9 @@ async fn sync_lane_component(
         metric_description: format!("NyxID {field} usage for {}", service.slug),
         credits_per_unit: lane.credits_per_unit.clone(),
     };
-    let synced = lago.sync_standard_charge(plan_code, &input).await.is_ok();
+    let synced = super::taxes::sync_charge(db, lago, plan_code, &input)
+        .await
+        .is_ok();
     // Include the unit: identical prices in a different unit are different charges.
     let mut filter = doc! { "_id": &service.id,
         format!("{path}.lago_metric_code"): &lane.lago_metric_code,
@@ -568,7 +573,10 @@ async fn cleanup_components(
     };
     let mut changed = false;
     for code in &billing.component_cleanup_metric_codes {
-        if lago.remove_standard_charge(plan_code, code).await.is_err() {
+        if super::taxes::remove_charge(db, lago, plan_code, code)
+            .await
+            .is_err()
+        {
             continue;
         }
         retire_rate(db, code).await?;
@@ -601,7 +609,7 @@ async fn sync_legacy_price(
         else {
             return Ok(false);
         };
-        match lago.remove_standard_charge(plan_code, metric_code).await {
+        match super::taxes::remove_charge(db, lago, plan_code, metric_code).await {
             Ok(()) => {
                 complete_price_removal(db, &service.id, metric_code).await?;
                 return Ok(true);
@@ -628,7 +636,7 @@ async fn sync_legacy_price(
         credits_per_unit: pricing.credits_per_unit.clone(),
     };
 
-    match lago.sync_standard_charge(plan_code, &input).await {
+    match super::taxes::sync_charge(db, lago, plan_code, &input).await {
         Ok(()) => {
             let pico = decimal_to_pico(&pricing.credits_per_unit)
                 .ok_or_else(|| AppError::Internal("stored service price is invalid".to_string()))?;

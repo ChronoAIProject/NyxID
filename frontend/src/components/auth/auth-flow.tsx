@@ -214,7 +214,7 @@ export function AuthFlow({
           window.location.assign(trustedReturnTo);
           return;
         }
-        void navigate({ to: "/dashboard" as string });
+        void navigate({ to: "/assistant" as string });
       }
     } catch (error) {
       if (error instanceof ApiError) {
@@ -236,7 +236,7 @@ export function AuthFlow({
         password: data.password,
         invite_code: data.inviteCode,
       });
-      toast.info(result.message || "Check your email to complete registration.");
+      toast.info(result.message || "Registration processed. Sign in to continue.");
       slideToPanel(0);
     } catch (error) {
       if (error instanceof ApiError) {

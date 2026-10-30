@@ -24,6 +24,8 @@ crate::exact_credit_model! {
     #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
     pub struct CreditGrantSettlementLock {
         pub operation_id: String,
+        #[serde(default)]
+        pub service_limit_key: Option<String>,
         pub usage_row_id: String,
         #[serde(with = "crate::models::credits::whole")]
         #[serde(rename = "reserved", alias = "reserved_micros")]
@@ -79,6 +81,8 @@ crate::exact_credit_model! {
         #[serde(rename = "reserved", alias = "reserved_micros")]
         pub reserved: Credits,
         pub scope: BillingServiceScope,
+        #[serde(default)]
+        pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimit>,
         #[serde(default, with = "crate::models::bson_datetime::optional")]
         pub expires_at: Option<DateTime<Utc>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,5 +117,9 @@ crate::exact_credit_model! {
         pub expired_at: Option<DateTime<Utc>>,
         #[serde(default, with = "crate::models::bson_datetime::optional")]
         pub revoked_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub revoke_requested_at: Option<DateTime<Utc>>,
+        #[serde(default)]
+        pub revoke_requested_by: Option<String>,
     }
 }

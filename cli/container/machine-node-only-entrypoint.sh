@@ -46,6 +46,14 @@ if [ "${NYXID_MACHINE_MANAGED:-1}" = "1" ]; then
 else
   chown agent:agent /workspace /home/agent
   if [ ! -s "$CONFIG" ]; then
+    # Absence is automatic, never consent to legacy. This browserless image
+    # cannot confirm separated contexts; setup explains the required explicit
+    # choice before registration. An existing profile retains its stored intent.
+    MACHINE_SEPARATION=${NYXID_MACHINE_SEPARATION-automatic}
+    case "$MACHINE_SEPARATION" in
+        automatic|require-separated|shared-legacy) ;;
+        *) echo "NYXID_MACHINE_SEPARATION must be automatic, require-separated or shared-legacy." >&2; exit 2 ;;
+    esac
     if [ -z "${NYXID_NODE_TOKEN:-}" ]; then
         echo "NYXID_NODE_TOKEN is required on first start; mount an existing identity or provide a registration token." >&2
         exit 2
@@ -60,6 +68,7 @@ else
         --token "$NYXID_NODE_TOKEN" \
         --url "$NYXID_NODE_URL" \
         --node-only-machine-preset \
+        --separation "$MACHINE_SEPARATION" \
         --container \
         --no-daemon \
         --skip-browser-policy \

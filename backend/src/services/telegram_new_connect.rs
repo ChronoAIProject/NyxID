@@ -83,7 +83,11 @@ impl TelegramNewService<'_> {
         {
             saved
         } else {
-            let (manager_id, _, values) = self.manager().await?;
+            let (manager_id, _, values) = self
+                .for_manager(request.manager_bot_id)
+                .await?
+                .manager()
+                .await?;
             if manager_id != request.manager_bot_id
                 || values.get("observation_id") != Some(request.observation_id.as_str())
             {
@@ -118,6 +122,7 @@ impl TelegramNewService<'_> {
             }
             let secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
             let bot = ChannelBot {
+                manager_instance: None,
                 diagnostics: Default::default(),
                 x_events: None,
                 last_verification: None,
@@ -300,13 +305,17 @@ impl TelegramNewService<'_> {
                 None,
                 None,
             );
-            if let Ok((_, _, values)) = self.manager().await
+            if let Ok((_, _, values)) = self
+                .for_manager(request.manager_bot_id)
+                .await?
+                .manager()
+                .await
                 && let Some(token) = values.get(MANAGER_TOKEN)
             {
                 let username = request.bot_username.as_deref().unwrap_or_default();
                 let _ = self.api.call(token, "sendMessage", json!({
                     "chat_id": request.telegram_user_id,
-                    "text": format!("@{username} is connected to NyxID. Setup is complete. Tap Open your bot and press Start to talk to it. You can choose an AI agent for replies in Bot settings."),
+                    "text": format!("@{username} is registered and connected to NyxID. An AI agent must be linked before it can reply. If you started setup for a specialist, return to that setup to finish or check the link. If no setup is in progress and no agent is linked, choose and link one in Bot settings. Once linking is complete, tap Open your bot, press Start, and send a message to verify the first reply."),
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "Open your bot", "url": format!("https://t.me/{username}")}],
                         [{"text": "Bot settings", "url": format!("{}/channel-bots/{id}", self.config.frontend_url.trim_end_matches('/'))}],

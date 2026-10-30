@@ -1176,6 +1176,7 @@ pub(crate) fn is_duplicate_key(err: &mongodb::error::Error) -> bool {
         err.kind.as_ref(),
         mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we))
             if we.code == 11000
+    ) || matches!(err.kind.as_ref(), mongodb::error::ErrorKind::Command(error) if error.code == 11000
     )
 }
 

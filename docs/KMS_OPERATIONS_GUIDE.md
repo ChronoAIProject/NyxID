@@ -202,10 +202,10 @@ pub struct EncryptionDecryptStats {
 
 Both KMS providers log operational events:
 
-- **AWS KMS**: SDK errors logged at `ERROR` level; generic message returned in error chain
+- **AWS KMS**: fixed failure category/message at `ERROR`; generic client error without the SDK error body
 - **GCP KMS**: Transient failures logged at `WARN` per attempt; final failure at `ERROR`
 
-All log messages redact key ARNs, key names, and key material. The `Debug` impls for both providers show `[REDACTED]` for all key identifiers.
+Provider operational logs omit key ARNs, names and material. Both provider `Debug` implementations redact key identifiers. The cross-provider startup collision diagnostic still includes the short key selector in the current implementation; this is not a universal identifier-redaction guarantee.
 
 ---
 
@@ -237,32 +237,11 @@ GCP automatically selects the correct version for decrypt.
 
 ### Cross-Key Rotation
 
-To rotate to a completely different KMS key:
-
-1. Set the new key as primary and the old key as previous:
-   ```bash
-   AWS_KMS_KEY_ARN=arn:aws:kms:...:key/new-key
-   AWS_KMS_KEY_ARN_PREVIOUS=arn:aws:kms:...:key/old-key
-   ```
-
-2. Deploy and verify startup (collision check passes)
-
-3. Run `rewrap()` on all records
-
-4. Monitor `v2_previous` until it reaches 0
-
-5. Remove `_PREVIOUS` config
+Prepare independent HMAC keys before changing AES/JWT sources. Stage readers with both old and new KMS keys across the fleet before switching the primary, or drain writers while preparing them. After activation, retain the old key in the provider's `_PREVIOUS` setting. Follow [the explicit migration/readiness procedure](SECURITY.md#encrypted-record-migration), which covers durable progress, exact-source CAS and unresolved fields. Pending adapters block complete readiness.
 
 ### Local Key Rotation
 
-If using `KEY_PROVIDER=local`, rotate with:
-
-```bash
-ENCRYPTION_KEY=<new 64 hex chars>
-ENCRYPTION_KEY_PREVIOUS=<old 64 hex chars>
-```
-
-Then run `rewrap()` on all v2 records. When `v2_previous == 0`, remove `ENCRYPTION_KEY_PREVIOUS`.
+Follow [the ordered local-key procedure](SECURITY.md#key-rotation). Keep both keys across the prepared fleet and migrate through the explicit runner. Never remove a key based only on zero decrypt traffic; dormant records, legacy readers, backups and rollback binaries remain dependencies. A logical KMS resource may still decrypt older internal versions, so provider-specific retirement evidence is also required.
 
 ---
 
@@ -284,11 +263,11 @@ Then run `rewrap()` on all v2 records. When `v2_previous == 0`, remove `ENCRYPTI
 
 **"Primary and fallback providers have colliding key IDs (0xNN)"**
 - Cause: The KMS key ARN/name and local `ENCRYPTION_KEY` produce the same SHA-256 first-byte hash (1-in-256 chance)
-- Fix: Use a different KMS key, or generate a new local key (`openssl rand -hex 32`)
+- Fix: Use a distinct KMS key while retaining every local key needed by existing records and backups. Do not discard an existing local key to resolve a selector collision.
 
-**"... produce the same key id (0xNN). This is a 1-in-256 hash collision."**
+**"... produce the same key id; configure distinct noncolliding keys"**
 - Cause: Current and previous keys for the same provider produce the same key ID
-- Fix: Use a different key for current or previous
+- Fix: Choose a noncolliding replacement; retain keys already needed by records/backups until a reviewed migration permits retirement.
 
 ### Runtime Failures
 
@@ -310,7 +289,7 @@ Then run `rewrap()` on all v2 records. When `v2_previous == 0`, remove `ENCRYPTI
 
 **"No key could decrypt the data"**
 - Cause: The ciphertext was encrypted with a key that is no longer configured
-- Check: `unknown_key_id_failures` counter for specific key IDs
+- Check: `unknown_key_id_failures` for unavailable wrapping-key dependencies; it is an aggregate counter with no per-key labels
 - Check: Was the `ENCRYPTION_KEY` removed before migration completed?
 - Check: Was a KMS key disabled or deleted?
 
@@ -334,21 +313,21 @@ AWS SDK includes built-in retry (3 attempts with exponential backoff via `Behavi
 |----------|-----------|-------|
 | Plaintext DEK | `Zeroizing<[u8; 32]>` | Scrubbed on drop, all code paths |
 | Wrapped DEK (in `WrappedKey`) | `Zeroizing<Vec<u8>>` | Defense-in-depth (data is encrypted) |
-| KMS key ARN / key name | `[REDACTED]` in Debug | Never appears in logs or error messages |
+| KMS key ARN / key name | `[REDACTED]` in provider Debug | Provider diagnostics use fixed failure categories; do not log SDK error bodies |
 | Local key (env var) | `Zeroizing<[u8; 32]>` in `LocalKeyProvider` | `[REDACTED]` in Debug |
 | SDK-internal DEK copies | Not controlled by NyxID | Accepted limitation (documented in code) |
 
 ### Error Message Sanitization
 
-KMS SDK errors are logged via `tracing::error!()` for diagnostics but the `AppError::Internal` returned to callers contains only a generic message (e.g., "AWS KMS encrypt failed"). SDK errors may contain request IDs, endpoint URLs, or key identifiers.
+Provider failure logs use fixed categories and generic messages (for example, `provider_encrypt_failed` / "AWS KMS encrypt failed"). Raw SDK errors and key identifiers are excluded from this boundary and from client errors.
 
 ### Debug Output
 
 All provider `Debug` impls redact sensitive identifiers:
 
 ```
-AwsKmsProvider { current_key_arn: "[REDACTED]", current_key_id: "0xab", previous_key_arn: "None" }
-GcpKmsProvider { current_key_name: "[REDACTED]", current_key_id: "0xcd", previous_key_name: "None" }
+AwsKmsProvider { current_key_arn: "[REDACTED]", current_key_id: "[REDACTED]", previous_key_arn: "None" }
+GcpKmsProvider { current_key_name: "[REDACTED]", current_key_id: "[REDACTED]", previous_key_name: "None" }
 LocalKeyProvider { current: "[REDACTED]", previous: "None" }
 ```
 

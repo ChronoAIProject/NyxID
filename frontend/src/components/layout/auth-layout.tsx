@@ -40,21 +40,21 @@ export function AuthLayout() {
         }}
       >
         {/* Logo — top-left */}
-        <div className="flex shrink-0 items-center px-10 pt-8">
+        <div className="flex shrink-0 items-center px-4 pt-8 sm:px-10">
           <Link to={logoHref} className="flex items-center">
             <NyxidLogo className="h-7 w-auto" />
           </Link>
         </div>
 
         {/* Form area — vertically centered */}
-        <div className="flex flex-1 items-center justify-center overflow-y-auto px-10 py-10">
+        <div className="flex flex-1 items-center justify-center overflow-y-auto px-4 py-10 sm:px-10">
           <div className="w-full max-w-[400px]">
             <Outlet />
           </div>
         </div>
 
         {/* Footer — sticky bottom */}
-        <div className="mt-auto shrink-0 px-10 pb-8">
+        <div className="mt-auto shrink-0 px-4 pb-8 sm:px-10">
           <div className="mb-4 flex justify-center">
             <GitHubButton
               label="View source on GitHub"

@@ -1,12 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { composerInput, openAssistant } from "./helpers";
+import { composerInput, openAccountMenu, openAssistant } from "./helpers";
 
 test.use({ browserName: "webkit", viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
 test("iOS inputs keep the zoom-prevention minimum and grow with larger text", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   for (const [key, scale] of [["Home", 0.5], ["End", 2]] as const) {
-    await page.getByRole("button", { name: "User menu", exact: true }).click();
+    await openAccountMenu(page);
     await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Account Settings" });
     await dialog.getByRole("tab", { name: "Display", exact: true }).click();

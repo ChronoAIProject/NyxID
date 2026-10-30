@@ -474,6 +474,27 @@ pub(crate) async fn cancel_unforwarded(
     cancel(db, &handle.id).await
 }
 
+// This durable marker is written only by the single worker after a typed
+// final-sender refusal. Recovery can finish releasing this proven-unsent work
+// if cancellation's funding transaction or benefit release is interrupted.
+const REJECTED_BEFORE_SEND: &str = "authority_rejected_before_send";
+
+pub(crate) async fn reject_before_send(
+    db: &Database,
+    handle: &ManagedExecutionHandle,
+) -> AppResult<()> {
+    db.collection::<ManagedExecution>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&handle.id,"route_digest":&handle.route_digest,
+            "state":{"$in":["prepared","funded","dispatch_admitted","pending"]},
+            "usage":bson::Bson::Null},
+            doc! {"$set":{"state":"cancelling","pending_reason":REJECTED_BEFORE_SEND,
+            "next_reconcile_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}},
+        )
+        .await?;
+    cancel(db, &handle.id).await
+}
+
 async fn cancel(db: &Database, id: &str) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db.clone(),id.to_owned()),|session,(db,id)|Box::pin(async move {
@@ -481,6 +502,8 @@ async fn cancel(db: &Database, id: &str) -> AppResult<()> {
             let calls = db.collection::<ManagedExecution>(COLLECTION_NAME);
             let Some(row) = calls.find_one(doc! {"_id":id,"state":{"$in":["prepared","funded","cancelling"]}})
                 .session(&mut *session).await? else { return Ok(()); };
+            let proven_unsent = row.state == State::Cancelling
+                && row.pending_reason.as_deref() == Some(REJECTED_BEFORE_SEND);
             // The execution document conflicts with the dispatch transaction.
             calls.update_one(doc! {"_id":&row.id},doc! {"$set":{"state":"cancelling","updated_at":bson::DateTime::now()}})
                 .session(&mut *session).await?;
@@ -488,7 +511,12 @@ async fn cancel(db: &Database, id: &str) -> AppResult<()> {
                 let meter = db.collection::<UsageMeterRow>(METERS).find_one(doc! {"_id":id,"managed_execution_id":&row.id})
                     .session(&mut *session).await?.ok_or_else(unavailable)?;
                 if meter.released { continue; }
-                if meter.forwarded || meter.status != crate::models::usage_meter::UsageStatus::Reserved { return Err(unavailable()); }
+                let rejected_forwarding = proven_unsent
+                    && meter.forwarded
+                    && meter.status == crate::models::usage_meter::UsageStatus::Forwarded;
+                if !rejected_forwarding
+                    && (meter.forwarded || meter.status != crate::models::usage_meter::UsageStatus::Reserved)
+                { return Err(unavailable()); }
                 if meter.reserved_credits > Credits::ZERO {
                     let wallet_id = meter.wallet_id.as_deref().ok_or_else(unavailable)?;
                     if db.collection::<bson::Document>(crate::models::billing_wallet::COLLECTION_NAME).update_one(doc! {
@@ -496,8 +524,9 @@ async fn cancel(db: &Database, id: &str) -> AppResult<()> {
                     },doc! {"$inc":{"reserved_credits":meter.reserved_credits.checked_neg()?.decimal()},"$set":{"updated_at":bson::DateTime::now()}})
                         .session(&mut *session).await?.matched_count != 1 { return Err(unavailable()); }
                 }
-                if db.collection::<UsageMeterRow>(METERS).update_one(doc! {"_id":id,"released":false,"forwarded":false,"status":"reserved"},
-                    doc! {"$set":{"released":true,"status":"failed","last_error":"Managed execution cancelled before dispatch",
+                if db.collection::<UsageMeterRow>(METERS).update_one(doc! {"_id":id,"released":false,"forwarded":meter.forwarded,
+                    "status":if rejected_forwarding {"forwarded"} else {"reserved"}, "quantity":bson::Bson::Null},
+                    doc! {"$set":{"released":true,"forwarded":false,"status":"failed","last_error":"Managed execution cancelled before dispatch",
                         "updated_at":bson::DateTime::now(),"finalized_at":bson::DateTime::now()}})
                     .session(&mut *session).await?.matched_count != 1 { return Err(unavailable()); }
             }

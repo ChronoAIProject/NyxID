@@ -48,6 +48,20 @@ bindings. Personal resources and saved logins MUST be refused. Maintenance must
 not grant resources the maintaining person cannot access. Account-wide personal
 management access and guest/channel sharing are not organization-agent grants.
 
+MCP discovery and execution use the same organization-bound connection scope.
+The live member ACL is applied before slug collision resolution, so a personal
+connection or a connection from another organization cannot shadow an
+organization connection. `nyx__list_connected_services`, `nyx__search_tools`,
+`tools/list`, `/api/v1/mcp/config`, `nyx__call_tool` and direct `tools/call`
+dispatch preserve the selected `UserService.id`. On REST slug routes, a
+granted bound-organization connection, including a model/inference connection,
+owns its slug over a same-slug personal connection. Without that grant, the
+existing cascade and the documented implicit model-transport exception are
+unchanged. Granted rows report `chat_access: granted`; other live organization
+rows may report `acknowledgement_required` and are handled by the existing
+service gate rather than becoming an `Unknown tool`. A new request rechecks the
+same live ACL.
+
 ## Management, skills and memory
 
 Personal NyxBot tools accept an explicit `org` selector (ID, slug or unambiguous
@@ -164,6 +178,14 @@ never message, upload, memory or credential content.
 Existing group routes and management tools accept the B3a organization selector
 (ID, slug or unambiguous name). Personal NyxBot may manage authorized groups but
 MUST NOT post into or follow organization groups; channel links are unsupported.
+Attempting to link an organization specialist to a channel bot or chat is
+refused with HTTP 403 `forbidden`, error code 1002, and
+`details.reason: "organization_agent_channel_unsupported"`. Native tools return
+`error: "organization_agent_channel_unsupported"` with the same message and
+fixed recovery instructions. Link the bot or chat to NyxBot or one of the
+owner's personal specialists instead. From the owner's own chat, NyxBot can
+delegate to the organization specialist with `nyxid__message_subagent` using
+`org-slug/agent-name`; guest messages are never delegated to that specialist.
 Keep `assistant:org-agents` off while deploying, including when upgrading from
 B3a, then enable it only after every auth/proxy/MCP/worker replica is upgraded.
 Old group routes fail closed through actor/owner equality, but B3a binaries do

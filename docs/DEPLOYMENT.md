@@ -143,19 +143,88 @@ docker build -f backend/Dockerfile -t nyxid-backend .
 docker build -f frontend/Dockerfile -t nyxid-frontend .
 ```
 
-The **backend Dockerfile** (`backend/Dockerfile`) uses a two-stage build:
-1. `rust:1.85-bookworm` builder with dependency caching (copies manifests first, builds deps, then copies source)
-2. `debian:bookworm-slim` runtime with only `ca-certificates` and `curl`, running as non-root user `nyxid`
+The **backend Dockerfile** (`backend/Dockerfile`) builds the Rust binary and a
+separate Node 22.23.2 credential-accept bundle. Its Debian runtime runs as
+non-root `nyxid` and includes the standalone HTML, SRI assets and release
+manifest at `/app/frontend/dist/`; it also needs its private durable TUF volume.
+
+Backend builds accept `--build-arg NYXID_GIT_HASH=<commit>`. The final image sets
+that value as a runtime environment variable for `/health`; it is not an input
+to either Cargo layer. Without a nonempty runtime value, standalone server
+binaries retain their build-time stamp. CLI/node binaries retain their existing
+build-time identity. The credential-accept bundle still receives its own commit
+stamp and release-integrity manifest.
+
+A separate Python recipe stage copies only workspace manifests and `Cargo.lock`
+and normalizes the nine workspace packages to version `0.0.0` in both. It leaves
+third-party versions, checksums and requirements exact. The fresh `dependencies`
+stage copies only that normalized output and generates stub crate entry points;
+a version-only release changes the recipe stage but its output still has the
+same content hash. Normalizing in the compiler stage itself would not work: its
+parent COPY layer would already have changed. The real `builder` restores the
+original manifests/lock before compiling application code, preserving `/health`
+and every `CARGO_PKG_VERSION`. New versioned path constraints or inherited member
+versions fail the recipe explicitly until supported; they are never relaxed.
+Both Cargo invocations use `--locked` and the same release binary/features.
+Real source and embedded assets enter only after
+dependency compilation. With those inputs unchanged, a commit-only change now
+reuses the compiled server layer; source/embedded-input changes still rebuild
+the affected crates, and dependency/toolchain changes invalidate the dependency
+layer. Workspace package version bumps alone do not. This is layer reuse, not
+incremental Rust compilation.
+
+`CARGO_BUILD_JOBS` is a build argument with a default of **2**, used by both the
+amd64 smoke job and native amd64/arm64 publishing. Each backend image runner
+first provisions at least 24 GiB total swap. Two jobs permit bounded dependency
+and code-generation parallelism without using every runner CPU; the large
+server crate compiles after its dependencies, and the CLI/test binaries are not
+built. The swap reserve absorbs peaks rather than making sustained swapping
+fast. Smaller local builders can pass `--build-arg CARGO_BUILD_JOBS=1`. No change
+to optimization, release features or runtime resources is made.
+
+Publishing imports and exports registry caches at
+`ghcr.io/<owner>/nyxid/backend:buildcache-linux-{amd64,arm64}` with `mode=max`,
+including intermediate compiler layers. Both jobs retain the matching
+`backend-linux-<arch>` GHA import as a migration fallback. Smoke also imports the
+old `backend-pr-linux-amd64` scope, but exports no cache: in PR #2052 the release
+compile finished in 49m 23s, then even a `mode=min` GHA export stalled for nearly
+40 minutes until the 90-minute job timeout. That export did not retain
+intermediate compiler layers. PRs never overwrite the trusted registry cache
+or consume the shared Actions cache budget, where large image exports previously
+evicted Rust release caches. A missing/cold registry cache still requires a full
+compile. The first publish after this Dockerfile change repopulates it.
+
+For a bounded dependency-cache check, build with `--target dependencies`, then
+repeat after changing only workspace package versions in the manifests/lock.
+The dependency Cargo step must say `CACHED`. On small local builders add
+`--build-arg CARGO_BUILD_JOBS=1`; this target never compiles the real server.
+Local native arm64 validation on 2026-10-27 compiled dependencies in 8m 10s.
+Changing all nine local package versions to `9.8.7` then completed in 3s with
+the Cargo layer `CACHED`; both invocations retained `--locked`.
+
+For timings, use `docker buildx build --progress=plain` with the same registry
+`--cache-from` as publishing, then repeat with only `NYXID_GIT_HASH` changed.
+Both Cargo `RUN` steps should report `CACHED` on the second build; the credential
+bundle stamp and final image metadata still change. Backend source changes
+cannot get that complete compiler-layer hit. No fixed speedup is assumed for
+cold builds or the single large crate: compare Cargo's reported build duration
+and BuildKit's per-layer durations on each native runner.
 
 The **frontend Dockerfile** (`frontend/Dockerfile`) uses a two-stage build:
-1. `node:20-alpine` builder with `npm ci` and `npm run build`
-2. `nginx:1.27-alpine` runtime serving the SPA with automatic `envsubst` for `BACKEND_URL`
+1. Node 22.23.2 builder with `npm ci` and `npm run build`
+2. Unprivileged nginx 1.27 runtime with a validating Python origin/policy renderer
 
 The frontend nginx config (`frontend/nginx.conf.template`) handles:
-- SPA fallback (`try_files $uri $uri/ /index.html`)
+- SPA fallback (`try_files $uri /index.html`)
 - Reverse proxy for `/api`, `/oauth`, `/.well-known`, `/health` to the backend
 - Gzip compression and cache headers for hashed assets
-- Security headers
+- Response-specific enforcing CSP and complete security headers on every location
+
+See [Production browser policy](BROWSER_SECURITY_POLICY.md) for the resource
+inventory, validated `NYXID_PUBLIC_ORIGIN`/`NYXID_BROWSER_CONNECT_ORIGINS`, HSTS
+boundary, credential routing, access-log redaction and production browser tests.
+Use its generated frontend configuration for direct static hosting too;
+handwritten static-server snippets below require the same response policies.
 
 The production SPA checks `/health` and `/build-version.json` on startup, then
 every ten minutes. Returning to the tab or reconnecting cannot trigger another
@@ -288,126 +357,9 @@ docker push registry.example.com/nyxid/frontend:v0.5.0
 
 ## Kubernetes Deployment
 
-Kubernetes manifests are provided in the `k8s/` directory for deploying NyxID to a Kubernetes cluster.
+This repository does not ship a `k8s/` directory or maintained Kubernetes manifests. Earlier instructions referenced files that are absent and have been removed. Kubernetes deployment requires operator-authored manifests and validation; it is not an installable repository example.
 
-### Prerequisites
-
-- Kubernetes cluster (1.27+)
-- `kubectl` configured with cluster access
-- nginx ingress controller installed
-- Container images pushed to an accessible registry
-- RSA key pair generated (see [RSA Key Management](#rsa-key-management))
-
-### Manifests Overview
-
-| File | Resource |
-|------|----------|
-| `k8s/namespace.yaml` | `chronoai-platform` namespace |
-| `k8s/configmap.yaml` | Non-secret configuration (URLs, JWT settings, rate limits) |
-| `k8s/secrets.yaml` | Secret templates (DB credentials, encryption key, JWT keys) |
-| `k8s/backend-deployment.yaml` | Backend Deployment (2 replicas), public ClusterIP Service, private headless Service, and internal-port NetworkPolicy |
-| `k8s/frontend-deployment.yaml` | Frontend Deployment (2 replicas) + ClusterIP Service |
-| `k8s/mongodb-statefulset.yaml` | MongoDB StatefulSet (1 replica) + headless Service + 10Gi PVC |
-| `k8s/ingress.yaml` | Ingress rules for the backend, long-lived node and MCP connections, and the frontend |
-
-### Step 1: Create Namespace
-
-```bash
-kubectl apply -f k8s/namespace.yaml
-```
-
-### Step 2: Create Secrets
-
-```bash
-# Create JWT key pair secret from files
-kubectl create secret generic nyxid-jwt-keys \
-  --namespace chronoai-platform \
-  --from-file=private.pem=keys/private.pem \
-  --from-file=public.pem=keys/public.pem
-
-# Create application secrets
-kubectl create secret generic nyxid-secrets \
-  --namespace chronoai-platform \
-  --from-literal=DATABASE_URL='mongodb://nyxid:YOUR_PASSWORD@nyxid-mongodb:27017/nyxid?authSource=admin' \
-  --from-literal=ENCRYPTION_KEY="$(openssl rand -hex 32)"
-
-# Create MongoDB credentials
-kubectl create secret generic nyxid-mongo-secret \
-  --namespace chronoai-platform \
-  --from-literal=MONGO_INITDB_ROOT_USERNAME=nyxid \
-  --from-literal=MONGO_INITDB_ROOT_PASSWORD='YOUR_STRONG_PASSWORD'
-```
-
-### Step 3: Update Configuration
-
-Edit `k8s/configmap.yaml` and replace the placeholder URLs:
-- `BASE_URL`: Your backend's public URL (e.g., `https://auth.yourdomain.com`)
-- `FRONTEND_URL`: Your frontend's public URL (e.g., `https://app.yourdomain.com`)
-- `JWT_ISSUER`: Defaults to `BASE_URL`; leave unset unless you need a custom issuer
-
-Edit `k8s/ingress.yaml` and replace `nyx-api.chrono-ai.fun` and
-`nyx.chrono-ai.fun` with your domains. Keep the internal port out of every
-Ingress. The `nyxid-backend-headless` Service is the only Service that exposes
-port 3002.
-
-### Step 4: Update Image References
-
-Edit `k8s/backend-deployment.yaml` and `k8s/frontend-deployment.yaml` to reference your registry:
-
-```yaml
-image: registry.example.com/nyxid/backend:v0.5.0  # replace
-image: registry.example.com/nyxid/frontend:v0.5.0  # replace
-```
-
-### Step 5: Apply the workload manifests
-
-```bash
-kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/mongodb-statefulset.yaml
-kubectl apply -f k8s/backend-deployment.yaml
-kubectl apply -f k8s/frontend-deployment.yaml
-kubectl apply -f k8s/ingress.yaml
-```
-
-Step 2 created the three Secret resources. Do not apply the placeholder values
-in `k8s/secrets.yaml` over those resources.
-
-### Step 6: Verify
-
-```bash
-# Check all resources
-kubectl get all -n chronoai-platform
-
-# Check backend health
-kubectl port-forward -n chronoai-platform svc/nyxid-backend 3001:3001
-curl http://localhost:3001/health
-
-# Check logs
-kubectl logs -n chronoai-platform -l app.kubernetes.io/name=nyxid-backend --tail=50
-```
-
-### Scaling
-
-```bash
-# Scale backend horizontally
-kubectl scale deployment nyxid-backend -n chronoai-platform --replicas=4
-
-# Scale frontend
-kubectl scale deployment nyxid-frontend -n chronoai-platform --replicas=3
-```
-
-All backend instances share the RSA keys, encryption key, and coordination
-settings through the same Kubernetes Secrets and ConfigMap. The downward API
-sets `POD_NAME`, `POD_IP`, and `INSTANCE_NAME` per replica. See
-[Scaling](#scaling) for the runtime model.
-
-### TLS with cert-manager
-
-If using cert-manager for automatic TLS certificates:
-
-1. Install cert-manager and create a `ClusterIssuer`
-2. Uncomment the `cert-manager.io/cluster-issuer` annotation in `k8s/ingress.yaml`
-3. cert-manager will automatically provision and renew certificates
+Use the production configuration and scaling guidance in this document to define Deployments, Services, secret mounts, database replica-set connectivity, health checks, long-lived WebSocket/MCP routing and TLS termination. Keep the backend internal port private and restricted to replicas; never expose it through public ingress. Share the supported key/configuration set across replicas. Validate your actual ingress headers and network policies. Maintained manifests are a separate deployment deliverable.
 
 ---
 
@@ -588,7 +540,7 @@ For managed MongoDB (Atlas):
 
 ## RSA Key Management
 
-NyxID uses a 4096-bit RSA key pair for JWT signing (RS256).
+NyxID signs JWTs with RS256. Generated key pairs use 4096-bit RSA; imported signing pairs and retained verification keys must contain at least 3072 bits. Startup validates that the signing private and public keys match. A partially missing pair is an error; development generation does not replace a surviving key.
 
 ### Generating Keys
 
@@ -613,20 +565,20 @@ In development (`ENVIRONMENT=development`), NyxID auto-generates keys if the con
 - Store keys outside the application directory (e.g., `/etc/nyxid/keys/`)
 - Use filesystem permissions to restrict access (`chmod 600`)
 - Mount keys as read-only volumes in Docker
-- Rotate keys periodically (update both files, restart the server)
+- Rotate keys with an overlap of prepared verification keys, using the sequence below
 - Back up the private key securely -- losing it invalidates all issued JWTs
 
 ### Key Rotation
 
-When rotating keys:
+JWT verification supports the active signer plus up to sixteen retained public keys through `JWT_RETAINED_PUBLIC_KEY_PATHS`. NyxID publishes their public keys in JWKS. Verification selects the exact known `kid` and requires RS256; missing or unknown key IDs fail without probing other keys.
 
-1. Generate a new key pair
-2. Replace the key files
-3. Restart the NyxID backend
-4. All existing JWTs signed with the old key will fail verification
-5. Users will need to re-authenticate (refresh tokens will also be invalidated)
+1. Generate the replacement pair in separate files. Keep the current signer active.
+2. Configure the replacement public key as a retained verifier on every replica and deploy all readers before changing any signer. Confirm that external JWT consumers can also consume the overlapping JWKS.
+3. Activate the replacement pair. Retain the old public key in `JWT_RETAINED_PUBLIC_KEY_PATHS` on every replica throughout this rollout.
+4. Keep the old verifier for the lifetime of every supported JWT class issued by the old signer, including verification leeway and any required external-consumer overlap. Retained public keys do not extend token expiry or bypass live user/session/consent checks.
+5. Remove a verifier only after its required overlap has elapsed. Removing it immediately invalidates still-valid JWTs naming that key. Independent Machine-provider trust roots are not rotated by this setting.
 
-To avoid downtime during rotation, implement a multi-key verification strategy at the application level (not yet supported -- planned for a future release).
+Private signing-key backups remain sensitive even after the public verifier is retired. This procedure describes the implemented configuration; no deployment or key retirement is performed by the remediation PR.
 
 ---
 
@@ -728,7 +680,9 @@ server {
 
 - TLS 1.2+ (TLS 1.3 preferred)
 - Valid certificate from a trusted CA (Let's Encrypt, etc.)
-- HSTS is enforced by NyxID's security headers middleware
+- HSTS is emitted only for configured HTTPS public origins (`BASE_URL` on the
+  backend, `NYXID_PUBLIC_ORIGIN` on frontend nginx), independent of request
+  Host/forwarded-proto headers. Neither subdomain inclusion nor preload is automatic.
 
 ### Let's Encrypt with Certbot
 
@@ -782,6 +736,10 @@ npm run build
 ---
 
 ## Health Checks and Monitoring
+
+Publish Images may reuse successful CI jobs from an identical pull-request
+merge tree on `main`; see [Main publish gate reuse](ci/MAIN_GATE_REUSE.md).
+Any uncertainty runs the complete release gate.
 
 ### Health Endpoint
 
@@ -1113,7 +1071,7 @@ https://auth.example.com/.well-known/openid-configuration
 | Flow                 | Authorization Code with PKCE (S256)                  |
 | Response Type        | `code`                                               |
 | Grant Types          | `authorization_code`, `refresh_token`                |
-| Token Signing        | RS256 (RSA SHA-256, 4096-bit key)                    |
+| Token Signing        | RS256 (generated RSA 4096-bit; imported minimum 3072-bit)                    |
 | Scopes               | `openid`, `profile`, `email`                         |
 | Client Auth Methods  | `client_secret_post`, `none` (for public clients)    |
 | ID Token Claims      | `sub`, `iss`, `aud`, `exp`, `iat`, `email`, `email_verified`, `name`, `picture`, `nonce` |
@@ -1595,7 +1553,7 @@ APPROVAL_EXPIRY_INTERVAL_SECS=10  # Check every 10 seconds
 
 - [ ] Monitor the `/health` endpoint
 - [ ] Review audit logs periodically
-- [ ] Rotate the `ENCRYPTION_KEY` deliberately, not on an unattended schedule, unless you have completed re-encryption of old-key data and `/health` shows zero fallback decrypts for the old key (see [SECURITY.md](SECURITY.md#key-rotation))
+- [ ] Rotate encryption keys through the ordered reader-first procedure and authenticated field inventory (see [SECURITY.md](SECURITY.md#key-rotation)). `/health` and zero observed fallback decrypts are operational signals, not retirement proof. Resolve old-format/provider/key dependencies and retained backups and rollback readers before retiring any key; cloud KMS internal-version uncertainty remains a blocker.
 - [ ] Rotate RSA keys on a schedule
 - [ ] Keep dependencies updated (`cargo update`, `npm update`)
 - [ ] Subscribe to security advisories for critical dependencies (argon2, jsonwebtoken, rsa, aes-gcm)

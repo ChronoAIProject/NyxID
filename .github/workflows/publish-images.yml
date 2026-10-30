@@ -30,32 +30,105 @@ concurrency:
 permissions:
   contents: read
   packages: write
-  pull-requests: write
+  pull-requests: read
   id-token: write
   attestations: write
 
 jobs:
+  # Resolve a previously successful PR/main gate before invoking the reusable
+  # workflow.  This job only permits reuse after comparing GitHub metadata and
+  # git trees; any uncertainty returns an empty reuse set and the normal full
+  # force-all gate runs.
+  gate-reuse:
+    name: Decide CI gate reuse
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      reuse: ${{ steps.decide.outputs.reuse }}
+      jobs: ${{ steps.decide.outputs.jobs }}
+      coverage: ${{ steps.decide.outputs.coverage }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install decision helper dependency
+        continue-on-error: true
+        run: pip install pyyaml==6.0.2
+      - name: Decide reusable jobs
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/ci_gate_reuse.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA" \
+            --event "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" \
+            --summary "$GITHUB_STEP_SUMMARY" > /tmp/ci-gate-reuse.json
+          cat /tmp/ci-gate-reuse.json
+          {
+            echo 'reuse<<CI_GATE_REUSE'
+            cat /tmp/ci-gate-reuse.json
+            echo CI_GATE_REUSE
+            echo 'jobs<<CI_GATE_REUSE_JOBS'
+            python3 -c 'import json; print(json.dumps(json.load(open("/tmp/ci-gate-reuse.json"))["jobs"], separators=(",", ":")))'
+            echo CI_GATE_REUSE_JOBS
+            echo "coverage=$(python3 -c 'import json; print(str("coverage-backend" in json.load(open("/tmp/ci-gate-reuse.json"))["jobs"]).lower())')"
+          } >> "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------------------
   # Reuse the CI workflow as a gate so we never publish a broken build.
   # ---------------------------------------------------------------------------
   ci-gate:
     name: CI Gate
+    needs: gate-reuse
+    # The lookup is an optimization only. If its runner/setup/API fails or it
+    # is skipped, an empty input makes ci.yml run the normal full gate.
+    if: ${{ !cancelled() }}
     uses: ./.github/workflows/ci.yml
     # Must cover every scope a ci.yml job requests, or this workflow fails to
     # start (checked on PRs by scripts/check-reusable-workflow-permissions.py).
     permissions:
       contents: read
+      actions: read
+      pull-requests: read
       attestations: read
     with:
       # The publish gate is a release validation, not a PR check, so path
       # filtering must not skip anything. Force the full suite to run
       # regardless of which files were touched in the merge commit.
       force-all: true
+      reuse-pr-run: ${{ needs.gate-reuse.outputs.reuse }}
+      reuse-jobs: ${{ needs.gate-reuse.outputs.jobs }}
+
+  # Coverage's threshold result is reusable when the tested tree is identical.
+  # On a reused main gate, publish the backend baseline separately so this
+  # expensive measurement never blocks image manifests. The full gate retains
+  # its existing baseline behavior whenever reuse is unavailable.
+  coverage-baseline:
+    name: Coverage baseline
+    needs: gate-reuse
+    if: >-
+      !cancelled() && needs.gate-reuse.result == 'success' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.gate-reuse.outputs.coverage == 'true'
+    uses: ./.github/workflows/backend-tests.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      coverage: true
 
   # ---------------------------------------------------------------------------
   # Build each component for each platform on its native runner while CI runs.
-  # Each job pushes by digest only (no tags). A failed CI gate leaves no tagged
-  # release because `merge` waits for both the builds and the gate.
+  # Each image is pushed by digest only. Backend buildcache-* references may
+  # update during builds; release tags wait for both the builds and the CI gate.
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
@@ -75,6 +148,9 @@ jobs:
           - component: backend
             context: .
             file: backend/Dockerfile
+            # The dependency layer defaults to two jobs; the final server
+            # compile uses four native vCPUs on both release runners.
+            cargo_build_args: CARGO_BUILD_JOBS=4
           - component: frontend
             # Repo-root context (not frontend/): the frontend image needs the
             # docs source at docs/site, read by the vite docs-sync publish-gate
@@ -93,6 +169,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Prepare backend image memory reserve
+        if: matrix.component == 'backend'
+        timeout-minutes: 5
+        run: bash .github/scripts/prepare-backend-runner.sh
+
       - name: Compute lowercase image repo
         id: repo
         run: |
@@ -109,7 +190,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Labels only -- tags are applied by the merge job on the manifest list.
+      # Labels only -- release tags are applied by merge on the manifest list.
       - name: Extract metadata (labels)
         id: meta
         uses: docker/metadata-action@v6
@@ -138,9 +219,16 @@ jobs:
           # build-args for telemetry are needed here.
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
+            ${{ matrix.cargo_build_args }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
+          # Image layer caches exceed the shared 10 GB Actions cache budget and
+          # evicted the Rust release caches, so every component now writes a
+          # per-platform registry cache (backend did first). Only this trusted
+          # publish workflow writes it. Imports use the registry exclusively so
+          # retired Actions cache indexes cannot reference pruned blobs.
+          cache-from: |
+            type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }}
+          cache-to: type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }},mode=max,ignore-error=true
           provenance: false
 
       - name: Verify machine browser and desktop

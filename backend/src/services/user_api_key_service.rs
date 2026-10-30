@@ -2,6 +2,7 @@ use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use mongodb::{Database, options::ReturnDocument};
+use std::future::IntoFuture;
 use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -153,23 +154,8 @@ pub async fn create_api_key(
     let api_key = build_api_key(encryption_keys, user_id, params).await?;
     crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .insert_one(&api_key)
-        .await?;
-    Ok(api_key)
-}
-
-/// Create an API key with a caller-reserved UUID.
-pub async fn create_api_key_with_id(
-    db: &Database,
-    encryption_keys: &EncryptionKeys,
-    user_id: &str,
-    id: &str,
-    params: CreateApiKeyParams<'_>,
-) -> AppResult<UserApiKey> {
-    let mut api_key = build_api_key(encryption_keys, user_id, params).await?;
-    api_key.id = id.to_string();
-    crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-        .insert_one(&api_key)
-        .await?;
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)?;
     Ok(api_key)
 }
 
@@ -177,6 +163,21 @@ pub async fn create_api_key_with_id(
 pub async fn build_api_key(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
+    params: CreateApiKeyParams<'_>,
+) -> AppResult<UserApiKey> {
+    build_api_key_with_id(
+        encryption_keys,
+        user_id,
+        &Uuid::new_v4().to_string(),
+        params,
+    )
+    .await
+}
+
+pub(crate) async fn build_api_key_with_id(
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    id: &str,
     params: CreateApiKeyParams<'_>,
 ) -> AppResult<UserApiKey> {
     if params.label.is_empty() || params.label.len() > 200 {
@@ -211,11 +212,34 @@ pub async fn build_api_key(
         params.credential
     };
 
-    let credential_encrypted = encrypt_optional_secret(encryption_keys, credential_value).await?;
-    let access_token_encrypted =
-        encrypt_optional_secret(encryption_keys, access_token.unwrap_or("")).await?;
-    let refresh_token_encrypted =
-        encrypt_optional_secret(encryption_keys, params.refresh_token.unwrap_or("")).await?;
+    let mut versions = Default::default();
+    let credential_encrypted = encrypt_optional_secret(
+        encryption_keys,
+        id,
+        user_id,
+        "credential_encrypted",
+        credential_value,
+        &mut versions,
+    )
+    .await?;
+    let access_token_encrypted = encrypt_optional_secret(
+        encryption_keys,
+        id,
+        user_id,
+        "access_token_encrypted",
+        access_token.unwrap_or(""),
+        &mut versions,
+    )
+    .await?;
+    let refresh_token_encrypted = encrypt_optional_secret(
+        encryption_keys,
+        id,
+        user_id,
+        "refresh_token_encrypted",
+        params.refresh_token.unwrap_or(""),
+        &mut versions,
+    )
+    .await?;
 
     // BYO Custom App credentials (Lark / Feishu / Twitter multi-connection).
     // Caller has already validated paired presence; we treat them as
@@ -229,10 +253,24 @@ pub async fn build_api_key(
         }
         _ => {}
     }
-    let user_oauth_client_id_encrypted =
-        encrypt_optional_secret(encryption_keys, params.oauth_client_id.unwrap_or("")).await?;
-    let user_oauth_client_secret_encrypted =
-        encrypt_optional_secret(encryption_keys, params.oauth_client_secret.unwrap_or("")).await?;
+    let user_oauth_client_id_encrypted = encrypt_optional_secret(
+        encryption_keys,
+        id,
+        user_id,
+        "user_oauth_client_id_encrypted",
+        params.oauth_client_id.unwrap_or(""),
+        &mut versions,
+    )
+    .await?;
+    let user_oauth_client_secret_encrypted = encrypt_optional_secret(
+        encryption_keys,
+        id,
+        user_id,
+        "user_oauth_client_secret_encrypted",
+        params.oauth_client_secret.unwrap_or(""),
+        &mut versions,
+    )
+    .await?;
 
     let now = Utc::now();
 
@@ -253,9 +291,10 @@ pub async fn build_api_key(
     };
 
     let api_key = UserApiKey {
+        secret_context_versions: versions,
         oauth_app_observation: None,
         credential_source,
-        id: Uuid::new_v4().to_string(),
+        id: id.to_string(),
         user_id: user_id.to_string(),
         label: params.label.to_string(),
         credential_type: params.credential_type.to_string(),
@@ -293,13 +332,18 @@ pub async fn insert_api_key_in_session(
 ) -> AppResult<()> {
     let collection =
         crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME);
-    collection.insert_one(api_key).session(session).await?;
+    collection
+        .insert_one(api_key)
+        .session(session)
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)?;
     Ok(())
 }
 
 /// Create a new API key by copying encrypted fields from an existing provider token.
 pub async fn create_api_key_from_provider_token(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     label: &str,
     provider_config_id: &str,
@@ -311,34 +355,112 @@ pub async fn create_api_key_from_provider_token(
         ));
     }
 
-    let collection =
-        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME);
-
-    // Reuse an existing UserApiKey that already points at this provider token.
-    // The `{source, source_id}` unique partial index enforces the invariant
-    // "one UserApiKey per UserProviderToken per user", so a second call would
-    // otherwise hit a duplicate-key error and surface as HTTP 500. Multiple
-    // UserService rows can share the returned api_key, which is the desired
-    // behaviour when a user registers several services backed by the same
-    // provider credential (e.g. two `llm-openai` services with different
-    // endpoint URLs).
-    if let Some(existing) = collection
-        .find_one(doc! {
-            "user_id": user_id,
-            "source": "user_created",
-            "source_id": &provider_token.id,
-        })
+    use super::credential_record_service as records;
+    let raw = db
+        .collection::<bson::Document>(USER_PROVIDER_TOKENS)
+        .find_one(doc! {"_id":&provider_token.id})
         .await?
+        .ok_or_else(|| AppError::Conflict("Provider credential is no longer available".into()))?;
+    let current: UserProviderToken = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid provider credential storage".into()))?;
+    // The caller's authorization/source snapshot must still be the source
+    // being rebound. A model comparison is only a freshness check; raw BSON
+    // remains the transaction's exact storage CAS evidence.
+    if current.provider_config_id != provider_config_id
+        || bson::to_document(&current)
+            .map_err(|_| AppError::Internal("Invalid provider credential storage".into()))?
+            != bson::to_document(provider_token)
+                .map_err(|_| AppError::Internal("Invalid provider credential storage".into()))?
+        || matches!(
+            current.status.as_str(),
+            "revoked" | "failed" | "refresh_failed"
+        )
     {
-        return Ok(existing);
+        return Err(AppError::Conflict(
+            "Provider credential changed before copying".into(),
+        ));
     }
-
-    let api_key = api_key_from_provider_token(user_id, label, provider_config_id, provider_token)?;
-    collection.insert_one(&api_key).await?;
-    Ok(api_key)
+    let api_key = api_key_from_provider_token(
+        encryption_keys,
+        user_id,
+        label,
+        provider_config_id,
+        provider_token,
+    )
+    .await?;
+    let filter = records::exact_source_filter(USER_PROVIDER_TOKENS, &raw)?;
+    let db = super::transaction_service::durable_database(db);
+    let transaction_db = db.clone();
+    let user_id = user_id.to_owned();
+    let provider_token = provider_token.clone();
+    super::service_history::transaction::run_send(
+        &transaction_db,
+        encryption_keys,
+        move |session, _encryption_keys| {
+            let db = db.clone();
+            let filter = filter.clone();
+            let provider_token = provider_token.clone();
+            let user_id = user_id.clone();
+            let api_key = api_key.clone();
+            Box::pin(async move {
+                let operation: AppResult<UserApiKey> = async {
+                    // Writing the actual source contends with refresh/replacement/
+                    // disconnect; snapshot reads plus an owner fence alone do not.
+                    let source = db
+                        .collection::<bson::Document>(USER_PROVIDER_TOKENS)
+                        .update_one(
+                            filter.clone(),
+                            doc! {"$inc":{"credential_copy_fence":1_i64}},
+                        )
+                        .session(&mut **session)
+                        .await?;
+                    if source.matched_count != 1 {
+                        return Err(AppError::Conflict(
+                            "Provider credential changed while copying".into(),
+                        ));
+                    }
+                    super::erasure_admission::credential_change_in_session(
+                        &db,
+                        &provider_token.user_id,
+                        session,
+                    )
+                    .await?;
+                    if provider_token.user_id != user_id {
+                        super::erasure_admission::credential_change_in_session(
+                            &db, &user_id, session,
+                        )
+                        .await?;
+                    }
+                    let collection =
+                        super::service_history::collection::<UserApiKey>(&db, COLLECTION_NAME);
+                    // Reuse is covered by the same live source fence. A caller with a
+                    // stale source cannot bypass it merely because a prior key exists.
+                    if let Some(existing) = collection
+                    .find_one(doc! {
+                        "user_id":&user_id,"source":"user_created","source_id":&provider_token.id,
+                    })
+                    .session(&mut *session)
+                    .await?
+                {
+                    return Ok(existing);
+                }
+                    collection
+                        .insert_one(&api_key)
+                        .session(&mut *session)
+                        .await?;
+                    Ok(api_key.clone())
+                }
+                .await;
+                super::api_key_mutation_service::transaction_result(operation)
+            })
+        },
+    )
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
-pub(crate) fn api_key_from_provider_token(
+pub(crate) async fn api_key_from_provider_token(
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     label: &str,
     provider_config_id: &str,
@@ -346,20 +468,67 @@ pub(crate) fn api_key_from_provider_token(
 ) -> AppResult<UserApiKey> {
     let credential_type = provider_token_type_to_api_key_type(&provider_token.token_type)?;
     let now = Utc::now();
+    let id = Uuid::new_v4().to_string();
+    let mut versions = Default::default();
+    use super::credential_record_service::{self as records, CredentialRecord};
+    let source = CredentialRecord::token(provider_token);
+    let credential_encrypted = records::rebind_optional(
+        encryption_keys,
+        &source,
+        "api_key_encrypted",
+        provider_token.api_key_encrypted.as_deref(),
+        records::FieldDestination {
+            collection: COLLECTION_NAME,
+            record_id: &id,
+            owner_id: user_id,
+            field: "credential_encrypted",
+        },
+        &mut versions,
+    )
+    .await?;
+    let access_token_encrypted = records::rebind_optional(
+        encryption_keys,
+        &source,
+        "access_token_encrypted",
+        provider_token.access_token_encrypted.as_deref(),
+        records::FieldDestination {
+            collection: COLLECTION_NAME,
+            record_id: &id,
+            owner_id: user_id,
+            field: "access_token_encrypted",
+        },
+        &mut versions,
+    )
+    .await?;
+    let refresh_token_encrypted = records::rebind_optional(
+        encryption_keys,
+        &source,
+        "refresh_token_encrypted",
+        provider_token.refresh_token_encrypted.as_deref(),
+        records::FieldDestination {
+            collection: COLLECTION_NAME,
+            record_id: &id,
+            owner_id: user_id,
+            field: "refresh_token_encrypted",
+        },
+        &mut versions,
+    )
+    .await?;
 
     let api_key = UserApiKey {
+        secret_context_versions: versions,
         oauth_app_observation: (credential_type == "oauth2").then(|| {
             OAuthAppSource::from_credential_owner(provider_token.credential_user_id.as_deref())
                 .observation(default_credential_epoch())
         }),
         credential_source: None,
-        id: Uuid::new_v4().to_string(),
+        id,
         user_id: user_id.to_string(),
         label: label.to_string(),
         credential_type: credential_type.to_string(),
-        credential_encrypted: provider_token.api_key_encrypted.clone(),
-        access_token_encrypted: provider_token.access_token_encrypted.clone(),
-        refresh_token_encrypted: provider_token.refresh_token_encrypted.clone(),
+        credential_encrypted,
+        access_token_encrypted,
+        refresh_token_encrypted,
         token_scopes: provider_token.token_scopes.clone(),
         expires_at: provider_token.expires_at,
         provider_config_id: Some(provider_config_id.to_string()),
@@ -395,19 +564,37 @@ pub(crate) fn api_key_from_provider_token(
 /// token (the "B2" failure mode in the design doc).
 pub async fn sync_provider_token_to_api_keys(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_config_id: &str,
 ) -> AppResult<()> {
-    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, None, false).await
+    sync_provider_token_to_api_keys_impl(
+        db,
+        encryption_keys,
+        user_id,
+        provider_config_id,
+        None,
+        false,
+    )
+    .await
 }
 
 /// Operational refresh is explicit: reconciliation and replacement callers keep normal capture.
 pub async fn sync_refreshed_provider_token_to_api_keys(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_config_id: &str,
 ) -> AppResult<()> {
-    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, None, true).await
+    sync_provider_token_to_api_keys_impl(
+        db,
+        encryption_keys,
+        user_id,
+        provider_config_id,
+        None,
+        true,
+    )
+    .await
 }
 
 /// Fresh-authorization variant: identical to
@@ -423,12 +610,14 @@ pub async fn sync_refreshed_provider_token_to_api_keys(
 /// initiate.
 pub async fn sync_provider_token_to_api_keys_after_authorization(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_config_id: &str,
 ) -> AppResult<()> {
     let authorized_at = bson::DateTime::from_chrono(Utc::now());
     sync_provider_token_to_api_keys_impl(
         db,
+        encryption_keys,
         user_id,
         provider_config_id,
         Some(authorized_at),
@@ -439,172 +628,167 @@ pub async fn sync_provider_token_to_api_keys_after_authorization(
 
 /// Apply an explicitly authorized API-key replacement in the transaction that
 /// stores its provider token. The supplied snapshot avoids syncing a later login.
+async fn rebound_provider_fields(
+    keys: &EncryptionKeys,
+    token: &UserProviderToken,
+    target: &UserApiKey,
+) -> AppResult<bson::Document> {
+    use super::credential_record_service::{self as records, CredentialRecord};
+    let mut versions = target.secret_context_versions.clone();
+    let mut set = bson::Document::new();
+    for (source, target_field, ciphertext) in [
+        (
+            "api_key_encrypted",
+            "credential_encrypted",
+            token.api_key_encrypted.as_deref(),
+        ),
+        (
+            "access_token_encrypted",
+            "access_token_encrypted",
+            token.access_token_encrypted.as_deref(),
+        ),
+        (
+            "refresh_token_encrypted",
+            "refresh_token_encrypted",
+            token.refresh_token_encrypted.as_deref(),
+        ),
+    ] {
+        let rebound = records::rebind_optional(
+            keys,
+            &CredentialRecord::token(token),
+            source,
+            ciphertext,
+            records::FieldDestination {
+                collection: COLLECTION_NAME,
+                record_id: &target.id,
+                owner_id: &target.user_id,
+                field: target_field,
+            },
+            &mut versions,
+        )
+        .await?;
+        set.insert(target_field, optional_binary_bson(rebound.as_ref()));
+    }
+    set.insert(
+        records::VERSIONS,
+        bson::to_bson(&versions)
+            .map_err(|_| AppError::Internal("Invalid credential version map".into()))?,
+    );
+    set.insert("source_id", &token.id);
+    Ok(set)
+}
+
 pub(crate) async fn replace_provider_api_key_in_transaction(
-    db: &mongodb::Database,
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
     session: &mut crate::services::service_history::transaction::Transaction,
     token: &UserProviderToken,
 ) -> AppResult<()> {
-    let filter = doc! {
-        "user_id": &token.user_id, "provider_config_id": &token.provider_config_id,
-        "connection_id": null, "status": {"$nin": ["revoked", "failed"]},
-        "credential_type": {"$ne": "node_managed"},
-    };
-    let keys = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME);
-    keys.update_many(
-        filter.clone(),
-        vec![doc! {"$set": {
-            "credential_epoch": credential_epoch_add_expr(),
-        }}],
-    )
-    .session(&mut *session)
-    .await?;
-    keys.update_many(
-        filter,
-        doc! {"$set": {
-            "credential_type": "api_key",
-            "credential_encrypted": optional_binary_bson(token.api_key_encrypted.as_ref()),
-            "access_token_encrypted": bson::Bson::Null,
-            "refresh_token_encrypted": bson::Bson::Null,
-            "token_scopes": bson::Bson::Null, "expires_at": bson::Bson::Null,
-            "status": "active", "error_message": bson::Bson::Null,
-            "updated_at": bson::DateTime::from_chrono(token.updated_at),
-            "last_authorized_at": bson::DateTime::from_chrono(token.updated_at),
-        }},
-    )
-    .session(&mut *session)
-    .await?;
+    let mut cursor=crate::services::service_history::collection::<UserApiKey>(db,COLLECTION_NAME).find(doc! {
+        "user_id":&token.user_id,"provider_config_id":&token.provider_config_id,"connection_id":null,
+        "status":{"$nin":["revoked","failed"]},"credential_type":{"$ne":"node_managed"}
+    }).session(&mut *session).await?;
+    while cursor.advance(&mut *session).await? {
+        let key = cursor.deserialize_current()?;
+        let mut set = rebound_provider_fields(encryption_keys, token, &key).await?;
+        set.extend(doc! {"credential_type":"api_key","token_scopes":bson::Bson::Null,"expires_at":bson::Bson::Null,
+            "status":"active","error_message":bson::Bson::Null,"updated_at":bson::DateTime::from_chrono(token.updated_at),
+            "last_authorized_at":bson::DateTime::from_chrono(token.updated_at)});
+        let mut literal = bson::Document::new();
+        for (field, value) in set {
+            literal.insert(field, doc! {"$literal":value});
+        }
+        literal.insert("credential_epoch", credential_epoch_add_expr());
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&key.id,"user_id":&key.user_id},
+                vec![doc! {"$set":literal}],
+            )
+            .session(&mut *session)
+            .await?;
+    }
     Ok(())
 }
 
 async fn sync_provider_token_to_api_keys_impl(
-    db: &mongodb::Database,
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_config_id: &str,
     last_authorized_at: Option<bson::DateTime>,
     routine_refresh: bool,
 ) -> AppResult<()> {
-    // Exclude terminal failure keys from provider-token sync. Without
-    // this filter, a placeholder that was revoked via the
-    // `only_if_pending` cleanup path (e.g. the cli-pair flow's
-    // unload/cancel race against the OAuth callback) would be
-    // resurrected as the callback's `sync_provider_token_to_api_keys`
-    // blindly rewrites every key for the provider back to the
-    // token's status. `revoked` and `failed` are terminal by design:
-    // once explicit cleanup or provider denial took effect, a later
-    // provider callback must not flip that row back to `active`.
-    //
-    // `connection_id: null` filter scopes this to legacy keys only
-    // (B2 fix). Multi-connection keys deliberately have `connection_id:
-    // Some(uuid)` and are excluded from the legacy fan-out path.
-    let keys: Vec<UserApiKey> =
-        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-            .find(doc! {
-                "user_id": user_id,
-                "provider_config_id": provider_config_id,
-                "status": { "$nin": ["revoked", "failed"] },
-                "connection_id": null,
-            })
-            .await?
-            .try_collect()
-            .await?;
-
-    if keys.is_empty() {
-        return Ok(());
-    }
-
-    let provider_token = db
-        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-        .find_one(doc! {
-            "user_id": user_id,
-            "provider_config_id": provider_config_id,
-            "status": { "$in": ["active", "expired", "refresh_failed"] },
+    // Stream the inventory; each destination and its authenticated source are
+    // reread in one snapshot/majority transaction before committing a copy.
+    let mut cursor = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find(doc! {
+            "user_id":&user_id,"provider_config_id":&provider_config_id,"connection_id":null,
+            "status":{"$nin":["revoked","failed"]},"credential_type":{"$ne":"node_managed"}
         })
+        .projection(doc! {"_id":1})
+        .sort(doc! {"_id":1})
+        .batch_size(64)
         .await?;
-
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    for key in keys {
-        if key.credential_type == "node_managed" {
-            continue;
-        }
-
-        let mut set_doc = if let Some(ref token) = provider_token {
-            doc! {
-                "credential_type": provider_token_type_to_api_key_type(&token.token_type)?,
-                "credential_encrypted": optional_binary_bson(token.api_key_encrypted.as_ref()),
-                "access_token_encrypted": optional_binary_bson(token.access_token_encrypted.as_ref()),
-                "refresh_token_encrypted": optional_binary_bson(token.refresh_token_encrypted.as_ref()),
-                "token_scopes": optional_string_bson(token.token_scopes.as_deref()),
-                "expires_at": optional_datetime_bson(token.expires_at),
-                "status": token.status.as_str(),
-                "last_used_at": optional_datetime_bson(token.last_used_at),
-                "error_message": optional_string_bson(token.error_message.as_deref()),
-                "updated_at": &now,
-                "oauth_app_observation": if token.token_type == "oauth2" {
-                    doc! {
-                        "source": OAuthAppSource::from_credential_owner(token.credential_user_id.as_deref()).as_str(),
-                        "credential_epoch": key.credential_epoch,
-                        "observed_at": &now,
-                    }.into()
-                } else { bson::Bson::Null },
-            }
-        } else {
-            doc! {
-                "credential_encrypted": bson::Bson::Null,
-                "access_token_encrypted": bson::Bson::Null,
-                "refresh_token_encrypted": bson::Bson::Null,
-                "token_scopes": bson::Bson::Null,
-                "expires_at": bson::Bson::Null,
-                "status": "revoked",
-                "error_message": bson::Bson::Null,
-                "updated_at": &now,
-            }
-        };
-
-        // Stamp only on the fresh-auth path (NyxID#917) — refresh-only syncs
-        // pass `None` and must not advance the manage-scopes completion
-        // signal that the wizard polls for.
-        if let Some(ts) = last_authorized_at.as_ref() {
-            set_doc.insert("last_authorized_at", ts);
-        }
-
-        if last_authorized_at.is_some() {
-            // Literalize provider strings so a leading '$' cannot become an aggregation path.
-            // Epoch and replacement now commit atomically in the existing pipeline semantics.
-            let mut literal_set = bson::Document::new();
-            for (field, value) in set_doc {
-                literal_set.insert(field, doc! { "$literal": value });
-            }
-            literal_set.insert("credential_epoch", credential_epoch_add_expr());
-            literal_set.insert(
-                "oauth_app_observation",
-                oauth_app_observation_expr(
-                    provider_token
-                        .as_ref()
-                        .filter(|token| token.token_type == "oauth2")
-                        .map(|token| {
-                            OAuthAppSource::from_credential_owner(
-                                token.credential_user_id.as_deref(),
-                            )
-                        }),
-                    now,
-                ),
-            );
-            crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-                .update_one(doc! { "_id": &key.id }, vec![doc! { "$set": literal_set }])
-                .await?;
-        } else {
-            let write =
-                crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-                    .update_one(doc! { "_id": &key.id }, doc! { "$set": set_doc });
-            if routine_refresh {
-                write.routine_refresh().await?;
-            } else {
-                write.await?;
-            }
-        }
+    while let Some(selected) = cursor.try_next().await? {
+        let id = selected
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid credential identity".into()))?
+            .to_owned();
+        let transaction_db = db.clone();
+        let db = db.clone();
+        let user_id = user_id.to_owned();
+        let provider_config_id = provider_config_id.to_owned();
+        super::service_history::transaction::run_send(&transaction_db, encryption_keys, move |session, encryption_keys| {
+            let db = db.clone();
+            let id = id.clone();
+            let user_id = user_id.clone();
+            let provider_config_id = provider_config_id.clone();
+            Box::pin(async move {
+            let result:AppResult<()>=async {
+                let Some(raw)=db.collection::<bson::Document>(COLLECTION_NAME).find_one(doc! {
+                    "_id":&id,"user_id":&user_id,"provider_config_id":&provider_config_id,"connection_id":null,
+                    "status":{"$nin":["revoked","failed"]},"credential_type":{"$ne":"node_managed"}
+                }).session(&mut *session).await? else {return Ok(());};
+                let key:UserApiKey=bson::from_document(raw.clone()).map_err(|_|AppError::Internal("Invalid credential storage".into()))?;
+                let token=db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS).find_one(doc! {
+                    "user_id":&user_id,"provider_config_id":&provider_config_id,"status":{"$in":["active","expired","refresh_failed"]}
+                }).session(&mut *session).await?;
+                let now=bson::DateTime::from_chrono(Utc::now());
+                let mut set=if let Some(token)=&token {
+                    let mut set=rebound_provider_fields(encryption_keys,token,&key).await?;
+                    set.extend(doc! {"credential_type":provider_token_type_to_api_key_type(&token.token_type)?,
+                        "token_scopes":optional_string_bson(token.token_scopes.as_deref()),"expires_at":optional_datetime_bson(token.expires_at),
+                        "status":&token.status,"last_used_at":optional_datetime_bson(token.last_used_at),
+                        "error_message":optional_string_bson(token.error_message.as_deref()),"updated_at":now,
+                        "oauth_app_observation":if token.token_type=="oauth2" {doc! {
+                            "source":OAuthAppSource::from_credential_owner(token.credential_user_id.as_deref()).as_str(),
+                            "credential_epoch":key.credential_epoch,"observed_at":now}.into()} else {bson::Bson::Null}});
+                    set
+                } else {
+                    let mut versions=key.secret_context_versions.clone();
+                    for field in ["credential_encrypted","access_token_encrypted","refresh_token_encrypted"] {versions.remove(field);}
+                    doc! {"credential_encrypted":bson::Bson::Null,"access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
+                        "secret_context_versions":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?,
+                        "token_scopes":bson::Bson::Null,"expires_at":bson::Bson::Null,"status":"revoked","error_message":bson::Bson::Null,"updated_at":now}
+                };
+                let filter=super::credential_record_service::exact_source_filter(COLLECTION_NAME,&raw)?;
+                let write=if let Some(stamp)=last_authorized_at {
+                    set.insert("last_authorized_at",stamp);
+                    let mut literal=bson::Document::new();for (field,value) in set {literal.insert(field,doc! {"$literal":value});}
+                    literal.insert("credential_epoch",credential_epoch_add_expr());
+                    literal.insert("oauth_app_observation",oauth_app_observation_expr(token.as_ref().filter(|t|t.token_type=="oauth2")
+                        .map(|t|OAuthAppSource::from_credential_owner(t.credential_user_id.as_deref())),now));
+                    super::service_history::collection::<UserApiKey>(&db,COLLECTION_NAME).update_one(filter,vec![doc! {"$set":literal}])
+                } else { super::service_history::collection::<UserApiKey>(&db,COLLECTION_NAME).update_one(filter,doc! {"$set":set}) };
+                let write=if routine_refresh {write.routine_refresh()}else{write};
+                if write.session(&mut *session).await?.matched_count!=1 {return Err(AppError::Conflict("Credential changed during provider synchronization".into()));}
+                Ok(())
+            }.await;
+            super::api_key_mutation_service::transaction_result(result)
+            })
+        }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
     }
-
     Ok(())
 }
 
@@ -638,16 +822,53 @@ pub async fn write_oauth_tokens_to_key(
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
     app_source: Option<OAuthAppSource>,
 ) -> AppResult<()> {
-    let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
-    let refresh_enc = match refresh_token {
-        Some(rt) if !rt.is_empty() => Some(encryption_keys.encrypt(rt.as_bytes()).await?),
-        _ => None,
+    use super::credential_record_service as records;
+    let selector = doc! {"connection_id":connection_id,"status":{"$nin":["revoked","failed"]}};
+    let Some(raw) = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(selector)
+        .await?
+    else {
+        return Err(AppError::NotFound(
+            "OAuth connection is no longer writable".into(),
+        ));
     };
-
+    let key: UserApiKey = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
+    let predicate = records::exact_source_filter(COLLECTION_NAME, &raw)?;
+    let mut versions = key.secret_context_versions.clone();
+    let access_enc = records::encrypt(
+        encryption_keys,
+        COLLECTION_NAME,
+        &key.id,
+        &key.user_id,
+        "access_token_encrypted",
+        access_token.as_bytes(),
+    )
+    .await?;
+    records::mark_version(&mut versions, encryption_keys, "access_token_encrypted");
+    let refresh_enc = match refresh_token.filter(|value| !value.is_empty()) {
+        Some(rt) => {
+            let encrypted = records::encrypt(
+                encryption_keys,
+                COLLECTION_NAME,
+                &key.id,
+                &key.user_id,
+                "refresh_token_encrypted",
+                rt.as_bytes(),
+            )
+            .await?;
+            records::mark_version(&mut versions, encryption_keys, "refresh_token_encrypted");
+            Some(encrypted)
+        }
+        None => None,
+    };
+    versions.remove("credential_encrypted");
     let now = bson::DateTime::from_chrono(Utc::now());
 
     let mut set_doc = doc! {
         "credential_type": "oauth2",
+        "secret_context_versions":{"$literal":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?},
         "access_token_encrypted": optional_binary_bson(Some(&access_enc)),
         "expires_at": optional_datetime_bson(expires_at),
         "status": "active",
@@ -673,7 +894,7 @@ pub async fn write_oauth_tokens_to_key(
         );
     }
     if let Some(scopes) = token_scopes {
-        set_doc.insert("token_scopes", optional_string_bson(Some(scopes)));
+        set_doc.insert("token_scopes", doc! {"$literal":scopes});
     }
     // Preserve the existing `credential_encrypted` (which is None for
     // OAuth keys); explicit unset so a previously-set credential cannot
@@ -692,18 +913,22 @@ pub async fn write_oauth_tokens_to_key(
     // callback must not resurrect it back to `active`. A fresh add
     // (`pending_auth`) and a re-authorization of a live connection
     // (`active` / `expired`) are both still matched.
-    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-        .update_one(
-            doc! {
-                "connection_id": connection_id,
-                "status": { "$nin": ["revoked", "failed"] },
-            },
-            vec![
-                doc! { "$set": set_doc },
-                doc! { "$unset": ["oauth_attempt_nonce"] },
-            ],
-        )
-        .await?;
+    let result = super::personal_erasure_service::issuance::key_mutation(
+        doc! {"connection_id":connection_id},
+        &set_doc.clone(),
+        access_token,
+        refresh_token,
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+            .update_one(
+                predicate,
+                vec![
+                    doc! { "$set": set_doc },
+                    doc! { "$unset": ["oauth_attempt_nonce"] },
+                ],
+            )
+            .into_future(),
+    )
+    .await??;
 
     if result.matched_count == 0 {
         return Err(AppError::NotFound(format!(
@@ -734,14 +959,51 @@ pub async fn write_chat_oauth_tokens_to_key(
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
     app_source: Option<OAuthAppSource>,
 ) -> AppResult<bool> {
-    let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
-    let refresh_enc = match refresh_token {
-        Some(rt) if !rt.is_empty() => Some(encryption_keys.encrypt(rt.as_bytes()).await?),
-        _ => None,
+    use super::credential_record_service as records;
+    let mut selector = doc! {"connection_id":connection_id,"status":{"$nin":["revoked","failed"]}};
+    selector.insert("oauth_attempt_nonce", attempt_nonce);
+    let Some(raw) = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(selector)
+        .await?
+    else {
+        return Ok(false);
     };
+    let key: UserApiKey = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
+    let predicate = records::exact_source_filter(COLLECTION_NAME, &raw)?;
+    let mut versions = key.secret_context_versions.clone();
+    let access_enc = records::encrypt(
+        encryption_keys,
+        COLLECTION_NAME,
+        &key.id,
+        &key.user_id,
+        "access_token_encrypted",
+        access_token.as_bytes(),
+    )
+    .await?;
+    records::mark_version(&mut versions, encryption_keys, "access_token_encrypted");
+    let refresh_enc = match refresh_token.filter(|value| !value.is_empty()) {
+        Some(rt) => {
+            let encrypted = records::encrypt(
+                encryption_keys,
+                COLLECTION_NAME,
+                &key.id,
+                &key.user_id,
+                "refresh_token_encrypted",
+                rt.as_bytes(),
+            )
+            .await?;
+            records::mark_version(&mut versions, encryption_keys, "refresh_token_encrypted");
+            Some(encrypted)
+        }
+        None => None,
+    };
+    versions.remove("credential_encrypted");
     let now = bson::DateTime::from_chrono(Utc::now());
     let mut set_doc = doc! {
         "credential_type": "oauth2",
+        "secret_context_versions":{"$literal":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?},
         "access_token_encrypted": optional_binary_bson(Some(&access_enc)),
         "expires_at": optional_datetime_bson(expires_at),
         "status": "active",
@@ -756,7 +1018,7 @@ pub async fn write_chat_oauth_tokens_to_key(
         );
     }
     if let Some(scopes) = token_scopes {
-        set_doc.insert("token_scopes", optional_string_bson(Some(scopes)));
+        set_doc.insert("token_scopes", doc! {"$literal":scopes});
     }
     set_doc.insert("credential_encrypted", bson::Bson::Null);
     set_doc.insert("credential_epoch", credential_epoch_add_expr());
@@ -765,19 +1027,22 @@ pub async fn write_chat_oauth_tokens_to_key(
         oauth_app_observation_expr(app_source, now),
     );
 
-    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-        .update_one(
-            doc! {
-                "connection_id": connection_id,
-                "oauth_attempt_nonce": attempt_nonce,
-                "status": { "$nin": ["revoked", "failed"] },
-            },
-            vec![
-                doc! { "$set": set_doc },
-                doc! { "$unset": ["oauth_attempt_nonce"] },
-            ],
-        )
-        .await?;
+    let result = super::personal_erasure_service::issuance::key_mutation(
+        doc! {"connection_id":connection_id},
+        &set_doc.clone(),
+        access_token,
+        refresh_token,
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+            .update_one(
+                predicate,
+                vec![
+                    doc! { "$set": set_doc },
+                    doc! { "$unset": ["oauth_attempt_nonce"] },
+                ],
+            )
+            .into_future(),
+    )
+    .await??;
 
     Ok(result.matched_count == 1)
 }
@@ -1096,18 +1361,20 @@ pub async fn expire_pending_channel_connections(db: &mongodb::Database) -> AppRe
 /// keys without a `provider_config_id`.
 pub async fn reconcile_pending_oauth_placeholder(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     api_key_id: &str,
 ) -> AppResult<()> {
     crate::services::service_history::context::scope(
         crate::services::service_history::context::system("oauth_placeholder_reconciliation"),
-        reconcile_pending_oauth_placeholder_impl(db, user_id, api_key_id),
+        reconcile_pending_oauth_placeholder_impl(db, encryption_keys, user_id, api_key_id),
     )
     .await
 }
 
 async fn reconcile_pending_oauth_placeholder_impl(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     api_key_id: &str,
 ) -> AppResult<()> {
@@ -1150,7 +1417,8 @@ async fn reconcile_pending_oauth_placeholder_impl(
         if let Some(token) = candidate_token
             && token.updated_at > api_key.updated_at
         {
-            sync_provider_token_to_api_keys(db, user_id, provider_config_id).await?;
+            sync_provider_token_to_api_keys(db, encryption_keys, user_id, provider_config_id)
+                .await?;
             // Re-read; if pass 1 promoted us to `active`, we're done.
             let api_key = match get_api_key(db, user_id, api_key_id).await {
                 Ok(k) => k,
@@ -1366,7 +1634,23 @@ pub async fn promote_node_managed_api_key(
     // to rotate a provider-backed credential must go through the
     // provider's own OAuth / device-code / API-key flow. (Second Codex
     // review P2 of the NyxID#419 fix.)
-    let existing = get_api_key(db, user_id, key_id).await?;
+    use super::credential_record_service as records;
+    let raw = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id":key_id,"user_id":user_id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".into()))?;
+    let existing: UserApiKey = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
+    let predicate = records::exact_source_filter(COLLECTION_NAME, &raw)?;
+    let mut versions = existing.secret_context_versions.clone();
+    for field in [
+        "credential_encrypted",
+        "access_token_encrypted",
+        "refresh_token_encrypted",
+    ] {
+        versions.remove(field);
+    }
     if existing.credential_type != "node_managed" {
         return Err(AppError::NotFound(
             "Node-managed API key not found for this user".to_string(),
@@ -1381,7 +1665,16 @@ pub async fn promote_node_managed_api_key(
         ));
     }
 
-    let encrypted = encryption_keys.encrypt(credential.as_bytes()).await?;
+    let encrypted = records::encrypt(
+        encryption_keys,
+        COLLECTION_NAME,
+        &existing.id,
+        &existing.user_id,
+        "credential_encrypted",
+        credential.as_bytes(),
+    )
+    .await?;
+    records::mark_version(&mut versions, encryption_keys, "credential_encrypted");
     let encrypted_bson = bson::Binary {
         subtype: bson::spec::BinarySubtype::Generic,
         bytes: encrypted,
@@ -1395,19 +1688,12 @@ pub async fn promote_node_managed_api_key(
     // (thirty-third-round Codex P1).
     let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
-            doc! {
-                "_id": key_id,
-                "user_id": user_id,
-                "credential_type": "node_managed",
-                "$or": [
-                    { "provider_config_id": bson::Bson::Null },
-                    { "provider_config_id": { "$exists": false } },
-                ],
-            },
+            predicate,
             vec![
                 doc! {
                     "$set": {
                         "credential_type": credential_type,
+                        "secret_context_versions":{"$literal":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?},
                         "credential_encrypted": encrypted_bson,
                         "access_token_encrypted": bson::Bson::Null,
                         "refresh_token_encrypted": bson::Bson::Null,
@@ -1469,7 +1755,11 @@ async fn reset_provider_api_key_state(
 
 async fn encrypt_optional_secret(
     encryption_keys: &EncryptionKeys,
+    id: &str,
+    owner: &str,
+    field: &str,
     secret: &str,
+    versions: &mut std::collections::BTreeMap<String, u8>,
 ) -> AppResult<Option<Vec<u8>>> {
     if secret.is_empty() {
         Ok(None)
@@ -1479,7 +1769,17 @@ async fn encrypt_optional_secret(
                 "Credential exceeds maximum length of {MAX_CREDENTIAL_LENGTH} bytes"
             )));
         }
-        Ok(Some(encryption_keys.encrypt(secret.as_bytes()).await?))
+        let encrypted = super::credential_record_service::encrypt(
+            encryption_keys,
+            COLLECTION_NAME,
+            id,
+            owner,
+            field,
+            secret.as_bytes(),
+        )
+        .await?;
+        super::credential_record_service::mark_version(versions, encryption_keys, field);
+        Ok(Some(encrypted))
     }
 }
 
@@ -1525,36 +1825,65 @@ fn optional_binary_bson(bytes: Option<&Vec<u8>>) -> bson::Bson {
 /// without embedded credentials: user-typed Custom App creds on the
 /// connection are never clobbered.
 pub async fn embed_byo_oauth_client_on_connection(
-    db: &mongodb::Database,
+    db: &Database,
+    keys: &EncryptionKeys,
     connection_id: &str,
-    client_id_encrypted: Vec<u8>,
-    client_secret_encrypted: Option<Vec<u8>>,
+    client_id: &str,
+    client_secret: Option<&str>,
 ) -> AppResult<()> {
-    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-        .update_one(
-            doc! {
-                "connection_id": connection_id,
-                "user_oauth_client_id_encrypted": bson::Bson::Null,
-            },
-            doc! { "$set": {
-                "user_oauth_client_id_encrypted":
-                    optional_binary_bson(Some(&client_id_encrypted)),
-                "user_oauth_client_secret_encrypted":
-                    optional_binary_bson(client_secret_encrypted.as_ref()),
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            }},
-        )
-        .await?;
-
-    // Fail loudly if the placeholder vanished (deletion/race) or already
-    // carried creds: silently returning Ok would let the later refresh fall
-    // back to the current platform client -- the exact wrong-client bug B3
-    // exists to prevent. The caller aborts initiation rather than mint a
-    // grant whose refresh provenance is not pinned.
-    if result.matched_count == 0 {
-        return Err(AppError::Internal(format!(
-            "BYO credential embed matched no pending connection key (connection_id={connection_id})"
-        )));
+    use super::credential_record_service as records;
+    let raw = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {
+            "connection_id":connection_id,"user_oauth_client_id_encrypted":bson::Bson::Null,
+            "status":{"$nin":["revoked","failed"]}
+        })
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("BYO connection changed before credential admission".into())
+        })?;
+    let key: UserApiKey = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
+    let mut versions = key.secret_context_versions.clone();
+    let cid = records::encrypt(
+        keys,
+        COLLECTION_NAME,
+        &key.id,
+        &key.user_id,
+        "user_oauth_client_id_encrypted",
+        client_id.as_bytes(),
+    )
+    .await?;
+    records::mark_version(&mut versions, keys, "user_oauth_client_id_encrypted");
+    let secret = match client_secret {
+        Some(value) => {
+            let encrypted = records::encrypt(
+                keys,
+                COLLECTION_NAME,
+                &key.id,
+                &key.user_id,
+                "user_oauth_client_secret_encrypted",
+                value.as_bytes(),
+            )
+            .await?;
+            records::mark_version(&mut versions, keys, "user_oauth_client_secret_encrypted");
+            Some(encrypted)
+        }
+        None => {
+            versions.remove("user_oauth_client_secret_encrypted");
+            None
+        }
+    };
+    let result=super::service_history::collection::<UserApiKey>(db,COLLECTION_NAME).update_one(
+        records::exact_source_filter(COLLECTION_NAME,&raw)?,doc! {"$set":{
+            "user_oauth_client_id_encrypted":optional_binary_bson(Some(&cid)),"user_oauth_client_secret_encrypted":optional_binary_bson(secret.as_ref()),
+            "secret_context_versions":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?,
+            "updated_at":bson::DateTime::from_chrono(Utc::now())}}
+    ).await?;
+    if result.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "BYO connection changed before credential admission".into(),
+        ));
     }
     Ok(())
 }
@@ -1588,7 +1917,16 @@ pub async fn update_api_key(
         ));
     }
 
-    let existing = get_api_key(db, user_id, key_id).await?;
+    use super::credential_record_service as records;
+    let raw = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id":key_id,"user_id":user_id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".into()))?;
+    let existing: UserApiKey = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
+    let mut versions = existing.secret_context_versions.clone();
+    let predicate = records::exact_source_filter(COLLECTION_NAME, &raw)?;
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -1626,7 +1964,21 @@ pub async fn update_api_key(
                 "Credential exceeds maximum length of {MAX_CREDENTIAL_LENGTH} bytes"
             )));
         }
-        let encrypted = encryption_keys.encrypt(cred.as_bytes()).await?;
+        let field = if existing.credential_type == "oauth2" {
+            "access_token_encrypted"
+        } else {
+            "credential_encrypted"
+        };
+        let encrypted = records::encrypt(
+            encryption_keys,
+            COLLECTION_NAME,
+            &existing.id,
+            &existing.user_id,
+            field,
+            cred.as_bytes(),
+        )
+        .await?;
+        records::mark_version(&mut versions, encryption_keys, field);
         let encrypted_bson = bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
             bytes: encrypted,
@@ -1635,6 +1987,8 @@ pub async fn update_api_key(
             set_doc.insert("credential_encrypted", bson::Bson::Null);
             set_doc.insert("access_token_encrypted", encrypted_bson);
             set_doc.insert("refresh_token_encrypted", bson::Bson::Null);
+            versions.remove("credential_encrypted");
+            versions.remove("refresh_token_encrypted");
             set_doc.insert("expires_at", bson::Bson::Null);
             set_doc.insert("token_scopes", bson::Bson::Null);
         } else {
@@ -1642,31 +1996,39 @@ pub async fn update_api_key(
             // A rotation replaces the durable credential. Any cached access
             // token minted from the old value must be discarded immediately.
             set_doc.insert("access_token_encrypted", bson::Bson::Null);
+            versions.remove("access_token_encrypted");
             set_doc.insert("expires_at", bson::Bson::Null);
         }
         set_doc.insert("status", "active");
         set_doc.insert("error_message", bson::Bson::Null);
+        set_doc.insert(records::VERSIONS,doc! {"$literal":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?});
+        if let Some(label) = label {
+            set_doc.insert("label", doc! {"$literal":label});
+        }
         set_doc.insert("credential_epoch", credential_epoch_add_expr());
     }
 
     let result = if credential.is_some() {
         crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-            .update_one(
-                doc! { "_id": key_id, "user_id": user_id },
-                vec![doc! { "$set": set_doc }],
-            )
+            .update_one(predicate, vec![doc! { "$set": set_doc }])
             .await?
     } else {
         crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
-            .update_one(
-                doc! { "_id": key_id, "user_id": user_id },
-                doc! { "$set": set_doc },
-            )
+            .update_one(predicate, doc! { "$set": set_doc })
             .await?
     };
 
     if result.matched_count == 0 {
         return Err(AppError::NotFound("API key not found".to_string()));
+    }
+
+    if credential.is_some()
+        && let Some(encrypted) = existing.credential_encrypted.as_deref()
+        && let Ok(plaintext) = records::CredentialRecord::key(&existing)
+            .decrypt(encryption_keys, "credential_encrypted", encrypted)
+            .await
+    {
+        super::provider_token_exchange_service::retire_credential(&plaintext).await;
     }
 
     Ok(())
@@ -1813,7 +2175,7 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
     Ok(())
 }
 
-/// Update last_used_at and updated_at timestamps (fire-and-forget, called from proxy).
+/// Advance last_used_at without changing the edit timestamp (called from proxy).
 pub async fn touch_last_used(db: &mongodb::Database, key_id: &str) {
     let _ = crate::services::service_history::mutation::touch_credential_usage(db, key_id).await;
 }
@@ -1838,6 +2200,7 @@ mod tests {
 
     fn sample_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: "key-1".to_string(),
@@ -1920,6 +2283,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
                 id: api_key_id.clone(),
@@ -1951,14 +2315,25 @@ mod tests {
 
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: org_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
-                access_token_encrypted: Some(vec![1, 2, 3]),
-                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                access_token_encrypted: Some(
+                    test_encryption_keys()
+                        .encrypt(b"fixture-access")
+                        .await
+                        .unwrap(),
+                ),
+                refresh_token_encrypted: Some(
+                    test_encryption_keys()
+                        .encrypt(b"fixture-refresh")
+                        .await
+                        .unwrap(),
+                ),
                 token_scopes: Some("openid profile".to_string()),
                 expires_at: None,
                 api_key_encrypted: None,
@@ -1976,7 +2351,7 @@ mod tests {
             .await
             .unwrap();
 
-        sync_provider_token_to_api_keys(&db, &admin_id, &provider_id)
+        sync_provider_token_to_api_keys(&db, &test_encryption_keys(), &admin_id, &provider_id)
             .await
             .unwrap();
         let key_after_admin_sync = db
@@ -1988,7 +2363,7 @@ mod tests {
         assert_eq!(key_after_admin_sync.status, "pending_auth");
         assert!(key_after_admin_sync.access_token_encrypted.is_none());
 
-        sync_provider_token_to_api_keys(&db, &org_id, &provider_id)
+        sync_provider_token_to_api_keys(&db, &test_encryption_keys(), &org_id, &provider_id)
             .await
             .unwrap();
         let key_after_org_sync = db
@@ -1998,14 +2373,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(key_after_org_sync.status, "active");
-        assert_eq!(
-            key_after_org_sync.access_token_encrypted,
-            Some(vec![1, 2, 3])
-        );
-        assert_eq!(
-            key_after_org_sync.refresh_token_encrypted,
-            Some(vec![4, 5, 6])
-        );
+        assert_key_secret(
+            &key_after_org_sync,
+            "access_token_encrypted",
+            b"fixture-access",
+        )
+        .await;
+        assert_key_secret(
+            &key_after_org_sync,
+            "refresh_token_encrypted",
+            b"fixture-refresh",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -2029,14 +2408,25 @@ mod tests {
 
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
-                access_token_encrypted: Some(vec![1, 2, 3]),
-                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                access_token_encrypted: Some(
+                    test_encryption_keys()
+                        .encrypt(b"fixture-access")
+                        .await
+                        .unwrap(),
+                ),
+                refresh_token_encrypted: Some(
+                    test_encryption_keys()
+                        .encrypt(b"fixture-refresh")
+                        .await
+                        .unwrap(),
+                ),
                 token_scopes: Some("openid profile".to_string()),
                 expires_at: None,
                 api_key_encrypted: None,
@@ -2054,7 +2444,7 @@ mod tests {
             .await
             .unwrap();
 
-        sync_provider_token_to_api_keys(&db, &user_id, &provider_id)
+        sync_provider_token_to_api_keys(&db, &test_encryption_keys(), &user_id, &provider_id)
             .await
             .unwrap();
 
@@ -2620,23 +3010,50 @@ mod tests {
             attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,
         }
     }
 
-    fn provider_token(user_id: &str, provider_id: &str) -> UserProviderToken {
+    async fn assert_key_secret(row: &UserApiKey, field: &str, expected: &[u8]) {
+        let ciphertext = match field {
+            "credential_encrypted" => row.credential_encrypted.as_deref(),
+            "access_token_encrypted" => row.access_token_encrypted.as_deref(),
+            "refresh_token_encrypted" => row.refresh_token_encrypted.as_deref(),
+            _ => panic!("unsupported test field"),
+        }
+        .unwrap();
+        let value = crate::services::credential_record_service::CredentialRecord::key(row)
+            .decrypt(&test_encryption_keys(), field, ciphertext)
+            .await
+            .unwrap();
+        assert_eq!(value.as_slice(), expected);
+    }
+
+    async fn provider_token(user_id: &str, provider_id: &str) -> UserProviderToken {
         let now = Utc::now();
         UserProviderToken {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
             connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".to_string(),
-            access_token_encrypted: Some(vec![1, 2, 3]),
-            refresh_token_encrypted: Some(vec![4, 5, 6]),
+            access_token_encrypted: Some(
+                test_encryption_keys()
+                    .encrypt(b"fixture-access")
+                    .await
+                    .unwrap(),
+            ),
+            refresh_token_encrypted: Some(
+                test_encryption_keys()
+                    .encrypt(b"fixture-refresh")
+                    .await
+                    .unwrap(),
+            ),
             token_scopes: Some("openid profile".to_string()),
             expires_at: None,
             api_key_encrypted: None,
@@ -2683,18 +3100,18 @@ mod tests {
         // landing a fresh token that the original sync missed (race / silent
         // sync error).
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-            .insert_one(provider_token(&user_id, &provider_id))
+            .insert_one(provider_token(&user_id, &provider_id).await)
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &key_id)
             .await
             .unwrap();
 
         let key = get_key(&db, &key_id).await;
         assert_eq!(key.status, "active");
-        assert_eq!(key.access_token_encrypted, Some(vec![1, 2, 3]));
-        assert_eq!(key.refresh_token_encrypted, Some(vec![4, 5, 6]));
+        assert_key_secret(&key, "access_token_encrypted", b"fixture-access").await;
+        assert_key_secret(&key, "refresh_token_encrypted", b"fixture-refresh").await;
     }
 
     /// Regression test for the local-test bug we hit on first ship: a user
@@ -2717,7 +3134,7 @@ mod tests {
         let key_id = uuid::Uuid::new_v4().to_string();
 
         // Stale token from a previous OAuth (10 minutes ago).
-        let mut stale_token = provider_token(&user_id, &provider_id);
+        let mut stale_token = provider_token(&user_id, &provider_id).await;
         let stale_at = Utc::now() - Duration::minutes(10);
         stale_token.created_at = stale_at;
         stale_token.updated_at = stale_at;
@@ -2745,7 +3162,7 @@ mod tests {
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &key_id)
             .await
             .unwrap();
 
@@ -2784,7 +3201,7 @@ mod tests {
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &key_id)
             .await
             .unwrap();
 
@@ -2825,7 +3242,7 @@ mod tests {
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &key_id)
             .await
             .unwrap();
 
@@ -2856,7 +3273,7 @@ mod tests {
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &key_id)
             .await
             .unwrap();
 
@@ -2904,7 +3321,7 @@ mod tests {
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &key_id)
             .await
             .unwrap();
 
@@ -2957,7 +3374,7 @@ mod tests {
             .unwrap();
 
         // Reconcile is invoked with the row owner (the org user id).
-        reconcile_pending_oauth_placeholder(&db, &org_user_id, &key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &org_user_id, &key_id)
             .await
             .unwrap();
 
@@ -2990,7 +3407,7 @@ mod tests {
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &key_id)
             .await
             .unwrap();
 
@@ -3057,6 +3474,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
@@ -3117,10 +3535,16 @@ mod tests {
         );
 
         // Decrypt and verify the stored access token is the plaintext we wrote.
-        let access_bytes = encryption_keys
-            .decrypt(restored.access_token_encrypted.as_ref().unwrap())
-            .await
-            .unwrap();
+        let access_bytes =
+            crate::services::credential_record_service::CredentialRecord::key(&restored)
+                .decrypt(
+                    &encryption_keys,
+                    "access_token_encrypted",
+                    restored.access_token_encrypted.as_ref().unwrap(),
+                )
+                .await
+                .unwrap()
+                .to_vec();
         assert_eq!(String::from_utf8(access_bytes).unwrap(), "access-token-123");
     }
 
@@ -3136,6 +3560,8 @@ mod tests {
             return;
         };
 
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let encryption_keys = test_encryption_keys();
         let now = Utc::now();
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
@@ -3171,14 +3597,19 @@ mod tests {
         // Insert a legacy provider token to sync from.
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
-                access_token_encrypted: Some(vec![7, 7, 7]),
-                refresh_token_encrypted: Some(vec![8, 8, 8]),
+                access_token_encrypted: Some(
+                    encryption_keys.encrypt(b"legacy-access").await.unwrap(),
+                ),
+                refresh_token_encrypted: Some(
+                    encryption_keys.encrypt(b"fixture-refresh").await.unwrap(),
+                ),
                 token_scopes: Some("legacy".to_string()),
                 expires_at: None,
                 api_key_encrypted: None,
@@ -3196,14 +3627,14 @@ mod tests {
             .await
             .unwrap();
 
-        sync_provider_token_to_api_keys(&db, &user_id, &provider_id)
+        sync_provider_token_to_api_keys(&db, &test_encryption_keys(), &user_id, &provider_id)
             .await
             .unwrap();
 
         // Legacy key: tokens copied in, flipped to active.
         let legacy_after = get_key(&db, &legacy_key_id).await;
         assert_eq!(legacy_after.status, "active");
-        assert_eq!(legacy_after.access_token_encrypted, Some(vec![7, 7, 7]));
+        assert_key_secret(&legacy_after, "access_token_encrypted", b"legacy-access").await;
 
         // Multi-connection key: completely untouched.
         let multi_after = get_key(&db, &multi_conn_key_id).await;
@@ -3265,6 +3696,7 @@ mod tests {
         // the Pass 1 trap the reconcile logic must NOT take.
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
@@ -3299,7 +3731,7 @@ mod tests {
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &multi_key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &multi_key_id)
             .await
             .unwrap();
 
@@ -3362,7 +3794,7 @@ mod tests {
             .await
             .unwrap();
 
-        reconcile_pending_oauth_placeholder(&db, &user_id, &multi_key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &multi_key_id)
             .await
             .unwrap();
 
@@ -3415,7 +3847,7 @@ mod tests {
 
         // No OAuthState at all — simulating the gap before the
         // OAuth-initiate request lands.
-        reconcile_pending_oauth_placeholder(&db, &user_id, &multi_key_id)
+        reconcile_pending_oauth_placeholder(&db, &test_encryption_keys(), &user_id, &multi_key_id)
             .await
             .unwrap();
 
@@ -3601,6 +4033,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
@@ -3677,6 +4110,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
@@ -3684,7 +4118,12 @@ mod tests {
                 label: "preserve-on-reauth".to_string(),
                 credential_type: "oauth2".to_string(),
                 credential_encrypted: None,
-                access_token_encrypted: Some(vec![0xAA]),
+                access_token_encrypted: Some(
+                    encryption_keys
+                        .encrypt(b"previous-access-token")
+                        .await
+                        .unwrap(),
+                ),
                 refresh_token_encrypted: Some(existing_refresh.clone()),
                 token_scopes: Some("openid profile email".to_string()),
                 expires_at: None,
@@ -3724,16 +4163,40 @@ mod tests {
         let restored = get_key(&db, &key_id).await;
         assert_eq!(restored.status, "active");
         // Access token rotated to the new value.
-        let access_bytes = encryption_keys
-            .decrypt(restored.access_token_encrypted.as_ref().unwrap())
-            .await
-            .unwrap();
+        let access_bytes =
+            crate::services::credential_record_service::CredentialRecord::key(&restored)
+                .decrypt(
+                    &encryption_keys,
+                    "access_token_encrypted",
+                    restored.access_token_encrypted.as_ref().unwrap(),
+                )
+                .await
+                .unwrap()
+                .to_vec();
         assert_eq!(String::from_utf8(access_bytes).unwrap(), "new-access-token");
         // Refresh token preserved (provider didn't return one).
         assert_eq!(
             restored.refresh_token_encrypted.as_deref(),
             Some(existing_refresh.as_slice()),
             "refresh_token_encrypted must survive when provider omits refresh_token on re-auth"
+        );
+        assert_eq!(
+            crate::services::credential_record_service::CredentialRecord::key(&restored)
+                .decrypt(
+                    &encryption_keys,
+                    "refresh_token_encrypted",
+                    restored.refresh_token_encrypted.as_deref().unwrap()
+                )
+                .await
+                .unwrap()
+                .as_slice(),
+            b"existing-refresh-token"
+        );
+        assert!(
+            !restored
+                .secret_context_versions
+                .contains_key("refresh_token_encrypted"),
+            "preserving a legacy refresh ciphertext must retain its absent marker"
         );
         // Scopes preserved (provider didn't return `scope`).
         assert_eq!(
@@ -3776,14 +4239,25 @@ mod tests {
 
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
-                access_token_encrypted: Some(vec![1, 2, 3]),
-                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                access_token_encrypted: Some(
+                    test_encryption_keys()
+                        .encrypt(b"fixture-access")
+                        .await
+                        .unwrap(),
+                ),
+                refresh_token_encrypted: Some(
+                    test_encryption_keys()
+                        .encrypt(b"fixture-refresh")
+                        .await
+                        .unwrap(),
+                ),
                 token_scopes: Some("read".to_string()),
                 expires_at: None,
                 api_key_encrypted: None,
@@ -3801,9 +4275,14 @@ mod tests {
             .await
             .unwrap();
 
-        sync_provider_token_to_api_keys_after_authorization(&db, &user_id, &provider_id)
-            .await
-            .unwrap();
+        sync_provider_token_to_api_keys_after_authorization(
+            &db,
+            &test_encryption_keys(),
+            &user_id,
+            &provider_id,
+        )
+        .await
+        .unwrap();
 
         let after = get_key(&db, &key_id).await;
         assert!(
@@ -3815,7 +4294,7 @@ mod tests {
             "fresh legacy OAuth authorization must invalidate pending approvals"
         );
         // Sanity: the token did fan out too.
-        assert_eq!(after.access_token_encrypted, Some(vec![1, 2, 3]));
+        assert_key_secret(&after, "access_token_encrypted", b"fixture-access").await;
     }
 
     #[tokio::test]
@@ -3829,6 +4308,8 @@ mod tests {
             return;
         };
 
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let encryption_keys = test_encryption_keys();
         let now = Utc::now();
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
@@ -3843,14 +4324,19 @@ mod tests {
 
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
-                access_token_encrypted: Some(vec![9, 9, 9]),
-                refresh_token_encrypted: Some(vec![8, 8, 8]),
+                access_token_encrypted: Some(
+                    encryption_keys.encrypt(b"refresh-access").await.unwrap(),
+                ),
+                refresh_token_encrypted: Some(
+                    encryption_keys.encrypt(b"fixture-refresh").await.unwrap(),
+                ),
                 token_scopes: Some("read".to_string()),
                 expires_at: None,
                 api_key_encrypted: None,
@@ -3870,13 +4356,13 @@ mod tests {
 
         // Plain (non-stamping) sync — used by refresh / manual disconnect /
         // proxy-time refresh paths.
-        sync_provider_token_to_api_keys(&db, &user_id, &provider_id)
+        sync_provider_token_to_api_keys(&db, &test_encryption_keys(), &user_id, &provider_id)
             .await
             .unwrap();
 
         let after = get_key(&db, &key_id).await;
         // Token still fans out…
-        assert_eq!(after.access_token_encrypted, Some(vec![9, 9, 9]));
+        assert_key_secret(&after, "access_token_encrypted", b"refresh-access").await;
         // …but `last_authorized_at` stays None — only the fresh-auth
         // wrapper advances it, so a background refresh can't accidentally
         // satisfy the wizard's manage-scopes completion predicate.
@@ -3931,6 +4417,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
@@ -4007,6 +4494,7 @@ mod tests {
         for (key_id, conn_id) in [(&key_a, &conn_a), (&key_b, &conn_b)] {
             db.collection::<UserApiKey>(super::COLLECTION_NAME)
                 .insert_one(UserApiKey {
+                    secret_context_versions: Default::default(),
                     oauth_app_observation: None,
                     credential_source: None,
                     id: key_id.clone(),
@@ -4114,12 +4602,26 @@ mod tests {
         );
         let enc_cid = stored
             .user_oauth_client_id_encrypted
+            .as_ref()
             .expect("client_id must be persisted");
         let enc_sec = stored
             .user_oauth_client_secret_encrypted
+            .as_ref()
             .expect("client_secret must be persisted");
-        let dec_cid = encryption_keys.decrypt(&enc_cid).await.unwrap();
-        let dec_sec = encryption_keys.decrypt(&enc_sec).await.unwrap();
+        let dec_cid = crate::services::credential_record_service::CredentialRecord::key(&stored)
+            .decrypt(&encryption_keys, "user_oauth_client_id_encrypted", enc_cid)
+            .await
+            .unwrap()
+            .to_vec();
+        let dec_sec = crate::services::credential_record_service::CredentialRecord::key(&stored)
+            .decrypt(
+                &encryption_keys,
+                "user_oauth_client_secret_encrypted",
+                enc_sec,
+            )
+            .await
+            .unwrap()
+            .to_vec();
         assert_eq!(String::from_utf8(dec_cid).unwrap(), "cli_marketing_app");
         assert_eq!(
             String::from_utf8(dec_sec).unwrap(),
@@ -4534,10 +5036,15 @@ mod tests {
         assert!(key.expires_at.is_some());
 
         // Verify round-trip via decryption.
-        let access_bytes = enc
-            .decrypt(key.access_token_encrypted.as_ref().unwrap())
+        let access_bytes = crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &enc,
+                "access_token_encrypted",
+                key.access_token_encrypted.as_ref().unwrap(),
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .to_vec();
         assert_eq!(
             String::from_utf8(access_bytes).unwrap(),
             "access-token-value"
@@ -4577,10 +5084,15 @@ mod tests {
         .unwrap();
 
         assert!(key.credential_encrypted.is_none());
-        let access_bytes = enc
-            .decrypt(key.access_token_encrypted.as_ref().unwrap())
+        let access_bytes = crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &enc,
+                "access_token_encrypted",
+                key.access_token_encrypted.as_ref().unwrap(),
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .to_vec();
         assert_eq!(String::from_utf8(access_bytes).unwrap(), "explicit-access");
     }
 
@@ -4657,10 +5169,15 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
-        let token = provider_token(&user_id, &provider_id);
+        let token = provider_token(&user_id, &provider_id).await;
 
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(&token)
+            .await
+            .unwrap();
         let key = super::create_api_key_from_provider_token(
             &db,
+            &crate::test_utils::test_encryption_keys(),
             &user_id,
             "GitHub OAuth",
             &provider_id,
@@ -4679,8 +5196,8 @@ mod tests {
         assert_eq!(key.status, "active");
         assert_eq!(key.source.as_deref(), Some("user_created"));
         assert_eq!(key.source_id.as_deref(), Some(token.id.as_str()));
-        assert_eq!(key.access_token_encrypted, Some(vec![1, 2, 3]));
-        assert_eq!(key.refresh_token_encrypted, Some(vec![4, 5, 6]));
+        assert_key_secret(&key, "access_token_encrypted", b"fixture-access").await;
+        assert_key_secret(&key, "refresh_token_encrypted", b"fixture-refresh").await;
 
         // Verify stored in DB.
         let fetched = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
@@ -4694,10 +5211,15 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
-        let token = provider_token(&user_id, &provider_id);
+        let token = provider_token(&user_id, &provider_id).await;
 
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(&token)
+            .await
+            .unwrap();
         let key1 = super::create_api_key_from_provider_token(
             &db,
+            &crate::test_utils::test_encryption_keys(),
             &user_id,
             "First Call",
             &provider_id,
@@ -4708,6 +5230,7 @@ mod tests {
 
         let key2 = super::create_api_key_from_provider_token(
             &db,
+            &crate::test_utils::test_encryption_keys(),
             &user_id,
             "Second Call",
             &provider_id,
@@ -4728,12 +5251,18 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
-        let token = provider_token(&user_id, &provider_id);
+        let token = provider_token(&user_id, &provider_id).await;
 
-        let err =
-            super::create_api_key_from_provider_token(&db, &user_id, "", &provider_id, &token)
-                .await
-                .expect_err("empty label should fail");
+        let err = super::create_api_key_from_provider_token(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &user_id,
+            "",
+            &provider_id,
+            &token,
+        )
+        .await
+        .expect_err("empty label should fail");
         assert!(matches!(err, crate::errors::AppError::ValidationError(_)));
     }
 
@@ -4744,14 +5273,24 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
-        let mut token = provider_token(&user_id, &provider_id);
+        let mut token = provider_token(&user_id, &provider_id).await;
         token.token_type = "api_key".to_string();
-        token.api_key_encrypted = Some(vec![10, 20, 30]);
+        token.api_key_encrypted = Some(
+            test_encryption_keys()
+                .encrypt(b"fixture-api-key")
+                .await
+                .unwrap(),
+        );
         token.access_token_encrypted = None;
         token.refresh_token_encrypted = None;
 
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(&token)
+            .await
+            .unwrap();
         let key = super::create_api_key_from_provider_token(
             &db,
+            &crate::test_utils::test_encryption_keys(),
             &user_id,
             "API Key Provider",
             &provider_id,
@@ -4761,7 +5300,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(key.credential_type, "api_key");
-        assert_eq!(key.credential_encrypted, Some(vec![10, 20, 30]));
+        assert_key_secret(&key, "credential_encrypted", b"fixture-api-key").await;
     }
 
     #[tokio::test]
@@ -4802,10 +5341,16 @@ mod tests {
 
         let updated = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
         assert_eq!(updated.status, "active");
-        let cred_bytes = enc
-            .decrypt(updated.credential_encrypted.as_ref().unwrap())
-            .await
-            .unwrap();
+        let cred_bytes =
+            crate::services::credential_record_service::CredentialRecord::key(&updated)
+                .decrypt(
+                    &enc,
+                    "credential_encrypted",
+                    updated.credential_encrypted.as_ref().unwrap(),
+                )
+                .await
+                .unwrap()
+                .to_vec();
         assert_eq!(String::from_utf8(cred_bytes).unwrap(), "new-secret");
         assert_eq!(updated.credential_epoch, 2);
     }
@@ -4850,10 +5395,16 @@ mod tests {
         // For oauth2, credential rotation stores in access_token_encrypted
         // and nullifies refresh_token, expires_at, token_scopes.
         assert!(updated.credential_encrypted.is_none());
-        let access_bytes = enc
-            .decrypt(updated.access_token_encrypted.as_ref().unwrap())
-            .await
-            .unwrap();
+        let access_bytes =
+            crate::services::credential_record_service::CredentialRecord::key(&updated)
+                .decrypt(
+                    &enc,
+                    "access_token_encrypted",
+                    updated.access_token_encrypted.as_ref().unwrap(),
+                )
+                .await
+                .unwrap()
+                .to_vec();
         assert_eq!(String::from_utf8(access_bytes).unwrap(), "new-access-token");
         assert!(updated.refresh_token_encrypted.is_none());
         assert!(updated.expires_at.is_none());
@@ -5160,7 +5711,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn touch_last_used_updates_timestamps() {
+    async fn touch_last_used_preserves_edit_timestamp() {
         let Some(db) = connect_test_database("user_api_key_svc_touch").await else {
             return;
         };
@@ -5191,13 +5742,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(key.last_used_at.is_none());
+        // Compare persisted timestamps: BSON stores milliseconds, while the
+        // value returned by create_api_key can retain submillisecond precision.
+        let before = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
+        assert!(before.last_used_at.is_none());
 
         super::touch_last_used(&db, &key.id).await;
 
         let updated = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
-        assert!(updated.last_used_at.is_some());
-        assert!(updated.updated_at >= key.updated_at);
+        assert!(updated.last_used_at.unwrap() >= before.created_at);
+        assert_eq!(updated.updated_at, before.updated_at);
     }
 
     #[tokio::test]
@@ -5979,10 +6533,15 @@ mod tests {
         let after = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
         assert_eq!(after.credential_type, "api_key");
         assert_eq!(after.status, "active");
-        let cred_bytes = enc
-            .decrypt(after.credential_encrypted.as_ref().unwrap())
+        let cred_bytes = crate::services::credential_record_service::CredentialRecord::key(&after)
+            .decrypt(
+                &enc,
+                "credential_encrypted",
+                after.credential_encrypted.as_ref().unwrap(),
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .to_vec();
         assert_eq!(String::from_utf8(cred_bytes).unwrap(), "sk-new-key");
     }
 
@@ -6276,7 +6835,7 @@ mod tests {
 
         // No UserProviderToken exists for this user+provider, so
         // sync_provider_token_to_api_keys should revoke all matching keys.
-        sync_provider_token_to_api_keys(&db, &user_id, &provider_id)
+        sync_provider_token_to_api_keys(&db, &test_encryption_keys(), &user_id, &provider_id)
             .await
             .unwrap();
 
@@ -6310,11 +6869,11 @@ mod tests {
 
         // Insert a provider token with different values.
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-            .insert_one(provider_token(&user_id, &provider_id))
+            .insert_one(provider_token(&user_id, &provider_id).await)
             .await
             .unwrap();
 
-        sync_provider_token_to_api_keys(&db, &user_id, &provider_id)
+        sync_provider_token_to_api_keys(&db, &test_encryption_keys(), &user_id, &provider_id)
             .await
             .unwrap();
 
@@ -6441,10 +7000,15 @@ mod tests {
 
         let after = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
         assert_eq!(after.label, "New Label");
-        let cred_bytes = enc
-            .decrypt(after.credential_encrypted.as_ref().unwrap())
+        let cred_bytes = crate::services::credential_record_service::CredentialRecord::key(&after)
+            .decrypt(
+                &enc,
+                "credential_encrypted",
+                after.credential_encrypted.as_ref().unwrap(),
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .to_vec();
         assert_eq!(String::from_utf8(cred_bytes).unwrap(), "new-secret");
         assert_eq!(after.status, "active");
     }
@@ -6486,10 +7050,15 @@ mod tests {
         // Bearer stores in credential_encrypted, not access_token_encrypted.
         assert!(key.access_token_encrypted.is_none());
 
-        let cred_bytes = enc
-            .decrypt(key.credential_encrypted.as_ref().unwrap())
+        let cred_bytes = crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &enc,
+                "credential_encrypted",
+                key.credential_encrypted.as_ref().unwrap(),
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .to_vec();
         assert_eq!(String::from_utf8(cred_bytes).unwrap(), "Bearer xyz123");
     }
 
@@ -6526,10 +7095,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(key.credential_type, "basic");
-        let cred_bytes = enc
-            .decrypt(key.credential_encrypted.as_ref().unwrap())
+        let cred_bytes = crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &enc,
+                "credential_encrypted",
+                key.credential_encrypted.as_ref().unwrap(),
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .to_vec();
         assert_eq!(String::from_utf8(cred_bytes).unwrap(), "user:pass");
     }
 
@@ -6571,8 +7145,7 @@ mod tests {
         .unwrap();
 
         // Matching connection -> succeeds and embeds.
-        let cid_enc = enc.encrypt(b"byo-id").await.unwrap();
-        super::embed_byo_oauth_client_on_connection(&db, "conn-1", cid_enc, None)
+        super::embed_byo_oauth_client_on_connection(&db, &enc, "conn-1", "byo-id", None)
             .await
             .expect("embed onto matching pending connection should succeed");
         let after = db
@@ -6584,13 +7157,17 @@ mod tests {
         assert!(after.user_oauth_client_id_encrypted.is_some());
 
         // No such connection -> hard error (matched_count == 0).
-        let cid_enc2 = enc.encrypt(b"byo-id").await.unwrap();
-        let err =
-            super::embed_byo_oauth_client_on_connection(&db, "does-not-exist", cid_enc2, None)
-                .await
-                .expect_err("embed onto a missing connection must error");
+        let err = super::embed_byo_oauth_client_on_connection(
+            &db,
+            &enc,
+            "does-not-exist",
+            "byo-id",
+            None,
+        )
+        .await
+        .expect_err("embed onto a missing connection must error");
         assert!(
-            matches!(err, crate::errors::AppError::Internal(_)),
+            matches!(err, crate::errors::AppError::Conflict(_)),
             "got {err:?}"
         );
     }

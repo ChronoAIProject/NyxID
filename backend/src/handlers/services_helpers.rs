@@ -288,6 +288,19 @@ pub async fn service_to_response_with_viewer(
     s: DownstreamService,
     viewer: Option<&ViewerRouting>,
 ) -> ServiceResponse {
+    let displayed_headers = crate::services::default_header_service::management(
+        inspection_keys,
+        crate::models::downstream_service::COLLECTION_NAME,
+        &s.id,
+        crate::services::ownership_transfer_service::catalog_owner(&s),
+        s.default_request_headers.as_deref(),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        crate::models::default_request_header::stored_list_for_response(
+            s.default_request_headers.clone(),
+        )
+    });
     let skills_manifest_digest = crate::services::catalog_skill_service::manifest_digest(
         &crate::services::catalog_skill_service::state(&s),
     );
@@ -400,14 +413,13 @@ pub async fn service_to_response_with_viewer(
         recommended_skill_refs: s.recommended_skill_refs,
         recommended_skills: s.recommended_skills,
         custom_user_agent: s.custom_user_agent,
-        default_request_headers: crate::models::default_request_header::redact_list_for_response(
-            s.default_request_headers,
-        ),
+        default_request_headers: displayed_headers,
         ws_frame_injections: s.ws_frame_injections,
         anonymous_endpoints: s.anonymous_endpoints,
         proxy_operation_policy: s.proxy_operation_policy,
         destination_targets: s.destination_targets,
         developer_app_ids: s.developer_app_ids,
+        introspection_client_ids: s.introspection_client_ids,
         owner_user_id: s
             .owner_user_id
             .clone()
@@ -418,6 +430,7 @@ pub async fn service_to_response_with_viewer(
         node_id: viewer.and_then(|v| v.node_id.clone()),
         your_user_service_id: viewer.and_then(|v| v.user_service_id.clone()),
         your_binding_count: viewer.map_or(0, |v| v.binding_count),
+        can_resync_identity: None,
     }
 }
 
@@ -470,6 +483,34 @@ pub async fn validate_developer_app_ids(
         }
     }
 
+    Ok(())
+}
+
+/// Trust is separately administered from private-service consent/auto-connection.
+pub async fn validate_introspection_client_ids(
+    state: &AppState,
+    auth_user: &AuthUser,
+    client_ids: &[String],
+) -> AppResult<()> {
+    require_admin(state, auth_user).await?;
+    if client_ids.len() > 50 {
+        return Err(AppError::ValidationError(
+            "introspection_client_ids must not exceed 50 entries".into(),
+        ));
+    }
+    for id in client_ids {
+        let exists = state
+            .db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! {"_id": id, "is_active": true, "client_type": "confidential"})
+            .await?
+            .is_some();
+        if !exists {
+            return Err(AppError::ValidationError(
+                "introspection_client_ids must name active confidential OAuth clients".into(),
+            ));
+        }
+    }
     Ok(())
 }
 

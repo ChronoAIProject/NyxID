@@ -27,6 +27,7 @@ pub enum ClientInput {
     Playback { ms: i64, audible: bool },
 }
 pub enum Output {
+    Ready,
     StartFailed(crate::errors::ErrorResponse),
     Audio { bytes: Vec<u8>, end_ms: i64 },
     Flush,
@@ -312,6 +313,7 @@ impl Grok {
                     .filter(|s| s.len() <= 4096)
                     .ok_or(AppError::VoiceProviderUnavailable)?;
                 let segment = Segment {
+                    fragments: Vec::new(),
                     id: input.id.clone(),
                     speaker: Speaker::User,
                     text: text.into(),
@@ -463,6 +465,7 @@ impl Grok {
                     return Err(AppError::VoiceProviderUnavailable);
                 }
                 let segment = Segment {
+                    fragments: Vec::new(),
                     id: speech.id.clone(),
                     speaker: Speaker::Assistant,
                     text: speech.text.clone(),
@@ -488,6 +491,7 @@ impl Grok {
                 tokens::settle(&self.state, &meter, &event, &self.call.preferences.model).await?;
                 if let Some(speech) = self.speech.take() {
                     self.segment(Segment {
+                        fragments: Vec::new(),
                         id: speech.id,
                         speaker: Speaker::Assistant,
                         text: speech.text,

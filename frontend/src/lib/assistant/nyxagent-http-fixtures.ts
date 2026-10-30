@@ -164,6 +164,7 @@ function conversation(id: string, title: string, model: string, now: string): Ny
 
 function emptyHistory(id: string, title: string, model: string, now: string): NyxAgentHistory {
   return {
+    cma_operations: [],
     conversation: conversation(id, title, model, now),
     messages: [],
     acknowledgements: [],
@@ -527,6 +528,16 @@ export class NyxAgentHttpFixtures {
       return;
     }
     const acknowledgements = row.history.acknowledgements;
+    if (text === "Review formatting and receipt") {
+      acknowledgements.push(acknowledgement({
+        kind: "skills", status: "allowed", decided_by: "access_mode",
+        summary: "Formatting proposal approved",
+        creation_turn_id: row.history.conversation.active_turn!.turn_id,
+        decided_at: new Date().toISOString(),
+      }));
+      row.reply = "**Formatting reviewed**\n\n```ts\nconst answer = 42;\n```\n<function_calls><invoke name=\"private_tool\">hidden arguments</invoke></function_calls>";
+      return;
+    }
     if (text === "Show the lobby camera") {
       // The camera tool returns an image during the turn; the server attaches it.
       row.history.conversation.active_turn!.attachments = [
@@ -599,11 +610,11 @@ export class NyxAgentHttpFixtures {
       return;
     }
     const previous = acknowledgements.at(-1);
-    const confirmed = /^Confirmed: .*\(acknowledgement_id ([0-9a-f-]{36})\)\. Retry it now\.$/m.exec(
+    const confirmed = /^Confirmed: .*\(acknowledgement_id ([0-9a-f-]{36})\)\. Retry it now\./m.exec(
       text,
     );
     if (text === "Delete agent key ci-bot") {
-      if (this.settings.skip_destructive_confirmation) {
+      if ((this.settings.access_mode ?? (this.settings.skip_destructive_confirmation ? "autopilot" : "nyxmode")) === "autopilot") {
         row.reply = "Deleted agent key ci-bot.";
         return;
       }

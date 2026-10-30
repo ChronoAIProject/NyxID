@@ -12,11 +12,15 @@ NyxID supports TOTP-based MFA (Time-based One-Time Password) using any authentic
 ### Enable MFA
 
 1. Go to **Settings → Security**.
-2. Click **Set up two-factor authentication**.
+2. Turn on the **Two-Factor Authentication** switch.
 3. NyxID generates a QR code and a backup secret.
 4. Open your authenticator app, scan the QR code (or enter the secret manually).
 5. Enter the 6-digit code from your app to confirm the setup.
 6. Save the **backup codes** shown on the confirmation screen. These are single-use emergency codes for when your authenticator is unavailable.
+
+After confirmation, NyxID keeps the device you used for setup signed in and
+signs out other browser sessions, refresh tokens, and session-backed MCP
+connections. Sign those devices in again with MFA.
 
 :::warning
 Store your backup codes in a secure location (password manager, printed and locked away). If you lose access to your authenticator and have no backup codes, account recovery requires manual admin intervention.
@@ -24,13 +28,71 @@ Store your backup codes in a secure location (password manager, printed and lock
 
 ### Sign in with MFA enabled
 
-After entering your email and password on the login page, NyxID prompts for a 6-digit TOTP code. Enter the current code from your authenticator app.
+After entering your email and password on the login page, NyxID prompts for a
+6-digit TOTP code. Social sign-in (Google, GitHub, or Apple) prompts for the
+same MFA form before creating a session. Mobile social sign-in follows a staged rollout: when enabled for your account,
+the app keeps the challenge in the deep-link fragment and verifies your code
+before storing a session. During the rollout, mobile social sign-in can continue
+without this second step. Email/password sign-in on mobile still requires MFA. Choose **Use a recovery code** when your authenticator is
+unavailable; each recovery code is single-use.
+
+Devices signed in before the MFA enforcement rollout keep working until their
+normal session expiry or revocation. Unless you enable the app sign-in preference below, a new sign-in on another device still needs
+MFA: when approving a device, issuing a login code, or connecting the CLI, an
+older session may ask you to **Verify this session**. Enter your authenticator
+or a single-use recovery code; NyxID then retries the action without signing
+you out. The mobile app offers this prompt only after MFA rollout is enabled
+for your account; otherwise it shows the verification requirement.
+
+### Sign in with the NyxID mobile app
+
+Choose **Continue with the NyxID app** on the login page, then scan the QR code
+with a phone that is already signed in to NyxID and approve the request.
+This option is also available on the MFA verification screen after password or
+social sign-in. Returning from the QR panel keeps your existing MFA challenge
+available if you prefer to enter a code.
+**Skip MFA for NyxID app sign-ins** is on by default. An already signed-in phone or
+browser can approve QR or typed sign-in codes without an extra authenticator
+prompt. With the setting off, an older or mobile-exempt session may need
+**Verify this session** first. A verified approval already carries its MFA
+verification to the receiving browser. Scanning alone never approves a sign-in.
+
+If approval succeeds but your account cannot load, choose **Retry loading
+account**. NyxID retries the account lookup using the delivered browser session;
+it does not redeem the QR code a second time. Sign-in completes after that lookup
+succeeds.
+
+Open **Settings → Security → Two-Factor Authentication** to change **Skip MFA
+for NyxID app sign-ins**. Turn it off to require MFA when an older or mobile
+session approves a QR or typed sign-in code. Turning it back on may ask you to
+verify the current session when MFA is enabled. Accounts without MFA can save
+either choice; it takes effect when two-factor authentication is on. The saved
+preference covers browser QR login, device account and Agent Key login, and app
+verification while approving another device. QR scans and typed request codes
+use the same policy.
+
+Anyone with access to your signed-in app or browser can use this preference to
+approve another sign-in without TOTP, including phone sessions created during
+the mobile MFA rollout. Review each request and approve only codes shown on your
+own screen. With mobile MFA off, someone holding your social first factor can
+sign in to the mobile app and use it to approve web QR login by default. Turning
+this switch off closes that path. Password/social web sign-in and ordinary
+one-time login-code creation still use their usual MFA requirements.
+
+Turning the switch off requires no extra MFA and blocks outstanding approvals
+that relied on the exception. Turning it back on cannot revive those approvals.
+Completed sessions remain signed in until their expiry or revocation; use
+**Sign out other sessions** to remove them. Disabling two-factor authentication
+preserves this preference and invalidates pending bypass approvals. Older servers
+show a disabled switch until updated.
 
 ### Disable MFA
 
 1. Go to **Settings → Security**.
-2. Click **Disable two-factor authentication**.
-3. Confirm with your current TOTP code or a backup code.
+2. Turn off the **Two-Factor Authentication** switch.
+3. Enter an authenticator code or a single-use recovery code in the confirmation dialog.
+4. If your account has a password, enter the current password too.
+5. Click **Disable MFA**.
 
 :::note
 MFA setup is idempotent on the backend — calling setup again while a factor is unverified replaces the pending factor without error. A verified factor must be explicitly disabled before setup can be repeated.
@@ -40,16 +102,31 @@ MFA setup is idempotent on the backend — calling setup again while a factor is
 
 ### Change your password
 
-1. Go to **Settings → Security**.
-2. Click **Change password**.
-3. Enter your current password, then your new password twice.
-4. Click **Save**.
+The **Change Password** card appears only when your account has a password set.
+This includes accounts that use social sign-in and later add a password.
 
-Password changes do not invalidate existing sessions.
+1. Go to **Settings → Security**.
+2. Enter your current password, then your new password twice in **Change Password**.
+3. Click **Change Password**.
+
+New passwords must contain 8–128 UTF-8 bytes; accented characters and emoji may
+use more than one byte. There is no uppercase, lowercase, or digit requirement
+for this action. Reusing the current password is allowed, matching password reset.
+Your current password is required, so this action cannot add a password to a
+passwordless account.
+
+Successful changes invalidate pending password-reset links, unfinished MFA
+challenges, and request-only login approval proofs. Completed browser,
+access-token, and refresh-token sessions remain valid, including the current
+session. Use **Sessions** to revoke any session you no longer trust.
+
+Attempts, including successful changes, are limited to 5 per account and 20 per
+IP address per minute across servers. A wrong current password or a rate limit
+shows an inline error and keeps you signed in.
 
 ### Reset a forgotten password
 
-On the login page, click **Forgot password**. Enter your email address. NyxID sends a single-use reset link valid for 1 hour. Click the link, set a new password, and sign in.
+On the login page, click **Forgot password**. Enter your email address. NyxID sends a single-use reset link valid for 1 hour. Click the link, set a new password, and sign in. A successful reset revokes existing sessions, refresh tokens, and pending login proofs.
 
 :::note
 If your account uses social sign-in (Google / GitHub / Apple) and you never set a password, the forgot-password flow creates a password credential in addition to the existing social login.
@@ -57,7 +134,8 @@ If your account uses social sign-in (Google / GitHub / Apple) and you never set 
 
 ## Sessions
 
-Every sign-in creates a session. Sessions expire after 7 days of inactivity (refresh token TTL). Active sessions stay alive with automatic token refresh on every page load.
+Every sign-in creates a session with a fixed 30-day expiry. Refresh tokens rotate
+automatically while that session is live; refresh does not extend the session expiry.
 
 ### View active sessions
 

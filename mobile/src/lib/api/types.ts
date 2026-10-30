@@ -1,5 +1,6 @@
 export type ChallengeStatus = "PENDING" | "APPROVED" | "DENIED" | "EXPIRED";
 export type ApprovalMode = "per_request" | "grant";
+export type ApprovalDecisionChannel = "web" | "telegram" | "mobile";
 
 export type ChallengeItem = {
   id: string;
@@ -7,7 +8,7 @@ export type ChallengeItem = {
   action: string;
   resource: string;
   approval_mode: ApprovalMode;
-  risk_level: "low" | "medium" | "high";
+  risk_level: "low" | "medium" | "high" | "unknown";
   status: ChallengeStatus;
   created_at: string;
   expires_at: string;
@@ -22,9 +23,12 @@ export type ChallengeItem = {
 
 export type ChallengeDetail = ChallengeItem & {
   summary: string;
+  /** Actual decision metadata, absent on older servers and pending requests. */
+  decided_at?: string | null;
+  decision_channel?: ApprovalDecisionChannel | null;
   request_context: {
     client: string;
-    location: string;
+    requester: string;
   };
   /**
    * Stable service identifier (e.g. catalog slug or `UserService.slug`).
@@ -33,6 +37,11 @@ export type ChallengeDetail = ChallengeItem & {
    * underlying service rather than the user-editable display title.
    */
   service_slug: string;
+  tool_name?: string | null;
+  tool_call_id?: string | null;
+  tool_arguments?: string | null;
+  is_destructive?: boolean | null;
+  verb?: string | null;
 };
 
 export type ApprovalItem = {
@@ -76,8 +85,11 @@ export type NotificationSettings = {
   telegram_connected: boolean;
   telegram_username: string | null;
   telegram_enabled: boolean;
+  global_approval_mode?: "writes_only" | "all" | "off";
   approval_required: boolean;
   approval_suspended: boolean;
+  approval_web_available?: boolean;
+  approval_delivery_configured?: boolean;
   approval_timeout_secs: number;
   grant_expiry_days: number;
   push_enabled: boolean;
@@ -94,6 +106,7 @@ export type TelegramLinkInfo = {
 export type UpdateNotificationSettingsInput = {
   telegram_enabled?: boolean;
   push_enabled?: boolean;
+  global_approval_mode?: "writes_only" | "all" | "off";
   approval_required?: boolean;
   approval_timeout_secs?: number;
   grant_expiry_days?: number;
@@ -104,6 +117,7 @@ export type SubmitDecisionOptions = {
 };
 
 export type AccountProfile = {
+  capabilities?: { enabled_features?: string[] };
   id: string;
   email: string;
   display_name?: string | null;
@@ -118,6 +132,8 @@ export type AccountProfile = {
 };
 
 export type DeleteAccountResponse = {
-  status: "DELETED";
-  deleted_at: string;
+  status: "accepted" | "pending" | "operator_action" | "complete";
+  accepted_at: string;
+  completed_at: string | null;
+  domains: Array<{domain: string; status: "pending" | "operator_action" | "complete"; reason: string | null; completed_at: string | null}>;
 };

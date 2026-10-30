@@ -68,6 +68,7 @@ const EVENTS = Array.from({ length: 31 * 24 }, (_, hour) =>
     return {
       time: END - (31 * 24 - hour) * HOUR,
       service: uid(service + 1),
+      model: `sample-model-${service + 1}-${(hour % 2) + 1}`,
       actor: uid(actor + 101),
       owner: uid(owner + 201),
       credentialClass: service % 2 ? "user_owned" : "nyxid_managed_master",
@@ -209,13 +210,15 @@ export function sampleAnalytics(
                     ? eventCounts[panel.measure]!
                     : quantities[panel.metric]!;
     const group =
-      panel.breakdown === "service"
-        ? row.service
-        : panel.breakdown === "user"
-          ? row.actor
-          : panel.breakdown === "credential_class"
-            ? row.credentialClass
-            : row.owner;
+      panel.breakdown === "model"
+        ? row.model
+        : panel.breakdown === "service"
+          ? row.service
+          : panel.breakdown === "user"
+            ? row.actor
+            : panel.breakdown === "credential_class"
+              ? row.credentialClass
+              : row.owner;
     groups.set(group, (groups.get(group) ?? 0) + amount);
     const byTime =
       groupedPoints.get(group) ??
@@ -251,20 +254,22 @@ export function sampleAnalytics(
   }
   const total = points.reduce((sum, point) => sum + point.value!, 0);
   const names =
-    panel.breakdown === "credential_class"
-      ? [
-          ...["user_owned", "nyxid_managed_master"].map((id) => ({
-            id,
-            label: credentialClassLabel(id),
-          })),
-        ]
-      : SAMPLE_OPTIONS[
-          panel.breakdown === "service"
-            ? "services"
-            : panel.breakdown === "user"
-              ? "actors"
-              : "owners"
-        ];
+    panel.breakdown === "model"
+      ? [...groups.keys()].map((id) => ({ id, label: id }))
+      : panel.breakdown === "credential_class"
+        ? [
+            ...["user_owned", "nyxid_managed_master"].map((id) => ({
+              id,
+              label: credentialClassLabel(id),
+            })),
+          ]
+        : SAMPLE_OPTIONS[
+            panel.breakdown === "service"
+              ? "services"
+              : panel.breakdown === "user"
+                ? "actors"
+                : "owners"
+          ];
   const sorted = [...groups].sort(
     (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
   );

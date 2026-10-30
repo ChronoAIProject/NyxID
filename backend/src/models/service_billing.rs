@@ -330,6 +330,10 @@ pub struct PlatformUsage {
     pub audio_tokens: Option<AudioTokens>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_tokens: Option<ImageTokens>,
+    /// Model the provider reported in the response (observability only; never
+    /// selects a rate and is not sent to Lago).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_model: Option<String>,
 }
 
 impl PlatformUsage {
@@ -365,6 +369,11 @@ impl PlatformUsage {
 
     pub fn with_image_tokens(mut self, images: Option<ImageTokens>) -> Self {
         self.image_tokens = images.filter(|images| !images.is_empty());
+        self
+    }
+
+    pub fn with_reported_model(mut self, model: Option<String>) -> Self {
+        self.reported_model = model;
         self
     }
 }

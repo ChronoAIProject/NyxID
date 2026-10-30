@@ -93,7 +93,7 @@ export function WebDeviceLogin({
       window.location.assign(trustedReturnTo);
       return;
     }
-    void navigate({ to: "/dashboard" as string });
+    void navigate({ to: "/assistant" as string });
   }, [deviceLogin.phase, navigate, returnTo]);
 
   function setOpen(open: boolean) {
@@ -158,7 +158,7 @@ export function WebDeviceLogin({
         ? "Code expired - generate a new one"
         : deviceLogin.phase === "used"
           ? "This code was already used"
-          : deviceLogin.phase === "error"
+          : deviceLogin.phase === "error" || deviceLogin.phase === "restore_error"
             ? deviceLogin.error?.message ?? "Device sign-in failed"
             : null;
   const formattedCode = deviceLogin.request
@@ -200,6 +200,13 @@ export function WebDeviceLogin({
         >
           <RefreshCw className="size-3.5 animate-spin" />
           Generating a sign-in code...
+        </div>
+      )}
+
+      {deviceLogin.phase === "restoring" && (
+        <div className="mt-8 flex items-center justify-center gap-2 text-12 text-muted-foreground" role="status">
+          <RefreshCw className="size-3.5 animate-spin" />
+          Loading your approved account...
         </div>
       )}
 
@@ -276,13 +283,13 @@ export function WebDeviceLogin({
             type="button"
             variant="outline"
             className="mt-3"
-            onClick={generateNew}
+            onClick={deviceLogin.phase === "restore_error" ? deviceLogin.retryProfile : generateNew}
             disabled={deviceLogin.phase === "requesting"}
           >
             <ButtonIcon>
               <RefreshCw />
             </ButtonIcon>
-            Generate new code
+            {deviceLogin.phase === "restore_error" ? "Retry loading account" : "Generate new code"}
           </Button>
         </div>
       )}

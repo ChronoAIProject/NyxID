@@ -2,6 +2,7 @@ import { platformThreadSchema, platformTurnOriginSchema } from "./platform-perso
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
+import { cmaOperationSchema } from "./cma-operation";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -90,7 +91,14 @@ export const nyxAgentConversationSchema = z.object({
     .object({
       platform_origin: platformTurnOriginSchema.nullish(),
       turn_id: z.string(),
+      reply: z.object({
+        message_id: z.string(),
+        block_id: z.string(),
+        cursor: z.number().int().nonnegative(),
+        text: z.string(),
+      }).nullish(),
       response_id: z.string().nullish(),
+      queued: z.boolean().optional(),
       waiting_for_capacity: z.boolean().optional(),
       capacity_wait_note_origin: z.string().nullish(),
       engine_request_started_at: z.string().nullish(),
@@ -138,6 +146,21 @@ export const nyxAgentRecoverySchema = z.object({
   attachments: z.array(z.string()),
 });
 export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
+const nyxAgentFailureReasonSchema = z.object({
+  model_route: z.object({ reason: z.string(), unknown_fields: z.array(z.string()) }).nullish(),
+  source: z.string(),
+  stage: z.string(),
+  code: z.string(),
+  http_status: z.number().int().nullish(),
+  nyxid_error_code: z.number().int().nullish(),
+});
+export type NyxAgentFailureReason = z.infer<typeof nyxAgentFailureReasonSchema>;
+const turnMetadataSchema = z.object({
+  attempts: z.number().int().nonnegative().nullish(),
+  capacity_wait_ms: z.number().nonnegative().nullish(),
+  failure_reason: nyxAgentFailureReasonSchema.nullish(),
+  channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
+});
 export const nyxAgentMessageSchema = z.object({
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
@@ -152,7 +175,7 @@ export const nyxAgentMessageSchema = z.object({
   status: z.enum(["completed", "failed"]),
   error_code: z.string().nullable(),
   upstream_error_code: z.string().nullable().optional(),
-  turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish() }).nullish(),
+  turn_metadata: turnMetadataSchema.nullish(),
   error_detail: z.object({
     attempts: z.number().int().nonnegative().nullish(),
     capacity_wait_ms: z.number().nonnegative().nullish(),
@@ -171,6 +194,10 @@ export const nyxAgentMessageSchema = z.object({
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
+  /** Who started the turn this message opens; absent on older rows. */
+  origin: z.string().nullish(),
+  /** The automation an automation-started message came from, while its run is retained. */
+  automation: z.object({ trigger_id: z.string(), run_id: z.string(), label: z.string() }).nullish(),
 });
 /** How NyxBot asks before acting: never, for sensitive/destructive actions, or for every change. */
 export const nyxAgentAccessModeSchema = z.enum(["autopilot", "nyxmode", "ask_every_time"]);
@@ -194,6 +221,9 @@ export const nyxAgentModelSchema = z.object({
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
+  creation_turn_id: z.string().nullish(),
+  /** The tool call (turn activity) this card or receipt belongs to. */
+  activity_id: z.string().nullish(),
   authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
   continuation_receipt_id: z.string().uuid().nullish(),
@@ -245,6 +275,7 @@ export const nyxAgentWaitingSchema = z.object({
 export type NyxAgentWaiting = z.infer<typeof nyxAgentWaitingSchema>;
 
 export const nyxAgentHistorySchema = z.object({
+  cma_operations: z.array(cmaOperationSchema).default([]),
   conversation: nyxAgentConversationSchema,
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
@@ -263,7 +294,9 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.status"),
     conversation_id: conversationId,
     turn_id: z.string(),
+    started_at: z.string().optional(),
     status: z.enum(["running", "waiting"]),
+    queued: z.boolean().optional(),
     waiting_for_capacity: z.boolean().optional(),
     engine_accepted: z.boolean().optional(),
     capacity_wait_note_origin: z.string().nullish(),
@@ -296,7 +329,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.completed"),
     turn_id: z.string(),
     status: z.enum(["completed", "failed", "cancelled"]),
-    turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish() }).nullish(),
+    turn_metadata: turnMetadataSchema.nullish(),
     error: z.object({
       attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(),
       code: z.string(), message: z.string(), upstream_error_code: z.string().nullish(),
@@ -412,7 +445,21 @@ export type AssistantAgentRequest = z.infer<typeof assistantAgentRequestSchema>;
 export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
+export const guestReadinessSchema = z.object({
+  status: z.enum(["ready", "not_ready"]),
+  reason: z.string().nullish(),
+  fix: z.string().nullish(),
+});
+export type GuestReadiness = z.infer<typeof guestReadinessSchema>;
+export const guestReadinessSettingsSchema = guestReadinessSchema.extend({
+  conversation_overrides: z.array(z.string()).default([]),
+  conversation_overrides_truncated: z.boolean().default(false),
+});
+
+
 export const assistantAgentSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
+  share_role: z.enum(["manager", "user"]).nullable().optional(),
   owner_id: z.string().optional(),
   owner_name: z.string().nullable().optional(),
   owner_kind: z.enum(["person", "org"]).optional(),
@@ -430,6 +477,7 @@ export const assistantAgentSchema = z.object({
   description: z.string().default(""),
   model: z.string().optional(),
   access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+  channel_checking_notice: z.boolean().optional(),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
@@ -561,6 +609,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         persona: agentPersona,
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+        channel_checking_notice: z.boolean().optional(),
       })
     : z.object({
         name: agentName,
@@ -569,6 +618,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         persona: agentPersona,
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+        channel_checking_notice: z.boolean().optional(),
       });
 }
 /** A PATCH to an agent: only the fields that changed. `null` clears the override. */
@@ -579,6 +629,7 @@ export type AssistantAgentUpdate = {
   persona?: string;
   model?: string;
   access_mode_override?: NyxAgentAccessMode | null;
+  channel_checking_notice?: boolean;
 };
 export type AssistantAgentProfile = {
   name: string;
@@ -587,6 +638,7 @@ export type AssistantAgentProfile = {
   persona: string;
   model?: string;
   access_mode_override?: "autopilot" | "nyxmode" | "ask_every_time" | null;
+  channel_checking_notice?: boolean;
 };
 
 export const assistantAgentGrantsSchema = z.object({
@@ -612,6 +664,7 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
   follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
   id: z.string(),
   channel_bot_id: z.string(),
@@ -629,7 +682,7 @@ export const nyxAgentChannelAgentSchema = z.object({
   org_id: z.string().nullable().default(null),
   /** Who may talk to the agent in private chats with the bot. */
   private_chats: z.enum(["owner", "everyone"]).catch("owner"),
-  /** `ok` or `failing` once a message has been judged; null before. */
+  /** `ok`, `failing`, `interrupted`, or `media_failed`; null before a message is judged. */
   delivery_status: z.string().nullable().default(null),
   delivery_error: z.string().nullable().default(null),
   /** Plain words for `delivery_error`. */
@@ -662,6 +715,7 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
   parent_chat_id: z.string().nullable().optional(),
   has_thread_history: z.boolean().optional(),
   threads: z.enum(["follow", "off"]).catch("off").optional(),

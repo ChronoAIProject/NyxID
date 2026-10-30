@@ -15,7 +15,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-#[cfg(test)]
 use mongodb::bson::doc;
 
 use crate::AppState;
@@ -30,6 +29,30 @@ use crate::services::channel_inbound_service::InboundDeps as WebhookHandlerDeps;
 // Adapter-driven webhook handlers
 // ---------------------------------------------------------------------------
 
+type ManagerProducers =
+    std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>;
+
+pub async fn channel_webhook_with_runtime(
+    State(state): State<AppState>,
+    Path((platform, bot_id)): Path<(String, String)>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    producers: Option<axum::Extension<ManagerProducers>>,
+    body: Bytes,
+) -> axum::response::Response {
+    channel_webhook_with_producers(
+        State(state),
+        Path((platform, bot_id)),
+        uri,
+        headers,
+        body,
+        "https://api.telegram.org",
+        producers.map(|axum::Extension(value)| value),
+    )
+    .await
+}
+
+#[cfg(test)]
 pub async fn channel_webhook(
     State(state): State<AppState>,
     Path((platform, bot_id)): Path<(String, String)>,
@@ -48,6 +71,7 @@ pub async fn channel_webhook(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn channel_webhook_with_api(
     State(state): State<AppState>,
     Path((platform, bot_id)): Path<(String, String)>,
@@ -55,6 +79,27 @@ pub(crate) async fn channel_webhook_with_api(
     headers: HeaderMap,
     body: Bytes,
     telegram_api_base: &str,
+) -> axum::response::Response {
+    channel_webhook_with_producers(
+        State(state),
+        Path((platform, bot_id)),
+        uri,
+        headers,
+        body,
+        telegram_api_base,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn channel_webhook_with_producers(
+    State(state): State<AppState>,
+    Path((platform, bot_id)): Path<(String, String)>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    telegram_api_base: &str,
+    producers: Option<ManagerProducers>,
 ) -> axum::response::Response {
     use crate::services::channel_platform::WebhookPolicy;
     let Ok(adapter) = resolve_adapter(&platform, &state.token_exchange_cache) else {
@@ -106,6 +151,49 @@ pub(crate) async fn channel_webhook_with_api(
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     }
+    if platform == "discord" {
+        let verified = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::services::platform_entry_native::authenticate_discord_ack(
+                &state.db,
+                adapter.as_ref(),
+                &bot_id,
+                &headers,
+                &body,
+            ),
+        )
+        .await;
+        match verified {
+            Ok(Ok(())) => {}
+            Ok(Err(
+                crate::errors::AppError::ChannelWebhookVerificationFailed(_)
+                | crate::errors::AppError::Forbidden(_),
+            )) => return StatusCode::UNAUTHORIZED.into_response(),
+            Ok(Err(_)) | Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
+    if platform == "discord" {
+        match serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["type"].as_u64())
+        {
+            Some(0) => {
+                let _ =
+                    crate::services::discord_gateway::record_setup_probe(&state.db, &bot_id, true)
+                        .await;
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error":"discord_event_webhooks_wrong_endpoint",
+                    "message":"Use General Information > Interactions Endpoint URL for this URL. Event Webhooks do not deliver ordinary bot chat messages. Ordinary chat requires Discord Gateway ingress and Message Content Intent."
+                }))).into_response();
+            }
+            Some(1) => {
+                let _ =
+                    crate::services::discord_gateway::record_setup_probe(&state.db, &bot_id, false)
+                        .await;
+            }
+            _ => {}
+        }
+    }
     let empty_ack_is_text = adapter.registration().empty_ack_is_text;
     match adapter.webhook_policy(&body) {
         WebhookPolicy::RetryAwareInline => {
@@ -151,7 +239,7 @@ pub(crate) async fn channel_webhook_with_api(
         }
         WebhookPolicy::Challenge(response) => Json(response).into_response(),
         WebhookPolicy::Immediate(response) => {
-            tokio::spawn(async move {
+            crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
                 // A WABA override covers all of its numbers. Managed callbacks
                 // fan out through the same verified dispatcher as the app route.
                 if adapter.platform_webhook()
@@ -161,16 +249,24 @@ pub(crate) async fn channel_webhook_with_api(
                             bot.platform == platform && bot.credential_source == "platform"
                         })
                 {
-                    if dispatch_platform_webhook(&state, &platform, &headers, &body)
-                        .await
-                        .is_err()
+                    if dispatch_platform_webhook_with_producers(
+                        &state,
+                        &platform,
+                        &headers,
+                        &body,
+                        producers.clone(),
+                    )
+                    .await
+                    .is_err()
                     {
                         tracing::warn!(bot_id = %bot_id, platform = %platform, "managed channel webhook processing failed");
                     }
                     return;
                 }
-                if let Err(e) =
-                    handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await
+                if let Err(e) = handle_webhook_inner_with_producers(
+                    &state, &bot_id, &platform, &headers, &body, producers,
+                )
+                .await
                 {
                     tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
                 }
@@ -178,7 +274,11 @@ pub(crate) async fn channel_webhook_with_api(
             webhook_response(response, empty_ack_is_text)
         }
         WebhookPolicy::Inline => {
-            match handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await {
+            match handle_webhook_inner_with_producers(
+                &state, &bot_id, &platform, &headers, &body, producers,
+            )
+            .await
+            {
                 Ok(response) => webhook_response(response, empty_ack_is_text),
                 Err(e) => {
                     tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
@@ -247,15 +347,17 @@ pub async fn platform_webhook(
     State(state): State<AppState>,
     Path(platform): Path<String>,
     headers: HeaderMap,
+    producers: Option<axum::Extension<ManagerProducers>>,
     body: Bytes,
 ) -> axum::response::Response {
+    let producers = producers.map(|axum::Extension(value)| value);
     if !resolve_adapter(&platform, &state.token_exchange_cache)
         .is_ok_and(|adapter| adapter.platform_webhook())
     {
         return StatusCode::NOT_FOUND.into_response();
     }
-    tokio::spawn(async move {
-        if dispatch_platform_webhook(&state, &platform, &headers, &body)
+    crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
+        if dispatch_platform_webhook_with_producers(&state, &platform, &headers, &body, producers)
             .await
             .is_err()
         {
@@ -265,11 +367,22 @@ pub async fn platform_webhook(
     StatusCode::OK.into_response()
 }
 
+#[cfg(test)]
 pub(super) async fn dispatch_platform_webhook(
     state: &AppState,
     platform: &str,
     headers: &HeaderMap,
     body: &[u8],
+) -> crate::errors::AppResult<()> {
+    dispatch_platform_webhook_with_producers(state, platform, headers, body, None).await
+}
+
+pub(crate) async fn dispatch_platform_webhook_with_producers(
+    state: &AppState,
+    platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<ManagerProducers>,
 ) -> crate::errors::AppResult<()> {
     let adapter = resolve_adapter(platform, &state.token_exchange_cache)?;
     let descriptor = adapter
@@ -338,9 +451,16 @@ pub(super) async fn dispatch_platform_webhook(
             continue;
         };
         // Reuse per-bot verification and phone filtering for managed credentials.
-        if handle_webhook_inner(state, &bot.id, platform, headers, body)
-            .await
-            .is_err()
+        if handle_webhook_inner_with_producers(
+            state,
+            &bot.id,
+            platform,
+            headers,
+            body,
+            producers.clone(),
+        )
+        .await
+        .is_err()
         {
             tracing::warn!(platform, bot_id = %bot.id, "platform webhook bot processing failed");
         }
@@ -409,6 +529,7 @@ pub async fn channel_subscription(
 ///
 /// Returns errors for logging; the outer platform handler suppresses them and
 /// always returns 200 OK to prevent platforms from retrying failed deliveries.
+#[cfg(test)]
 async fn handle_webhook_inner(
     state: &AppState,
     bot_id: &str,
@@ -416,6 +537,32 @@ async fn handle_webhook_inner(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    handle_webhook_inner_with_producers(state, bot_id, expected_platform, headers, body, None).await
+}
+
+pub(crate) async fn handle_webhook_inner_with_producers(
+    state: &AppState,
+    bot_id: &str,
+    expected_platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<ManagerProducers>,
+) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    match crate::services::platform_entry_ingress_service::intercept(
+        state,
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+        producers,
+    )
+    .await?
+    {
+        crate::services::platform_entry_ingress_service::NativeWebhook::Ordinary => {}
+        crate::services::platform_entry_ingress_service::NativeWebhook::Consumed(response) => {
+            return Ok(response);
+        }
+    }
     handle_webhook_inner_with_deps(
         WebhookHandlerDeps::from(state),
         bot_id,
@@ -596,6 +743,87 @@ async fn handle_webhook_inner_impl(
         // database error, which can include the rejected document or validator.
         tracing::warn!(bot_id = %bot.id, "unable to persist channel receipt metadata");
     }
+
+    // Native WhatsApp owns Meta's callback while gateway-owned. Keep signed
+    // relay deliveries explicit: during rollback they are admitted and fence
+    // native intake; during the gateway phase they are diagnosed and dropped
+    // because native ownership remains authoritative.
+    if bot.platform == "whatsapp"
+        && bot.credential_source == "user"
+        && let Some(config) = crate::services::whatsapp_native::load(state.db, &bot).await?
+    {
+        let payload = serde_json::from_slice::<serde_json::Value>(&prepared.body).ok();
+        match config.callback.phase {
+            crate::models::channel_whatsapp_native::CallbackPhase::AwaitingRelay => {
+                let mut observed = config.clone();
+                if payload.as_ref().is_some_and(|payload| {
+                    crate::services::whatsapp_native::callback::observe_relay_intake(
+                        &mut observed,
+                        &bot,
+                        payload,
+                    )
+                }) {
+                    let _ = state
+                        .db
+                        .collection::<crate::models::channel_whatsapp_native::NativeWhatsapp>(
+                            crate::models::channel_whatsapp_native::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {
+                                "_id": &config.bot_id,
+                                "revision": config.revision,
+                                "callback.phase": "awaiting_relay",
+                            },
+                            doc! {
+                                "$set": {
+                                    "callback.intake_seen_at": observed.callback.intake_seen_at,
+                                    "callback.relay_observed_at": observed.callback.relay_observed_at,
+                                    "updated_at": bson::DateTime::now(),
+                                }
+                            },
+                        )
+                        .await;
+                }
+            }
+            crate::models::channel_whatsapp_native::CallbackPhase::Gateway => {
+                if crate::services::whatsapp_native::callback::suppress_relay_messages(&config)
+                    && payload.as_ref().is_some_and(|payload| {
+                        crate::services::whatsapp_native::callback::relay_message_evidence(
+                            &config, &bot, payload,
+                        )
+                    })
+                {
+                    crate::services::channel_bot_service::record_webhook_error(
+                        state.db,
+                        &bot.id,
+                        crate::services::channel_bot_health::codes::NATIVE_RELAY_CONFLICT,
+                    )
+                    .await?;
+                    let mut facts = crate::services::channel_bot_health::HealthFacts::for_bot(
+                        &bot,
+                        chrono::Utc::now(),
+                        true,
+                    );
+                    facts.failure_reason =
+                        Some(crate::services::channel_bot_health::codes::NATIVE_RELAY_CONFLICT);
+                    let recommendation = crate::services::channel_bot_health::recommend(&facts);
+                    crate::services::channel_bot_health::notify_failure(
+                        state.db,
+                        &bot,
+                        &recommendation,
+                    );
+                    return Ok(None);
+                }
+            }
+            crate::models::channel_whatsapp_native::CallbackPhase::Unknown
+                if crate::services::whatsapp_native::callback::suppress_relay_messages(&config) =>
+            {
+                return Ok(None);
+            }
+            _ => {}
+        }
+    }
+
     let messages = adapter.parse_inbound(&prepared.body).await.map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
             tracing::warn!(platform = %bot.platform, bot_id, stage = "payload", "channel webhook payload rejected");
@@ -877,6 +1105,13 @@ mod tests {
         state.config.channel_relay_callback_timeout_secs = 1;
         let bot_id = uuid::Uuid::new_v4().to_string();
         let owner_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let (callback_url, received, shutdown_tx) =
             spawn_callback_server_with_outcome(callback_status).await;
@@ -987,6 +1222,8 @@ mod tests {
             assert!(adapter.dedup_inbound_by_platform_message_id());
             assert!(adapter.atomic_inbound_admission());
             let message = crate::services::channel_platform::InboundMessage {
+                embedded_attachments: Vec::new(),
+                embedded_attachments_omitted: 0,
                 platform_message_id: "500".into(),
                 conversation_id: "15551234567".into(),
                 conversation_type: "private".into(),
@@ -1319,7 +1556,9 @@ mod tests {
         crate::config::AppConfig {
             port: 3001,
             auth_device_eight_char_codes: false,
+            resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
+            chrono_probe_url: None,
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],
@@ -1328,6 +1567,8 @@ mod tests {
             environment: "development".to_string(),
             jwt_private_key_path: key_dir.join("private.pem").display().to_string(),
             jwt_public_key_path: key_dir.join("public.pem").display().to_string(),
+            jwt_retained_public_key_paths: Vec::new(),
+            domain_aliases: Default::default(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -1352,6 +1593,8 @@ mod tests {
             smtp_from_address: None,
             encryption_key: Some(encryption_key.to_string()),
             encryption_key_previous: None,
+            allow_legacy_record_reads: true,
+            contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             platform_service_rate_limit_per_second: 2,
@@ -1361,6 +1604,7 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            hmac_keyset_path: None,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
@@ -1392,6 +1636,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,
@@ -1449,6 +1694,7 @@ mod tests {
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
+            billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),
@@ -1549,7 +1795,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        tokio::spawn(async move {
+        crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
@@ -1565,7 +1811,25 @@ mod tests {
         )
     }
 
+    /// Which NyxBot channel, if any, the receiving route belongs to.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum NyxbotLink {
+        None,
+        /// A personal bot routed to its owner's NyxBot.
+        Personal,
+        /// An organization's bot routed to the NyxBot of the admin who linked it.
+        LinkedOrg,
+    }
+
     async fn assert_verified_group_mention_passthrough(platform: &str, sender_is_bot: bool) {
+        assert_verified_group_mention_relay(platform, sender_is_bot, NyxbotLink::None).await;
+    }
+
+    async fn assert_verified_group_mention_relay(
+        platform: &str,
+        sender_is_bot: bool,
+        nyxbot: NyxbotLink,
+    ) {
         use hmac::{Hmac, Mac};
         use sha2::{Digest, Sha256};
 
@@ -1621,6 +1885,13 @@ mod tests {
         let jwt_keys = crate::test_utils::cached_test_jwt_keys();
         let encryption_keys = crate::crypto::aes::EncryptionKeys::from_config(&config);
         let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let bot_id = uuid::Uuid::new_v4().to_string();
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let conversation_id = uuid::Uuid::new_v4().to_string();
@@ -1629,6 +1900,7 @@ mod tests {
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
         let bot = crate::models::channel_bot::ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -1754,6 +2026,13 @@ mod tests {
         let mut mentioned_bot = bot.clone();
         mentioned_bot.id = uuid::Uuid::new_v4().to_string();
         mentioned_bot.user_id = foreign_key.user_id.clone();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &foreign_key.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         mentioned_bot.platform_bot_id = if platform == "telegram" {
             "9876"
         } else {
@@ -1788,8 +2067,16 @@ mod tests {
         .await
         .unwrap();
 
-        // No sender identity, OAuth binding, notification link, or user row exists.
-        for collection in ["users", "oauth_broker_bindings", "notification_channels"] {
+        // No sender identity, OAuth binding, notification link, or user row
+        // exists; the only accounts are the two live bot owners.
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+                .count_documents(doc! {"_id":{"$nin":[&user_id,&foreign_key.user_id]}})
+                .await
+                .unwrap(),
+            0
+        );
+        for collection in ["oauth_broker_bindings", "notification_channels"] {
             assert_eq!(
                 db.collection::<mongodb::bson::Document>(collection)
                     .count_documents(doc! {})
@@ -1853,6 +2140,29 @@ mod tests {
             .unwrap(),
             0
         );
+
+        if nyxbot != NyxbotLink::None {
+            let mut row = doc! {
+                "_id": uuid::Uuid::new_v4().to_string(),
+                "user_id": &user_id,
+                "channel_bot_id": &bot_id,
+                "platform": platform,
+                "transport": "gateway",
+                "status": "active",
+                "route_api_key_id": &api_key_id,
+            };
+            if nyxbot == NyxbotLink::LinkedOrg {
+                // The linking admin owns the NyxBot channel; the org owns the bot.
+                row.insert("user_id", uuid::Uuid::new_v4().to_string());
+                row.insert("bot_owner_id", &user_id);
+            }
+            db.collection::<mongodb::bson::Document>(
+                crate::models::nyxbot_channel::COLLECTION_NAME,
+            )
+            .insert_one(row)
+            .await
+            .unwrap();
+        }
 
         let result = handle_webhook_inner_with_deps(
             deps(),
@@ -1930,22 +2240,28 @@ mod tests {
         )
         .unwrap();
 
-        let owner_claims = crate::crypto::jwt::verify_token(
-            &jwt_keys,
-            &config,
-            request.headers["X-NyxID-User-Token"].to_str().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(owner_claims.sub, user_id);
-        assert_eq!(owner_claims.relay, Some(true));
-        assert_eq!(
-            owner_claims.relay_api_key_id.as_deref(),
-            Some(api_key_id.as_str())
-        );
-        assert_eq!(owner_claims.relay_allow_all_services, Some(false));
-        assert_eq!(owner_claims.relay_allow_all_nodes, Some(false));
-        assert_eq!(owner_claims.relay_allowed_service_ids, Some(vec![]));
-        assert_eq!(owner_claims.relay_allowed_node_ids, Some(vec![]));
+        if nyxbot == NyxbotLink::LinkedOrg {
+            // The gateway binds this token to the linking admin and would
+            // refuse the org-subject token with HTTP 401.
+            assert!(!request.headers.contains_key("X-NyxID-User-Token"));
+        } else {
+            let owner_claims = crate::crypto::jwt::verify_token(
+                &jwt_keys,
+                &config,
+                request.headers["X-NyxID-User-Token"].to_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(owner_claims.sub, user_id);
+            assert_eq!(owner_claims.relay, Some(true));
+            assert_eq!(
+                owner_claims.relay_api_key_id.as_deref(),
+                Some(api_key_id.as_str())
+            );
+            assert_eq!(owner_claims.relay_allow_all_services, Some(false));
+            assert_eq!(owner_claims.relay_allow_all_nodes, Some(false));
+            assert_eq!(owner_claims.relay_allowed_service_ids, Some(vec![]));
+            assert_eq!(owner_claims.relay_allowed_node_ids, Some(vec![]));
+        }
 
         let stored = db
             .collection::<mongodb::bson::Document>(crate::models::channel_message::COLLECTION_NAME)
@@ -1994,6 +2310,18 @@ mod tests {
     async fn delivered_telegram_bot_message_preserves_group_mentions() {
         // A delivered-update fixture cannot prove that Telegram delivers a bot's message live.
         assert_verified_group_mention_passthrough("telegram", true).await;
+    }
+
+    #[tokio::test]
+    async fn org_bot_linked_to_nyxbot_relays_without_user_token() {
+        for platform in ["lark", "telegram"] {
+            assert_verified_group_mention_relay(platform, false, NyxbotLink::LinkedOrg).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn personal_bot_linked_to_nyxbot_keeps_user_token() {
+        assert_verified_group_mention_relay("lark", false, NyxbotLink::Personal).await;
     }
 
     // ── lark_event_body helper tests ────────────────────────────────────

@@ -298,17 +298,27 @@ async fn persist(
     merged: Vec<String>,
     expected_version: i64,
 ) -> AppResult<Replacement> {
+    let context = (
+        db.clone(),
+        user_id.to_owned(),
+        current.is_none(),
+        merged,
+        expected_version,
+        bson::DateTime::now().to_chrono(),
+    );
+    super::transaction_service::run_db_only(db, &context, |tx, (db, user_id, absent, merged, expected_version, now)| {
+        Box::pin(async move {
+    super::erasure_admission::fence_in_session(db, user_id, tx).await?;
     let collection = db.collection::<ServicePreference>(COLLECTION_NAME);
-    let now = bson::DateTime::now().to_chrono();
-    let preference = if current.is_none() {
+    let preference = if *absent {
         let row = ServicePreference {
-            user_id: user_id.into(),
-            ordered: merged,
+            user_id: user_id.clone(),
+            ordered: merged.clone(),
             version: 1,
-            created_at: now,
-            updated_at: now,
+            created_at: *now,
+            updated_at: *now,
         };
-        match collection.insert_one(&row).await {
+        match collection.insert_one(&row).session(&mut *tx).await {
             Ok(_) => row,
             Err(error) if duplicate_key(&error) => {
                 return Err(AppError::Conflict(
@@ -318,20 +328,22 @@ async fn persist(
             Err(error) => return Err(error.into()),
         }
     } else {
-        let filter = if expected_version == 0 {
+        let filter = if *expected_version == 0 {
             doc! { "_id": user_id, "$or": [{ "version": 0_i64 }, { "version": { "$exists": false } }] }
         } else {
             doc! { "_id": user_id, "version": expected_version }
         };
         collection.find_one_and_update(filter,
-            doc! { "$set": { "ordered": &merged, "updated_at": bson::DateTime::from_chrono(now) }, "$inc": { "version": 1_i64 } })
-            .return_document(ReturnDocument::After).await?
+            doc! { "$set": { "ordered": &merged, "updated_at": bson::DateTime::from_chrono(*now) }, "$inc": { "version": 1_i64 } })
+            .return_document(ReturnDocument::After).session(&mut *tx).await?
             .ok_or_else(|| AppError::Conflict("preference order changed elsewhere".into()))?
     };
     Ok(Replacement {
         preference: Some(preference),
         changed: true,
     })
+        })
+    }).await
 }
 
 fn duplicate_key(error: &mongodb::error::Error) -> bool {

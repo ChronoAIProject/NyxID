@@ -5,6 +5,14 @@ pub const COLLECTION_NAME: &str = "assistant_acknowledgements";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAcknowledgement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    /// The tool call (turn activity) that raised this card or receipt, so the
+    /// transcript can show it on that call. Presentation only; never used to
+    /// authorize, consume or retry anything. Absent outside a tracked tool call
+    /// and on rows from older replicas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<String>,
     #[serde(default)]
     pub authored_skill: Option<AuthoredSkillReview>,
     #[serde(rename = "_id")]
@@ -44,6 +52,9 @@ pub struct AssistantAcknowledgement {
     /// Denial is sticky for the user turn that requested it. A new user turn
     /// may ask again; the model is explicitly instructed not to retry otherwise.
     pub requested_turn_id: Option<String>,
+    /// Presentation only; never used to authorize or retry an action.
+    #[serde(default)]
+    pub creation_turn_id: Option<String>,
     #[serde(default)]
     pub voice_request_id: Option<String>,
     #[serde(default)]

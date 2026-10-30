@@ -48,7 +48,10 @@ import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import type { AdminUsageSearch } from "@/types/admin";
-import { AssistantFeedbackPanel } from "@/components/admin/assistant-feedback-panel";
+import { NyxbotUsage } from "@/components/admin/nyxbot-usage";
+import { canReadAdminUsage } from "@/types/api";
+
+type UsageTab = "dashboard" | "list" | "nyxbot";
 
 const SamplePage =
   import.meta.env.DEV && import.meta.env.MODE === "test"
@@ -62,23 +65,36 @@ export function AdminUsagePage() {
   const search = useSearch({ from: "/dashboard/admin/usage" });
   const { sample, tab = "dashboard" } = search;
   const navigate = useNavigate();
+  const canReadNyxbot = useAuthStore((state) => canReadAdminUsage(state.user));
+  const onTabChange = (next: UsageTab) =>
+    void navigate({ to: "/admin/usage", search: { ...search, tab: next } });
   if (SamplePage && sample)
     return (
       <Suspense fallback={<Skeleton className="h-96" />}>
         <SamplePage layout={sample} />
       </Suspense>
     );
+  if (tab === "nyxbot" && canReadNyxbot)
+    return (
+      <div className="space-y-5 pb-6">
+        <UsageHeader />
+        <Tabs
+          value="nyxbot"
+          onValueChange={(value) => onTabChange(value as UsageTab)}
+        >
+          <UsageTabList canReadNyxbot />
+          <TabsContent value="nyxbot" className="mt-6">
+            <NyxbotUsage />
+          </TabsContent>
+        </Tabs>
+      </div>
+    );
   return (
-    <>
-      <AssistantFeedbackPanel />
-      <LiveAnalytics
-      tab={tab}
+    <LiveAnalytics
+      tab={tab === "nyxbot" ? "dashboard" : tab}
       preloadSearch={normalizeAdminUsageSearch(search)}
-      onTabChange={(next) =>
-        void navigate({ to: "/admin/usage", search: { ...search, tab: next } })
-      }
-      />
-    </>
+      onTabChange={onTabChange}
+    />
   );
 }
 function LiveAnalytics({
@@ -87,7 +103,7 @@ function LiveAnalytics({
   preloadSearch,
 }: {
   tab: "dashboard" | "list";
-  onTabChange: (tab: "dashboard" | "list") => void;
+  onTabChange: (tab: UsageTab) => void;
   preloadSearch: AdminUsageSearch;
 }) {
   const user = useAuthStore((state) => state.user);
@@ -136,7 +152,7 @@ export function AnalyticsWorkspace({
   options?: SampleOptions;
   initialLayout?: AnalyticsLayout;
   tab?: "dashboard" | "list";
-  onTabChange?: (tab: "dashboard" | "list") => void;
+  onTabChange?: (tab: UsageTab) => void;
   preloadSearch?: AdminUsageSearch;
 }) {
   const [starting] = useState<WorkspaceResponse>(() =>
@@ -163,7 +179,7 @@ export function AnalyticsWorkspace({
     : { ...config.draft, layout: "operations" as const };
   const [localTab, setLocalTab] = useState<"dashboard" | "list">("dashboard");
   const activeTab = tab ?? localTab;
-  const client = useQueryClient();
+  const canReadNyxbot = useAuthStore((state) => canReadAdminUsage(state.user));
   const [name, setName] = useState("");
   const [viewsOpen, setViewsOpen] = useState(false);
   const saved = config.saved_views.find((saved) => saved.id === view.id);
@@ -188,31 +204,25 @@ export function AnalyticsWorkspace({
     new TextEncoder().encode(name.trim()).length <= 100;
   return (
     <div className="space-y-5 pb-6">
-      <PageHeader
-        title="Usage"
-        description="Understand what you use, where credits go, and who drives spend."
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              onClick={() =>
-                void Promise.all([
-                  client.invalidateQueries({
-                    queryKey: [
-                      "usage-analytics",
-                      useAuthStore.getState().user?.id,
-                    ],
-                  }),
-                  client.invalidateQueries({ queryKey: ["admin", "usage"] }),
-                ])
-              }
-            >
-              <RefreshCw className="size-3" />
-              Refresh
-            </Button>
-          </div>
-        }
-      />
+      <UsageHeader />
+      <fieldset
+        disabled={Boolean(workspace.pendingRecovery)}
+        className="min-w-0 space-y-2"
+        aria-label="Usage filters"
+      >
+        <FilterBar
+          filters={view.filters}
+          sample={options}
+          onChange={(filters) =>
+            setConfig({ ...config, draft: { ...view, filters } })
+          }
+        />
+        <p className="text-11 text-muted-foreground">
+          Applies to Dashboard and List totals and charts. Users select who made
+          requests; Users / organizations selects the billing account that paid.
+          NyxBot has its own filters.
+        </p>
+      </fieldset>
       {import.meta.env.DEV &&
         import.meta.env.VITE_USAGE_SEEDED === "true" &&
         !sample && (
@@ -235,15 +245,17 @@ export function AnalyticsWorkspace({
       <Tabs
         value={activeTab}
         onValueChange={(value) => {
-          const next = value === "list" ? "list" : "dashboard";
-          setLocalTab(next);
+          const next: UsageTab =
+            value === "nyxbot"
+              ? "nyxbot"
+              : value === "list"
+                ? "list"
+                : "dashboard";
+          setLocalTab(next === "nyxbot" ? "dashboard" : next);
           onTabChange?.(next);
         }}
       >
-        <TabsList aria-label="Usage view">
-          <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
-          <TabsTrigger value="list">List</TabsTrigger>
-        </TabsList>
+        <UsageTabList canReadNyxbot={!sample && canReadNyxbot} />
         {sample && (
           <div
             className="mt-5 flex flex-wrap gap-2"
@@ -364,9 +376,7 @@ export function AnalyticsWorkspace({
                 </PopoverTrigger>
                 <PopoverContent align="end" className="w-80 space-y-4 p-4">
                   <div>
-                    <h3 className="text-13 font-semibold">
-                      Your saved views
-                    </h3>
+                    <h3 className="text-13 font-semibold">Your saved views</h3>
                     <p className="mt-1 text-11 text-muted-foreground">
                       Private to your account. Exploring never overwrites a
                       named view.
@@ -509,15 +519,6 @@ export function AnalyticsWorkspace({
           disabled={Boolean(workspace.pendingRecovery)}
           className="min-w-0"
         >
-          <div className="mt-5">
-            <FilterBar
-              filters={view.filters}
-              sample={options}
-              onChange={(filters) =>
-                setConfig({ ...config, draft: { ...view, filters } })
-              }
-            />
-          </div>
           <TabsContent value="dashboard" className="mt-6">
             <AnalyticsCanvas
               view={view}
@@ -540,5 +541,47 @@ export function AnalyticsWorkspace({
         acting-user filters select who made the request.
       </p>
     </div>
+  );
+}
+
+function UsageTabList({ canReadNyxbot }: { canReadNyxbot: boolean }) {
+  return (
+    <TabsList aria-label="Usage view">
+      <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
+      <TabsTrigger value="list">List</TabsTrigger>
+      {canReadNyxbot && <TabsTrigger value="nyxbot">NyxBot</TabsTrigger>}
+    </TabsList>
+  );
+}
+
+function UsageHeader() {
+  const client = useQueryClient();
+  return (
+    <PageHeader
+      title="Usage"
+      description="Understand usage, where credits go, and how NyxBot performs."
+      actions={
+        <Button
+          variant="outline"
+          onClick={() =>
+            void Promise.all([
+              client.invalidateQueries({
+                queryKey: ["usage-analytics", useAuthStore.getState().user?.id],
+              }),
+              client.invalidateQueries({ queryKey: ["admin", "usage"] }),
+              client.invalidateQueries({
+                queryKey: ["admin", "assistant-analytics"],
+              }),
+              client.invalidateQueries({
+                queryKey: ["admin", "assistant-feedback"],
+              }),
+            ])
+          }
+        >
+          <RefreshCw className="size-3" />
+          Refresh
+        </Button>
+      }
+    />
   );
 }

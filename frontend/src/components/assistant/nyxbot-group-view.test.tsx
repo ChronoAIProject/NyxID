@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
+import { messageTime } from "@/lib/assistant/message-time";
 import type {
   AssistantGroup,
   AssistantGroupMessage,
@@ -9,6 +10,8 @@ import type {
 
 const post = vi.fn();
 let group: AssistantGroup;
+let groupLoaded = true;
+let groupError: Error | null = null;
 
 vi.mock("@/components/assistant/blocks/tool-image", () => ({
   ToolImage: ({ image }: { image: { endpoint: string; label: string } }) => (
@@ -29,15 +32,15 @@ vi.mock("@/hooks/use-approvals", () => ({
 }));
 vi.mock("@/hooks/use-nyxbot-groups", () => ({
   useNyxBotGroupMessages: () => ({
-    data: { group, messages: [], pending_actions: [], before_seq: null },
-    error: null,
+    data: groupLoaded ? { group, messages: [], pending_actions: [], before_seq: null } : undefined,
+    error: groupError,
     post: { mutateAsync: post, isPending: false },
     refetch: vi.fn(),
     loadOlder: vi.fn(),
   }),
 }));
 vi.mock("@/components/assistant/assistant-shell", () => ({
-  AssistantShell: ({ children }: { children: ReactNode }) => <>{children}</>,
+  AssistantShell: ({ children, contentTitle }: { children: ReactNode; contentTitle?: boolean }) => <main data-content-title={Boolean(contentTitle)}>{children}</main>,
 }));
 vi.mock("@/components/assistant/assistant-link-modals", () => ({
   AssistantLinkModalHost: ({ children }: { children: ReactNode }) => (
@@ -52,9 +55,6 @@ vi.mock("@/components/assistant/nyxbot-agent-details", () => ({
 }));
 vi.mock("@/components/assistant/nyxbot-group-forms", () => ({
   GroupSettingsDialog: () => null,
-}));
-vi.mock("@/components/assistant/nyxbot-settings-button", () => ({
-  NyxBotSettingsButton: () => null,
 }));
 // The real composer is covered by its own tests; this stand-in keeps its
 // contract: content changes are reported, Send hands over the text and the
@@ -143,9 +143,36 @@ async function send() {
 
 describe("group recipient pills", () => {
   beforeEach(() => {
+    groupLoaded = true;
+    groupError = null;
     post.mockReset();
     post.mockResolvedValue({});
     group = makeGroup([NYXBOT]);
+  });
+
+  it("replaces the loading group header with recovery when loading fails", () => {
+    groupLoaded = false;
+    groupError = new Error("Group is unavailable");
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not open this group");
+    expect(screen.getByRole("button", { name: "Back to home" })).toBeVisible();
+    expect(screen.queryByText("Loading group…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading members…")).not.toBeInTheDocument();
+  });
+
+  it("keeps one group header while its identity loads", () => {
+    groupLoaded = false;
+    const view = render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
+    const panels = view.container.querySelector("[data-chat-thread-panels]");
+    expect(panels).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Loading group…" })).toBeVisible();
+    groupLoaded = true;
+    view.rerender(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(view.container.querySelectorAll("[data-chat-thread-panels]")).toHaveLength(1);
+    expect(view.container.querySelector("[data-chat-thread-panels]")).toBe(panels);
+    expect(screen.getByRole("heading", { name: "Launch" })).toBeVisible();
+    expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
   });
 
   it("seeds the pills from the group's default recipients on load", () => {
@@ -288,6 +315,7 @@ describe("delivered message recipients", () => {
     expect(
       screen.getByText("to researcher, retired, a removed agent"),
     ).toBeInTheDocument();
+    expect(screen.getByText("to researcher, retired, a removed agent").parentElement).toHaveClass("bg-chat-bubble", "text-chat-bubble-foreground");
     expect(screen.queryByText(new RegExp(RESEARCHER))).toBeNull();
   });
 });
@@ -330,6 +358,42 @@ describe("group message timestamps", () => {
       "2026-10-01T00:00:00.000Z",
       "2026-10-02T09:15:00.000Z",
     ]);
-    for (const time of times) expect(time).toHaveTextContent(/2026/);
+    for (const time of times) {
+      const expected = messageTime(time.getAttribute("datetime"))!;
+      expect(time).toHaveTextContent(expected.short);
+      expect(time).toHaveAttribute("title", expected.label);
+      expect(time.getAttribute("title")).toMatch(/2026/);
+    }
+  });
+});
+
+
+describe("group message body copy integration", () => {
+  function row(role: "user" | "agent", text: string) {
+    group = makeGroup([NYXBOT]);
+    const message = { id: "copy", group_id: group.id, seq: 1, role, text,
+      agent_id: NYXBOT, agent_name: "NyxBot", created_at: "2026-10-01T00:00:00Z",
+      activities: [], attachments: [], recipient_agent_ids: [] } as unknown as AssistantGroupMessage;
+    return <GroupMessageRow groupId={group.id} message={message} names={[]} members={group.members} onOpenAgent={() => undefined} />;
+  }
+  it("copies the sanitized assistant body with Markdown code intact", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const markdown = "**Answer**\n\n```ts\n  run()\n```";
+    render(row("agent", `${markdown}\n<function_calls>hidden-tool-input</function_calls>`));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+  });
+  it("copies original user text without rendered recipients or timestamps", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const original = "@NyxBot  <function_calls>literal example</function_calls>  ";
+    render(row("user", original));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(original);
+  });
+  it("has no copy button for output without a visible body", () => {
+    render(row("agent", "<function_calls>hidden</function_calls>"));
+    expect(screen.queryByRole("button", { name: "Copy message" })).not.toBeInTheDocument();
   });
 });

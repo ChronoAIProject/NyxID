@@ -1,13 +1,7 @@
-# ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM rust:1.93-bookworm AS builder
-
-WORKDIR /build
-
-# Commit hash baked into the binary for /health. `.git` is excluded from the
-# Docker context, so CI must pass this ARG explicitly; otherwise the build
-# script falls back to "unknown".
-ARG NYXID_GIT_HASH=unknown
-ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
+# Normalize release-only workspace versions outside the dependency layer chain.
+# COPY from this stage is keyed by its output, not the original manifest bytes.
+FROM python:3.12-slim-bookworm AS dependency-recipe
+WORKDIR /input
 
 # Copy workspace manifests and lock file for dependency caching.
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
@@ -24,6 +18,20 @@ COPY nyxid-crypto/Cargo.toml nyxid-crypto/Cargo.toml
 COPY machine/Cargo.toml machine/Cargo.toml
 COPY permissions/Cargo.toml permissions/Cargo.toml
 COPY machine-updater/Cargo.toml machine-updater/Cargo.toml
+COPY scripts/docker-dependency-recipe.py /recipe.py
+RUN python /recipe.py /input /recipe
+
+# Build only dependencies; usable as --target dependencies for cache checks.
+FROM rust:1.93-bookworm AS dependencies
+WORKDIR /build
+
+# Keep the dependency compile bounded while allowing two compiler jobs.
+# CI prepares 24 GiB total swap for the large server crate. The final server
+# compile has its own CARGO_BUILD_JOBS setting below.
+ARG CARGO_DEP_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_DEP_BUILD_JOBS}
+ENV CARGO_INCREMENTAL=0
+COPY --from=dependency-recipe /recipe/ ./
 
 # Create dummy entry points so cargo can resolve and compile dependencies.
 # backend, cli, and mcp-demo are binary crates (need main.rs).
@@ -42,7 +50,16 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
     && mkdir -p machine/src && echo "" > machine/src/lib.rs \
     && mkdir -p machine-updater/src && echo "fn main() {}" > machine-updater/src/main.rs \
     && echo "" > machine-updater/src/lib.rs
-RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
+RUN cargo build --locked --release --manifest-path backend/Cargo.toml --bin nyxid-server --features gcp-kms
+
+FROM dependencies AS builder
+# The final server compile can use all four hosted vCPUs. Callers can lower
+# this without changing the dependency-layer default above.
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+# Restore every original manifest and the exact lock before compiling real code.
+# CARGO_PKG_VERSION and workspace path dependency identities must be real here.
+COPY --from=dependency-recipe /input/ ./
 
 # Remove the dummy build artifacts (forces recompilation of our code only).
 # Drop the cloud-auth artifacts too so its real source is recompiled.
@@ -81,6 +98,7 @@ COPY cli/src/commands/update_attestation.rs cli/src/commands/update_attestation.
 COPY cli/src/commands/update_attestation cli/src/commands/update_attestation
 COPY cli/resources/sigstore-root.json cli/resources/sigstore-root.json
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
+COPY docs/assistant/CHANNEL_SETUP_GUIDE.md docs/assistant/CHANNEL_SETUP_GUIDE.md
 # The oracle worker bundle is embedded via include_str! and served from
 # /api/v1/oracle/worker-bundle so installs stay in sync with the server.
 COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/worker.mjs
@@ -88,10 +106,25 @@ COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/wo
 # Touch entry points so cargo sees them as newer than the cached dummies.
 RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs permissions/src/lib.rs
 
-# Build the real binary
-RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
+# Build the real binary without a per-commit input. The runtime stage stamps
+# /health below; unchanged Rust/embedded inputs reuse this entire layer even
+# when the release commit changes. .git is excluded from the build context.
+RUN cargo build --locked --release --manifest-path backend/Cargo.toml --bin nyxid-server --features gcp-kms
 
-# ── Stage 2: Runtime ─────────────────────────────────────────────────────────
+# The standalone page is served by the backend with its own SRI-bound CSP.
+# Keep the Node/lockfile/source/epoch inputs identical to the frontend build.
+FROM node:22.23.2-alpine AS credential-builder
+WORKDIR /build/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+ARG NYXID_GIT_HASH=unknown
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_COMMIT=${NYXID_GIT_HASH}
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+RUN npm run build:credential-accept
+
+# ── Runtime ─────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
 RUN apt-get update \
@@ -108,12 +141,25 @@ WORKDIR /app
 # to avoid colliding with the CLI's `nyxid` binary at the same workspace
 # `target/{triple}/release/` path.
 COPY --from=builder /build/target/release/nyxid-server /usr/local/bin/nyxid-server
+COPY --from=credential-builder /build/frontend/dist/credential-accept /app/frontend/dist/credential-accept
+COPY --from=credential-builder /build/frontend/dist/release-integrity /app/frontend/dist/release-integrity
 
 # Create directory for JWT keys (mounted at runtime)
-RUN mkdir -p /app/keys && chown nyxid:nyxid /app/keys
+RUN mkdir -p /app/keys /var/lib/nyxid/tuf \
+    && chown nyxid:nyxid /app/keys /var/lib/nyxid/tuf \
+    && chmod 0700 /var/lib/nyxid/tuf
+
+# Retain authenticated TUF rollback floors independently of the image/HOME.
+ENV NYXID_SERVER_TUF_STATE_DIR=/var/lib/nyxid/tuf
+VOLUME ["/var/lib/nyxid/tuf"]
 
 USER nyxid
 
 EXPOSE 3001
+
+# Image identity must not invalidate either Cargo build. Non-container builds
+# retain the build.rs fallback; the credential page keeps its own release stamp.
+ARG NYXID_GIT_HASH=unknown
+ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
 
 ENTRYPOINT ["nyxid-server"]

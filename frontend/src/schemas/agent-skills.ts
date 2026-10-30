@@ -19,9 +19,49 @@ export const agentSkillsSchema = z.object({
   skills: agentSkillSchema.array(),
   metadata: z.record(
     z.string(),
-    z.object({ description: z.string(), size_bytes: z.number() }),
+    z.object({
+      description: z.string(),
+      size_bytes: z.number(),
+      preload_paths: z.array(z.string()).default([]),
+      preload_bytes: z.number().default(0),
+    }),
   ),
 });
+export const skillPreloadFormSchema = z
+  .object({
+    enabled: z.boolean(),
+    paths: z.string().max(2048),
+  })
+  .superRefine((value, context) => {
+    if (!value.enabled) return;
+    const paths = value.paths
+      .split("\n")
+      .map((path) => path.trim())
+      .filter(Boolean);
+    let message: string | undefined;
+    if (paths.length > 8 || !paths.includes("SKILL.md")) {
+      message = "Include SKILL.md and choose at most 8 files.";
+    } else if (
+      new Set(paths).size !== paths.length ||
+      paths.some(
+        (path) =>
+          path.length > 256 ||
+          path.includes("\\") ||
+          path.includes(":") ||
+          Array.from(path).some((character) => {
+            const code = character.codePointAt(0)!;
+            return code < 32 || (code >= 127 && code <= 159);
+          }) ||
+          !/\.(md|txt)$/.test(path) ||
+          path
+            .split("/")
+            .some((part) => !part || part === "." || part === ".."),
+      )
+    ) {
+      message = "Use unique relative .md or .txt paths, one per line.";
+    }
+    if (message) context.addIssue({ code: "custom", path: ["paths"], message });
+  });
 export const skillSearchSchema = z.object({
   items: z
     .object({ id: z.string(), name: z.string(), description: z.string() })

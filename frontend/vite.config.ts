@@ -18,7 +18,8 @@ function telegramClaimReferrer(): Plugin {
     name: "telegram-claim-referrer",
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (new URL(req.url ?? "/", "http://localhost").searchParams.has("claim"))
+        const url = new URL(req.url ?? "/", "http://localhost")
+        if (url.searchParams.has("claim") || url.pathname === "/onboarding/link")
           res.setHeader("Referrer-Policy", "no-referrer")
         next()
       })
@@ -57,6 +58,7 @@ function cookieRewrite(proxyRes: import("http").IncomingMessage) {
 const proxyTarget = {
   target: backendUrl,
   changeOrigin: true,
+  ws: true,
   // Vite's proxy sets agent=false, so an environment proxy needs an explicit agent.
   agent: process.env.NODE_USE_ENV_PROXY === "1" && backendUrl.startsWith("https:")
     ? new https.Agent({ proxyEnv: process.env })
@@ -65,6 +67,9 @@ const proxyTarget = {
   configure: (proxy: any) => {
     // Proxy agents can send headers before proxyReq; rewrite before request creation.
     proxy.on("start", originRewrite)
+    proxy.on("proxyReqWs", (request: import("http").ClientRequest, incoming: import("http").IncomingMessage) => {
+      if (incoming.headers.origin) request.setHeader("Origin", expectedOrigin)
+    })
     proxy.on("proxyRes", cookieRewrite)
   },
 }
@@ -254,9 +259,10 @@ export default defineConfig({
     "import.meta.env.VITE_ROUTING_PREVIEW": JSON.stringify(process.env.NYXID_ROUTING_PREVIEW === "1" ? "1" : "0"),
   },
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: [
+      { find: /^zod$/, replacement: path.resolve(__dirname, "./src/lib/zod-csp.ts") },
+      { find: "@", replacement: path.resolve(__dirname, "./src") },
+    ],
   },
   build: {
     rollupOptions: {

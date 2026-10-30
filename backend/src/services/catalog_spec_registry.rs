@@ -305,13 +305,18 @@ pub struct OperationMarks {
     /// Aevatar's marker is Aevatar's contract; NyxID adds its own rather
     /// than change it.
     pub changes_existing: Option<bool>,
+    /// NyxID-owned append-only attestation, matched by exact route only.
+    pub append_only: bool,
+    pub append_only_query: Option<&'static serde_json::Map<String, serde_json::Value>>,
 }
 
 impl OperationMarks {
-    pub fn of(operation: &serde_json::Value) -> Self {
+    pub fn of(operation: &'static serde_json::Value) -> Self {
         Self {
             destructive: operation["x-aevatar-tool"]["destructive"].as_bool() == Some(true),
             changes_existing: operation["x-nyxid-changes-existing"].as_bool(),
+            append_only: operation["x-nyxid-append-only"].as_bool() == Some(true),
+            append_only_query: operation["x-nyxid-append-only-query"].as_object(),
         }
     }
 }
@@ -356,6 +361,8 @@ pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> Oper
         .unwrap_or_default();
     OperationMarks {
         destructive: by_name.destructive || by_route.destructive,
+        append_only: by_route.append_only,
+        append_only_query: by_route.append_only_query,
         changes_existing: if by_name.changes_existing == Some(true)
             || by_route.changes_existing == Some(true)
         {
@@ -653,6 +660,62 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::services::openapi_parser;
+
+    #[test]
+    fn lark_base_write_registry_exposes_readonly_field_pages_and_closed_trusted_composite_for_all_four_slugs()
+     {
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let fields = endpoints
+                .iter()
+                .find(|ep| ep.name == "bitable_fields_list")
+                .unwrap();
+            assert_eq!(fields.method, "GET");
+            assert_eq!(
+                fields.path,
+                "/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+            );
+            assert_eq!(
+                fields.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+            let parameters = fields.parameters.as_ref().unwrap().as_array().unwrap();
+            for name in ["page_size", "page_token"] {
+                assert!(
+                    parameters
+                        .iter()
+                        .any(|p| p["name"] == name && p["in"] == "query" && p["required"] == false)
+                );
+            }
+            let composite = endpoints
+                .iter()
+                .find(|ep| ep.name == "bitable_record_create_with_attachments")
+                .unwrap();
+            assert_eq!(composite.method, "POST");
+            assert_eq!(
+                composite.path,
+                crate::services::lark_attachment_tool::COMPOSITE_PATH
+            );
+            assert_eq!(
+                composite.request_content_type.as_deref(),
+                Some("application/json")
+            );
+            let body = composite.request_body_schema.as_ref().unwrap();
+            assert_eq!(
+                body["required"],
+                serde_json::json!(["fields", "attachments"])
+            );
+            assert_eq!(body["additionalProperties"], false);
+            let mark = &spec["paths"][crate::services::lark_attachment_tool::COMPOSITE_PATH]["post"]
+                ["x-nyxid-managed-operation"];
+            assert_eq!(
+                mark,
+                &serde_json::json!({"kind":"lark_bitable_record_with_attachments","version":1,
+                "fields_operation":"bitable_fields_list","upload_operation":"bitable_media_upload","create_operation":"bitable_record_create"})
+            );
+        }
+    }
 
     #[test]
     fn lark_approval_forwarding_uses_user_routes_and_mutation_marks() {

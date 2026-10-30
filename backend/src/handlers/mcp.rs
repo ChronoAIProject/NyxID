@@ -43,10 +43,13 @@ pub struct McpCatalogDiagnostics {
     pub service_scope_restricted: bool,
     pub node_scope_restricted: bool,
     pub node_scope_exclusions_present: bool,
+    pub shadowed_connections: usize,
 }
 
 #[derive(Debug, Serialize)]
 pub struct McpServiceConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_connection: Option<serde_json::Value>,
     pub service_id: String,
     pub service_name: String,
     pub service_slug: String,
@@ -123,11 +126,14 @@ pub async fn get_mcp_config(
     // Match MCP tools/list: chat keys discover services before acknowledgement.
     // allowed_platform_service_ids and account_acknowledged gate execution,
     // not this catalog. MCP-only account/meta-tools are added by the transport.
-    let service_scope = if chat.is_some() || auth_user.allow_all_services {
-        mcp_service::ServiceScope::Unrestricted
-    } else {
-        mcp_service::ServiceScope::Allowed(auth_user.allowed_service_ids.as_slice())
-    };
+    let service_scope = mcp_service::caller_service_scope(
+        &user_id,
+        auth_user.assistant_agent_owner_id.as_deref(),
+        auth_user.org_agent_access.as_deref(),
+        chat.as_ref(),
+        auth_user.allow_all_services,
+        auth_user.allowed_service_ids.as_slice(),
+    );
     let mut catalog = mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
@@ -137,11 +143,21 @@ pub async fn get_mcp_config(
     )
     .await?;
 
+    for service in &mut catalog.services {
+        service.endpoints.retain(|endpoint| {
+            !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        });
+    }
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth_user.assistant_operation_scopes,
         &mut catalog.services,
     );
-    let mcp_services = config_services(&catalog.services);
+    let mut mcp_services = config_services(&catalog.services);
+    if let Some(shared) = auth_user.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        for service in &mut mcp_services {
+            service.shared_connection = shared.discovery_metadata(&service.service_id);
+        }
+    }
 
     let total_endpoints: usize = mcp_services.iter().map(|s| s.endpoints.len()).sum();
     let total_services = mcp_services.len();
@@ -191,6 +207,7 @@ pub async fn get_mcp_config(
             service_scope_restricted: catalog.diagnostics.service_scope_restricted,
             node_scope_restricted: catalog.diagnostics.node_scope_restricted,
             node_scope_exclusions_present: catalog.diagnostics.node_scope_exclusions_present,
+            shadowed_connections: catalog.diagnostics.shadowed_connections,
         },
     }))
 }
@@ -219,6 +236,7 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
                 .collect();
 
             McpServiceConfig {
+                shared_connection: None,
                 service_id: svc.service_id.clone(),
                 service_name: svc.service_name.clone(),
                 service_slug: svc.service_slug.clone(),
@@ -263,6 +281,7 @@ mod tests {
 
     fn service_with_schema(schema: serde_json::Value) -> McpServiceConfig {
         McpServiceConfig {
+            shared_connection: None,
             recommended_skill_refs: None,
             skills_revision: None,
             service_id: "service-1".to_string(),
@@ -323,6 +342,7 @@ mod tests {
             service_category: "user_service".to_string(),
             recommended_skills: Vec::new(),
             endpoints: vec![McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 target_id: None,
                 endpoint_id: "endpoint-1".to_string(),
@@ -374,6 +394,7 @@ mod tests {
             service_scope_restricted: true,
             node_scope_restricted: true,
             node_scope_exclusions_present: true,
+            shadowed_connections: 0,
         };
 
         let value = serde_json::to_value(diagnostics).expect("serialize diagnostics");

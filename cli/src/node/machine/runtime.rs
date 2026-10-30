@@ -1,6 +1,9 @@
 mod authority;
 pub mod browser;
 mod browser_input;
+mod browser_layout;
+#[cfg(target_os = "linux")]
+mod browser_probe;
 mod cancellation;
 #[cfg(target_os = "linux")]
 mod context_dispatch;
@@ -24,7 +27,8 @@ mod jobs;
 mod memory_capture;
 mod native_desktop;
 mod owner_job;
-mod process;
+pub(crate) mod process;
+mod separation;
 pub mod transfer;
 pub mod update;
 mod usage;
@@ -508,6 +512,8 @@ fn receipt_operation(operation: Operation) -> bool {
 
 #[derive(Debug, thiserror::Error)]
 enum MachineError {
+    #[error("node_custody_unverified")]
+    Custody,
     #[error("owner_in_control")]
     OwnerInControl,
     #[error("machine_turn_stopped")]
@@ -538,6 +544,9 @@ enum MachineError {
 
 impl From<anyhow::Error> for MachineError {
     fn from(error: anyhow::Error) -> Self {
+        if error.is::<crate::node::custody::Unverified>() {
+            return Self::Custody;
+        }
         if let Some(driver) = error.downcast_ref::<cua::DriverError>() {
             return Self::Driver(driver.clone());
         }
@@ -554,6 +563,10 @@ impl From<anyhow::Error> for MachineError {
 impl MachineError {
     fn public(&self) -> (u32, &'static str) {
         match self {
+            Self::Custody => (
+                12419,
+                "node_custody_unverified: protect node tokens, signing secrets and stored credentials under a separate supervisor identity; install the node executable where every worker identity can execute it (e.g. /usr/local/bin), then restart to repeat custody probes",
+            ),
             Self::AuthorityStale => (12421, "machine_authority_stale: acquire fresh authority"),
             Self::TurnStopped => (
                 12418,
@@ -617,6 +630,7 @@ impl MachineError {
 fn cache_status(
     directory: &std::path::Path,
     profile: &nyxid_machine::MachineProfile,
+    custody: crate::node::custody::Status,
 ) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -624,6 +638,7 @@ fn cache_status(
     file.as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     let mut value = serde_json::to_value(profile)?;
+    value["credential_custody"] = serde_json::to_value(custody)?;
     value["observed_at_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
     file.write_all(&serde_json::to_vec(&value)?)?;
     file.persist(directory.join("machine-status.json"))?;
@@ -639,6 +654,7 @@ pub struct Runtime {
     node_id: String,
     runtime_id: String,
     excluded: Vec<PathBuf>,
+    custody: Arc<crate::node::custody::Custody>,
     roots: files::Roots,
     identity: process::Identity,
     browser_identity: process::Identity,
@@ -647,7 +663,7 @@ pub struct Runtime {
     contexts: Mutex<context_dispatch::Contexts>,
     #[cfg(target_os = "linux")]
     context_resources: Option<context_runtime::BrowserResources>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     context_binding: Option<nyxid_machine::authority::Authority>,
     jobs: Arc<jobs::Jobs>,
     gateway: tokio::sync::OnceCell<Arc<gateway::Gateway>>,
@@ -660,6 +676,12 @@ pub struct Runtime {
     dev_browser: Mutex<Option<dev_browser::DevBrowser>>,
     clipboard_files: Mutex<Vec<tempfile::NamedTempFile>>,
     operation_receipts: Arc<OperationReceipts>,
+    owner_job_deadlines: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            (nyxid_machine::authority::OwnerJobAccess, std::time::Instant),
+        >,
+    >,
     replay: Mutex<ReplayGuard>,
     redactor: Arc<Mutex<Redactor>>,
     owner_control: tokio::sync::watch::Sender<u64>,
@@ -723,6 +745,7 @@ impl Runtime {
             node_id: node_id.into(),
             runtime_id: uuid::Uuid::new_v4().to_string(),
             excluded,
+            custody: Arc::new(crate::node::custody::Custody::new(config_dir)),
             roots,
             identity,
             browser_identity: browser,
@@ -731,7 +754,7 @@ impl Runtime {
             contexts: Mutex::new(context_dispatch::Contexts::default()),
             #[cfg(target_os = "linux")]
             context_resources: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", test))]
             context_binding: None,
             jobs: Arc::new(jobs::Jobs::new(config, redactor.clone())),
             gateway: tokio::sync::OnceCell::new(),
@@ -751,6 +774,7 @@ impl Runtime {
             turns: Arc::new(cancellation::Turns::default()),
             authority: authority::Fences::open(config_dir)?,
             external_authority: external_authority::Fences::open(config_dir)?,
+            owner_job_deadlines: std::sync::Mutex::new(Default::default()),
             managed_binding: std::sync::OnceLock::new(),
             managed_window: std::sync::Mutex::new(None),
             managed_deadline_closed: std::sync::atomic::AtomicBool::new(false),
@@ -765,6 +789,8 @@ impl Runtime {
         sender: tokio::sync::mpsc::Sender<crate::node::ws_client::NodeWsMessage>,
         signing_secret: &[u8],
     ) -> Result<()> {
+        self.refresh_custody().await;
+        self.custody.monitor(self.custody_identities());
         self.ensure_authority_watch();
         let gateway = self
             .gateway
@@ -827,6 +853,8 @@ impl Runtime {
     }
 
     pub async fn profile(&self) -> MachineProfile {
+        self.refresh_custody().await;
+        let custody = self.custody.status();
         let tools = if let Some(driver) = &self.driver {
             tokio::time::timeout(std::time::Duration::from_secs(20), driver.tools())
                 .await
@@ -866,7 +894,9 @@ impl Runtime {
             } else {
                 false
             };
+        let separation_evidence = self.separation_evidence().await;
         let profile = MachineProfile {
+            authority_timing_v1: true,
             installation: Some(update::installation(&self.config)),
             updater_ready: update::ready(&self.update_directory),
             updater: self.updater_status(),
@@ -878,7 +908,9 @@ impl Runtime {
             browser: self.config.browser,
             authority_versions: vec![2, 3],
             exact_cancel: true,
-            separated: Some(self.context_support().await),
+            separated: Some(separation_evidence.support()),
+            separation_evidence: Some(separation_evidence),
+            separation_choice: self.config.separation_choice,
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
             roots: self
@@ -892,15 +924,37 @@ impl Runtime {
             computer_ready,
             computer_permissions,
             computer_tools: tools,
-            browser_isolated: isolated,
-            commands_isolated: Some(self.identity.commands_isolated(&self.excluded).await),
+            browser_isolated: isolated
+                && custody.browser == crate::node::custody::Observation::Denied
+                && custody.developer == crate::node::custody::Observation::Denied,
+            commands_isolated: Some(custody.command == crate::node::custody::Observation::Denied),
             saved_login_ready,
             browser_tools: self.config.browser_enabled(),
         };
-        if cache_status(&self.status_directory, &profile).is_err() {
+        if cache_status(&self.status_directory, &profile, custody).is_err() {
             tracing::warn!("machine_status_snapshot_unavailable");
         }
         profile
+    }
+
+    fn custody_identities(&self) -> [Option<process::Identity>; 3] {
+        [
+            Some(self.identity.clone()),
+            Some(self.browser_identity.clone()),
+            self.developer_identity().ok().map(|i| i.into_owned()),
+        ]
+    }
+
+    async fn refresh_custody(&self) {
+        self.custody.observe(&self.custody_identities()).await;
+    }
+
+    fn require_custody(&self) -> Result<()> {
+        #[cfg(any(target_os = "linux", test))]
+        let separated = self.context_binding.is_some();
+        #[cfg(not(any(target_os = "linux", test)))]
+        let separated = false;
+        self.custody.require(separated)
     }
 
     fn developer_identity(&self) -> Result<std::borrow::Cow<'_, process::Identity>> {
@@ -948,13 +1002,21 @@ impl Runtime {
             .and_then(|i| i.desktop.as_ref())
             .map(|d| (d.display.clone(), d.authority.clone()))
     }
-    #[cfg(not(target_os = "linux"))]
+    async fn separation_evidence(&self) -> nyxid_machine::context::Evidence {
+        let mut evidence = separation::observe(
+            &self.config,
+            &self.identity,
+            &self.browser_identity,
+            self.dev_identity.as_ref(),
+        )
+        .await;
+        evidence.credential_custody = Some(self.custody.status().all_denied());
+        evidence
+    }
+
+    #[cfg(target_os = "linux")]
     async fn context_support(&self) -> nyxid_machine::context::Support {
-        nyxid_machine::context::Support {
-            available: false,
-            landlock_abi: None,
-            reason: Some("separated_requires_linux".into()),
-        }
+        self.separation_evidence().await.support()
     }
 
     fn desktop_for(&self, display: nyxid_machine::desktop::Display) -> &desktop::Desktop {
@@ -1075,12 +1137,30 @@ impl Runtime {
             let access = serde_json::from_value::<nyxid_machine::authority::OwnerJobAccess>(
                 parameters["owner_job_access"].clone(),
             );
+            let timing = {
+                let mut deadlines = self
+                    .owner_job_deadlines
+                    .lock()
+                    .expect("owner job deadlines");
+                deadlines.retain(|_, (_, deadline)| *deadline > std::time::Instant::now());
+                if operation == Operation::JobCancel {
+                    // Receipt replays bypass handle_owner_job. Keep the original
+                    // verified deadline; replay must neither extend it nor cancel again.
+                    deadlines.get(request_id).cloned()
+                } else {
+                    deadlines.remove(request_id)
+                }
+            };
             if !access.is_ok_and(|access| {
-                access.valid(
+                timing.is_some_and(|(expected, deadline)| {
+                    expected == access && deadline > std::time::Instant::now()
+                }) && access.valid(
                     &self.node_id,
                     &self.runtime_id,
                     parameters["job_id"].as_str().unwrap_or_default(),
-                    chrono::Utc::now().timestamp_millis(),
+                    chrono::Utc::now()
+                        .timestamp_millis()
+                        .saturating_add(nyxid_machine::authority::CLOCK_SKEW_MS),
                 )
             }) {
                 result = json!({"error":{"code":12421,"message":"machine_authority_stale: owner job authority expired"}});
@@ -1384,9 +1464,24 @@ impl Runtime {
         }
         let mut authority_stop = None;
         if let Some(authority) = request.authority.as_ref() {
+            let clock = match nyxid_machine::authority::LeaseClock::signed(
+                request.timestamp,
+                authority.expires_at_ms,
+                chrono::Utc::now().timestamp_millis(),
+            ) {
+                Ok(clock) => clock,
+                Err(error) => {
+                    tracing::warn!(reason = error.reason(), request_id = %request.request_id, node_id = %self.node_id, "Machine authority timing rejected; check server and node UTC synchronization");
+                    return json!({"error":{"code":12421,"message":"machine_authority_stale: check machine authority diagnostics","reason":error.reason()},"request_id":request.request_id});
+                }
+            };
             let result = match request.operation {
-                Operation::AuthorityRenew => self.authority.renew(authority, &self.runtime_id),
-                Operation::AuthorityRevoke => self.authority.revoke(authority, &self.runtime_id),
+                Operation::AuthorityRenew => {
+                    self.authority.renew_at(authority, &self.runtime_id, clock)
+                }
+                Operation::AuthorityRevoke => {
+                    self.authority.revoke_at(authority, &self.runtime_id, clock)
+                }
                 _ => {
                     if !authority
                         .capabilities
@@ -1397,18 +1492,25 @@ impl Runtime {
                         return json!({"error":{"code":12420,"message":"machine_permission_revoked: capability or task not authorized"}});
                     }
                     self.authority
-                        .admit(
+                        .admit_at(
                             authority,
                             &self.runtime_id,
                             (request.operation == Operation::Exec)
                                 .then(|| request.parameters["job_id"].as_str().map(str::to_owned))
                                 .flatten(),
+                            clock,
                         )
                         .map(|stop| authority_stop = Some(stop))
                 }
             };
-            if result.is_err() {
-                return json!({"error":{"code":12421,"message":"machine_authority_stale: acquire fresh authority"}});
+            if let Err(error) = result {
+                let reason = if authority.runtime_id != self.runtime_id {
+                    "authority_runtime_mismatch"
+                } else {
+                    authority::rejection_reason(&error)
+                };
+                tracing::warn!(reason, request_id = %request.request_id, node_id = %self.node_id, "Machine authority rejected");
+                return json!({"error":{"code":12421,"message":"machine_authority_stale: check machine authority diagnostics","reason":reason},"request_id":request.request_id});
             }
             if matches!(
                 request.operation,
@@ -1422,7 +1524,7 @@ impl Runtime {
                         .await
                         .is_err()
                 {
-                    return json!({"error":{"code":12421,"message":"context_quarantine_pending: retry revocation"}});
+                    return json!({"error":{"code":12421,"message":"context_quarantine_pending: retry revocation","reason":"context_quarantine_pending"}});
                 }
                 return json!({"accepted":true});
             }
@@ -1631,6 +1733,17 @@ impl Runtime {
     }
 
     async fn execute_inner(&self, operation: Operation, mut parameters: Value) -> Result<Value> {
+        // Loss of custody closes effectful admission, never a signed stop.
+        // Signature, authority, job and display checks still run as usual.
+        if !matches!(
+            operation,
+            Operation::JobCancel
+                | Operation::Cancel
+                | Operation::CancelExact
+                | Operation::DesktopClose
+        ) {
+            self.require_custody()?;
+        }
         let profile = MachineProfile {
             version: nyxid_machine::PROTOCOL_VERSION,
             shell: self.config.shell,
@@ -2118,6 +2231,7 @@ impl Runtime {
     }
 
     async fn ensure_dev_browser(&self) -> Result<()> {
+        self.require_custody()?;
         let config = self
             .config
             .managed_browser
@@ -2140,6 +2254,7 @@ impl Runtime {
     }
 
     async fn ensure_browser(&self) -> Result<()> {
+        self.require_custody()?;
         let Some(config) = self.config.managed_browser.as_ref() else {
             return Ok(());
         };
@@ -2279,10 +2394,10 @@ impl Runtime {
             );
             anyhow::Error::new(MachineError::File(failure))
         };
-        // The backend transport test library runs inside nyxid-server's test
+        // CLI unit tests and the backend transport library run inside a test
         // harness, not the CLI executable. Production always uses a cancellable
         // child, even when the command user is the supervisor's own user.
-        #[cfg(feature = "node-proxy-test")]
+        #[cfg(any(test, feature = "node-proxy-test"))]
         if self.identity.uid == unsafe { libc::geteuid() } {
             return tokio::task::spawn_blocking(move || execute_file(request))
                 .await
@@ -3352,7 +3467,7 @@ mod authority_runtime_tests {
             turn_id: id(),
             lease_id: id(),
             revision: 1,
-            expires_at_ms: chrono::Utc::now().timestamp_millis() + 4_000,
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + 9_000,
             capabilities: nyxid_machine::authority::Capabilities {
                 shell: true,
                 files: true,
@@ -3361,8 +3476,300 @@ mod authority_runtime_tests {
         };
         (root, runtime, a, receiver)
     }
+    #[tokio::test]
+    async fn issue_1844_signed_browserless_skew_restart_keeps_fences_and_no_duplicate_effects() {
+        let (root, runtime, mut a, _receiver) = fixture().await;
+        assert!(!runtime.config.browser_enabled());
+        let marker = root.path().join("workspace/once");
+        a.expires_at_ms =
+            chrono::Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS + 3_000;
+        assert!(
+            !a.valid(&runtime.runtime_id, chrono::Utc::now().timestamp_millis()),
+            "reproduces the old skew rejection"
+        );
+        let job = uuid::Uuid::new_v4().to_string();
+        let mut parameters = exec(&a, &job, false);
+        parameters["command"] = json!("printf x >> once; printf done");
+        let mut request = signed(&runtime, Operation::Exec, parameters, Some(a.clone()));
+        request.timestamp += 3;
+        request.signature = nyxid_machine::signing::sign(&request, b"authority test");
+        let result = runtime.handle(request.clone(), b"authority test").await;
+        assert!(result.get("error").is_none(), "{result}");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"x");
+        let duplicate = runtime.handle(request, b"authority test").await;
+        assert!(duplicate.get("error").is_none(), "{duplicate}");
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            b"x",
+            "no repeated side effect"
+        );
+        let mut revoke = a.clone();
+        revoke.revision = 2;
+        let mut request = signed(
+            &runtime,
+            Operation::AuthorityRevoke,
+            json!({}),
+            Some(revoke),
+        );
+        request.timestamp += 3;
+        request.signature = nyxid_machine::signing::sign(&request, b"authority test");
+        assert_eq!(
+            runtime.handle(request, b"authority test").await["accepted"],
+            true
+        );
+        runtime.shutdown().await;
+        let restarted =
+            Runtime::new(&runtime.config, &runtime.node_id, &root.path().join("node")).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(100);
+        restarted.connect(tx, b"authority test").await.unwrap();
+        assert_ne!(restarted.runtime_id, a.runtime_id);
+        a.expires_at_ms = chrono::Utc::now().timestamp_millis() + 30_000;
+        let old = signed(
+            &restarted,
+            Operation::AuthorityRenew,
+            json!({}),
+            Some(a.clone()),
+        );
+        let stale_runtime = restarted.handle(old, b"authority test").await;
+        assert_eq!(stale_runtime["error"]["code"], 12421);
+        assert_eq!(
+            stale_runtime["error"]["reason"],
+            "authority_runtime_mismatch"
+        );
+        a.runtime_id = restarted.runtime_id.clone();
+        a.expires_at_ms = chrono::Utc::now().timestamp_millis() + 30_000;
+        a.lease_id = uuid::Uuid::new_v4().to_string();
+        let denied = signed(
+            &restarted,
+            Operation::ReadFile,
+            json!({"path":marker,"conversation_id":a.conversation_id,"turn_id":a.turn_id}),
+            Some(a.clone()),
+        );
+        assert_eq!(
+            restarted.handle(denied, b"authority test").await["error"]["reason"],
+            "authority_revision_stale"
+        );
+        a.revision = 2;
+        a.lease_id = uuid::Uuid::new_v4().to_string();
+        let fresh = signed(
+            &restarted,
+            Operation::ReadFile,
+            json!({"path":marker,"conversation_id":a.conversation_id,"turn_id":a.turn_id}),
+            Some(a.clone()),
+        );
+        let result = restarted.handle(fresh, b"authority test").await;
+        assert!(result.get("error").is_none(), "{result}");
+        // A new command uses a fresh job and lease; restarting never renews
+        // the old command or retries its side effects.
+        a.lease_id = uuid::Uuid::new_v4().to_string();
+        let mut parameters = exec(&a, &uuid::Uuid::new_v4().to_string(), false);
+        parameters["command"] = json!("printf recovered");
+        let result = restarted
+            .handle(
+                signed(&restarted, Operation::Exec, parameters, Some(a)),
+                b"authority test",
+            )
+            .await;
+        assert!(result.get("error").is_none(), "{result}");
+        assert_eq!(std::fs::read(marker).unwrap(), b"x");
+        restarted.shutdown().await;
+    }
+
     fn exec(a: &nyxid_machine::authority::Authority, job: &str, background: bool) -> Value {
         json!({"conversation_id":a.conversation_id,"turn_id":a.turn_id,"runtime_id":a.runtime_id,"job_id":job,"command":"sleep 30","background":background})
+    }
+
+    #[tokio::test]
+    async fn shared_legacy_exec_runs_with_unknown_custody_and_a_false_claim() {
+        let (root, runtime, authority, _receiver) = fixture().await;
+        assert!(!runtime.custody.status().all_denied());
+        assert!(!runtime.profile().await.commands_isolated.unwrap());
+        let mut parameters = exec(&authority, &uuid::Uuid::new_v4().to_string(), false);
+        parameters["command"] = json!("printf custody-shared-legacy > custody-result");
+        let result = runtime
+            .handle(
+                signed(&runtime, Operation::Exec, parameters, Some(authority)),
+                b"authority test",
+            )
+            .await;
+        assert!(result.get("error").is_none(), "{result}");
+        assert_eq!(
+            std::fs::read(root.path().join("workspace/custody-result")).unwrap(),
+            b"custody-shared-legacy"
+        );
+        runtime.shutdown().await;
+    }
+
+    // Exercise the platform-independent custody gate on every host. Production
+    // separated context construction remains Linux-only.
+    fn unverified_separated_fixture() -> (
+        tempfile::TempDir,
+        Arc<Runtime>,
+        nyxid_machine::authority::Authority,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("node");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let mut runtime = Runtime::new(
+            &Config {
+                shell: true,
+                files: true,
+                browser: Some(true),
+                computer: true,
+                allow_root: true,
+                roots: vec![workspace],
+                ..Default::default()
+            },
+            &uuid::Uuid::new_v4().to_string(),
+            &directory,
+        )
+        .unwrap();
+        let id = || uuid::Uuid::new_v4().to_string();
+        let authority = nyxid_machine::authority::Authority {
+            require_v2: true,
+            context_id: id(),
+            generation: 1,
+            mode: "separated".into(),
+            agent_id: id(),
+            owner_id: id(),
+            actor_id: id(),
+            group_id: None,
+            runtime_id: runtime.runtime_id.clone(),
+            conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
+            turn_id: id(),
+            lease_id: id(),
+            revision: 1,
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + 9_000,
+            capabilities: nyxid_machine::authority::Capabilities {
+                shell: true,
+                files: true,
+                ..Default::default()
+            },
+        };
+        Arc::get_mut(&mut runtime).unwrap().context_binding = Some(authority.clone());
+        assert!(!runtime.custody.status().all_denied());
+        (root, runtime, authority)
+    }
+
+    #[tokio::test]
+    async fn separated_context_refuses_unknown_custody_before_any_job_effect() {
+        let (root, runtime, _) = unverified_separated_fixture();
+        for operation in [
+            Operation::Exec,
+            Operation::ReadFile,
+            Operation::WriteFile,
+            Operation::EditFile,
+            Operation::Computer,
+            Operation::Browser,
+            Operation::DesktopOpen,
+            Operation::DesktopInput,
+        ] {
+            let error = runtime
+                .execute_inner(operation, json!({"command":"touch must-not-exist"}))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "node_custody_unverified",
+                "{operation:?}"
+            );
+            assert_eq!(MachineError::from(error).public().0, 12419);
+        }
+        assert!(!root.path().join("workspace/must-not-exist").exists());
+        assert!(runtime.desktop.session.lock().await.is_none());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unverified_separated_custody_preserves_scoped_signed_stops() {
+        for operation in [
+            Operation::JobCancel,
+            Operation::Cancel,
+            Operation::CancelExact,
+        ] {
+            let (_root, runtime, authority) = unverified_separated_fixture();
+            let target = uuid::Uuid::new_v4().to_string();
+            let other = uuid::Uuid::new_v4().to_string();
+            for (job, conversation) in [
+                (&target, authority.conversation_id.clone()),
+                (&other, uuid::Uuid::new_v4().to_string()),
+            ] {
+                let mut parameters = exec(&authority, job, true);
+                parameters["conversation_id"] = json!(conversation);
+                runtime
+                    .jobs
+                    .start(
+                        serde_json::from_value(parameters).unwrap(),
+                        &runtime.identity,
+                        &runtime.roots,
+                        &Default::default(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let parameters = json!({
+                "conversation_id":authority.conversation_id,
+                "turn_id":authority.turn_id,
+                "job_id":target,
+                "job_ids":[target],
+            });
+            let mut tampered = signed(&runtime, operation, parameters.clone(), None);
+            tampered.parameters["job_id"] = json!(other);
+            let denied = runtime.handle(tampered, b"authority test").await;
+            assert_eq!(denied["error"]["code"], 12401, "{operation:?}: {denied}");
+            assert!(runtime.jobs.running(&target).await);
+            assert!(runtime.jobs.running(&other).await);
+            if operation == Operation::JobCancel {
+                let mut wrong_scope = parameters.clone();
+                wrong_scope["conversation_id"] = json!("outside-authorized-conversation");
+                let denied = runtime
+                    .handle(
+                        signed(&runtime, operation, wrong_scope, Some(authority.clone())),
+                        b"authority test",
+                    )
+                    .await;
+                assert_eq!(denied["error"]["code"], 12420, "{denied}");
+                assert!(runtime.jobs.running(&target).await);
+                assert!(runtime.jobs.running(&other).await);
+            }
+            let stopped = runtime
+                .handle(
+                    signed(&runtime, operation, parameters, None),
+                    b"authority test",
+                )
+                .await;
+            assert!(stopped.get("error").is_none(), "{operation:?}: {stopped}");
+            let result = runtime.jobs.result(&target, 5, 0, 0).await.unwrap();
+            assert_eq!(result["status"], "finished", "{operation:?}: {result}");
+            assert!(
+                runtime.jobs.running(&other).await,
+                "outside scope: {operation:?}"
+            );
+            runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unverified_separated_custody_allows_signed_desktop_close_only() {
+        let (_root, runtime, _) = unverified_separated_fixture();
+        *runtime.desktop.session.lock().await = Some(desktop::custody_test_session());
+        let parameters = json!({"display":"secure"});
+        let mut tampered = signed(&runtime, Operation::DesktopClose, parameters.clone(), None);
+        tampered.parameters["display"] = json!("dev");
+        let denied = runtime.handle(tampered, b"authority test").await;
+        assert_eq!(denied["error"]["code"], 12401, "{denied}");
+        assert!(runtime.desktop.session.lock().await.is_some());
+        let closed = runtime
+            .handle(
+                signed(&runtime, Operation::DesktopClose, parameters, None),
+                b"authority test",
+            )
+            .await;
+        assert_eq!(closed, json!({"closed":true}));
+        assert!(runtime.desktop.session.lock().await.is_none());
+        runtime.shutdown().await;
     }
     fn managed_window(runtime: &Arc<Runtime>, duration_ms: i64) {
         let id = || uuid::Uuid::new_v4().to_string();
@@ -3767,7 +4174,7 @@ mod authority_runtime_tests {
                 12419
             );
             revoked.lease_id = uuid::Uuid::new_v4().to_string();
-            revoked.expires_at_ms = chrono::Utc::now().timestamp_millis() + 4_000;
+            revoked.expires_at_ms = chrono::Utc::now().timestamp_millis() + 9_000;
             let mut params = exec(&revoked, &uuid::Uuid::new_v4().to_string(), false);
             params["command"] = json!("true");
             let result = runtime
@@ -3863,7 +4270,7 @@ mod authority_runtime_tests {
         })
         .await
         .unwrap();
-        a.expires_at_ms = chrono::Utc::now().timestamp_millis() + 4_000;
+        a.expires_at_ms = chrono::Utc::now().timestamp_millis() + 9_000;
         assert_eq!(
             runtime
                 .handle(

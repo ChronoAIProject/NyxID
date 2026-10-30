@@ -1,190 +1,306 @@
 import { useMemo, useState } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  MessageSquare,
+  ThumbsDown,
+  ThumbsUp,
+} from "lucide-react";
 import { useAssistantFeedbackAdmin } from "@/hooks/use-assistant-feedback-admin";
 import type { FeedbackReplyContext } from "@/schemas/assistant-feedback-admin";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
-/** Reply metadata beside a vote. Never reply or prompt text. */
-function ReplyContext({ context }: { readonly context: FeedbackReplyContext | null | undefined }) {
-  if (!context) {
-    return <span className="text-text-tertiary">No context (pre-A1 row)</span>;
-  }
-  const facts = [
-    context.agent_kind ? `Agent: ${context.agent_kind}` : null,
-    context.model ? `Model: ${context.model}` : null,
-    context.error_code ? `Error: ${context.error_code}` : null,
-    context.latency_ms != null ? `Latency: ${(context.latency_ms / 1000).toFixed(1)} s` : null,
-    context.tool_calls
-      ? `Tools: ${context.tool_calls} (${context.tool_errors ?? 0} failed)`
-      : null,
-  ].filter((fact): fact is string => fact !== null);
+/** Only metadata and the submitted comment; never prompt/reply text. */
+function ReplyContext({
+  context,
+}: {
+  context: FeedbackReplyContext | null | undefined;
+}) {
+  if (!context)
+    return (
+      <span className="text-11 text-text-tertiary">
+        Reply details unavailable
+      </span>
+    );
   return (
-    <span className="flex flex-col gap-0.5">
-      <span>{facts.join(" · ") || "No reply metadata"}</span>
-      {context.tool_labels?.length ? (
-        <span className="font-mono text-text-tertiary">{context.tool_labels.join(", ")}</span>
-      ) : null}
-    </span>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-11 text-text-tertiary">
+      <span>
+        {context.agent_kind === "nyxbot"
+          ? "NyxBot"
+          : context.agent_kind === "specialist"
+            ? "Specialist"
+            : "Agent unspecified"}
+      </span>
+      {context.model && <span className="break-all">{context.model}</span>}
+      {context.latency_ms != null && (
+        <span>{(context.latency_ms / 1000).toFixed(1)} s reply time</span>
+      )}
+      {Boolean(context.tool_calls) && (
+        <span>
+          {context.tool_calls} recorded tools · {context.tool_errors ?? 0}{" "}
+          {context.tool_errors === 1 ? "error" : "errors"}
+        </span>
+      )}
+      {context.error_code && (
+        <span className="text-destructive">{context.error_code}</span>
+      )}
+    </div>
   );
 }
 
-export function AssistantFeedbackPanel() {
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [vote, setVote] = useState("");
+export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
+  const [vote, setVote] = useState("all");
   const [model, setModel] = useState("");
-  const [agentKind, setAgentKind] = useState("");
-  const [hasError, setHasError] = useState(false);
-  const [cursor, setCursor] = useState<string>();
+  const [agentKind, setAgentKind] = useState("all");
+  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
+  const [page, setPage] = useState(0);
+  const rangeKey = range?.toString() ?? "";
   const params = useMemo(() => {
-    const next = new URLSearchParams();
-    if (from) next.set("from", new Date(`${from}T00:00:00Z`).toISOString());
-    if (to) next.set("to", new Date(`${to}T23:59:59Z`).toISOString());
-    if (vote) next.set("vote", vote);
+    const next = new URLSearchParams(rangeKey);
+    if (vote !== "all") next.set("vote", vote);
     if (model.trim()) next.set("model", model.trim());
-    if (agentKind) next.set("agent_kind", agentKind);
-    if (hasError) next.set("has_error", "true");
-    if (cursor) next.set("cursor", cursor);
+    if (agentKind !== "all") next.set("agent_kind", agentKind);
+    if (cursors[page]) next.set("cursor", cursors[page]!);
     return next;
-  }, [from, to, vote, model, agentKind, hasError, cursor]);
+  }, [rangeKey, vote, model, agentKind, cursors, page]);
   const query = useAssistantFeedbackAdmin(params);
   const data = query.data;
-  const error = query.error ? "Unable to load assistant feedback." : undefined;
-  /* TanStack Query owns fetch lifecycle, schema validation, and cache identity. */
-  if (query.isPending)
-    return (
-      <section
-        aria-label="Assistant reply feedback"
-        className="mb-6 rounded-xl border border-border/50 bg-card p-4"
-      >
-        Loading assistant feedback…
-      </section>
-    );
+  function resetPage() {
+    setCursors([undefined]);
+    setPage(0);
+  }
+  const filtered = vote !== "all" || Boolean(model) || agentKind !== "all";
   return (
-    <section
-      aria-labelledby="assistant-feedback-heading"
-      className="mb-6 rounded-xl border border-border/50 bg-card p-4"
-    >
-      <h2 id="assistant-feedback-heading" className="text-15 font-semibold">
-        Assistant reply feedback
-      </h2>
-      <div className="mt-3 flex flex-wrap gap-2 text-11">
-        <label>
-          From{" "}
-          <input
-            type="date"
-            value={from}
-            onChange={(e) => {
-              setCursor(undefined);
-              setFrom(e.target.value);
-            }}
-          />
-        </label>
-        <label>
-          To{" "}
-          <input
-            type="date"
-            value={to}
-            onChange={(e) => {
-              setCursor(undefined);
-              setTo(e.target.value);
-            }}
-          />
-        </label>
-        <label>
-          Vote{" "}
-          <select
-            value={vote}
-            onChange={(e) => {
-              setCursor(undefined);
-              setVote(e.target.value);
-            }}
-          >
-            <option value="">All</option>
-            <option value="up">Helpful</option>
-            <option value="down">Not helpful</option>
-          </select>
-        </label>
-        <label>
-          Model{" "}
-          <input
-            type="text"
-            value={model}
-            placeholder="Any"
-            onChange={(e) => {
-              setCursor(undefined);
-              setModel(e.target.value);
-            }}
-          />
-        </label>
-        <label>
-          Agent{" "}
-          <select
-            value={agentKind}
-            onChange={(e) => {
-              setCursor(undefined);
-              setAgentKind(e.target.value);
+    <Card aria-labelledby="assistant-feedback-heading">
+      <div className="space-y-4 border-b border-border/50 p-4">
+        <div>
+          <h2 id="assistant-feedback-heading" className="font-display text-15 font-semibold leading-none tracking-tight">
+            Recent feedback
+          </h2>
+          <p className="mt-1 text-12 text-muted-foreground">
+            Read what users found helpful and what needs attention.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="w-36 space-y-1 text-11 text-muted-foreground">
+            Vote
+            <Select
+              value={vote}
+              onValueChange={(value) => {
+                resetPage();
+                setVote(value);
+              }}
+            >
+              <SelectTrigger aria-label="Vote">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All feedback</SelectItem>
+                <SelectItem value="up">Helpful</SelectItem>
+                <SelectItem value="down">Not helpful</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <label className="w-36 space-y-1 text-11 text-muted-foreground">
+            Agent
+            <Select
+              value={agentKind}
+              onValueChange={(value) => {
+                resetPage();
+                setAgentKind(value);
+              }}
+            >
+              <SelectTrigger aria-label="Agent">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All agents</SelectItem>
+                <SelectItem value="nyxbot">NyxBot</SelectItem>
+                <SelectItem value="specialist">Specialist</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <form
+            className="flex items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = new FormData(event.currentTarget).get("model");
+              resetPage();
+              setModel(typeof value === "string" ? value.trim() : "");
             }}
           >
-            <option value="">All</option>
-            <option value="nyxbot">NyxBot</option>
-            <option value="specialist">Specialist</option>
-          </select>
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={hasError}
-            onChange={(e) => {
-              setCursor(undefined);
-              setHasError(e.target.checked);
-            }}
-          />{" "}
-          Failed replies only
-        </label>
-      </div>
-      {error ? (
-        <p role="alert" className="mt-3 text-11 text-destructive">
-          {error}
+            <label className="space-y-1 text-11 text-muted-foreground">
+              Model
+              <Input
+                key={model}
+                name="model"
+                placeholder="Any model"
+                defaultValue={model}
+                className="w-44"
+              />
+            </label>
+            <Button type="submit" variant="outline">
+              Apply
+            </Button>
+          </form>
+          {filtered && (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                resetPage();
+                setVote("all");
+                setAgentKind("all");
+                setModel("");
+              }}
+            >
+              Clear filters
+            </Button>
+          )}
+        </div>
+        <p className="text-11 text-text-tertiary">
+          These filters apply to the feedback list. Charts above show all
+          feedback in the selected period.
         </p>
-      ) : null}
-      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {(data?.counts ?? []).map((row) => (
-          <div key={row.day} className="rounded-lg bg-overlay p-3 text-center">
-            <div className="text-11 text-muted-foreground">{row.day}</div>
-            <div className="mt-1 text-13">
-              {row.up} up · {row.down} down
-            </div>
-          </div>
-        ))}
       </div>
-      <div className="mt-4 space-y-2">
-        {(data?.recent ?? []).map((row) => (
+      <div aria-busy={query.isFetching}>
+        {query.isFetching && !query.isPending && (
+          <p role="status" className="px-4 pt-3 text-11 text-muted-foreground">
+            Updating feedback…
+          </p>
+        )}
+        {query.isError ? (
           <div
-            key={`${row.message_id}-${row.created_at}`}
-            className="flex items-start justify-between gap-3 border-t border-border/50 pt-2 text-11"
+            role="alert"
+            className="flex items-center justify-between gap-3 p-4 text-12"
           >
-            <span className="font-mono text-text-tertiary">
-              {row.message_id}
-            </span>
-            <time dateTime={row.created_at}>
-              {new Date(row.created_at).toLocaleString()}
-            </time>
-            <span>
-              {row.vote === "up" ? "Helpful" : "Not helpful"}
-              {row.comment ? `: ${row.comment}` : ""}
-            </span>
-            <ReplyContext context={row.context} />
+            <span>Unable to load assistant feedback.</span>
+            <Button variant="outline" onClick={() => void query.refetch()}>
+              Retry
+            </Button>
           </div>
-        ))}
+        ) : query.isPending ? (
+          <div aria-label="Loading feedback" className="space-y-3 p-4">
+            <Skeleton className="h-20" />
+            <Skeleton className="h-20" />
+          </div>
+        ) : data?.recent.length ? (
+          <ul className="divide-y divide-border/50">
+            {data.recent.map((row) => {
+              const Icon = row.vote === "up" ? ThumbsUp : ThumbsDown;
+              return (
+                <li key={`${row.message_id}-${row.created_at}`} className="p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Badge
+                      variant={row.vote === "up" ? "success" : "destructive"}
+                    >
+                      <Icon className="mr-1 size-3" aria-hidden="true" />
+                      {row.vote === "up" ? "Helpful" : "Not helpful"}
+                    </Badge>
+                    <time
+                      dateTime={row.created_at}
+                      className="font-mono text-11 text-text-tertiary"
+                    >
+                      {new Date(row.created_at).toLocaleString()}
+                    </time>
+                  </div>
+                  <p
+                    className={`my-3 whitespace-pre-wrap break-words text-13 ${row.comment ? "text-foreground" : "text-text-tertiary"}`}
+                  >
+                    {row.comment || "No comment provided"}
+                  </p>
+                  <ReplyContext context={row.context} />
+                  <details className="mt-2 text-11 text-text-tertiary">
+                    <summary className="w-fit cursor-pointer">
+                      Reply details
+                    </summary>
+                    <dl className="mt-2 space-y-1 break-all">
+                      <div>
+                        <dt className="inline">Message ID: </dt>
+                        <dd className="inline font-mono">{row.message_id}</dd>
+                      </div>
+                      {row.context?.turn_id && (
+                        <div>
+                          <dt className="inline">Turn ID: </dt>
+                          <dd className="inline font-mono">
+                            {row.context.turn_id}
+                          </dd>
+                        </div>
+                      )}
+                      {Boolean(row.context?.tool_labels?.length) && (
+                        <div>
+                          <dt className="inline">Recorded tools: </dt>
+                          <dd className="inline font-mono">
+                            {row.context?.tool_labels?.join(", ")}
+                          </dd>
+                        </div>
+                      )}
+                    </dl>
+                  </details>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <div className="m-4 rounded-lg border border-dashed border-border px-4 py-8 text-center">
+            <MessageSquare
+              className="mx-auto mb-3 size-5 text-text-tertiary"
+              aria-hidden="true"
+            />
+            <p className="text-13 font-medium">
+              {filtered
+                ? "No feedback matches these filters."
+                : "No feedback in this period."}
+            </p>
+            <p className="mt-1 text-12 text-muted-foreground">
+              {filtered
+                ? "Try another vote, agent, or model."
+                : "Votes and comments appear here when users rate a reply."}
+            </p>
+          </div>
+        )}
       </div>
-      {data?.next_cursor ? (
-        <button
-          type="button"
-          className="mt-3 text-11 underline"
-          onClick={() => setCursor(data.next_cursor ?? undefined)}
-        >
-          Next page
-        </button>
-      ) : null}
-    </section>
+      {(page > 0 || data?.next_cursor) && (
+        <div className="flex items-center justify-between border-t border-border/50 px-4 py-3">
+          <span className="text-11 text-text-tertiary">
+            Page {page + 1} · up to 100 replies per page
+          </span>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              disabled={page === 0 || query.isFetching}
+              onClick={() => setPage(page - 1)}
+            >
+              <ChevronLeft className="size-3" />
+              Previous page
+            </Button>
+            <Button
+              variant="outline"
+              disabled={!data?.next_cursor || query.isFetching}
+              onClick={() => {
+                setCursors([
+                  ...cursors.slice(0, page + 1),
+                  data?.next_cursor ?? undefined,
+                ]);
+                setPage(page + 1);
+              }}
+            >
+              Next page
+              <ChevronRight className="size-3" />
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }

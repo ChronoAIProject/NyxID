@@ -47,7 +47,8 @@ pub enum GuestAccess {
     Read,
     /// Reads, creates and acts (GET, HEAD, OPTIONS, POST), never changes or
     /// removes what exists (PUT, PATCH, DELETE, or an operation its spec
-    /// marks as deleting or replacing data).
+    /// marks as deleting or replacing data). A compiled NyxID append-only
+    /// attestation may permit a POST despite its destructive marker.
     #[default]
     Use,
     /// Everything the specialist may do with the service.
@@ -85,6 +86,17 @@ pub struct MemoryNote {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Server-established model transport from an admitted owner turn. Digests
+/// bind execution and request identity without retaining prompts or secrets.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerModelRoute {
+    pub profile: String,
+    pub catalog_service_id: String,
+    pub connection_id: Option<String>,
+    pub operation: String,
+    pub execution: String,
+}
+
 /// A persistent NyxBot agent. Conversations are its threads (web chats and
 /// channel chats); its identity, grants and memory are shared across them.
 #[derive(Clone, Serialize, Deserialize)]
@@ -113,6 +125,12 @@ pub struct AssistantAgent {
     /// Stored beside grants so older grant writers cannot erase restrictions.
     #[serde(default)]
     pub operation_scopes: super::agent_operation_scope::OperationScopes,
+    /// Guest-only intersection; an empty selection withholds a service. Old
+    /// readers ignore these fields and still deserialize the unchanged level enum.
+    #[serde(default)]
+    pub guest_operation_scopes: super::agent_operation_scope::OperationScopes,
+    #[serde(default)]
+    pub guest_operation_scope_revisions: BTreeMap<String, i64>,
     /// Untrusted guidance; sibling fields survive older grant writers.
     #[serde(default)]
     pub skills: Vec<super::catalog_skill_revision::SkillReference>,
@@ -134,9 +152,17 @@ pub struct AssistantAgent {
     pub created_by: String,
     /// NyxAgent profile for new threads.
     pub model: String,
+    #[serde(default)]
+    pub owner_model_route: Option<Box<OwnerModelRoute>>,
+    /// Closed-reason notification timestamps; BSON datetimes, never guest text.
+    #[serde(default)]
+    pub guest_model_notices: std::collections::BTreeMap<String, bson::DateTime>,
     /// Optional per-agent approval policy; absent inherits the owner's mode.
     #[serde(default)]
     pub access_mode_override: Option<super::assistant_settings::AccessMode>,
+    /// Send one progress reply for channel turns needing external checks after five seconds.
+    #[serde(default)]
+    pub channel_checking_notice: bool,
     /// Where NyxID delivers this agent's events when no thread asked for them.
     #[serde(default)]
     pub home_conversation_id: Option<String>,
@@ -161,6 +187,11 @@ pub struct AssistantAgent {
 pub struct AgentSkillMetadata {
     pub description: String,
     pub size_bytes: usize,
+    /// Owner-selected files automatically supplied as untrusted turn context.
+    #[serde(default)]
+    pub preload_paths: Vec<String>,
+    #[serde(default)]
+    pub preload_bytes: usize,
 }
 
 impl AssistantAgent {

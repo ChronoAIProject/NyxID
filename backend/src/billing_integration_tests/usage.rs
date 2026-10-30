@@ -19,6 +19,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         wallet_id: Some("wallet".into()),
         actor_user_id: owner.to_string(),
         api_key_id: None,
+        assistant_source: None,
         user_service_id: None,
         service_id: Some("service".into()),
         service_slug: Some("llm-test".into()),
@@ -27,6 +28,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         operation: None,
         credential_class: CredentialClass::NyxidManagedMaster,
         model: Some("test-model".into()),
+        reported_model: None,
         token_breakdown: None,
         audio_tokens: None,
         image_tokens: None,
@@ -181,6 +183,9 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
         if grant_micros > 0 {
             db.collection::<CreditGrant>(GRANTS)
                 .insert_one(CreditGrant {
+                    service_limits: Vec::new(),
+                    revoke_requested_at: None,
+                    revoke_requested_by: None,
                     id: grant_id.clone(),
                     batch_id: Uuid::new_v4().to_string(),
                     schedule_origin: None,
@@ -341,6 +346,7 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
             quantity: 20,
         }],
         grant_consumptions: vec![GrantConsumptionAllocation {
+            service_limit_key: None,
             operation_id: "g".into(),
             grant_id: "g".into(),
             amount: crate::models::credits::Credits::from_micros(50),
@@ -446,6 +452,7 @@ fn reservation_priced(quantity: i64, pico: Option<i64>, micros: i64, owner: &str
 
 fn grant_consumption(amount: Credits) -> crate::models::usage_meter::GrantConsumptionAllocation {
     crate::models::usage_meter::GrantConsumptionAllocation {
+        service_limit_key: None,
         operation_id: Uuid::new_v4().to_string(),
         grant_id: Uuid::new_v4().to_string(),
         amount,
@@ -747,6 +754,9 @@ async fn org_credential_request(platform_key: bool) {
     create_usage_index(&db).await;
     insert_fresh_rates(&db).await;
     let actor = insert_owner(&db).await;
+    // Keep payer/rollout assertions independent of the actor approval preference.
+    crate::test_utils::set_test_approval_preference(&db, &actor, false).await;
+
     let org = Uuid::new_v4().to_string();
     db.collection::<User>(USERS)
         .insert_one(test_user(&org, UserType::Org))

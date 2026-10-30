@@ -1,4 +1,5 @@
 import { ChannelActivities, LatestActivity } from "@/components/channels/channel-activities";
+import { WhatsappNativeSection } from "@/components/channels/whatsapp-native";
 import { useChannelActivities } from "@/hooks/use-channel-activities";
 import type { ChannelActivityDescriptor, ChannelActivityItem } from "@/types/channels";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
@@ -1245,7 +1246,7 @@ export function ChannelBotDetailPage() {
       {Boolean(bot.setup_instructions?.length) && (
         <DetailSection title={`${getPlatform(bot.platform).label} Setup`}>
           <div className="space-y-4 p-5">
-            <CopyableUrlCallout label="Callback URL" url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
+            <CopyableUrlCallout label={bot.platform === "discord" ? "Interactions Endpoint URL" : "Callback URL"} url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
             <ol className="list-decimal space-y-2 pl-4 text-xs text-muted-foreground">
               {bot.setup_instructions?.map((instruction) => <li key={instruction}>{instruction}</li>)}
             </ol>
@@ -1291,6 +1292,7 @@ export function ChannelBotDetailPage() {
       })()}
 
       {/* Conversation Routes */}
+      {bot.platform === "whatsapp" && <WhatsappNativeSection botId={bot.id} />}
       <ConversationsSection
         platform={bot.platform}
         botId={botId}

@@ -28,7 +28,10 @@ use crate::models::telegram_bot_request::{
 use crate::models::telegram_bot_request::{MANAGED_BOTS, ManagedBotEvents};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
+pub(crate) use prompt::PROMPT_HORIZON_SECS;
+
 pub struct TelegramNewService<'a> {
+    pub manager_id: Option<i64>,
     pub db: &'a mongodb::Database,
     pub keys: &'a EncryptionKeys,
     pub config: &'a AppConfig,
@@ -83,11 +86,10 @@ fn public_welcome() -> &'static str {
 fn scrub_relayed_message(message: &mut serde_json::Map<String, Value>) -> usize {
     let mut redacted = 0;
     for (field, entities) in [("text", "entities"), ("caption", "caption_entities")] {
-        let Some(scrubbed) = message
-            .get(field)
-            .and_then(Value::as_str)
-            .and_then(super::telegram_new_claims::scrub_claim_codes)
-        else {
+        let Some(scrubbed) = message.get(field).and_then(Value::as_str).and_then(|text| {
+            let scrubbed = super::telegram_input::scrub(text);
+            (scrubbed != text).then_some(scrubbed)
+        }) else {
             continue;
         };
         message.insert(field.into(), Value::String(scrubbed));
@@ -113,7 +115,8 @@ fn scrub_relayed_message(message: &mut serde_json::Map<String, Value>) -> usize 
 fn scrub_relayed_links(value: &mut Value) -> usize {
     match value {
         Value::String(text) => {
-            if let Some(scrubbed) = super::telegram_new_claims::scrub_claim_codes(text) {
+            let scrubbed = super::telegram_input::scrub(text);
+            if scrubbed != *text {
                 *text = scrubbed;
                 1
             } else {
@@ -385,12 +388,7 @@ impl TelegramNewService<'_> {
     pub async fn manager(
         &self,
     ) -> AppResult<(i64, String, super::channel_platform::PlatformVerifySecrets)> {
-        let values = credentials::load_decrypted(
-            self.db,
-            self.keys,
-            &super::channel_adapters::telegram_new::credential_descriptor(),
-        )
-        .await?;
+        let values = self.manager_values().await?;
         let id = values
             .get("manager_bot_id")
             .and_then(|v| v.parse::<i64>().ok());
@@ -547,7 +545,14 @@ impl TelegramNewService<'_> {
                 "Label must be between 1 and 128 characters".into(),
             ));
         }
-        let (manager_id, manager_name, manager_values) = self.manager().await?;
+        let selected;
+        let service = if let Some(authority) = setup_authority {
+            selected = self.for_manager(authority.manager_bot_id).await?;
+            &selected
+        } else {
+            self
+        };
+        let (manager_id, manager_name, manager_values) = service.manager().await?;
         let observation_id = manager_values
             .get("observation_id")
             .ok_or_else(|| conflict("Save the manager configuration before creating bots"))?;
@@ -620,6 +625,10 @@ impl TelegramNewService<'_> {
             manager_revision: None,
             auto_connect,
             start_update_id: None,
+            creation_context: (setup_authority.is_none() && link_claim.is_none())
+                .then_some(crate::models::telegram_bot_request::CreationContext::Standalone),
+            prompt_delivery: None,
+            prompt_update_boundary: None,
             connection_attempts: 0,
             next_connection_attempt_at: None,
             connection_error: None,
@@ -684,6 +693,7 @@ impl TelegramNewService<'_> {
                 .insert_one(&request)
                 .await?;
         }
+        let request = self.get(actor, &request.id).await?;
         Ok((
             request,
             format!("https://t.me/{manager_name}?start={}", challenge.as_str()),
@@ -700,7 +710,11 @@ impl TelegramNewService<'_> {
         {
             return Err(conflict("This creation request cannot be opened again"));
         }
-        let (manager_id, manager_name, _) = self.manager().await?;
+        let (manager_id, manager_name, _) = self
+            .for_manager(request.manager_bot_id)
+            .await?
+            .manager()
+            .await?;
         if manager_id != request.manager_bot_id {
             return Err(conflict(
                 "The manager configuration changed; start a new request",
@@ -752,7 +766,8 @@ impl TelegramNewService<'_> {
             return Err(conflict("The request changed; refresh before cancelling"));
         }
         if let Some(user) = request.telegram_user_id
-            && let Ok((_, _, values)) = self.manager().await
+            && let Ok(manager) = self.for_manager(request.manager_bot_id).await
+            && let Ok((_, _, values)) = manager.manager().await
             && let Some(token) = values.get(MANAGER_TOKEN)
         {
             let _ = self.api.call(token, "sendMessage", json!({"chat_id": user, "text": "Setup cancelled. Any bot you already created still exists in Telegram. You can start setup again from Channel Bots in NyxID.", "reply_markup": {"remove_keyboard": true}})).await;
@@ -786,6 +801,48 @@ impl TelegramNewService<'_> {
         }
         let mut update: Value = serde_json::from_slice(body)
             .map_err(|_| AppError::BadRequest("Invalid Telegram update".into()))?;
+        if let Some(command) = super::platform_pairing_link::personal_command(
+            update["message"]["text"].as_str().unwrap_or_default(),
+            &manager_username,
+        )
+        .or_else(|| {
+            super::platform_pairing_link::onboarding_command(
+                update["message"]["text"].as_str().unwrap_or_default(),
+                &manager_username,
+            )
+        }) {
+            if !super::platform_pairing_link::original_message(&update)
+                || private_sender(&update["message"]).is_none()
+            {
+                return Ok(None);
+            }
+            update["message"]["text"] = command.as_str().into();
+            update["message"]
+                .as_object_mut()
+                .unwrap()
+                .remove("entities");
+            return Ok(self
+                .manager_channel(manager_id)
+                .await?
+                .map(|bot| (bot, update)));
+        }
+        // Confirmation is consumed only by native handlers. Preserve an
+        // original private command until those handlers inspect its proof.
+        if super::telegram_input::original(&update)
+            && private_sender(&update["message"]).is_some()
+            && update["message"]["text"]
+                .as_str()
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| s.split('@').next())
+                .is_some_and(|s| {
+                    s.eq_ignore_ascii_case("/confirm") || s.eq_ignore_ascii_case("confirm")
+                })
+        {
+            return Ok(self
+                .manager_channel(manager_id)
+                .await?
+                .map(|bot| (bot, update)));
+        }
         if !is_manager_update(&update) {
             let bot = match self.manager_channel(manager_id).await {
                 Ok(bot) => bot,
@@ -806,16 +863,55 @@ impl TelegramNewService<'_> {
                     None
                 }
             };
-            // Telegram embeds quoted messages in ordinary replies, including private setup codes.
+            // Preserve public quotations while keeping this manager's private
+            // setup messages and bearer proofs outside model context.
             for kind in ["message", "edited_message", "channel_post"] {
                 if let Some(message) = update.get_mut(kind).and_then(Value::as_object_mut) {
-                    for value in message.values_mut() {
-                        // Replies, pins and nested service messages can embed
-                        // the manager's private setup messages.
-                        strip_embedded_messages(value);
+                    let own_source =
+                        |origin: &Value| origin["sender_user"]["id"].as_i64() == Some(manager_id);
+                    let private_forward = message.get("forward_origin").is_some_and(own_source)
+                        || message
+                            .get("forward_from")
+                            .is_some_and(|v| v["id"].as_i64() == Some(manager_id));
+                    let private_quote = message
+                        .get("external_reply")
+                        .is_some_and(|v| own_source(&v["origin"]))
+                        || message
+                            .get("reply_to_message")
+                            .is_some_and(|v| v["from"]["id"].as_i64() == Some(manager_id));
+                    if private_forward {
+                        for field in [
+                            "text",
+                            "caption",
+                            "entities",
+                            "caption_entities",
+                            "photo",
+                            "document",
+                            "audio",
+                            "voice",
+                            "video",
+                            "video_note",
+                            "animation",
+                            "sticker",
+                        ] {
+                            message.remove(field);
+                        }
+                        message.insert(
+                            "text".into(),
+                            "[Private manager setup message omitted]".into(),
+                        );
                     }
-                    message.remove("external_reply");
-                    message.remove("quote");
+                    for (field, value) in message.iter_mut() {
+                        if matches!(field.as_str(), "quote" | "external_reply") {
+                            if private_quote {
+                                *value = json!({});
+                            } else {
+                                scrub_relayed_links(value);
+                            }
+                        } else {
+                            strip_embedded_messages(value);
+                        }
+                    }
                     // A pasted or forwarded claim code is bearer proof of a creation.
                     let redacted = scrub_relayed_message(message);
                     if redacted > 0 {
@@ -879,18 +975,15 @@ impl TelegramNewService<'_> {
             .as_str()
             .and_then(|text| manager_command(text, &manager_username));
         if let Some(("/start", "")) = command {
-            let pending = self
+            let latest = self
                 .db
                 .collection::<TelegramBotRequest>(REQUESTS)
-                .find_one(doc! {
-                    "manager_bot_id": manager_id, "telegram_user_id": user_id,
-                    "active": true, "status": "waiting_bot",
-                })
+                .find_one(doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id})
+                .sort(doc! {"created_at": -1, "_id": -1})
                 .await?;
-            let pending = match pending {
-                Some(request) if self.owner_still_authorized(&request).await? => Some(request),
-                _ => None,
-            };
+            let pending = latest
+                .as_ref()
+                .filter(|request| request.active && request.status == Status::WaitingBot);
             if pending.is_none()
                 && self
                     .db
@@ -904,13 +997,49 @@ impl TelegramNewService<'_> {
                 let bot = self.db.collection::<ChannelBot>(BOTS).find_one(doc! {"platform_bot_id": manager_id.to_string(), "platform_profile_id": {"$exists": true}}).await?;
                 return Ok(bot.map(|bot| (bot, update)));
             }
+            if pending.is_none()
+                && latest
+                    .as_ref()
+                    .is_some_and(|request| request.status == Status::Expired)
+            {
+                self.send_expired_setup(token, user_id).await?;
+                return Ok(None);
+            }
             return self
-                .send_creation_prompt(manager_id, token, user_id, pending.as_ref())
+                .send_creation_prompt(manager_id, token, user_id, update_id, pending)
                 .await
                 .map(|()| None);
         }
         if let Some(("/start", challenge)) = command {
             if challenge.len() != 48 || !challenge.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok(None);
+            }
+            if self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(doc! {
+                "manager_bot_id": manager_id, "challenge_hash": hash(challenge), "status": "expired",
+                "$or": [{"telegram_user_id": null}, {"telegram_user_id": user_id}],
+                "$and": [{"$or": [{"setup_authority": null}, {"setup_authority.telegram_sender_id": user_id}]}]
+            }).await?.is_some() {
+                self.send_expired_setup(token, user_id).await?;
+                return Ok(None);
+            }
+            // A redelivered or explicit repeated handoff preserves the original
+            // creation boundary and never advances creation revision for observability.
+            let bound = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(doc! {
+                "manager_bot_id": manager_id, "challenge_hash": hash(challenge), "telegram_user_id": user_id,
+                "active": true, "expires_at": {"$gt": bson::DateTime::now()},
+                "status": {"$in": ["waiting_bot", "waiting_consent"]},
+            }).await?;
+            if let Some(bound) = bound {
+                if bound.status == Status::WaitingConsent {
+                    if self.owner_still_authorized(&bound).await? {
+                        self.send_consent(token, &bound).await?;
+                    } else {
+                        self.reply_to_closed_setup(token, user_id, &bound).await?;
+                    }
+                } else {
+                    self.send_creation_prompt(manager_id, token, user_id, update_id, Some(&bound))
+                        .await?;
+                }
                 return Ok(None);
             }
             let claimed = self.db.collection::<TelegramBotRequest>(REQUESTS)
@@ -969,15 +1098,21 @@ impl TelegramNewService<'_> {
                 if request.status == Status::WaitingConsent {
                     self.send_consent(token, &request).await?;
                 } else {
-                    self.db
-                        .collection::<TelegramBotRequest>(REQUESTS)
-                        .update_one(
-                            doc! {"_id": &request.id, "revision": request.revision},
-                            doc! {"$set": {"status": "waiting_bot"}},
-                        )
-                        .await?;
-                    self.send_creation_prompt(manager_id, token, user_id, Some(&request))
-                        .await?;
+                    let bound = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
+                        doc! {"_id": &request.id, "revision": request.revision, "active": true, "expires_at": {"$gt": bson::DateTime::now()}, "status": {"$in": ["waiting_telegram", "waiting_bot"]}},
+                        doc! {"$set": {"status": "waiting_bot"}},
+                    ).return_document(ReturnDocument::After).await?;
+                    let Some(request) = bound else {
+                        return Ok(None);
+                    };
+                    self.send_creation_prompt(
+                        manager_id,
+                        token,
+                        user_id,
+                        update_id,
+                        Some(&request),
+                    )
+                    .await?;
                 }
             }
             return Ok(None);
@@ -1066,6 +1201,11 @@ impl TelegramNewService<'_> {
             {
                 return Ok(None);
             }
+            if pending.creation_context.is_some() && pending.setup_authority.is_none() {
+                self.consume_created_bot(&pending, bot_id, &username)
+                    .await?;
+                return Ok(None);
+            }
             let result = self.db.collection::<TelegramBotRequest>(REQUESTS).update_one(
                 doc! {"_id": &pending.id, "revision": pending.revision, "status": "waiting_bot", "active": true},
                 doc! {"$set": {"telegram_bot_id": bot_id, "bot_username": &username, "status": "ready", "manager_revision": 1_i64}, "$inc": {"revision": 1}},
@@ -1108,7 +1248,53 @@ impl TelegramNewService<'_> {
             .await?)
     }
 
-    async fn send_creation_prompt(
+    async fn send_expired_setup(&self, token: &str, user: i64) -> AppResult<()> {
+        self.api.call(token, "sendMessage", json!({"chat_id": user,
+            "text": "This bot setup has expired. Open NyxID to start a new setup for the intended account and agent. Any bot you already created still exists in Telegram.",
+            "reply_markup": {"remove_keyboard": true}})).await?;
+        Ok(())
+    }
+
+    pub(super) async fn reply_to_closed_setup(
+        &self,
+        token: &str,
+        user: i64,
+        request: &TelegramBotRequest,
+    ) -> AppResult<()> {
+        let expired = self.db.collection::<bson::Document>(REQUESTS)
+            .find_one(doc! {"_id": &request.id, "expires_at": {"$lte": bson::DateTime::now()},
+                "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent", "expired"]}}).await?.is_some();
+        if expired {
+            self.expire().await?;
+            return self.send_expired_setup(token, user).await;
+        }
+        // Do not expose why owner, manager, link or source authority closed, and
+        // never turn this refusal into another unbound creation request.
+        self.api.call(token, "sendMessage", json!({"chat_id":user,
+            "text":"This bot setup is no longer available. Open NyxID to check its progress or ask for a new setup for the intended account and agent.",
+            "reply_markup":{"remove_keyboard":true}})).await?;
+        Ok(())
+    }
+
+    pub(super) async fn reply_if_request_expired(
+        &self,
+        token: &str,
+        user: i64,
+        request: &TelegramBotRequest,
+    ) -> AppResult<()> {
+        // expire() already performs the conditional terminal transition. Do not
+        // renew a request or turn a closed setup into an unbound creation flow.
+        let expired = self.db.collection::<TelegramBotRequest>(REQUESTS)
+            .find_one(doc! {"_id": &request.id, "expires_at": {"$lte": bson::DateTime::now()},
+                "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent", "expired"]}}).await?;
+        if expired.is_some() {
+            self.expire().await?;
+            self.send_expired_setup(token, user).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_unbound_creation_prompt(
         &self,
         manager_id: i64,
         token: &str,
@@ -1122,7 +1308,7 @@ impl TelegramNewService<'_> {
         };
         self.api.call(token, "sendMessage", json!({
             "chat_id": user,
-            "text": format!("{text}\n\nIf no Create bot button appears, send /start to try again. If the next message is blank or the button is still missing, open this chat in the latest Telegram app to continue."),
+            "text": format!("{text}\n\nIf no Create bot button appears, update Telegram to the latest version, then send /start to try again."),
             "parse_mode": "HTML",
             "link_preview_options": {"is_disabled": true},
         })).await?;
@@ -1321,7 +1507,11 @@ impl TelegramNewService<'_> {
         };
         let created_at = event.created_at.filter(|date| durable_review || *date >= Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES)).ok_or_else(|| conflict("This creation is too old to connect automatically. Use the Telegram bot token option with its current token."))?;
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
-        if webhook["url"] != self.manager_callback()
+        if webhook["url"]
+            != self
+                .for_manager(request.manager_bot_id)
+                .await?
+                .manager_callback()
             || webhook["pending_update_count"].as_i64() != Some(0)
             || webhook["last_error_date"]
                 .as_i64()
@@ -1477,3 +1667,9 @@ mod tests {
         }
     }
 }
+
+#[path = "telegram_new_prompt.rs"]
+mod prompt;
+
+#[path = "telegram_new_recovery.rs"]
+mod recovery;

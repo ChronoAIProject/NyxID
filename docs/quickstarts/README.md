@@ -13,3 +13,11 @@ For first-time NyxID setup (Docker stack, hosted signup, account registration), 
 | [**Use Supabase as an AI Agent Database**](supabase.md) | A Supabase project becomes a credential-brokered PostgREST database for scoped AI agents. | Per-user endpoint + encrypted API key |
 
 Every quickstart begins with the same prerequisite step — **Step 0: Get NyxID running and create an Agent Key**. The canonical version lives in the [n8n quickstart](n8n.md#step-0--get-nyxid-running-and-create-an-agent-key); the other guides reference it.
+
+For an application spanning several services, see the external
+[dining review reference application](https://github.com/ChronoAIProject/frigate-cma-events/tree/main/examples/dining).
+It connects Frigate and Home Assistant Event Relay to deterministic aggregation,
+a CMA visual worker and Google Sheets, with an existing NyxBot querying the
+records. NyxID provides the local-node proxy and scoped service credentials;
+the application repository owns the deployment templates and workflow. Camera,
+account, spreadsheet and credential values are supplied privately at deployment.

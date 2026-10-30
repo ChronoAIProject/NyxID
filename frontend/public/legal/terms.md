@@ -1,13 +1,13 @@
 ---
 title: Terms of Use
-effective_date: 2026-05-11
+effective_date: 2026-10-23
 ---
 
 # NyxID — Terms of Use
 
-**Last updated:** 11 May 2026
+**Last updated:** 23 October 2026
 
-> **IMPORTANT NOTICE:** PLEASE READ THESE TERMS OF USE CAREFULLY BEFORE ACCESSING OR USING THE NYXID APPLICATION. BY ACCESSING OR USING THE APP, YOU CONFIRM THAT YOU HAVE READ, UNDERSTOOD, AND AGREE TO BE LEGALLY BOUND BY THESE TERMS. PAY PARTICULAR ATTENTION TO **SECTIONS 4 (USER-OPERATED AI AGENTS), 6 (SECURITY DISCLAIMERS), 12 (LIMITATION OF LIABILITY), AND 15 (ARBITRATION).** IF YOU DO NOT AGREE TO THESE TERMS, DO NOT ACCESS OR USE THE APP.
+> **IMPORTANT NOTICE:** PLEASE READ THESE TERMS OF USE CAREFULLY BEFORE ACCESSING OR USING THE NYXID APPLICATION. BY ACCESSING OR USING THE APP, YOU CONFIRM THAT YOU HAVE READ, UNDERSTOOD, AND AGREE TO BE LEGALLY BOUND BY THESE TERMS. PAY PARTICULAR ATTENTION TO **SECTIONS 4 (AI ASSISTANTS AND AGENTS), 6 (SECURITY DISCLAIMERS), 12 (LIMITATION OF LIABILITY), 14 (FEES AND PAYMENT), AND 15 (ARBITRATION).** IF YOU DO NOT AGREE TO THESE TERMS, DO NOT ACCESS OR USE THE APP.
 
 These NyxID Terms of Use ("**Terms**") constitute a legal agreement between you ("**User**" or "**you**") and ChronoAI Pte. Ltd. ("**we**," "**us**," or "**ChronoAI**") (the "**Agreement**"). These Terms apply when you visit or interact with the NyxID application, engage with our customer support, interact with us on social media, or otherwise communicate with us. By accessing or using the App, you agree to be bound by these Terms.
 
@@ -26,7 +26,7 @@ Where NyxID utilises a shared or unified authentication system with any affiliat
 - authentication assertions, OAuth/OIDC tokens, and your NyxID identifier may be shared with the Partner Application to enable single sign-on; your NyxID password, MFA Secrets, and stored API Keys and Tokens are never shared with Partner Applications;
 - your use of the App is governed exclusively by this Agreement and the related Privacy Policy;
 - your use of any Partner Application is governed exclusively by the separate terms of service and privacy policy published by the operator of that Partner Application;
-- ChronoAI Pte. Ltd. operates all current Partner Applications and is the sole controller of personal data processed through them. If, at any future time, shared authentication creates a Joint Controller relationship with a separate legal entity under applicable law (including Article 26 of the GDPR), ChronoAI will disclose the essence of that arrangement, including the allocation of responsibility for Data Subject Access Requests and credential security, in the Privacy Policy and any applicable Joint Controller Agreement.
+- a Partner Application may be operated by ChronoAI or another operator. Its identity, requested access and applicable privacy information should be reviewed when authorising it. Shared authentication alone does not establish that ChronoAI operates that application or is the sole controller of its processing.
 
 ### 1.3 Acceptance of Terms
 
@@ -95,15 +95,16 @@ For the purposes of this Agreement, the following terms shall have the meanings 
 
 ### 3.1 Service Description
 
-NyxID is an identity and secure credential proxy service. The App enables Users to create an account, securely store API Keys and Tokens for remote third-party services, and have those credentials injected into outbound requests via the Credential Proxy functionality. NyxID is network and identity infrastructure; it does not itself incorporate or perform artificial intelligence or machine-learning inference. Where the App routes requests to third-party AI providers via the Model Context Protocol ("**MCP**") or LLM gateway functionality, those providers process your prompts and responses under their own terms; NyxID acts solely as a routing, identity, and credential-injection layer between you and your chosen AI provider. See Section 4 for the position on user-operated AI agents.
+NyxID provides identity, credential management, service proxying and hosted AI assistant features. The App enables Users to create an account, store API Keys and Tokens for connected services, and have credentials injected into outbound requests through the Credential Proxy. Its hosted assistant features include NyxBot, specialist agents, saved conversations, tools and automations. Assistant engines and model providers process content to produce responses and carry out permitted actions. Available features depend on the deployment, account permissions and connected services. Section 4 describes AI use; the [Privacy Policy](/privacy) describes the associated data handling.
 
 ### 3.2 Core Functionalities
 
 The App provides the following core Services:
 
-- **Credential Storage and Proxy:** You may store API Keys and Tokens within the App (encrypted at rest). NyxID proxies requests to third-party services by injecting your stored credentials on your behalf. Proxied request and response bodies are buffered in memory for the Approval Request flow only and are not written to disk or persistently logged.
-- **Local Agent (Node Agent and CLI):** You may optionally run the Node Agent daemon (installed via launchd, systemd, or Docker, optionally in multi-profile mode) or the CLI on your own infrastructure, allowing credentials to remain on your hardware and never be transmitted to ChronoAI's servers. The Node Agent maintains a persistent connection to ChronoAI's servers for proxy routing and supports failover across multiple nodes you have registered.
-- **Approval Interface:** The mobile App and supported messaging platforms serve as approval interfaces, enabling you to approve, deny, or revoke access requests via push notification (iOS/Android) or messaging-platform message before each proxied request is executed.
+- **Credential Storage and Proxy:** Dedicated stored credential fields are encrypted at rest. NyxID injects credentials into requests to connected services and processes request and response content to route those requests. Some features retain content, including saved assistant conversations and attachments, asynchronous results, Oracle tasks and configured webhook replay. See the Privacy Policy for storage and retention details.
+- **Local Agent (Node Agent and CLI):** You may run the Node Agent or CLI on your own infrastructure. Node-held downstream credentials can remain on that node; the node injects them when contacting the destination service. Using the CLI alone does not make every credential local, and request and response content can still pass through NyxID. The Node Agent maintains a connection to NyxID for routing and can support failover across registered nodes.
+- **Approval Interface:** Web, mobile and supported messaging interfaces allow you to review and decide requests when the applicable policy requires approval. Whether an action needs confirmation depends on the account, agent, service and operation settings; not every request presents an approval prompt. See Section 4.3 for hosted assistant access modes.
+- **Hosted Assistants and Channels:** NyxBot and specialist agents can use permitted services, save conversations and memory, run configured automations, and communicate through supported linked channels. Optional machine capabilities let an authorised assistant work on a connected machine. Enabling these features can send content to assistant engines, model providers, messaging platforms and the services used by an action.
 - **OAuth/OIDC Login Provider and SDK:** NyxID can act as an OAuth/OIDC login provider, enabling third-party developers to integrate "Sign in with NyxID" into their Partner Applications. ChronoAI publishes the SDK to support these integrations; developer obligations are addressed in Section 5.7.
 - **SSH Certificate Issuance:** The App can issue short-lived SSH Certificates for authenticating remote server access.
 
@@ -111,23 +112,27 @@ The App provides the following core Services:
 
 ChronoAI reserves the right to introduce, modify, suspend, or discontinue any Service or feature at any time. Where changes materially affect your use of the Services, ChronoAI will use reasonable endeavours to provide prior notice. Your continued use of the App following any change constitutes your acceptance of the modified Services.
 
-## 4. USER-OPERATED AI AGENTS ("BYOK")
+## 4. AI ASSISTANTS AND AGENTS
 
-### 4.1 No Inherent AI in the App
+### 4.1 Hosted AI Features and Provider Connections
 
-NyxID does not itself incorporate artificial intelligence or machine-learning features. The App is identity and credential-broker infrastructure. Any artificial intelligence used in connection with NyxID is supplied and operated by you ("Bring Your Own Key" / BYOK).
+NyxID includes hosted AI features powered by assistant engines and model providers, including NyxBot and specialist agents. Depending on the service and your access, requests may use a connection you supply ("Bring Your Own Key" or "BYOK") or an available platform-managed connection. Hosted AI is not limited to BYOK. Prompts, relevant conversation history, memory, attachments and tool context may be processed by the assistant engine and the model or other services used to fulfil the request, as described in the [Privacy Policy](/privacy).
+
+Shared channel entry points may provide published FAQ answers without AI inference. Where configured, they may also offer public AI assistance or access to your personal NyxBot. Personal access through a shared bot requires the account review and confirmation in the originating private chat; signing into the website alone does not link that chat. Availability of an integration does not mean every deployment enables it.
 
 ### 4.2 User-Operated AI Agents
 
-You may use third-party AI agents (for example, Claude Code, Codex, OpenClaw, or similar) to interact with the App. Such AI agents act under your authority and using credentials you supply, including scoped API keys issued through your NyxID account. ChronoAI does not control, supervise, or assume responsibility for AI agents operated by you or on your behalf.
+You may also use third-party AI agents (for example, Claude Code, Codex, OpenClaw, or similar) to interact with the App under credentials and permissions you authorise, including scoped API keys issued through your NyxID account. These externally operated agents are separate from NyxID's hosted assistant features and are subject to their operators' terms and data practices. ChronoAI does not operate or supervise your external agent runtime.
 
 ### 4.3 Responsibility for AI Agent Actions
 
-You are solely responsible for all actions performed by any AI agent acting under your account or API key, including the agent's compliance with these Terms and with the terms of any third-party services accessed via the Credential Proxy. ChronoAI accepts no liability for the outputs, errors, omissions, or unauthorised actions of AI agents operated by you or on your behalf, to the maximum extent permitted by applicable law.
+You are responsible for the instructions you give, the access you grant and your use of AI outputs, including compliance with these Terms and the terms of connected services. AI output can be inaccurate or incomplete, and an authorised action can change or disclose data, contact others, incur charges or affect a connected machine. Review outputs and permissions according to the consequences of the task.
 
-### 4.4 No Automated Decision-Making by ChronoAI with Legal Effect
+NyxBot uses your account authority; specialists operate within their assigned grants. Hosted assistant access modes determine which permitted actions require a confirmation: Auto asks for sensitive or destructive actions, Ask every time asks for non-read actions, and Full access permits actions without confirmation prompts. Additional service and machine confirmation rules apply in Auto and Ask every time. Full access bypasses confirmation requirements; it does not grant access to resources the agent is not authorised to use. Automations and linked channels can initiate work without an active browser session. You are responsible for choosing and reviewing these settings. The liability provisions in Section 12 remain subject to applicable law.
 
-ChronoAI does not use the App to make automated decisions that produce legal effects concerning you or similarly significantly affect you. Where the App incorporates automated controls (for example, rate limiting, abuse detection, or session termination on suspected compromise), those controls are deterministic security features applied uniformly to all Users, not AI-driven assessments of you as an individual. If you believe an automated control has affected you in error, you may contact ChronoAI at **contact@chrono-ai.fun**.
+### 4.4 Automated Actions and Controls
+
+The App applies automated access, rate, usage and security controls according to the relevant account and service configuration. Hosted agents and automations can also perform actions within their permitted scope, subject to the applicable confirmation settings. These actions can have real-world consequences; do not rely on an AI response as professional advice or as proof that an external action succeeded. If you believe an automated control or action has affected you in error, contact **contact@chrono-ai.fun**. Nothing in these Terms limits rights you have under applicable data-protection law.
 
 ## 5. USER RIGHTS AND OBLIGATIONS
 
@@ -202,9 +207,7 @@ If you use the SDK or otherwise build a Partner Application that integrates with
 
 ### 6.1 No Guarantee of Absolute Security
 
-While ChronoAI implements industry-standard security measures designed to protect your credentials and data — including encryption at rest and in transit, multi-factor authentication, role-based access controls, and regular security assessments — no security system is infallible. ChronoAI does not warrant or represent that the App or its underlying infrastructure is invulnerable to security breaches, cyberattacks, or unauthorised access.
-
-ChronoAI's security practices are informed by internationally recognised frameworks, including ISO/IEC 27001 (Information Security Management), the NIST Cybersecurity Framework, and SOC 2 Type II standards. However, references to these frameworks do not constitute a warranty that ChronoAI is formally certified under such frameworks, unless expressly stated.
+NyxID provides controls including encryption of dedicated credential fields, multi-factor authentication and access restrictions. Their scope and deployment-dependent protections are described in the Privacy Policy. These controls do not make every stored field encrypted or prevent every security incident. ChronoAI does not warrant that the App or its underlying infrastructure is invulnerable to security breaches, cyberattacks or unauthorised access. These Terms do not represent that the Service holds a security certification.
 
 ### 6.2 User Responsibility for Credential Security
 
@@ -250,11 +253,11 @@ Where the GDPR applies to ChronoAI's processing of your personal data (including
 
 ### 7.4 Cross-Border Data Transfers
 
-Personal data collected through the App may be transferred to, stored in, and processed in countries outside your jurisdiction, including Singapore and other countries where ChronoAI's service providers operate. Where personal data is transferred from the EEA, the UK, or other transfer-restricted jurisdictions, ChronoAI will implement appropriate safeguards, including Standard Contractual Clauses approved by the European Commission, adequacy decisions, or other legally recognised transfer mechanisms. Details of data storage locations and transfer safeguards are set out in the Privacy Policy.
+Personal data collected through the App may be transferred to, stored in, and processed in countries outside your jurisdiction, including Singapore and other countries where ChronoAI's service providers operate. Where personal data is transferred from the EEA, the UK, or other transfer-restricted jurisdictions, ChronoAI will implement appropriate safeguards, including Standard Contractual Clauses approved by the European Commission, adequacy decisions, or other legally recognised transfer mechanisms. Use the contact in the Privacy Policy to request the applicable processing locations and transfer arrangements.
 
 ### 7.5 Authentication Data as Sensitive Security Data
 
-ChronoAI recognises that API Keys and Tokens, MFA Secrets, and other authentication credentials stored within the App constitute highly sensitive security data. ChronoAI applies heightened security measures to such data, including strong encryption (at rest using AES-256 or equivalent, and in transit using TLS 1.2 or higher), strict access controls, and audit logging of all access events. Notwithstanding the above, ChronoAI cannot guarantee absolute security with respect to this data.
+API Keys and Tokens, MFA Secrets and other authentication credentials are sensitive security data. NyxID uses encryption for dedicated stored secret fields, hashes for credentials that need only verification, and access controls and security audit records for supported operations. Some protocols retain an encrypted credential for later authorised use or delivery. Transport, storage and backup protections depend on the deployment as described in the Privacy Policy; this is not a promise that every access is logged or every stored field is encrypted. ChronoAI cannot guarantee absolute security.
 
 ## 8. THIRD-PARTY INTEGRATIONS AND SERVICES
 
@@ -280,15 +283,17 @@ The App supports integration with third-party messaging and collaboration platfo
 
 The App may also expose an HTTP event-ingress endpoint allowing devices or other systems you operate to deliver structured events into a conversation flow. The same custody, rotation, and platform-compliance obligations described above apply to credentials and material supplied for such event ingress.
 
+Some deployments offer managed bot setup or a shared bot entry instead of requiring you to supply every bot credential. Public FAQ, public AI and linked personal assistant access are distinct modes. Review the account and channel being linked and the applicable data handling; linking or disconnecting one chat does not automatically link or disconnect your other chats. Assistant conversations can be retained in NyxID even when their messages originate on a messaging platform.
+
 ChronoAI is not affiliated with any messaging-platform operator and is not responsible for their privacy or security practices. Your use of each such platform is governed by the terms of service and privacy policy of that platform's operator.
 
 ### 8.4 Cloud Infrastructure and Hosting Providers
 
-The App is hosted on cloud infrastructure provided by third-party providers. All such providers are engaged pursuant to data processing agreements that require them to implement appropriate security measures and to process data only on ChronoAI's instructions. Details of primary cloud infrastructure providers and data storage regions are set out in the Privacy Policy.
+The hosted Service uses infrastructure and service providers to process data needed to operate NyxID. Self-hosted deployments may use different providers and configurations. The Privacy Policy describes recipient categories and how to request the applicable provider register, processing regions and transfer arrangements. A supported integration is not evidence that it is enabled in a particular deployment or covered by a particular provider agreement.
 
 ### 8.5 Analytics and Communications Providers
 
-ChronoAI may use third-party analytics, marketing, and communications platforms in connection with the Services. For example, waitlist sign-up data (first name, email, optional company name) may be transmitted to third-party mailing list providers (such as Mailchimp) for communications purposes, and is not stored persistently by NyxID. You will be informed of, and your consent sought for, any use of third-party analytics or communications tools that involve the processing of your personal data.
+Optional product analytics requires account permission and a device choice as described in the Privacy Policy. Account and device analytics controls do not disable necessary authentication, security, billing, transactional messages or the processing required to provide a feature you use. Communications and waitlist forms, where offered, use the information you submit for their stated purpose. See the Privacy Policy for recipient categories and privacy contacts.
 
 ### 8.6 Apple App Store and Google Play Requirements
 
@@ -429,11 +434,13 @@ By accessing or using the App, you represent and warrant to ChronoAI that:
 
 ### 14.1 Applicable Fees
 
-As at the Effective Date of these Terms, ChronoAI does not charge fees for use of the App. ChronoAI reserves the right to introduce fees ("**Service Fees**") for access to all or part of the Services in the future, in which case such fees will be disclosed to you prior to your incurring them. Service Fees may include subscription fees, per-use charges, or other pricing structures as notified by ChronoAI from time to time.
+NyxID supports free and paid features. Where billing is enabled for your account and the service you use, applicable charges ("**Service Fees**") may include metered service, model, voice or machine usage. A service may have different rates for your own credentials and platform-managed credentials, and rates may depend on the operation or usage unit. Using your own key does not by itself mean that NyxID's service is free. Refer to the applicable service pricing and Billing & Usage information; provider charges under your own third-party account may apply separately.
+
+Usage can consume available allowances, granted credits or wallet credits according to their applicable limits. Charges and availability depend on the configured service and account; an estimate or reservation is not necessarily the final charge. No particular free allowance, price, credit amount or continued free access is promised by these Terms. Applicable taxes and any credit conditions are governed by the billing information for the service or purchase.
 
 ### 14.2 Payment Obligations
 
-You agree to pay all applicable Service Fees in a timely manner. ChronoAI reserves the right to suspend or terminate your access to the Services if you fail to pay any fees when due. All in-app purchases and payment processing are subject to the terms and conditions of the applicable App Platform's payment system (e.g., Apple In-App Purchase or Google Play Billing). ChronoAI is not responsible for payment processing errors, disputes, or refunds originating from App Platform payment systems.
+You agree to pay applicable Service Fees. Where available, wallet top-ups use the checkout offered by the Service, which can be provided through an external billing and payment provider. Review that checkout's amount, currency and payment terms before paying. If a purchase is offered through an App Platform, that platform's payment terms apply to that purchase. Charges for connected third-party services may be payable directly to their operators. Access to paid operations may be limited by available credits, account limits or unpaid amounts, subject to applicable law.
 
 ### 14.3 Changes to Fees
 

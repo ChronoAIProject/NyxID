@@ -81,6 +81,123 @@ function calls(method: string, url: string) {
   return fetchMock.mock.calls.filter(([u, init]) => u === url && ((init as RequestInit | undefined)?.method ?? "GET") === method);
 }
 
+it("saves preload files with the observed revision and displays the persisted size", async () => {
+  const user = userEvent.setup();
+  const metadata = {
+    description: "Research guide",
+    size_bytes: 1000,
+    preload_paths: ["SKILL.md", "references/menu.md"],
+    preload_bytes: 12901,
+  };
+  replies[`PUT ${api}/skills/skill-id/preload`] = [
+    { status: 200, body: { revision: 5 } },
+  ];
+  replies[`GET ${api}/skills`] = [
+    { status: 200, body: { revision: 4, skills: [pin], metadata: {} } },
+    {
+      status: 200,
+      body: { revision: 5, skills: [pin], metadata: { "skill-id": metadata } },
+    },
+  ];
+  show();
+  await user.click(await screen.findByText("Preload settings"));
+  const save = screen.getByRole("button", { name: "Save preload settings" });
+  expect(save).toBeDisabled();
+  await user.click(screen.getByRole("switch", { name: "Preload research" }));
+  const files = screen.getByRole("textbox", {
+    name: "Preload files for research",
+  });
+  await user.clear(files);
+  await user.type(files, "SKILL.md\nreferences/menu.md");
+  expect(save).toBeEnabled();
+  await user.click(save);
+  await waitFor(() =>
+    expect(calls("PUT", `${api}/skills/skill-id/preload`)).toHaveLength(1),
+  );
+  expect(
+    JSON.parse(
+      calls("PUT", `${api}/skills/skill-id/preload`)[0]![1]!.body as string,
+    ),
+  ).toEqual({
+    expected_revision: 4,
+    paths: ["SKILL.md", "references/menu.md"],
+  });
+  expect(await screen.findByText("Preloaded · 12,901 bytes")).toBeVisible();
+  expect(save).toBeDisabled();
+});
+
+it("keeps unsaved preload files after a conflict and rejects unsafe paths locally", async () => {
+  const user = userEvent.setup();
+  replies[`PUT ${api}/skills/skill-id/preload`] = [
+    failure(409, "conflict", "Skills changed; reload the current revision"),
+  ];
+  show();
+  await user.click(await screen.findByText("Preload settings"));
+  await user.click(screen.getByRole("switch", { name: "Preload research" }));
+  const files = screen.getByRole("textbox", {
+    name: "Preload files for research",
+  });
+  await user.clear(files);
+  await user.type(files, "SKILL.md\n../private.md");
+  await user.click(
+    screen.getByRole("button", { name: "Save preload settings" }),
+  );
+  expect(
+    await screen.findByText(
+      "Use unique relative .md or .txt paths, one per line.",
+    ),
+  ).toBeVisible();
+  expect(calls("PUT", `${api}/skills/skill-id/preload`)).toHaveLength(0);
+  await user.clear(files);
+  await user.type(files, "SKILL.md\nreferences/menu.md");
+  await user.click(
+    screen.getByRole("button", { name: "Save preload settings" }),
+  );
+  expect(
+    await screen.findByText("Skills changed; reload the current revision"),
+  ).toBeVisible();
+  expect(files).toHaveValue("SKILL.md\nreferences/menu.md");
+});
+
+it("turns preloading off without removing or re-pinning the skill", async () => {
+  const user = userEvent.setup();
+  replies[`GET ${api}/skills`] = [
+    {
+      status: 200,
+      body: {
+        revision: 4,
+        skills: [pin],
+        metadata: {
+          "skill-id": {
+            description: "Research guide",
+            size_bytes: 1000,
+            preload_paths: ["SKILL.md"],
+            preload_bytes: 100,
+          },
+        },
+      },
+    },
+  ];
+  replies[`PUT ${api}/skills/skill-id/preload`] = [
+    { status: 200, body: { revision: 5 } },
+  ];
+  show();
+  await user.click(await screen.findByText("Preloaded · 100 bytes"));
+  await user.click(screen.getByRole("switch", { name: "Preload research" }));
+  await user.click(
+    screen.getByRole("button", { name: "Save preload settings" }),
+  );
+  await waitFor(() =>
+    expect(calls("PUT", `${api}/skills/skill-id/preload`)).toHaveLength(1),
+  );
+  expect(
+    JSON.parse(
+      calls("PUT", `${api}/skills/skill-id/preload`)[0]![1]!.body as string,
+    ),
+  ).toEqual({ expected_revision: 4, paths: [] });
+  expect(calls("PUT", `${api}/skills`)).toHaveLength(0);
+});
+
 it("tests a pin only on request and shows what the agent reads", async () => {
   const user = userEvent.setup();
   replies[`GET ${api}/skills/skill-id/preview`] = [{

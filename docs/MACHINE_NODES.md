@@ -26,11 +26,15 @@ Nothing here may break existing nodes, proxying, SSH, NyxBot or specialists.
 
 ## Shared machines, action cards and activity
 
-Existing machines share one workspace and browser session among their granted
-agents. The Machines page, settings and action cards say **Shared workspace and
-browser**. Command/browser credential isolation does not separate specialists'
-files or authenticated tabs. Use separate machine containers for stronger
-separation. See [the phased isolation design](MACHINE_AGENT_ISOLATION.md).
+Existing `shared_legacy` assignments share the node's legacy workspace and browser
+session. A `separated` assignment uses its agent/person/group context's private
+workspace and secure/developer browser profiles. The Machines page and node
+settings say **Sharing set per agent**; each assignment shows **Shared legacy**,
+**Separate workspace and browser**, or **Owner selection required**. Command/node
+credential separation alone does not separate specialists' files or authenticated
+tabs. Use a separate machine container or VM per agent for stronger separation;
+containers still share their host kernel. See [the separation contract and
+residuals](MACHINE_AGENT_ISOLATION.md#w94-new-assignment-selection).
 
 Machine actions in chat have metadata cards: browser action and an existing
 encrypted screenshot thumbnail when one was returned, file read/write byte
@@ -121,7 +125,9 @@ Nothing the server sends can enable a capability.
   level: machine access is the owner's, like SSH. Other API keys, delegated
   tokens, relay tokens and service accounts get no machine tools.
 - **Which machines:**
-  - NyxBot may use every machine node the owner can use;
+  - NyxBot uses its stored assignments on machine nodes the owner can use;
+    flag-off compatibility preserves reachability frozen at the W9.4 cutover,
+    while new reachability requires a recorded owner separation choice;
   - a specialist may use only the machine nodes granted to it;
   - "can use" = the node's owner is the agent's owner, or the node is org-owned
     and `org_service::resolve_owner_access(owner, node.user_id)` gives the owner
@@ -576,9 +582,41 @@ logging to a website and then hand back the control to nyxbot".
   - NyxID relays them to the owner's browser over an authenticated WebSocket
     under `/assistant/nyxagent/...` (human-only, owner-only; add it to
     `delegated_read_denied_path` if it is a GET upgrade).
+    The web viewer uses the frontend's same-origin `/api/v1/` WebSocket proxy,
+    preserving session cookies and the page's `connect-src 'self'` policy.
+    `node_ws_url` is companion ingress and must not select the human viewer host.
   - Cross-replica: follow the existing browser SSH terminal (`/ssh/{id}/terminal`)
     and node dispatch patterns, so the browser and the node can be on different
     replicas.
+- **Native desktop admission.** The upgrade uses the real auth extractor and
+  first-party-human rejection layers. An explicit Authorization header must be
+  exactly one nonempty `Bearer` credential verified as an `AccessToken`, with
+  no OAuth client, acting client or API key identity; a present live authenticated
+  session (`sid`); verified person provenance; unrestricted service/node authority
+  and no resource restriction. This credential may omit Origin or send exactly
+  the configured frontend or `BASE_URL` origin (Android's transport default).
+  Null, empty, duplicate, malformed and unrelated Origins are refused. Origins
+  come from server configuration, never Host or forwarded headers. Cookie auth
+  still requires exactly the frontend origin and verified Person provenance.
+  Bearer identity wins over cookies;
+  invalid or malformed explicit credentials cannot fall back to a valid cookie.
+  Node write ACL, capability, conversation and context checks still apply.
+  After signing-secret decryption, a fresh authority check must finish within
+  three seconds before the HTTP upgrade is accepted. The relay requires another
+  successful check before subscribing or dispatching its first DesktopOpen.
+  Each check covers the live session, active person/current MFA policy, node
+  write ACL and DesktopOpen capability, selected context ACL and desktop identity.
+  An independent watcher repeats the whole check every ten seconds with a
+  three-second timeout, including while setup, node commands or socket writes
+  stall. Frames and control dispatch require a successful check no older than
+  ten seconds; a stale result triggers a fresh bounded check before the effect.
+  For an active relay on a progressing executor, a persistent session/resource
+  revocation stops forwarding within thirteen seconds. This does not retract
+  already-buffered transport bytes or bound the whole pending HTTP request;
+  pending setup must pass the fresh pre-upgrade and relay gates before effects.
+  The policy close send has its own three-second bound. An authority failure
+  closes with WebSocket policy code 1008. Closing a viewer
+  releases only its connection; it does not Stop or take/hand back control.
 - **Sessions.**
   - Desktop sessions start on demand (the panel opens, or the agent uses
     computer tools) and end when no viewer and no agent activity remain, after
@@ -866,10 +904,58 @@ Measurements and reproduction commands are under
 - **Additive.** Every model field is additive and serde-defaulted. No new
   environment variables unless unavoidable; if one is added, document it in
   `docs/ENV.md` and CLAUDE.md.
-- **Mixed versions.** Old nodes are unchanged and never receive machine
-  requests. Old servers never send them. Old frontends ignore the new fields.
+- **Mixed versions.** Nodes that predate machine capability never receive machine
+  requests. Machine-capable nodes that predate W9.4 retain existing legacy
+  assignments; absent evidence never establishes a new separated assignment.
+  Upgrade and drain every API replica before relying on the W9.4 selection
+  contract, then publish the matching frontend and CLI/images. Older servers
+  ignore the new intent and do not enforce this contract. Keep old writers
+  drained while relying on the new selection rules.
+- **W9.4 cutover.** The first capable server atomically persists the immutable
+  `machine-separation-defaults-v1` marker and snapshot through machine access
+  index initialization. Its fixed snapshot version freezes enabled-node ceilings
+  and pre-marker organization-admin reachability. Flag-off NyxBot compatibility
+  materializes only that frozen reachability with live ACL checks. Later node
+  enablement, promotions or broader capabilities do not enlarge it; tombstones
+  and explicit restrictions win. Keep the marker and snapshot across restarts.
+- **Support and choice.** New setup intent is automatic by default, with positive
+  v4 OS evidence and positively verified `credential_custody` required for
+  separated access. Earlier v1/v2/v3 reports, missing custody and unknown
+  versions are insufficient for new automatic/required assignments.
+  Browser evidence is bound to the launched package browser through a pidfd and
+  kernel parent links, with UID/GID, map, PID-depth, network and seccomp checks;
+  names/arguments never prove ancestry. These observations are not attestation.
+  Containers hiding required facts explicitly report sandbox=false and
+  `separated_browser_sandbox_unobservable_in_container`: use supported native
+  Linux or a separate machine container/VM per agent, without adding capabilities.
+  `node_custody_unverified` directs the owner to repair protected storage and
+  rerun the probe. Explicit shared legacy requires the complete warning and
+  owner consent. Missing intent or evidence surfaces
+  `selection_required` in the API, settings and NyxBot result/watch; it grants
+  nothing and directs the owner to Assistant → Machines. Changing a feature flag
+  or node intent never rewrites existing assignments. New external OAuth/API-key
+  grants support explicit legacy consent only; automatic and required contexts
+  are refused until that authority supports them.
 - **Existing features.** Proxy, credential, SSH and oracle behaviour are
   unchanged.
+
+Linux managed-browser setup accepts `NYXID_MACHINE_BROWSER` as an absolute,
+executable package path. An explicit missing, non-executable or unknown package
+fails setup; it never falls back to another installed browser. Resolved package
+metadata still selects the policy directory: Debian Chromium uses
+`/etc/chromium/policies/managed`, Ubuntu Snap Chromium uses
+`/etc/chromium-browser/policies/managed`, and Google Chrome deb uses
+`/etc/opt/chrome/policies/managed`. This selection does not bypass the live
+policy-effectiveness or renderer-sandbox checks.
+
+Native acceptance (`bash cli/tests/machine_native_acceptance.sh --disposable`)
+defaults explicitly to `/usr/bin/google-chrome`, regardless of installed Chromium
+transitional shims. The prerequisite check and harness share one selector and
+print every candidate's resolved path and the selected policy directory. The
+hosted amd64 prerequisite requires the Google Chrome deb layout. Native Snap or
+Debian acceptance must explicitly pass the corresponding supported package path,
+for example `NYXID_MACHINE_BROWSER=/usr/bin/chromium`; these layouts remain covered
+by package-detection tests and the Snap guest / Debian container acceptance runs.
 
 ### D12. Documentation
 
@@ -1266,8 +1352,14 @@ controller lock. They require no writable system temporary directory. The
 rendered migration and companion commands nevertheless include
 `--tmpfs /tmp:rw,noexec,nosuid,size=16m` for compatibility with the published
 0.41.0 helper while the 0.41.1 image is being published. Native `nyxid update`
-keeps its normal temporary datastore: it installs into a writable native host,
-and container image updates use the companion instead.
+retains authenticated TUF state in `$HOME/.nyxid/tuf-public` (override with
+`NYXID_TUF_STATE_DIR`). The backend also verifies the suggested companion image
+using its own private durable `NYXID_SERVER_TUF_STATE_DIR`, defaulting to
+`$HOME/.nyxid/server-tuf` natively and `/var/lib/nyxid/tuf` in the backend image.
+Compose retains that directory in `backend_tuf`; custom read-only deployments
+must mount a private writable durable volume there, owned by the backend UID.
+Missing permissions, corrupt state and rollback fail closed; no consumer resets
+to an ephemeral datastore. See [release trust state](RELEASING.md#accepted-provenance-and-authenticated-time).
 
 Preflight failures print only a fixed stage and reason, for example
 `machine_update failed at verify_updater_image: trust_root_unavailable`.
@@ -1601,19 +1693,68 @@ accepts `--browser`. The node's local ceiling always wins. Computer access and
 developer-browser access require a browser grant. Saved logins additionally
 require their existing login grant and secure-browser confirmation checks.
 
-V2 agent work carries signed context and revision metadata with a 45-second
-lease, renewed every ten seconds; v1 nodes retain their shared behavior without leases. Revocation is committed with a durable outbox and cancels local
-operations, background process groups and service streams. Disconnected nodes
-stop leased work on expiry. Completed external effects cannot be undone. The
-UI reports pending delivery and the 45-second lease-expiry cancellation bound rather than
-promising instantaneous distributed cancellation. Context IDs currently partition authority,
-not files or cookies; enforced per-agent workspaces and browsers are later phases.
+V2 agent work carries signed context, revision and actual daemon runtime metadata
+with an authority lease of at most 45 seconds, renewed every ten seconds. Every
+new tool call automatically acquires live, runtime-bound authority from current
+permissions and the connected node profile. Re-reading capabilities or
+`machine_list` is observational; it does not refresh authority. A changed runtime
+requires a fresh admission, never renewal or replay of the old runtime's lease.
+Browserless `shared_legacy` shell/files machines remain supported; enabling a
+browser or switching to separated mode is not a recovery step.
+
+The node verifies the existing HMAC-signed request timestamp (whole seconds) and
+expiry together. `authority_timing_v1` profiles support a bounded 5,000 ms
+server/node clock difference: the timestamp represents its whole-second interval,
+expiry must be no later than that interval's upper end plus 45,000 ms, and
+validation uses node UTC plus 5,000 ms as conservative server time. The resulting
+remaining duration becomes a monotonic deadline capped at 45 seconds. Uncertainty
+is consumed from the usable duration (normally about 40 seconds), never added to
+cancellation time. Chat, external grants and first-party owner job reads/cancel
+use the same timing rule. Excess skew, overlong lifetime and expired authority
+fail closed. Locks/persistence cannot activate an expired lease; successful
+revision writes survive an expired activation. Renewal cannot revive a stopped
+or expired lease, cross a grant revision change, or cross a runtime change.
+
+Revocation commits a durable outbox and cancels local operations, background
+process groups and service streams when delivered. Disconnected nodes stop work
+by their last accepted local lease deadline. Completed external effects cannot
+be undone. The API distinguishes these states:
+
+- `execution_revocation_pending`: earlier work has not yet reached its proven
+  expiry bound. Committed rows use first observation plus 45 seconds and a
+  separate 2-second allowance for an already in-flight older replica renewal.
+  Renewal reservation on updated replicas is transactionally fenced against
+  both the assignment revision and current runtime.
+- `delivery_pending`: revision/fence delivery still needs a real node ACK. It
+  remains durable and retries even after execution expiry; expiry never claims
+  ACK or clears this row.
+- `quarantine_pending`: required browser cleanup still needs acknowledgement.
+  Execution lease expiry cannot satisfy cleanup or unlock its browser context.
+- `revocation_pending`: execution or cleanup remains pending. A timing-aware node
+  may report false while `delivery_pending` stays true. Nodes without
+  `authority_timing_v1` stay ACK-only and report upgrade guidance.
+
+Rows written before deadline tracking have no trustworthy creation time. New
+rows also start their window only after commit is visible, because enqueue time
+can precede a slow commit while older replicas still see the old grant. The first
+status read or dispatcher visit durably starts one conservative 47-second window;
+subsequent reads do not restart it. Each pass first reads at most 128 committed
+row IDs, then initializes only those observed rows with MongoDB's `$$NOW` plus
+47 seconds. Status expiry comparison also uses MongoDB's `$$NOW`, so clock
+differences between application replicas cannot shorten that window. Remaining
+rows stay pending, and the API suppresses an expiry time for the entire machine
+until every pending row has a deadline. The editor displays a neutral status
+check while these bounded passes complete. An existing null or wrong-type
+deadline stays pending with `revocation_deadline_invalid`, requiring operator
+inspection. The editor refreshes pending status every three seconds on an active
+page for at most one minute; idle/background polling stops. **Refresh machine
+status** performs another observation without changing permissions.
 
 Unsupported authority, revoked permissions and expired authority return distinct
 `machine_authority_unsupported`, `machine_permission_revoked` and
 `machine_authority_stale` errors (numeric definitions remain in `errors/mod.rs`).
-Update an old node before editing capabilities; request a missing grant through
-NyxBot; refresh authority after expiry. Owner Stop and takeover remain independent.
+Use the [node recovery procedure](NYXID_NODE.md#recovering-machine-authority)
+for repeated stale-authority failures. Owner Stop and takeover remain independent.
 
 V2 admission allows 128 active operation leases per node (local jobs are capped
 at 64, default 4). Idle connections, expired leases and other nodes do not count;
@@ -1627,3 +1768,21 @@ including pairing, capability widening, machine updates and saved-login fills,
 and records the completed action automatically. Resource confirmation settings
 apply in Auto and Ask every time. Grants, origin checks, protected fields,
 owner-control lockout, node authority and update attestation remain required.
+
+### NyxBot organization service use
+
+The existing machine-exec card identifies exact declared organization connections
+and states they may be used by this command for this job. The persisted job grant
+binds command/arguments, job ID, key generation, connections/owners and their
+credential/config authority. Every detached gateway request rechecks the live key,
+membership, policy, job expiry and machine lease. Revocation or drift ends service
+use. Dynamic HTTP payloads are authorized by this bounded command grant. Personal
+detached jobs and independently authorized catalog/platform declarations retain
+their existing authority semantics. Preferences are checked before the card; a
+model declaration is not human target selection. See
+[NyxBot execution](NYXBOT_SERVICE_EXECUTION.md).
+
+Externally authorized Remote Machine jobs use their existing source and machine
+grants instead of NyxBot chat consent. Signed gateway requests retain exact
+service declarations, streaming and billing attribution, with live source,
+grant, runtime and lease checks before dispatch.

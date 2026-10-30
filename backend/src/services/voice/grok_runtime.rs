@@ -44,7 +44,7 @@ pub async fn serve(
     input: mpsc::Receiver<grok::ClientInput>,
     output: mpsc::Sender<grok::Output>,
 ) {
-    let errors = output.clone();
+    let updates = output.clone();
     let setup = async {
         // A control stream can land on another replica. Its single-stream claim
         // transfers only an unstarted relay, never an established provider call.
@@ -113,6 +113,9 @@ pub async fn serve(
             .started_at(started),
         )));
         call = session::write(&state.db, &call, doc! {"state":"active"}).await?;
+        updates
+            .try_send(grok::Output::Ready)
+            .map_err(|_| AppError::ClientDisconnected)?;
         Ok::<_, AppError>((transport, resolved.billing, concurrency))
     };
     match tokio::time::timeout(std::time::Duration::from_secs(12), Box::pin(setup)).await {
@@ -132,7 +135,7 @@ pub async fn serve(
             )
             .await
             .unwrap_err();
-            let _ = errors.try_send(grok::Output::StartFailed(error.response_body()));
+            let _ = updates.try_send(grok::Output::StartFailed(error.response_body()));
             // Failed setup drops the sole provider socket; no invented duration.
             if runtime::settle_windows(&state, &call, false).await.is_ok()
                 && let Ok(updated) =

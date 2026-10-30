@@ -7,6 +7,32 @@ use crate::crypto::aes::EncryptionDecryptStats;
 use crate::errors::AppResult;
 use crate::services::feature_flag_service;
 
+/// GET /api/v1/admin/security-readiness. Process observations and an explicit
+/// serving roster are prerequisites, not an automatic rollout controller.
+pub async fn security_readiness(
+    State(state): State<AppState>,
+    auth: crate::mw::auth::AuthUser,
+) -> AppResult<
+    Json<
+        std::collections::BTreeMap<String, crate::services::security_readiness_service::Readiness>,
+    >,
+> {
+    crate::handlers::admin_helpers::require_admin_or_operator(
+        &state,
+        &auth,
+        "admin.security_readiness.get",
+    )
+    .await?;
+    let mut reports = std::collections::BTreeMap::new();
+    for capability in crate::services::security_readiness_service::CAPABILITIES {
+        reports.insert(
+            (*capability).to_owned(),
+            crate::services::security_readiness_service::report(&state.db, capability).await?,
+        );
+    }
+    Ok(Json(reports))
+}
+
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
@@ -28,12 +54,20 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: env!("NYXID_GIT_HASH").to_string(),
+        commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
         encryption: EncryptionHealthResponse {
             previous_key_configured: state.encryption_keys.has_previous(),
             decrypt_stats: state.encryption_keys.decrypt_stats(),
         },
     })
+}
+
+/// Container releases stamp this after compilation. Standalone binaries keep
+/// their build.rs identity when there is no nonempty runtime override.
+fn reported_commit(runtime: Option<String>) -> String {
+    runtime
+        .filter(|commit| !commit.is_empty())
+        .unwrap_or_else(|| env!("NYXID_GIT_HASH").to_owned())
 }
 
 #[derive(Serialize)]
@@ -135,6 +169,16 @@ pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<Publ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_commit_prefers_runtime_stamp_and_preserves_standalone_fallback() {
+        assert_eq!(
+            reported_commit(Some("runtime-release".into())),
+            "runtime-release"
+        );
+        assert_eq!(reported_commit(None), env!("NYXID_GIT_HASH"));
+        assert_eq!(reported_commit(Some(String::new())), env!("NYXID_GIT_HASH"));
+    }
 
     // ---- HealthResponse serialization ----
 

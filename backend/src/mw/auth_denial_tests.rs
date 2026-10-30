@@ -181,7 +181,48 @@ async fn channel_routes_keep_human_success_and_agent_denial() {
         None,
     )
     .unwrap();
-    let oauth = jwt::generate_oauth_access_token(
+    let now = chrono::Utc::now();
+    db.collection::<crate::models::oauth_client::OauthClient>(
+        crate::models::oauth_client::COLLECTION_NAME,
+    )
+    .insert_one(crate::models::oauth_client::OauthClient {
+        id: "private-client-id".into(),
+        client_name: "Channel list authority fixture".into(),
+        client_secret_hash: String::new(),
+        redirect_uris: vec![],
+        allowed_scopes: "openid profile".into(),
+        scope_provenance: Default::default(),
+        grant_types: "authorization_code".into(),
+        client_type: "public".into(),
+        is_active: true,
+        delegation_scopes: String::new(),
+        default_service_catalog_slugs: vec![],
+        broker_capability_enabled: false,
+        revocation_webhook_url: None,
+        revocation_webhook_secret_encrypted: None,
+        connection_webhook_url: None,
+        connection_webhook_secret_encrypted: None,
+        connection_webhook_key_id: None,
+        connection_webhook_enabled: false,
+        created_by: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+    let consent = crate::services::consent_service::grant_consent_with_services(
+        &db,
+        &actor.to_string(),
+        "private-client-id",
+        "openid profile",
+        None,
+    )
+    .await
+    .unwrap();
+    let reference = crate::services::consent_service::ensure_issuance_reference(&db, &consent)
+        .await
+        .unwrap();
+    let oauth = jwt::generate_oauth_access_token_with_consent(
         &state.jwt_keys,
         &state.config,
         &actor,
@@ -192,6 +233,7 @@ async fn channel_routes_keep_human_success_and_agent_denial() {
         None,
         None,
         "private-client-id",
+        Some(&reference),
     )
     .unwrap();
     let (_, private) = crate::routes::build_router();
@@ -339,7 +381,8 @@ async fn denial_guidance_scope_failures_do_not_claim_wrong_credential_type() {
     }
     let generic = AppError::Forbidden("Resource permission denied".into()).response_body();
     assert!(generic.details.is_none());
-    // Existing assistant tool callers retain their fixed denial copy too.
+    // Assistant tool callers receive identical server-authored rendering for
+    // guided and unguided denials; HTTP-only guidance metadata stays hidden.
     let old = crate::services::assistant_account_tools::error_result(AppError::Forbidden(
         "Missing scope".into(),
     ));
@@ -347,6 +390,8 @@ async fn denial_guidance_scope_failures_do_not_claim_wrong_credential_type() {
         AppError::insufficient_scope("Missing scope"),
     );
     assert_eq!(old.value, guided.value);
+    assert_eq!(old.value["message"], "Missing scope");
+    assert!(old.value.get("instructions").is_none());
 }
 
 #[test]

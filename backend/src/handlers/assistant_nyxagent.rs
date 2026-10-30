@@ -207,7 +207,29 @@ impl From<&crate::models::assistant_conversation::PlatformTurnOrigin>
     }
 }
 #[derive(Serialize)]
+pub struct StreamReplyResponse {
+    message_id: String,
+    block_id: String,
+    cursor: i64,
+    text: String,
+}
+impl From<crate::models::assistant_conversation::StreamReply> for StreamReplyResponse {
+    fn from(reply: crate::models::assistant_conversation::StreamReply) -> Self {
+        Self {
+            message_id: reply.message_id,
+            block_id: reply.block_id,
+            cursor: reply.cursor,
+            text: reply.text,
+        }
+    }
+}
+#[derive(Serialize)]
 pub struct ActiveTurnResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply: Option<StreamReplyResponse>,
+    /// Waiting for one of the owner's running slots; also reported through
+    /// the capacity-wait fields for clients that predate it.
+    queued: bool,
     waiting_for_capacity: bool,
     capacity_wait_note_origin: Option<String>,
     engine_request_started_at: Option<DateTime<Utc>>,
@@ -283,13 +305,15 @@ impl ConversationResponse {
             Some(id) => agents.iter().find(|agent| agent.id == id),
             None => agents.iter().find(|agent| agent.is_nyxbot()),
         };
-        self.agent = agent.map(|agent| AgentRefResponse {
-            id: agent.id.clone(),
-            kind: agent.kind,
-            name: agent.name.clone(),
-            display_name: agent.display_name.clone(),
-            destroyed: agent.destroyed_at.is_some(),
-        });
+        self.agent = agent
+            .map(|agent| AgentRefResponse {
+                id: agent.id.clone(),
+                kind: agent.kind,
+                name: agent.name.clone(),
+                display_name: agent.display_name.clone(),
+                destroyed: agent.destroyed_at.is_some(),
+            })
+            .or(self.agent);
         self
     }
     /// Fill in a channel thread's bot and chat.
@@ -312,11 +336,13 @@ impl ConversationResponse {
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
-            waiting_for_capacity: turn.waiting_for_capacity,
+            reply: None,
+            queued: turn.queued_at.is_some(),
+            waiting_for_capacity: turn.waiting_for_capacity || turn.queued_at.is_some(),
             capacity_wait_note_origin: turn.capacity_wait_note_origin.clone(),
             engine_request_started_at: turn.engine_request_started_at,
-            capacity_wait_started_at: turn.capacity_wait_started_at,
-            capacity_wait_deadline: turn.capacity_wait_deadline,
+            capacity_wait_started_at: turn.queued_at.or(turn.capacity_wait_started_at),
+            capacity_wait_deadline: turn.queue_deadline.or(turn.capacity_wait_deadline),
             platform_origin: turn
                 .platform_origin
                 .as_ref()
@@ -325,10 +351,12 @@ impl From<AssistantConversation> for ConversationResponse {
                 .running_response
                 .as_ref()
                 .map(|r| r.response_id.clone()),
-            steering_allowed: matches!(
-                crate::services::assistant_steering::unavailable(&row, &turn.turn_id),
-                None | Some("starting")
-            ),
+            // A queued turn has nothing upstream to steer yet.
+            steering_allowed: turn.queued_at.is_none()
+                && matches!(
+                    crate::services::assistant_steering::unavailable(&row, &turn.turn_id),
+                    None | Some("starting")
+                ),
             stop_requested: turn.stop_requested,
             continuations: turn.continuations,
             activity_total: turn.activity_total,
@@ -365,7 +393,13 @@ impl From<AssistantConversation> for ConversationResponse {
             context_reset_at: row.context_reset_at,
             context_reset_reason: row.context_reset_reason,
             role: row.role,
-            agent: None,
+            agent: row.shared_agent_thread.then(|| AgentRefResponse {
+                id: row.agent_id.clone().unwrap_or_default(),
+                kind: crate::models::assistant_agent::AgentKind::Specialist,
+                name: "Shared agent".into(),
+                display_name: None,
+                destroyed: false,
+            }),
             pending_events: row.pending_events.len(),
             channel: row.channel.map(|channel| ChannelOriginResponse {
                 parent_chat_id: None,
@@ -438,9 +472,34 @@ impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetai
 }
 
 #[derive(Serialize)]
+pub struct ChannelDeliveryResponse {
+    status: String,
+    heard_prefix_chars: Option<i64>,
+    heard_prefix_matches_sent: bool,
+}
+
+#[derive(Serialize)]
 pub struct TurnMetadataResponse {
+    failure_reason: Option<TurnFailureReasonResponse>,
+    channel_delivery: Option<ChannelDeliveryResponse>,
     attempts: Option<u32>,
     capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct ModelRouteDiagnosticResponse {
+    reason: String,
+    unknown_fields: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct TurnFailureReasonResponse {
+    model_route: Option<ModelRouteDiagnosticResponse>,
+    source: String,
+    stage: String,
+    code: String,
+    http_status: Option<u16>,
+    nyxid_error_code: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -468,6 +527,18 @@ pub struct MessageResponse {
     /// A user message written in a chat app: its platform.
     via: Option<String>,
     activity_total: i64,
+    /// Who started the turn this message opens (`user`, `event`, `trigger`,
+    /// ...); absent on rows written before it was recorded.
+    origin: Option<crate::models::assistant_conversation::TurnOrigin>,
+    /// The automation an automation-started message came from, while its run
+    /// record is retained.
+    automation: Option<AutomationRunResponse>,
+}
+#[derive(Serialize)]
+pub struct AutomationRunResponse {
+    trigger_id: String,
+    run_id: String,
+    label: String,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
@@ -495,6 +566,22 @@ impl From<AssistantMessage> for MessageResponse {
             upstream_error_code: row.upstream_error_code,
             error_detail: row.error_detail.map(ErrorDetailResponse::from),
             turn_metadata: row.turn_metadata.map(|data| TurnMetadataResponse {
+                failure_reason: data.failure_reason.map(|reason| TurnFailureReasonResponse {
+                    model_route: reason.model_route.map(|d| ModelRouteDiagnosticResponse {
+                        reason: d.reason,
+                        unknown_fields: d.unknown_fields,
+                    }),
+                    source: reason.source,
+                    stage: reason.stage,
+                    code: reason.code,
+                    http_status: reason.http_status,
+                    nyxid_error_code: reason.nyxid_error_code,
+                }),
+                channel_delivery: data.channel_delivery.map(|e| ChannelDeliveryResponse {
+                    status: e.status,
+                    heard_prefix_chars: e.heard_prefix_chars,
+                    heard_prefix_matches_sent: e.heard_prefix_matches_sent,
+                }),
                 attempts: data.attempts,
                 capacity_wait_ms: data.capacity_wait_ms,
             }),
@@ -511,8 +598,113 @@ impl From<AssistantMessage> for MessageResponse {
                 .collect(),
             via: row.via,
             activity_total: row.activity_total,
+            origin: row.origin,
+            automation: None,
         }
     }
+}
+
+/// Names the automation behind each automation-started message on the page.
+/// Its run is found by turn ID (the instruction turn) or by run ID (a
+/// webhook's payload message); expired runs leave the message unnamed. Two
+/// bounded reads, only when the page holds such a message.
+async fn attach_automations(
+    db: &mongodb::Database,
+    user_id: &str,
+    conversation_id: &str,
+    messages: &mut [MessageResponse],
+) {
+    if let Err(error) = try_attach_automations(db, user_id, messages).await {
+        tracing::warn!(
+            %error,
+            user_id,
+            conversation_id,
+            message_count = messages.len(),
+            "Could not attach automation names to history"
+        );
+    }
+}
+
+async fn try_attach_automations(
+    db: &mongodb::Database,
+    user_id: &str,
+    messages: &mut [MessageResponse],
+) -> AppResult<()> {
+    use futures::TryStreamExt;
+    use mongodb::bson::Document;
+    let trigger_origin = Some(crate::models::assistant_conversation::TurnOrigin::Trigger);
+    let keys: Vec<String> = messages
+        .iter()
+        .filter(|m| m.origin == trigger_origin)
+        .map(|m| m.turn_id.clone())
+        .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    // (run id, trigger id, turn id, snapshotted label)
+    let runs: Vec<(String, String, Option<String>, Option<String>)> = db
+        .collection::<Document>(crate::models::trigger_run::COLLECTION_NAME)
+        .find(doc! {"user_id": user_id, "$or": [
+            {"_id": {"$in": &keys}}, {"turn_id": {"$in": &keys}},
+        ]})
+        .projection(doc! {"_id": 1, "trigger_id": 1, "turn_id": 1, "label": 1})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter_map(|run| {
+            Some((
+                run.get_str("_id").ok()?.to_owned(),
+                run.get_str("trigger_id").ok()?.to_owned(),
+                run.get_str("turn_id").ok().map(str::to_owned),
+                run.get_str("label")
+                    .ok()
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned),
+            ))
+        })
+        .collect();
+    if runs.is_empty() {
+        return Ok(());
+    }
+    let trigger_ids: Vec<&str> = runs
+        .iter()
+        .map(|(_, trigger, _, _)| trigger.as_str())
+        .collect();
+    let labels: HashMap<String, String> = if trigger_ids.is_empty() {
+        HashMap::new()
+    } else {
+        db.collection::<Document>(crate::models::trigger::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": trigger_ids}, "user_id": user_id})
+            .projection(doc! {"_id": 1, "label": 1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .filter_map(|t| {
+                Some((
+                    t.get_str("_id").ok()?.to_owned(),
+                    t.get_str("label").ok()?.to_owned(),
+                ))
+            })
+            .collect()
+    };
+    for message in messages.iter_mut().filter(|m| m.origin == trigger_origin) {
+        let Some((run_id, trigger_id, _, snapshot)) = runs.iter().find(|(run, _, turn, _)| {
+            *run == message.turn_id || turn.as_deref() == Some(message.turn_id.as_str())
+        }) else {
+            continue;
+        };
+        let Some(label) = labels.get(trigger_id).or(snapshot.as_ref()) else {
+            continue;
+        };
+        message.automation = Some(AutomationRunResponse {
+            trigger_id: trigger_id.clone(),
+            run_id: run_id.clone(),
+            label: label.clone(),
+        });
+    }
+    Ok(())
 }
 #[derive(Serialize)]
 pub struct RecoveryResponse {
@@ -570,23 +762,23 @@ pub async fn list(
     let limit = limit(query.limit)?;
     crate::services::assistant_team_service::ensure_nyxbot(&state.db, &user_id).await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
-    let agent = match query.agent_id.as_deref() {
-        Some(id) => Some(
-            agents
-                .iter()
-                .find(|agent| agent.id == id)
-                .ok_or_else(|| AppError::NotFound("Agent not found".into()))?,
-        ),
-        None => None,
+    let agent = query
+        .agent_id
+        .as_deref()
+        .and_then(|id| agents.iter().find(|agent| agent.id == id));
+    let mut rows = if let Some(id) = query.agent_id.as_deref().filter(|_| agent.is_none()) {
+        engine::list_shared_history(&state.db, &user_id, id, limit + 1, query.cursor.as_deref())
+            .await?
+    } else {
+        engine::list(
+            &state.db,
+            &user_id,
+            limit + 1,
+            query.cursor.as_deref(),
+            agent,
+        )
+        .await?
     };
-    let mut rows = engine::list(
-        &state.db,
-        &user_id,
-        limit + 1,
-        query.cursor.as_deref(),
-        agent,
-    )
-    .await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let next_cursor = more.then(|| engine::index_cursor(rows.last().expect("nonempty page")));
@@ -622,6 +814,7 @@ pub async fn list(
 
 #[derive(Serialize)]
 pub struct HistoryResponse {
+    cma_operations: Vec<CmaOperationResponse>,
     conversation: ConversationResponse,
     messages: Vec<MessageResponse>,
     acknowledgements: Vec<AcknowledgementResponse>,
@@ -633,6 +826,24 @@ pub struct HistoryResponse {
     /// NyxID resumes the thread by itself when each happens.
     waiting: Vec<super::nyxbot::WaitingItem>,
     before_seq: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct CmaOperationResponse {
+    id: String,
+    turn_id: String,
+    kind: crate::models::async_service_operation::CmaOperationKind,
+    operation_id: Option<String>,
+    agent_id: Option<String>,
+    idempotency_key: Option<String>,
+    status: Option<String>,
+    phase: Option<String>,
+    state: String,
+    reason: Option<String>,
+    monitor_name: String,
+    created_at: DateTime<Utc>,
+    checked_at: Option<DateTime<Utc>>,
+    cma_url: Option<String>,
 }
 #[derive(Serialize)]
 pub struct ChatApprovalResponse {
@@ -683,6 +894,10 @@ pub async fn history(
         &user_id,
         &id,
         rows.first().map(|message| message.created_at),
+        &rows
+            .iter()
+            .map(|message| message.turn_id.clone())
+            .collect::<Vec<_>>(),
     )
     .await?;
     if let Some(card) = query.card {
@@ -722,6 +937,40 @@ pub async fn history(
     .await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
+    let cma_rows = crate::services::cma_operation::cards(&state.db, &user_id, &id).await?;
+    let cma_operations = cma_rows
+        .into_iter()
+        .filter_map(|row| {
+            let cma = row.cma?;
+            let monitor_name = agents
+                .iter()
+                .find(|agent| agent.id == row.agent_id)
+                .map(|agent| {
+                    agent
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(&agent.name)
+                        .to_owned()
+                })
+                .unwrap_or_else(|| "NyxBot".into());
+            Some(CmaOperationResponse {
+                cma_url: crate::services::cma_operation::card_url(&cma),
+                id: row.id,
+                turn_id: row.turn_id,
+                kind: cma.kind,
+                operation_id: row.operation_id,
+                agent_id: cma.agent_id,
+                idempotency_key: cma.idempotency_key,
+                status: cma.status,
+                phase: cma.phase,
+                state: row.state,
+                reason: row.reason,
+                monitor_name,
+                created_at: row.created_at,
+                checked_at: cma.checked_at,
+            })
+        })
+        .collect();
     let agent_available = agents.iter().any(|agent| {
         agent_id
             .as_deref()
@@ -738,9 +987,16 @@ pub async fn history(
     )
     .await?;
     let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
+    let reply = conversation
+        .active_turn
+        .as_mut()
+        .and_then(|turn| turn.reply.take());
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
+    if let Some(turn) = conversation.active_turn.as_mut() {
+        turn.reply = reply.map(Into::into);
+    }
     conversation.pending_acknowledgements = acknowledgements
         .iter()
         .filter(|ack| ack.status == "pending")
@@ -749,6 +1005,7 @@ pub async fn history(
     for message in &mut messages {
         message.recovery = recovery.get(&message.id).cloned().map(Into::into);
     }
+    Box::pin(attach_automations(&state.db, &user_id, &id, &mut messages)).await;
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let feedback =
         crate::services::assistant_feedback_service::states_for_messages(&state.db, &user_id, &ids)
@@ -778,6 +1035,7 @@ pub async fn history(
     }
     Box::pin(mark_expired_attachments(&state.db, &user_id, attachments)).await?;
     Ok(Json(HistoryResponse {
+        cma_operations,
         conversation,
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
         approvals: approvals.into_iter().map(Into::into).collect(),
@@ -943,6 +1201,9 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    creation_turn_id: Option<String>,
+    /// The tool call (turn activity ID) this card or receipt belongs to.
+    activity_id: Option<String>,
     authored_skill: Option<Value>,
     continuation_owner: Option<&'static str>,
     continuation_receipt_id: Option<String>,
@@ -972,6 +1233,8 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
 {
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
         Self {
+            creation_turn_id: row.creation_turn_id,
+            activity_id: row.activity_id,
             continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
             authored_skill: row.authored_skill.map(|s| json!({"agent_id":s.agent_id,"proposal_id":s.proposal_id,"revision":s.revision,"skills_revision":s.skills_revision})),
             continuation_receipt_id: row.continuation_receipt_id,
@@ -1037,7 +1300,7 @@ pub async fn decide_acknowledgement(
     )
     .await;
     // A user decision on a subagent's request resumes the subagent.
-    if row.decider == "orchestrator" {
+    if row.decider == "orchestrator" && row.invocation_id.is_none() {
         super::assistant_team::permission_decided(&state, &user, &row).await;
     }
     if matches!(body.decision, Decision::Deny) {
@@ -1203,6 +1466,12 @@ pub async fn delete(
         }
     }
     let rows = engine::delete(&state.db, &user_id, &id).await?;
+    for row in &rows {
+        crate::services::assistant_invocation_service::cancel_deleted_conversation(
+            &state, &user_id, &row.id,
+        )
+        .await?;
+    }
     let policy = request.extensions().get::<BillingRoutePolicy>().copied();
     for row in rows {
         let Some(session_id) = row.nyxagent_session_id.clone() else {
@@ -1486,6 +1755,42 @@ pub(crate) fn http_egress(
 
 #[async_trait::async_trait]
 impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgentEgress {
+    async fn preload_skills(
+        &self,
+        row: &AssistantConversation,
+        agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        super::agent_skills::preload_for_turn(&self.state, row, agent).await
+    }
+
+    fn checking_notice(&self, row: &AssistantConversation) -> Option<tokio::task::JoinHandle<()>> {
+        let origin = crate::services::assistant_checking_notice::destination(row)?;
+        let state = self.state.clone();
+        let row = row.clone();
+        Some(tokio::spawn(async move {
+            use crate::services::assistant_checking_notice as notice;
+            let turn = row.active_turn.as_ref().expect("claimed turn");
+            let remaining = (turn.started_at
+                + chrono::Duration::from_std(notice::DELAY).expect("bounded notice delay")
+                - Utc::now())
+            .to_std()
+            .unwrap_or_default();
+            tokio::time::sleep(remaining).await;
+            loop {
+                if notice::claim(&state.db, &row, Utc::now())
+                    .await
+                    .unwrap_or(false)
+                {
+                    // The ordinary progress path revalidates the channel, owner
+                    // and guest route without claiming the eventual answer.
+                    super::nyxbot::deliver_to(&state, &row, &origin, notice::TEXT, None).await;
+                    break;
+                }
+                tokio::time::sleep(notice::POLL_INTERVAL).await;
+            }
+        }))
+    }
+
     fn admission_acknowledged(
         &self,
         row: &AssistantConversation,
@@ -1547,11 +1852,12 @@ pub async fn turns(
     } else {
         None
     };
-    let permit = state.direct_chat_limiter.try_acquire(&user_id).await?;
+    // A full set of running replies queues the turn rather than refusing it.
+    let permit = state.direct_chat_limiter.admit(&user_id).await?;
     let policy = parts.extensions.get::<BillingRoutePolicy>().copied();
     let mut start = engine::TurnStart::from(&input);
     start.org_access = org_access;
-    if start.conversation_id.is_none() && start.model.is_none() {
+    if start.conversation_id.is_none() && start.agent_id.is_none() && start.model.is_none() {
         start.model = Some(
             crate::services::assistant_profile_routing::model_for(
                 &state.db,
@@ -1561,8 +1867,12 @@ pub async fn turns(
             .await,
         );
     }
-    let (_, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
-    Ok(subscribe_events(receiver))
+    let (row, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
+    let mut response = subscribe_events(receiver);
+    if let Ok(id) = row.id.parse() {
+        response.headers_mut().insert("x-nyxid-conversation-id", id);
+    }
+    Ok(response)
 }
 
 /// The billing classification of a server-started turn: the same metered
@@ -1638,6 +1948,7 @@ pub(crate) async fn start_turn_with_voice(
             policy,
             permit,
             Events {
+                checkpoint: None,
                 sender,
                 cursor: 0,
                 reset_notified: false,
@@ -1765,7 +2076,7 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_turn(
+pub(crate) async fn run_turn(
     state: AppState,
     auth: AuthUser,
     row: AssistantConversation,
@@ -1783,6 +2094,7 @@ async fn run_turn(
         crate::services::assistant_nyxagent_egress::producer(
             state.clone(),
             crate::services::platform_personal_binding_service::producer(state.clone()),
+            super::agent_skills::preload_context(state.clone()),
         )
     } else {
         http_egress(state.clone(), auth.clone())

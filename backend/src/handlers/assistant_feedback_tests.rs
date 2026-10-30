@@ -33,6 +33,10 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             platform_reply: None,
             platform_origin: None,
@@ -134,6 +138,10 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -183,6 +191,10 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -362,6 +374,10 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -430,6 +446,10 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -482,6 +502,10 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -627,6 +651,10 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -705,6 +733,10 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
                 platform_delivery_recovery_queued: false,
                 continuation_of: None,
                 retry_of: None,
@@ -966,6 +998,10 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -1059,6 +1095,10 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -1179,6 +1219,10 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -1393,6 +1437,10 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
     let answered = asked + Duration::milliseconds(1500);
     for message in [
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -1405,6 +1453,10 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
             ..fixtures::message("ctx-user".into(), conversation_id.into(), f.owner.clone())
         },
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             continuation_of: None,
             retry_of: None,
@@ -1810,4 +1862,282 @@ async fn history_hydration_survives_a_malformed_context() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn assistant_analytics_counts_real_activity_deduplicates_voice_and_separates_stops() {
+    let f = fixture("assistant-analytics", false).await;
+    let now = Utc::now();
+    let from = now - Duration::days(1);
+    let at = bson::DateTime::from_chrono(now - Duration::minutes(1));
+    let messages = f.state.db.collection::<Document>(ASSISTANT_MESSAGES);
+    for (index, (id, conv, role, turn, status, error, time)) in [
+        (
+            "input",
+            "conversation-a",
+            "user",
+            "turn-a",
+            "completed",
+            None,
+            at,
+        ),
+        (
+            "steering",
+            "conversation-a",
+            "user",
+            "turn-a",
+            "completed",
+            None,
+            at,
+        ),
+        (
+            "second-input",
+            "conversation-b",
+            "user",
+            "turn-b",
+            "completed",
+            None,
+            at,
+        ),
+        (
+            "reply",
+            "conversation-a",
+            "assistant",
+            "turn-a",
+            "completed",
+            None,
+            at,
+        ),
+        (
+            "voice-copy",
+            "conversation-b",
+            "assistant",
+            "turn-a",
+            "completed",
+            None,
+            at,
+        ),
+        (
+            "failure",
+            "conversation-b",
+            "assistant",
+            "turn-b",
+            "failed",
+            Some("idle_timeout"),
+            at,
+        ),
+        (
+            "stopped",
+            "automated",
+            "assistant",
+            "turn-c",
+            "failed",
+            Some("cancelled"),
+            at,
+        ),
+        // A successful async voice submission can later publish a cancelled result.
+        // The hidden acknowledgement must not turn a stopped task into a completion.
+        (
+            "stopped-voice-ack",
+            "hidden-voice-task",
+            "assistant",
+            "turn-c",
+            "completed",
+            None,
+            at,
+        ),
+        (
+            "old",
+            "old-conversation",
+            "user",
+            "old-turn",
+            "completed",
+            None,
+            bson::DateTime::from_chrono(from - Duration::milliseconds(1)),
+        ),
+        (
+            "upper-bound",
+            "future-conversation",
+            "user",
+            "future-turn",
+            "completed",
+            None,
+            bson::DateTime::from_chrono(now),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        messages.insert_one(doc! {
+            "_id": id, "conversation_id": conv, "user_id": &f.owner, "seq": index as i64,
+            "turn_id": turn, "role": role, "status": status, "error_code": error,
+            "created_at": time, "text": "private transcript must never be returned",
+            "activities": if id == "reply" || id == "voice-copy" { vec![doc! {"status": "error"}] } else { vec![] },
+        }).await.unwrap();
+    }
+    let conversations = f
+        .state
+        .db
+        .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    for (id, heartbeat_age, lease_offset, stop) in [
+        ("fresh", 1, 60, false),
+        ("stale", 76, 60, false),
+        ("expired", 1, -1, false),
+        ("stopping", 1, 60, true),
+        ("heartbeat-boundary", 75, 60, false),
+        ("future-heartbeat", -10, 60, false),
+    ] {
+        conversations.insert_one(doc! {"_id": id, "user_id": &f.owner, "active_turn": {
+            "started_at": bson::DateTime::from_chrono(now - Duration::seconds(30)),
+            "heartbeat_at": bson::DateTime::from_chrono(now - Duration::seconds(heartbeat_age)),
+            "lease_expires_at": bson::DateTime::from_chrono(now + Duration::seconds(lease_offset)),
+            "stop_requested": stop,
+        }}).await.unwrap();
+    }
+    conversations.insert_one(doc! {"_id": "implicit-lease", "user_id": &f.owner, "active_turn": {"started_at": at, "heartbeat_at": bson::DateTime::from_chrono(now)}}).await.unwrap();
+    conversations.insert_one(doc! {"_id": "expired-implicit-lease", "user_id": &f.owner, "active_turn": {"started_at": bson::DateTime::from_chrono(now - Duration::hours(1)), "heartbeat_at": bson::DateTime::from_chrono(now)}}).await.unwrap();
+    conversations.insert_one(doc! {"_id": "legacy-no-heartbeat", "user_id": &f.owner, "active_turn": {"started_at": at}}).await.unwrap();
+    let summary = crate::services::admin_assistant_analytics::summary(&f.state.db, from, now, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        (summary.sessions, summary.accounts, summary.running_now),
+        (2, 1, 3)
+    );
+    assert_eq!(
+        (
+            summary.outcomes.completed,
+            summary.outcomes.failed,
+            summary.outcomes.stopped
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        (
+            summary.outcomes.with_tools,
+            summary.outcomes.with_tool_errors
+        ),
+        (1, 1)
+    );
+    assert_eq!(
+        summary
+            .daily_sessions
+            .iter()
+            .map(|day| day.sessions)
+            .sum::<i64>(),
+        2
+    );
+    assert_eq!(
+        summary.daily_turns.iter().map(|day| day.turns).sum::<i64>(),
+        3
+    );
+    let empty = crate::services::admin_assistant_analytics::summary(
+        &f.state.db,
+        now + Duration::days(2),
+        now + Duration::days(3),
+        now,
+    )
+    .await
+    .unwrap();
+    assert_eq!((empty.sessions, empty.outcomes.completed), (0, 0));
+    assert!(empty.daily_sessions.is_empty() && empty.daily_turns.is_empty());
+    let path = format!(
+        "/api/v1/admin/assistant/analytics?from={}&to={}",
+        from.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    );
+    let (status, body) = request(&f.state, "GET", &path, &f.human_token, None).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(body["active_sessions"], 2);
+    assert!(!body.to_string().contains("private transcript"));
+    assert!(body.get("user_id").is_none());
+    for (query, expected) in [
+        (
+            "from=2026-01-01T00:00:00Z&to=2026-02-02T00:00:00Z",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z",
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(
+            request(
+                &f.state,
+                "GET",
+                &format!("/api/v1/admin/assistant/analytics?{query}"),
+                &f.human_token,
+                None
+            )
+            .await
+            .0,
+            expected
+        );
+    }
+    // Operators and usage-only readers can inspect metadata, feedback and model usage.
+    let roles = crate::services::role_service::get_platform_role_ids(&f.state.db)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"is_admin": false, "role_ids": [&roles.operator]}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        request(&f.state, "GET", &path, &f.human_token, None)
+            .await
+            .0
+            .is_success()
+    );
+    let usage_viewer = f
+        .state
+        .db
+        .collection::<Document>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! {"slug": "usage_viewer"})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"role_ids": [usage_viewer.get_str("_id").unwrap()]}},
+        )
+        .await
+        .unwrap();
+    let window = format!(
+        "from={}&to={}",
+        from.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    );
+    for path in [
+        path,
+        format!("/api/v1/admin/assistant/feedback?{window}"),
+        format!("/api/v1/admin/assistant/model-usage?{window}"),
+    ] {
+        let (status, body) = request(&f.state, "GET", &path, &f.human_token, None).await;
+        assert!(status.is_success(), "{path}: {status} {body}");
+    }
+    // Removing the role removes access again.
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(doc! {"_id": &f.owner}, doc! {"$set": {"role_ids": []}})
+        .await
+        .unwrap();
+    for path in ["analytics", "feedback", "model-usage"] {
+        let path = format!("/api/v1/admin/assistant/{path}?{window}");
+        assert_eq!(
+            request(&f.state, "GET", &path, &f.human_token, None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
 }

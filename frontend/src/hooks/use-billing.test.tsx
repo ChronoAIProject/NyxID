@@ -182,3 +182,42 @@ describe("billing wallet hooks", () => {
     expect(result.current.data?.checkout_url).toBe("https://checkout.example.com/session");
   });
 });
+
+describe("bill queries", () => {
+  it("fetches the personal bill and paginated subscription invoices", async () => {
+    const { useCurrentBill, useBillingInvoices } =
+      await import("./use-billing");
+    const { currentBill, usageInvoices } =
+      await import("@/test/billing-bill-fixture");
+    mockGet.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.startsWith("/billing/invoices") ? usageInvoices : currentBill,
+      ),
+    );
+    const { result } = renderHook(
+      () => ({ bill: useCurrentBill(), invoices: useBillingInvoices(2) }),
+      { wrapper: wrapperFactory() },
+    );
+    await waitFor(() =>
+      expect(
+        result.current.bill.isSuccess && result.current.invoices.isSuccess,
+      ).toBe(true),
+    );
+    expect(mockGet).toHaveBeenCalledWith("/billing/bill");
+    expect(mockGet).toHaveBeenCalledWith(
+      "/billing/invoices?page=2&per_page=10",
+    );
+  });
+  it("respects the rollout gate", async () => {
+    const { useCurrentBill, useBillingInvoices } =
+      await import("./use-billing");
+    renderHook(
+      () => ({
+        bill: useCurrentBill(false),
+        invoices: useBillingInvoices(1, false),
+      }),
+      { wrapper: wrapperFactory() },
+    );
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+});

@@ -23,6 +23,7 @@ static MANAGER_CHANNEL_DELIVERIES: Semaphore = Semaphore::const_new(32);
 
 pub(crate) fn service(state: &AppState) -> TelegramNewService<'_> {
     TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,
@@ -77,6 +78,22 @@ pub struct RequestResponse {
     pub channel_bot_id: Option<String>,
     pub auto_connect: bool,
     pub connection_error: Option<String>,
+    pub prompt_delivery: Option<PromptDeliveryResponse>,
+    pub can_open_creation_form: bool,
+}
+
+#[derive(Serialize)]
+pub struct PromptDeliveryResponse {
+    pub attempt_id: String,
+    pub phase: crate::models::telegram_bot_request::PromptPhase,
+    pub outcome: crate::models::telegram_bot_request::PromptOutcome,
+    pub attempted_at: String,
+    pub completed_at: Option<String>,
+    pub failure: Option<crate::models::telegram_bot_request::TelegramFailure>,
+    pub reason: Option<crate::models::telegram_bot_request::TelegramReason>,
+    pub http_status: Option<u16>,
+    pub error_code: Option<i32>,
+    pub retry_after: Option<u32>,
 }
 
 impl From<TelegramBotRequest> for RequestResponse {
@@ -85,7 +102,38 @@ impl From<TelegramBotRequest> for RequestResponse {
             request.status,
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
         );
+        // Live hosted context cannot be established by a request-only conversion.
+        // HTTP responses opt in through projected_request below.
+        let can_open_creation_form = false;
+        let prompt_delivery = request.prompt_delivery.map(|prompt| {
+            use crate::models::telegram_bot_request::PromptOutcome;
+            let outcome = if prompt.outcome == PromptOutcome::Sending
+                && prompt.attempted_at
+                    + chrono::Duration::seconds(
+                        crate::services::telegram_new_service::PROMPT_HORIZON_SECS,
+                    )
+                    <= chrono::Utc::now()
+            {
+                PromptOutcome::Unknown
+            } else {
+                prompt.outcome
+            };
+            PromptDeliveryResponse {
+                attempt_id: prompt.attempt_id,
+                phase: prompt.phase,
+                outcome,
+                attempted_at: prompt.attempted_at.to_rfc3339(),
+                completed_at: prompt.completed_at.map(|time| time.to_rfc3339()),
+                failure: prompt.diagnostic.as_ref().map(|d| d.failure),
+                reason: prompt.diagnostic.as_ref().map(|d| d.reason),
+                http_status: prompt.diagnostic.as_ref().and_then(|d| d.http_status),
+                error_code: prompt.diagnostic.as_ref().and_then(|d| d.error_code),
+                retry_after: prompt.diagnostic.as_ref().and_then(|d| d.retry_after),
+            }
+        });
         Self {
+            prompt_delivery,
+            can_open_creation_form,
             auto_connect: request.auto_connect,
             connection_error: request.connection_error,
             channel_bot_id: matches!(
@@ -106,6 +154,16 @@ impl From<TelegramBotRequest> for RequestResponse {
             bot_username: request.bot_username.filter(|_| approved),
         }
     }
+}
+
+pub(crate) async fn projected_request(
+    state: &AppState,
+    request: TelegramBotRequest,
+) -> AppResult<RequestResponse> {
+    let eligible = service(state).can_open_creation_form(&request).await?;
+    let mut response = RequestResponse::from(request);
+    response.can_open_creation_form = eligible;
+    Ok(response)
 }
 
 #[derive(Serialize)]
@@ -195,7 +253,7 @@ pub async fn redeem_claim(
     Ok((
         StatusCode::ACCEPTED,
         private_headers(),
-        Json(request.into()),
+        Json(projected_request(&state, request).await?),
     ))
 }
 
@@ -205,25 +263,28 @@ pub async fn configuration(
     Query(query): Query<ConfigurationQuery>,
 ) -> AppResult<(HeaderMap, Json<ConfigurationResponse>)> {
     let actor = human(&auth)?;
-    let row = crate::services::platform_credential_service::load(
-        &state.db,
-        &crate::services::channel_adapters::telegram_new::credential_descriptor(),
-    )
-    .await?;
-    let available = row.as_ref().is_some_and(|row| {
-        row.fields.get("webhook_ready").is_some_and(|v| v == "true")
-            && row.secrets.contains_key("manager_bot_token")
-    });
     let request = match query.request_id {
         Some(id) => Some(service(&state).get(&actor, &id.to_string()).await?),
         None => service(&state).current(&actor).await?,
     };
+    let manager = request
+        .as_ref()
+        .map(|request| request.manager_bot_id.to_string());
+    let row =
+        crate::services::telegram_manager_registry::load(&state.db, manager.as_deref()).await?;
+    let available = row.as_ref().is_some_and(|row| {
+        row.fields.get("webhook_ready").is_some_and(|v| v == "true")
+            && row.secrets.contains_key("manager_bot_token")
+    });
     Ok((
         private_headers(),
         Json(ConfigurationResponse {
             available,
             manager_username: row.and_then(|row| row.fields.get("manager_username").cloned()),
-            request: request.map(Into::into),
+            request: match request {
+                Some(request) => Some(projected_request(&state, request).await?),
+                None => None,
+            },
         }),
     ))
 }
@@ -250,7 +311,7 @@ pub async fn begin(
     Ok((
         private_headers(),
         Json(LaunchResponse {
-            request: request.into(),
+            request: projected_request(&state, request).await?,
             launch_url,
         }),
     ))
@@ -264,7 +325,7 @@ pub async fn get(
     let actor = human(&auth)?;
     Ok((
         private_headers(),
-        Json(service(&state).get(&actor, &id).await?.into()),
+        Json(projected_request(&state, service(&state).get(&actor, &id).await?).await?),
     ))
 }
 
@@ -279,8 +340,37 @@ pub async fn launch(
     Ok((
         private_headers(),
         Json(LaunchResponse {
-            request: service(&state).get(&actor, &id).await?.into(),
+            request: projected_request(&state, service(&state).get(&actor, &id).await?).await?,
             launch_url,
+        }),
+    ))
+}
+
+#[derive(Serialize)]
+pub struct CreationLinkResponse {
+    pub request: RequestResponse,
+    pub creation_url: String,
+}
+
+pub async fn creation_link(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> AppResult<(HeaderMap, Json<CreationLinkResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "This action accepts no parameters".into(),
+        ));
+    }
+    let (request, creation_url) = service(&state).creation_link(&actor, &id).await?;
+    Ok((
+        private_headers(),
+        Json(CreationLinkResponse {
+            request: projected_request(&state, request).await?,
+            creation_url,
         }),
     ))
 }
@@ -322,7 +412,10 @@ pub async fn connect(
             ),
         );
     }
-    Ok((private_headers(), Json(request.into())))
+    Ok((
+        private_headers(),
+        Json(projected_request(&state, request).await?),
+    ))
 }
 
 pub async fn webhook(
@@ -370,8 +463,21 @@ pub(crate) async fn webhook_with_producers(
         )
         .await
         {
-            Ok(true) => return Ok(StatusCode::OK),
-            Ok(false) => {}
+            Ok(crate::services::platform_manager_transport::ManagerDispatch::Handled) => {
+                return Ok(StatusCode::OK);
+            }
+            Ok(
+                crate::services::platform_manager_transport::ManagerDispatch::LegacyConfirmation,
+            ) => {
+                // This explicit compatibility handoff never falls through to guide/owner routing.
+                return match super::platform_binding::handle_command(state, &bot, &update, service)
+                    .await
+                {
+                    Ok(_) => Ok(StatusCode::OK),
+                    Err(error) => Ok(native_dispatch_status(&error)),
+                };
+            }
+            Ok(crate::services::platform_manager_transport::ManagerDispatch::NotOptedIn) => {}
             Err(error) => {
                 tracing::warn!(bot_id=%bot.id, error_code=error.error_code(), "Personal manager dispatch refused");
                 return Ok(native_dispatch_status(&error));
@@ -387,6 +493,16 @@ pub(crate) async fn webhook_with_producers(
                 tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "Platform binding command refused");
                 return Ok(native_dispatch_status(&error));
             }
+        }
+        if update["message"]["text"]
+            .as_str()
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.split('@').next())
+            .is_some_and(|s| {
+                s.eq_ignore_ascii_case("/confirm") || s.eq_ignore_ascii_case("confirm")
+            })
+        {
+            return Ok(StatusCode::OK);
         }
         match crate::services::platform_guide_service::dispatch(state, &bot, &update, service).await
         {
@@ -484,6 +600,40 @@ pub(crate) async fn relay_manager_channel(
             }
         }
     });
+}
+
+/// Scoped URL selects exactly one additional manager; its secret is still
+/// verified before parsing any provider content.
+pub async fn scoped_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    producers: Option<
+        Extension<
+            std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>,
+        >,
+    >,
+    body: Bytes,
+) -> AppResult<StatusCode> {
+    if id <= 0 {
+        return Err(AppError::ChannelWebhookVerificationFailed(
+            "Invalid manager".into(),
+        ));
+    }
+    let selected = service(&state).for_manager(id).await?;
+    if selected.manager_id != Some(id) {
+        return Err(AppError::ChannelWebhookVerificationFailed(
+            "Invalid manager route".into(),
+        ));
+    }
+    webhook_with_producers(
+        &state,
+        &selected,
+        &headers,
+        &body,
+        producers.map(|Extension(v)| v),
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -6,6 +6,9 @@ provider fixtures; no paid provider session has been run. Latencies below are en
 not measurements. Provider documentation is evidence of a contract, not proof of
 account entitlement or browser acoustic performance.
 
+Specialist authorization fix: [diagnosis and acceptance criteria](../SPECIALIST_BOT_VOICE_PLAN.md)
+and [review and verification evidence](../SPECIALIST_BOT_VOICE_REVIEW.md).
+
 ## 1. Decision
 
 Voice is another surface of the person's existing NyxAgent thread. The voice
@@ -78,7 +81,7 @@ Read alongside [08][engine], [09][nyxbot], [10][uploads], [organization agents][
 | `services/assistant_nyxagent.rs::begin_turn`, `handlers/assistant_nyxagent.rs::start_turn` | Transactional user-message/key/active-turn admission, detached worker, durable settlement, same upstream session and exact credential. Extract reusable orchestration into the service layer where necessary; a voice service must not depend on HTTP handlers. |
 | `handlers/assistant_team.rs::start_server_turn`, `after_turn`, `services/assistant_nyxagent.rs::push_events` | Reuse owner identity, pool accounting, event wakeups and specialist reports. Existing `pending_events` is bounded and channel-aware, not a generic browser FIFO: `/turns` currently returns `turn_active`. Voice needs durable request admission and an explicit atomic bridge to `begin_turn`. |
 | `assistant_conversations`, `assistant_messages` | Conversation-scoped sequence allocation, persisted history, active-turn Stop fencing. `via` is already an optional string: add `voice`, not a new channel credential. Add voice provenance and references without changing existing roles. |
-| `services/assistant_agent_credential_service.rs` | Exact encrypted thread key, replacement/rotation and authority convergence. Never create a voice-specific all-powerful key. Voice alone need not provision a thread key until delegation; first work uses normal provisioning. |
+| `services/assistant_agent_credential_service.rs` | Exact encrypted thread key, replacement/rotation and authority convergence. The ordinary draft flow provisions the conversation key before the first turn, so voice can authenticate that draft without an active turn. Never create a voice-specific all-powerful key. |
 | `services/org_agent_service.rs`, key auth and proxy/MCP authorization | Live membership, `can_proxy()`, person-private conversations, grant/scope intersection. No personal-resource fallback for org work. Recheck long-lived voice explicitly, not only at the initial upgrade. |
 | `assistant_acknowledgement_service`, frontend `use-assistant-nyxagent.ts` | Same action digest, current credential, expiry and one-use consumption. Today some owner-card continuations are browser-owned; voice needs server-owned, deduplicated continuations without also triggering the browser copy. |
 | `services/assistant_live.rs` | Metadata-only change stream and owner SSE, invalidation/resync and sweep recovery. Do not put transcripts on its existing owner-wide channel. A session-specific stream carries captions; the task view uses authoritative history. |
@@ -482,9 +485,12 @@ fragment updates its own unsealed segment; it never rewrites an executed request
 
 Generated speech is not necessarily heard. Store an output delivery marker
 (`generated`, `played`, `interrupted`, `unknown`) and a best-effort playback
-watermark. An interrupted transcript is labelled; do not treat unplayed output
-as information the user agreed to. Browser playback reports are UI telemetry,
-never authorization or the billing clock.
+watermark. In the composer, `played` means the media playback timeline has passed
+an exact provider fragment's end; it is not proof of audible delivery. Captions
+continue to progress during local speaker mute, while output audio activity is
+zero. Paused/closed media preserve the final timestamp. An interrupted transcript
+is labelled; do not treat output as information the user agreed to. Browser
+playback reports are UI telemetry, never authorization or the billing clock.
 
 **Required engine adjustment:** background speech/backchannels must not change
 the initiating-user-message identity used for acknowledgement dedupe, denial
@@ -661,7 +667,7 @@ cleanup and Stop continue when the feature flag is disabled.
 
 | Route | Closed request / safe result |
 | --- | --- |
-| `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Metadata only, no credential provisioning side effects. |
+| `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Omit `conversation_id` for account settings before a draft exists; own connections are then personal only. Both forms require a first-party human and the voice feature. Metadata only, no credential provisioning side effects; start reauthorizes against the actual thread. |
 | Existing `POST /drafts` | Create a normal private thread for selected agent before the first call if necessary. |
 | `POST /conversations/{id}/voice-sessions` | `{client_request_id,preferences:{service_id,connection_id?,key_source,model,voice,input_mode,language?,notify_on_completion},sdp_offer}`. OpenAI SDP required, xAI forbidden. Returns `{session,sdp_answer}`; the safe session DTO carries state, timing and revision, and options disclose limits. It does not change the thread's NyxAgent profile. |
 | `GET /conversations/{id}/voice-sessions/{sid}` | Authoritative safe state and task IDs for reconnect. No provider IDs, SDP, key IDs or transcript dump. |
@@ -925,6 +931,15 @@ no across-request grant cache. Distinguish catalog metadata, usable binding,
 model entitlement and temporary provider health. A custom service marked
 realtime does not automatically become an OpenAI/xAI transport.
 
+Options load the exact bound conversation authority once per request and reuse
+it for source-specific grant and operation checks. Each selected own connection
+also passes the shared read-only proxy authority snapshot, including its effective
+official origin and usable server credential. Compute eligibility before expanding
+models; discovery never decrypts, refreshes or provisions credentials. Discovery
+matches start's authorization, origin and credential eligibility at that moment;
+`available` does not promise wallet funds, concurrency capacity, unchanged state or
+provider entitlement at start. Startup remains authoritative for those checks.
+
 
 `ServiceInference.voice` is additive and serde-defaulted: `protocol` (`openai_live`
 or `xai_realtime`, with unknown future protocols ineligible for execution), `models`
@@ -947,7 +962,8 @@ verified Mini later requires only a catalog edit. Options and start validate the
 catalog choices again; no runtime model-name or voice-name allowlist exists.
 Adapters retain fixed origins and protocol/usage-source validation. Metadata alone
 never enables an unshipped adapter or overrides the paid platform rollout gate.
-Call setup displays the resolved model/voice, credential class, tariff and payer.
+Voice settings display the resolved model/voice and credential class, with the
+tariff and payer under **Credit usage**.
 
 Platform resolves through the existing shared platform ACL **before decrypting**
 the catalog master credential; fixed catalog destination, no user headers,
@@ -969,7 +985,21 @@ retains the stored own key exactly as existing rules require. Remember the
 chosen connection/source in assistant settings, then validate again next call.
 
 The voice-provider model transport uses the narrowly bounded assistant
-inference access policy; it cannot open service tools. Apply any configured B1
+inference access policy; it cannot open service tools. Billed platform voice
+requires no OpenAI tool grant or per-specialist OpenAI connection. Its authority
+must bind the live conversation credential to this private thread's acting user,
+conversation ID, agent ID and API key ID. Fresh drafts work without an active
+turn; ordinary/unbound/rebound keys and guest threads do not receive this
+exception. Authentication and live revalidation retain revoked/expired-key,
+destroyed-agent and organization-access fences. Platform ACLs, rollout flags,
+duration tariffs and billing admission still apply, with platform use charged to
+the acting person.
+
+BYOK requires the selected `UserService` connection's grant by its own ID; a
+catalog service ID cannot substitute for that grant. An explicitly granted own
+connection keeps its independent operation identity, so a restriction on a
+different granted connection does not constrain it. The platform catalog alias
+retains the existing conservative catalog-linked scope checks. Apply any configured B1
 scope to the canonical provider control operations too. B1 currently denies
 WebSocket execution on a scoped service, including inference: a restricted
 Grok service must therefore be reported unavailable rather than bypassed via
@@ -981,8 +1011,9 @@ classification. Platform (`NyxidManagedMaster`) always bills the acting person,
 even when an org grant permits it. Personal own key bills that person; authorized
 org BYOK retains existing org-wallet billing. "Same billing person" identifies
 the actor, not a new rule overriding existing resource-owner BYOK accounting.
-Show the payer and both relevant prices before starting. NyxAgent/model/tool
-work retains its own normal execution billing independently of voice duration.
+Keep the payer and all applicable prices discoverable under **Credit usage** in
+voice settings; omit routine cost labels from the active call controls.
+NyxAgent/model/tool work retains its own normal execution billing independently of voice duration.
 
 ### Duration accounting in existing lanes
 
@@ -1137,10 +1168,9 @@ the authority; no browser-only lock or automatic takeover.
 
 On closure, append exactly one compact **Call receipt** through the existing
 thread message/sequence path with `via: "voice"`. Its deterministic server
-snapshot shows duration and a cost line only when usage meters exist: a voice-only
-call has one `Cost` value, mixed token/voice usage may show credits plus voice
-cost, and any unsettled meter shows `Cost: pending`; billing-disabled calls omit
-the cost line. It then lists
+snapshot shows duration without cost or pending-cost lines. Personal charges
+remain in **Billing & Usage → Usage**; creating the receipt does not query usage
+meters. It then lists
 each handed-off request using a bounded title from the user's source message,
 its `Done`, `Running`, `Queued`, `Cancelled` or `Needs your OK` state, an
 existing-thread result link when available, and any confirmation inline. Zero
@@ -1207,6 +1237,84 @@ on a JSON audio hop). Count both upstream/downstream server legs for capacity.
 Set global/per-replica admission limits from load tests, independent of text-turn
 permits. A voice call does not hold a backend turn permit while merely chatting.
 Backpressure and long result narration must not delay receipt of Stop/mute.
+
+### Startup latency review (2026-10-26)
+
+Voice preferences belong to the person and persist across conversations and
+logins. The composer chevron opens Voice settings, which saves through the shared
+account settings cache; unchanged preferences skip the write. Opening settings
+does not create a draft or acquire microphone resources. On first use, when no
+preferences are saved, the voice waveform opens settings before a call can
+start. Changes during an active call apply to the next call.
+
+With saved preferences, the composer waveform starts the call without a second
+Start action. Its click immediately requests microphone access, creates/resumes
+the local audio context and preloads the lazy voice bundle. After permission
+succeeds, draft creation and any draft model update run before handoff to the
+panel. This preserves the no-draft-on-permission-denial contract. Preparation
+survives the composer's draft-adoption remount through an explicit handoff;
+navigation, logout, cancellation and failed handoff release resources, including
+microphone tracks acquired after cancellation. Voice and dictation retain the
+same exclusive capture owner and selected physical microphone. Grok reuses the
+prepared context; both transports retain the activity meter and playback resume.
+
+The panel validates the saved connection, model, voice and input mode against
+the actual thread's available options before starting automatically. Unavailable
+saved choices produce an actionable settings error without silently substituting
+another provider. The start request carries the effective preferences and the
+server independently authorizes the actual thread and connection. Starting with
+unchanged saved preferences does not rewrite them. Explicitly changed selections
+retain the existing account-fenced save before provider admission. No provider
+session is created before local microphone and audio setup succeeds.
+
+OpenAI still requires microphone capture, a complete ICE offer, server admission,
+provider creation and sideband attachment, then browser negotiation and the
+authenticated control snapshot. The UI stays Connecting until both
+`session.started` and an active control snapshot arrive, in either order. Grok
+requires capture, worklet/loopback setup, admission, then a control socket whose
+replica resolves credentials and establishes/configures the upstream session.
+After the active state is durable, Grok wakes the existing authenticated snapshot
+path immediately instead of waiting for its next one-second poll. This removes
+up to roughly one polling interval of avoidable startup wait, excluding database
+and network time; it is not a measured production speedup.
+
+The panel distinguishes Opening microphone, Preparing audio, Connecting and
+Reconnecting. Hold to talk stays disabled until capture is ready in both full
+and minimized views. A lost control connection disables capture immediately,
+clears the held state, and requires a fresh press after reconnection in manual
+mode. Automatic input resumes only after control readiness is restored.
+
+Local browser User Timing entries named `nyxid.voice.startup.preparation`,
+`.microphone`, `.audio`, `.server`, `.connecting` and `.total` record completed
+startup phases. They contain only durations and fixed phase names, are replaced
+on the next attempt, and are not sent to analytics. Total starts at the composer waveform
+click and ends at capture readiness, including draft/model work, lazy loading,
+option discovery and the microphone permission prompt. Preparation measures the
+time before the transport client starts; local microphone/context preparation
+overlaps that work, so the microphone phase measures only the remaining wait.
+OpenAI's server phase includes provider creation/sideband attachment; Grok's provider setup occurs
+after POST and is included in connecting. A failed or cancelled attempt has no
+successful total. Reproduce with microphone permission already granted when
+comparing against the budgets above. In browser developer tools:
+
+```js
+performance.getEntriesByType("measure")
+  .filter(({ name }) => name.startsWith("nyxid.voice.startup."))
+  .map(({ name, duration }) => ({ phase: name, milliseconds: Math.round(duration) }))
+```
+
+The next latency work should distinguish capture readiness from caption and
+reply latency. Transcript checkpoints are processed on the coordinator's
+one-second tick, and persisted captions are read by a separate one-second
+control-snapshot tick. Together these can add nearly two seconds of scheduling
+delay before a partial transcript becomes visible, beyond provider transcription
+and database time. OpenAI also seals input after a one-second fragment quiet
+window; this protects ordered, complete utterances used for delegation. A future
+coalesced caption push should preserve the session authorization checks and
+durable transcript authority while separating presentation updates from that
+seal window. Simply increasing both poll rates would also multiply database,
+authorization and billing work. Browser/device audio and paid-provider latency
+still require real-session measurements; fixtures do not establish those times.
 
 ## 15. Failures and observability
 
@@ -1441,6 +1549,213 @@ Remaining provider verification gates (not requests to reopen approved policy):
 - Grok manual transcription during output and browser loopback AEC quality.
 - Deployment/account provider retention terms before enabling paid voice.
 
+## 19. Implemented composer voice and dictation
+
+The composer offers separate **Dictate a message** (microphone) and **Voice mode**
+(AudioLines) actions. Typed drafts may coexist with voice controls; an active
+voice action stays available while attachments or delegated text work change.
+Opening the same actor/thread voice control reveals the existing panel/session;
+it does not restart the call. The active panel is a compact composer control bar
+inside the same composer surface with status, microphone mute, speaker mute and
+End. Settings, tasks, resume, conflict/rejoin and Grok Hold to talk remain
+accessible. Prices, payer and billing explanations live under **Credit usage** in
+voice settings, outside the active controls. The waveform intentionally requests
+microphone permission and starts the exact available saved configuration
+after source validation. First use opens account settings before capture. The
+composer chevron opens the same account editor, including before a thread exists;
+it saves defaults without starting media. Changes there apply to the next call. OpenAI defaults to Automatic hands-free input;
+an explicit saved mode remains authoritative and Grok requires Hold to talk. An
+unavailable saved source never silently selects another paid provider. The
+secondary Voice settings action in the microphone popup opens configuration
+without microphone permission or a provider start. End retains that panel's
+next-call settings; a later waveform start preserves them on the same binding.
+Before a provider start, changed preferences are saved and update the original actor's
+settings cache only after server confirmation. Unchanged saved preferences skip
+that write; session creation still revalidates access and funding. Close/reopen therefore retains
+the confirmed source and input mode; a save completing after an account change
+cannot update either account's cache or authorize that start. Settings controls
+wait for initial saved-preference loading, and subsequent hydration does not
+overwrite next-call edits. If source discovery or saved settings fail, **Retry
+voice loading** refetches the failed read without acquiring media or choosing
+another source. Once loading succeeds, a new waveform gesture starts the selected
+configuration; the failed preparation remains closed.
+
+After a startup error, **Retry voice** intentionally reacquires capture and
+submits a fresh request for the same selected source. It is hidden while a call
+is active/preparing/conflicting or its preferences/source are unusable. Credit
+errors retain safe stage/code diagnostics and explain recovery; they are never
+automatically retried. Each attempt reads current applicable funding, including
+newly journaled grants. Granting microphone permission itself uses no credits;
+the requested call can proceed to reservation after permission succeeds.
+
+Microphone capture begins only from an intentional activation, including a
+keyboard or touch press. Hovering configuration or reading options never requests
+permission. Permission denial, absent/busy devices and unsupported browsers use
+sanitized actionable messages. A pending grant can be cancelled: a late stream is
+stopped immediately and cannot open a provider session. Voice and dictation
+share one ephemeral capture owner. Account/thread navigation, disabled features,
+destroyed conversations, track revocation and component teardown fence late
+callbacks and close media. Audio contexts for capture/encoding are created and
+resumed during activation; autoplay rejection offers an explicit resume path.
+Dictation loads its encoder during this setup without connecting a microphone
+node. For an existing thread, read-only source/price discovery overlaps the
+permission/device wait and is reused only by that attempt and thread. New draft
+creation still follows permission; the metered connection waits for permission
+and validated source options. Rendering a price disclosure does not delay
+startup. Audio encoding starts only after the provider acknowledges readiness. Denial, cancellation and account changes cannot start a late session.
+
+### Dictation review and draft integrity
+
+The microphone uses a rounded capsule outline without a flat stand base. Its
+compact right chevron is hidden at rest and revealed by hovering the control or
+keyboard focus. It stays visible while settings are open and on touch devices.
+The hidden chevron has zero width and reserves no space. Revealing it expands
+the control; hovering or focusing the microphone does not open settings.
+Only actual pointer movement onto the chevron opens the hover popup, so a
+layout change beneath a stationary pointer does not open it.
+Configuration opens only by hovering or activating that
+Configure button with pointer, keyboard or touch. The popup aligns to the
+chevron's right edge, opens below when space allows and flips at viewport
+boundaries. Leaving the trigger and popup closes settings after a 200ms grace
+period; entering either region cancels dismissal so crossing the 8px gap keeps
+settings usable. Closing releases any microphone test, including a late
+permission grant. Draft/account changes, starting capture and unmounting cancel
+pending dismissal. Keyboard activation and Escape remain supported. The microphone and voice waveform icons both render at 20px. It lists current real
+audio input devices and labels, marks the selected device, updates on
+`devicechange`, and applies selections immediately using an exact device constraint.
+The intentional Test microphone/Enable action owns its local analyser stream;
+hovering never acquires it. Closing/dismissing the popup, losing window focus,
+unplugging the selected device or navigation releases that stream. An unavailable
+selected device is reported rather than silently marked selected elsewhere.
+After unplugging a device, selecting an available replacement keeps that new
+preview and its meter alive. Device enumeration validates the current selected
+identity and ignores superseded requests, including callbacks from the old
+preview.
+
+The current Hold to record switch updates and persists immediately without
+Save/Start forms. The saved non-sensitive device and control
+preference is scoped to the account: click-toggle starts/stops, while Hold to
+dictate stops capture on release, pointer cancellation, key release or blur.
+Main-mic activation works directly on first use; capture/encoding contexts are
+created during the gesture before asynchronous thread/options preparation.
+Release tracking survives React updates and pending permission. Hold release
+opens review; it never confirms or sends. Interim provider text is muted and the
+waveform measures actual microphone samples. Cancel/Escape leaves the original
+draft intact; Check inserts the reviewed transcript at the saved Tiptap selection
+through one undoable editor transaction, preserving surrounding mentions and
+attachments. Both actions restore editor focus/selection. If the original draft
+has changed, insertion refuses to overwrite it. No dictation transcript is sent
+as a chat message or persisted in chat history by the relay. A startup failure
+with no captured text returns to the editable draft with an accessible error
+and usable settings. Existing partial text remains in review. A server without
+the dictation route (404) is identified as unavailable on the connected server;
+device selection/testing stays usable and there is no fake transcript or
+browser-only fallback.
+
+### Bounded transcription transport and accounting
+
+Dictation options are read from
+`GET /api/v1/assistant/nyxagent/dictation/options?conversation_id=...`; capture uses
+the human-browser, same-origin WebSocket
+`GET /api/v1/assistant/nyxagent/conversations/{id}/dictation`. The delegated-read
+deny table already excludes the entire assistant namespace, including this
+execution-shaped GET. A live browser session, private conversation, bound
+credential/key/agent, organization access, service ACL, voice flags, operation
+limits, billing admission and the normal live slot/concurrency gates apply.
+Discovery is read-only and checks eligibility at that instant; it does not reserve
+funds or guarantee capacity/provider entitlement at capture time. Admission and
+live checks remain authoritative.
+
+The first transport offers platform OpenAI only and charges the acting person.
+It requires no per-specialist OpenAI connection/tool grant under the same bounded
+private-thread inference policy as platform voice. The selected operation is
+exactly WebSocket `GET /realtime`; it does not additionally require conversational
+voice's `POST /live/sessions`. Ordinary voice retains its HTTP create plus WS
+attach policy. Authored operation denials, including the existing scoped-service
+WebSocket restriction, remain effective; this does not authorize tools or a
+generic provider socket. BYOK is unavailable for this initial dictation transport.
+
+Only the server connects to
+`wss://api.openai.com/v1/realtime?intent=transcription`, using fixed
+`gpt-live-transcribe`, session type `transcription`, PCM16 mono 24 kHz and
+`turn_detection:null`. The server validates the provider's acknowledged type,
+model and audio configuration before forwarding audio. The browser can supply
+bounded PCM frames and Stop; it cannot submit provider JSON, session updates,
+tools, output generation, destinations or credentials. Total input is capped at
+120 seconds, individual ingress frames at 4096 bytes, channel backlogs and frame
+counts are bounded, and periodic manual commits limit pending audio. Lifecycle
+checks take precedence over provider-event floods. There is no browser Web Speech
+fallback or production destination override.
+
+Dictation reuses the administrator-authored OpenAI `voice_seconds` tariff and
+existing allowance → grant → wallet reservations/settlement. It measures
+**provider-confirmed transcription input seconds**, whereas conversational voice
+uses the adapter's documented conversational duration. Any actually charged,
+synced per-start `requests` component is listed alongside the input-second
+rate under **Credit usage** in dictation settings. Recording and transcript review
+do not display prices or payer labels. The account menu’s **Usage** view includes
+these recorded charges and audio quantities alongside other service usage.
+There is no source-code price or elapsed-clock user debit.
+Funds are reserved before forwarding, renewed within the hard cap, and checked
+through normal funding primitives. Source labels name `gpt-live-transcribe`;
+conversational catalog model rows do not duplicate dictation choices.
+
+Every completed item must report numeric
+`usage:{type:"duration",seconds:...}`. Item IDs deduplicate usage; conflicting
+replays or missing/token/wrong usage fail closed. Fractional seconds carry exactly
+across items, and only the cumulative total is floored at the existing whole-second
+tariff boundary. The terminal subsecond fraction is waived. Confirmed usage and
+item dedup commit atomically under the live lease before browser acknowledgement.
+Closing first fences the session and reads the latest durable total, freezes
+further checkpoints, then settles; stale workers cannot seal a newer owner's money
+windows or discard confirmed usage. Present malformed checkpoint fields fail
+closed rather than defaulting to zero.
+
+Stop/cancel/browser disconnect releases local capture immediately, stops new PCM
+and starts a bounded drain deadline then. Already-forwarded audio is committed
+and confirmed usage is settled even if the UI receiver has gone. Missing final
+confirmation remains bounded platform exposure under existing voice policy.
+Recovery settles durable confirmed usage without replaying uncertain audio or
+resurrecting capture. Dictation sessions cannot be attached through conversational
+voice stream/control paths and do not produce a conversational call receipt.
+
+### Real audio activity, caption timing and verification
+
+The waveform derives from live microphone/playback analysers, without fabricated
+amplitude. During an open/preparing voice or dictation capture, the aurora gently
+fades in and out over 3.2 seconds; measured amplitude changes its strength and
+size. Starting fades it in over 450ms, and stopping pauses the breathing cycle
+and fades the remaining glow out over 800ms. Stopped dictation review/finalization
+has no listening aura after that fade. Active
+audio controls stay primary on hover, focus and press. Semantic theme tokens work in
+light/dark; reduced motion uses a steady aura and removes transitions and spatial animation, while the usable mobile
+text row and full-width toolbar retain visible control bounds at 320 px.
+
+Conversational user speech is projected live. Assistant narration preserves exact
+OpenAI fragment text and provider `start_ms`/`end_ms` boundaries, bounded to 256
+fragments and 4096 text bytes per segment. A dedicated response projection carries
+timing; empty/tiny malformed floods cannot grow metadata indefinitely. Muted
+pending fragments brighten when the media playback timeline passes their end,
+including during speaker mute. No word timings are inferred. Grok uses only its
+available segment/delivery evidence. A bounded delivery revision updates the
+memoized message row after a caption is persisted, and shared segment IDs dedup
+live captions when durable history catches up. Media close clears levels without
+resetting the final playback timestamp.
+
+The test-only browser fixture is
+`frontend/e2e/voice-fixture.ts::installVoiceFixture(page, permission)`. It supplies
+explicit synthetic oscillator MediaStreams, actual browser analysers/PCM, a fake
+peer and scripted NyxID API/WS events. Permission can be granted, denied, pending
+or revoked. It is excluded from production; it does not establish paid provider
+availability. `e2e/composer-voice.spec.ts` exercises selected rich draft insertion,
+one undo/focus, late grant cancellation, bounded responsive controls, real activity,
+caption playback, repeated open and actual asynchronous End. Rust loopback
+provider tests with real Mongo transactions cover usage/dedup/order/drain/recovery,
+lease races and operation/security fences. Exact execution receipts and remaining
+physical-device/live-provider limits are in
+[the implementation plan](../COMPOSER_VOICE_DICTATION_PLAN.md) and the
+[parent's personal review](../COMPOSER_VOICE_DICTATION_REVIEW.md).
+
 ## Sources
 
 Official sources retrieved 2026-10-03. Versioned behavior and prices must be
@@ -1472,3 +1787,7 @@ rechecked during implementation; this document records the observed contract.
 [b2]: ../AGENT_SKILLS.md
 [platform]: ../PLATFORM_KEYS_AND_INFERENCE.md
 [exact]: ../BILLING_EXACT_ACCOUNTING.md
+
+[oa-transcription]: https://developers.openai.com/api/docs/guides/realtime-transcription
+[oa-transcription-model]: https://developers.openai.com/api/docs/models/gpt-live-transcribe
+[oa-realtime-events]: https://developers.openai.com/api/reference/resources/realtime/server-events

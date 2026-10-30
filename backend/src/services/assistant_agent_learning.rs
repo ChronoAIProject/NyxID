@@ -383,6 +383,9 @@ pub async fn enrollment_epoch(
     agent: &AssistantAgent,
     snapshot: Option<&super::org_agent_service::RequestAccess>,
 ) -> AppResult<Option<i64>> {
+    if snapshot.is_some_and(|a| a.shared().is_some()) {
+        return Ok(None);
+    }
     let pilot = feature_flag_service::flag_enabled_people(db, FLAG_KEY).await?;
     if pilot
         .as_ref()
@@ -1524,6 +1527,7 @@ mod tests {
         commands.lock().unwrap().clear();
         let now = Utc::now();
         let agent = AssistantAgent {
+            channel_checking_notice: false,
             id: Uuid::new_v4().to_string(),
             user_id: "learning-test-owner".into(),
             kind: AgentKind::Specialist,
@@ -1532,6 +1536,8 @@ mod tests {
             specialty: None,
             grants: Default::default(),
             guest_access: Default::default(),
+            guest_operation_scopes: Default::default(),
+            guest_operation_scope_revisions: Default::default(),
             operation_scopes: Default::default(),
             skills: Vec::new(),
             skills_revision: 0,
@@ -1542,6 +1548,8 @@ mod tests {
             saved_login_ids: Vec::new(),
             created_by: "learning-test-owner".into(),
             model: "test".into(),
+            owner_model_route: None,
+            guest_model_notices: Default::default(),
             access_mode_override: None,
             home_conversation_id: None,
             memory: Vec::new(),

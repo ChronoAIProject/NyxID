@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { apiClient, ApiError, api } from "./api-client";
 
 const mockFetch = vi.fn();
@@ -16,6 +16,8 @@ vi.mock("@/stores/auth-store", () => ({
 
 vi.stubGlobal("fetch", mockFetch);
 
+let testClock = 0;
+
 function jsonResponse(body: unknown, status = 200): Response {
   return {
     ok: status >= 200 && status < 300,
@@ -26,8 +28,15 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers();
+  testClock += 1_000;
+  vi.setSystemTime(testClock);
   mockFetch.mockReset();
   mockSetUser.mockReset();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("apiClient", () => {
@@ -208,10 +217,85 @@ describe("401 auth state handling", () => {
     // The opt-out is per request, not per path: the same proxy endpoint
     // without the flag keeps the strict global behavior.
     mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Unauthorized"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Session expired"));
     await expect(
       apiClient("/proxy/s/aevatar/api/scopes/abc/nyxid-chat/conversations"),
     ).rejects.toThrow(ApiError);
     expect(mockSetUser).toHaveBeenCalledWith(null);
+  });
+
+  it("keeps auth state when a non-identity 401 is followed by a live session", async () => {
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Provider rejected"));
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: "user-1" }));
+
+    await expect(apiClient("/proxy/provider")).rejects.toThrow(ApiError);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[1]?.[0]).toBe("/api/v1/users/me");
+    expect(mockSetUser).not.toHaveBeenCalled();
+  });
+
+  it("keeps auth state when identity confirmation returns a transient 503", async () => {
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Provider rejected"));
+    mockFetch.mockResolvedValueOnce(errorResponse(503, 12900, "Temporarily unavailable"));
+
+    await expect(apiClient("/proxy/provider")).rejects.toThrow(ApiError);
+
+    expect(mockSetUser).not.toHaveBeenCalled();
+  });
+
+  it("keeps auth state when identity confirmation fails at the network", async () => {
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Provider rejected"));
+    mockFetch.mockRejectedValueOnce(new TypeError("offline"));
+
+    await expect(apiClient("/proxy/provider")).rejects.toThrow(ApiError);
+
+    expect(mockSetUser).not.toHaveBeenCalled();
+  });
+
+  it("uses one identity confirmation for concurrent 401s", async () => {
+    mockFetch
+      .mockResolvedValueOnce(errorResponse(401, 1001, "Provider rejected"))
+      .mockResolvedValueOnce(errorResponse(401, 1001, "Provider rejected"))
+      .mockResolvedValueOnce(jsonResponse({ id: "user-1" }));
+
+    const results = await Promise.allSettled([
+      apiClient("/proxy/provider-a"),
+      apiClient("/proxy/provider-b"),
+    ]);
+
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch.mock.calls.filter(([url]) => url === "/api/v1/users/me")).toHaveLength(1);
+    expect(mockSetUser).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the authority fence before clearing after confirmation", async () => {
+    const authorityGuard = vi.fn();
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Provider rejected"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Session expired"));
+
+    await expect(apiClient("/proxy/provider", { authorityGuard })).rejects.toThrow(ApiError);
+
+    expect(authorityGuard).toHaveBeenCalledTimes(5);
+    expect(mockSetUser).toHaveBeenCalledWith(null);
+  });
+
+  it("does not clear a replacement authority while identity confirmation is pending", async () => {
+    let release!: (response: Response) => void;
+    let changed = false;
+    const authorityGuard = () => {
+      if (changed) throw new Error("Authority changed");
+    };
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Provider rejected"));
+    mockFetch.mockReturnValueOnce(new Promise<Response>((resolve) => { release = resolve; }));
+    const pending = apiClient("/proxy/provider", { authorityGuard });
+    const assertion = expect(pending).rejects.toThrow("Authority changed");
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+    changed = true;
+    release(errorResponse(401, 1001, "Session expired"));
+    await assertion;
+    expect(mockSetUser).not.toHaveBeenCalled();
   });
 
   it("does not clear auth state for auth endpoints", async () => {

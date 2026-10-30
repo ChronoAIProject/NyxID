@@ -272,3 +272,20 @@ describe("normalizeBillingSearch service filter", () => {
     expect(normalizeBillingSearch({ action: "refund" }).action).toBeUndefined();
   });
 });
+
+describe("bill contracts", () => {
+  it("preserves exact tax strings and rejects numeric money", async () => {
+    const { currentBillSchema, usageInvoicesSchema } =
+      await import("./billing");
+    const { currentBill, usageInvoices } =
+      await import("@/test/billing-bill-fixture");
+    expect(currentBillSchema.parse(currentBill).tax_total).toBe("0.91");
+    expect(
+      usageInvoicesSchema.parse(usageInvoices).invoices[0]
+        ?.prepaid_credits_applied,
+    ).toBe("10.9");
+    expect(
+      currentBillSchema.safeParse({ ...currentBill, tax_total: 0.91 }).success,
+    ).toBe(false);
+  });
+});

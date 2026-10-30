@@ -172,6 +172,8 @@ pub async fn request(
         let user_code = auth_device_service::generate_user_code();
         let now = Utc::now();
         let row = AgentKeyLoginRequest {
+            mfa_policy_revision: None,
+            delivery_context_version: None,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: code_hash(hmac_key, &device_code),
             user_code_hmac: code_hash(hmac_key, &user_code),
@@ -470,6 +472,30 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
     })
 }
 
+/// Freeze new parent/child expiry before entering a retryable transaction.
+/// Normalized selection is also persisted in a one-time login-code intent.
+pub async fn prepare_issuance(
+    db: &Database,
+    actor: &str,
+    selection: &mut Selection,
+    requested_child_expiry: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+) -> AppResult<DateTime<Utc>> {
+    let parent_expiry = match selection {
+        Selection::Existing { api_key_id, .. } => {
+            eligible_key(db, actor, api_key_id).await?.expires_at
+        }
+        Selection::New(input) => {
+            let expiry = key_service::validate_login_api_key(db, actor, input, created_at).await?;
+            // Preserve explicit nonexpiry as intent, never pass a resolved None
+            // back through the legacy Option -> omitted creation conversion.
+            input.expires_at = expiry.map(|value| value.to_rfc3339());
+            expiry
+        }
+    };
+    credentials::resolve_new_credential_expiry(parent_expiry, requested_child_expiry, created_at)
+}
+
 /// Issue a selected key and its child inside the caller's authorization transaction.
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_selected(
@@ -480,6 +506,7 @@ pub async fn issue_selected(
     profile: Option<&str>,
     selection: &Selection,
     credential_expires_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
     key_id: &str,
     credential_id: &str,
     secret: &str,
@@ -496,13 +523,17 @@ pub async fn issue_selected(
             input.target_org_id.as_deref(),
         )
         .await?;
-        let expires_at = input
-            .expires_at
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(api_key_validation::parse_expires_at)
-            .transpose()?;
-        credentials::credential_expiry(expires_at, credential_expires_at)?;
+        let expires_at = api_key_validation::NewKeyExpiry::from_request(
+            input.expires_at.as_deref(),
+            input.never_expires,
+        )?
+        .resolve(created_at)?;
+        let expiry_policy = match expires_at {
+            Some(value) => api_key_validation::NewKeyExpiry::At(value),
+            None => api_key_validation::NewKeyExpiry::NeverExpires(
+                api_key_validation::NonExpiringReason::UserSelected,
+            ),
+        };
         api_key_validation::resolve_create_allow_all(
             &input.allowed_service_ids,
             Some(input.allow_all_services),
@@ -521,7 +552,7 @@ pub async fn issue_selected(
             actor,
             key_id,
             input,
-            expires_at,
+            expiry_policy,
             &mut *session,
         )
         .await?;
@@ -541,6 +572,11 @@ pub async fn issue_selected(
         return Err(AppError::AgentKeyLoginKeyIneligible);
     }
     consent::validate(db, &parent, selection, &mut *session).await?;
+    let credential_expires_at = credentials::resolve_new_credential_expiry(
+        parent.expires_at,
+        credential_expires_at,
+        created_at,
+    )?;
     credentials::issue(
         db,
         &parent,
@@ -604,15 +640,24 @@ pub async fn approve(
     hmac_key: &[u8],
     actor: &str,
     user_code: &str,
-    selection: Selection,
+    mut selection: Selection,
     credential_expires_at: Option<DateTime<Utc>>,
     approver_ip: Option<&str>,
     approver_user_agent: Option<&str>,
+    authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    let mfa_policy_revision =
+        super::approved_sign_in_policy::authorize(db, actor, authority).await?;
+    let policy_used = mfa_policy_revision.is_some();
+    let policy_default =
+        mfa_policy_revision.as_deref() == Some(super::approved_sign_in_policy::DEFAULT_REVISION);
     let row = find_by_user_code(db, hmac_key, user_code).await?;
     if row.status != Status::Pending || row.expires_at <= Utc::now() {
         return Err(decision_error(&row));
     }
+    let created_at = Utc::now();
+    let credential_expires_at =
+        Some(prepare_issuance(db, actor, &mut selection, credential_expires_at, created_at).await?);
     let (key_id, created_now) = match &selection {
         Selection::Existing { api_key_id, .. } => {
             (eligible_key(db, actor, api_key_id).await?.id, false)
@@ -621,7 +666,17 @@ pub async fn approve(
     };
     let credential_id = Uuid::new_v4().to_string();
     let secret = credentials::generate_secret();
-    let encrypted = encryption.encrypt(secret.as_bytes()).await?;
+    let encrypted = super::agent_login_record_service::encrypt(
+        encryption,
+        &row.id,
+        actor,
+        &key_id,
+        &credential_id,
+        secret.as_bytes(),
+    )
+    .await?;
+    let delivery_context_version =
+        super::agent_login_record_service::version(encryption).map(i32::from);
     let mut session = db.client().start_session().await?;
     // Claim, key insertion, child issuance, and encrypted delivery are committed
     // together. A cancelled future or process crash cannot leave a partial grant.
@@ -637,6 +692,7 @@ pub async fn approve(
         let approver_ip_hmac = approver_ip.map(|ip| code_hash(hmac_key, ip));
         session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<String> = async {
+            super::approved_sign_in_policy::fence_approval(&db, &actor, authority, mfa_policy_revision.as_deref(), session).await?;
             let claimed = db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME).find_one_and_update(
                 doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
                 doc! {"$set": {"status": "approved"}},
@@ -645,19 +701,20 @@ pub async fn approve(
                 return Err(current_decision_error(&db, &row.id).await?);
             }
             let parent = issue_selected(&db, &actor, &row.id, &row.context,
-                row.context.requested_profile.as_deref(), &selection, credential_expires_at,
+                row.context.requested_profile.as_deref(), &selection, credential_expires_at, created_at,
                 &key_id, &credential_id, &secret, &mut *session).await?;
             let owner_type = key_summary(&db, &parent, created_now).await?.owner_type;
             let now = Utc::now();
             if row.expires_at <= now { return Err(AppError::AgentKeyLoginExpired); }
             db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME).update_one(
                 doc! {"_id": &row.id, "status": "approved"},
-                doc! {"$set": {"approved_user_id": &actor, "api_key_id": &key_id,
+                doc! {"$set": {"approved_user_id": &actor, "mfa_policy_revision": &mfa_policy_revision, "api_key_id": &key_id,
                     "credential_id": &credential_id, "key_was_created": false,
                     "key_created_by_approval": created_now,
                     "approver_ip_hmac": &approver_ip_hmac,
                     "approved_at": bson::DateTime::from_chrono(now),
                     "expires_at": bson::DateTime::from_chrono(now + Duration::seconds(60)),
+                    "delivery_context_version": delivery_context_version,
                     "delivery_credential_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted.clone()}}},
             ).session(&mut *session).await?;
             Ok(owner_type)
@@ -670,7 +727,7 @@ pub async fn approve(
         Some(actor.into()),
         "agent_key_login_approved".into(),
         Some(
-            serde_json::json!({"request_id": request_id, "api_key_id": key_id, "credential_id": credential_id, "key_was_created": created_now, "owner_type": owner_type}),
+            serde_json::json!({"request_id": request_id, "api_key_id": key_id, "credential_id": credential_id, "key_was_created": created_now, "mfa_policy": policy_used.then_some("approved_sign_in"), "policy_default": policy_default, "owner_type": owner_type}),
         ),
         approver_ip.map(str::to_owned),
         approver_user_agent.map(str::to_owned),
@@ -711,6 +768,24 @@ pub async fn deny(
         None,
     );
     Ok(())
+}
+
+async fn claim_delivery(
+    db: &Database,
+    row: &AgentKeyLoginRequest,
+    transaction: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Option<AgentKeyLoginRequest>> {
+    let collection = db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME);
+    let now = Utc::now();
+    let claim = collection.find_one_and_update(
+        doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}, "delivery_credential_encrypted": {"$ne": bson::Bson::Null}},
+        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now), "last_polled_at": bson::DateTime::from_chrono(now)}, "$unset": {"delivery_credential_encrypted": "", "delivery_context_version": ""}},
+    ).return_document(ReturnDocument::Before);
+    Ok(if let Some(tx) = transaction {
+        claim.session(tx).await?
+    } else {
+        claim.await?
+    })
 }
 
 #[tracing::instrument(
@@ -765,11 +840,21 @@ pub async fn poll(
     // Resolve and decrypt before consuming the exchange. A failed read or KMS
     // call leaves the approved row available for retry and expiry cleanup.
     let delivery = prepare_delivery(db, encryption, &row).await?;
-    let now = Utc::now();
-    let delivered = collection.find_one_and_update(
-        doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}, "delivery_credential_encrypted": {"$ne": bson::Bson::Null}},
-        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now), "last_polled_at": bson::DateTime::from_chrono(now)}, "$unset": {"delivery_credential_encrypted": ""}},
-    ).return_document(ReturnDocument::Before).await?;
+    let delivered = if let Some(revision) = row.mfa_policy_revision.as_deref() {
+        let context = (db.clone(), row.clone());
+        let result = super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
+            let (db, row) = c;
+            super::approved_sign_in_policy::fence(db, row.approved_user_id.as_deref().ok_or(AppError::AgentKeyLoginDenied)?, row.mfa_policy_revision.as_deref(), tx).await?;
+            claim_delivery(db, row, Some(tx)).await
+        })).await;
+        if matches!(result, Err(AppError::AuthDeviceCodeDenied)) {
+            super::approved_sign_in_policy::deny_undelivered(db, COLLECTION_NAME, &row.id, revision).await?;
+            return Err(AppError::AgentKeyLoginDenied);
+        }
+        result?
+    } else {
+        claim_delivery(db, &row, None).await?
+    };
     let delivered = match delivered {
         Some(delivered) => delivered,
         None => return Err(current_decision_error(db, &row.id).await?),
@@ -805,12 +890,12 @@ async fn prepare_delivery(
     encryption: &EncryptionKeys,
     row: &AgentKeyLoginRequest,
 ) -> AppResult<Delivery> {
-    prepare_credential_delivery(
+    let credential = super::agent_login_record_service::decrypt(encryption, row).await?;
+    prepare_decoded_credential_delivery(
         db,
-        encryption,
         row.credential_id.as_deref(),
         row.approved_user_id.as_deref(),
-        row.delivery_credential_encrypted.as_deref(),
+        credential,
         row.key_was_created || row.key_created_by_approval,
     )
     .await
@@ -822,6 +907,33 @@ pub async fn prepare_credential_delivery(
     credential_id: Option<&str>,
     approved_user_id: Option<&str>,
     encrypted: Option<&[u8]>,
+    key_was_created: bool,
+) -> AppResult<Delivery> {
+    let plaintext = Zeroizing::new(
+        encryption
+            .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
+            .await?,
+    );
+    let credential = Zeroizing::new(
+        std::str::from_utf8(&plaintext)
+            .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?
+            .to_owned(),
+    );
+    prepare_decoded_credential_delivery(
+        db,
+        credential_id,
+        approved_user_id,
+        credential,
+        key_was_created,
+    )
+    .await
+}
+
+async fn prepare_decoded_credential_delivery(
+    db: &Database,
+    credential_id: Option<&str>,
+    approved_user_id: Option<&str>,
+    credential: Zeroizing<String>,
     key_was_created: bool,
 ) -> AppResult<Delivery> {
     let id = credential_id.ok_or(AppError::AgentKeyCredentialNotFound)?;
@@ -836,16 +948,11 @@ pub async fn prepare_credential_delivery(
         &child.api_key_id,
     )
     .await?;
-    credentials::credential_expiry(parent.expires_at, child.expires_at)?;
-    let plaintext = Zeroizing::new(
-        encryption
-            .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
-            .await?,
-    );
-    let credential = Zeroizing::new(
-        String::from_utf8(plaintext.to_vec())
-            .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?,
-    );
+    credentials::validate_stored_credential_expiry(
+        parent.expires_at,
+        child.expires_at,
+        Utc::now(),
+    )?;
     let api_key = key_summary(db, &parent, key_was_created).await?;
     Ok(Delivery {
         credential,
@@ -872,7 +979,7 @@ async fn expire(db: &Database, row: &AgentKeyLoginRequest) -> AppResult<()> {
     // win the same row or leave its credential to this durable cleanup marker.
     let current = collection.find_one_and_update(
         doc! {"_id": &row.id, "status": {"$in": ["pending", "approved", "expired"]}, "expires_at": {"$lte": bson::DateTime::from_chrono(Utc::now())}},
-        doc! {"$set": {"status": "expired"}, "$unset": {"delivery_credential_encrypted": ""}},
+        doc! {"$set": {"status": "expired"}, "$unset": {"delivery_credential_encrypted": "", "delivery_context_version": ""}},
     ).return_document(ReturnDocument::After).await?;
     if let Some(current) = current {
         cleanup(db, &current).await?;

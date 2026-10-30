@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { Check, Loader2, MessageSquareText, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,7 +42,7 @@ export function InputCard({
     const submitted = block.status === "submitted";
     return (
       <section
-        className={`rounded-lg border p-4 ${
+        className={`${STATUS_CARD_MAX_W} rounded-lg border p-4 ${
           resolved
             ? "border-success/30 bg-success/[0.06]"
             : submitted
@@ -78,7 +79,7 @@ export function InputCard({
   const busy = pending !== null;
   const normalizedText = freeText.trim();
   return (
-    <section className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+    <section className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-lg border border-border bg-card shadow-sm`}>
       <div className="flex items-start gap-3 border-b border-border px-4 py-3.5">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-nyx-secondary-400/30 bg-nyx-secondary-400/10">
           <MessageSquareText className="h-4 w-4 text-nyx-secondary-400" />

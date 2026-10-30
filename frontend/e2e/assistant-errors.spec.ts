@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { openAssistant, sendMessage } from "./helpers";
+import { composerInput, openAssistant, sendMessage } from "./helpers";
 
-test("the latest failed reply appears above the transcript with its durable trace", async ({ page }) => {
+test("the latest failed reply is dismissable above the composer with its durable trace", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await page.evaluate(() => {
     const original = globalThis.__nyxidAssistantHttpMock;
@@ -25,8 +25,9 @@ test("the latest failed reply appears above the transcript with its durable trac
   const notice = page.getByRole("alert").filter({ hasText: "The assistant stopped responding. Check what it already did before asking it to continue." });
   await expect(notice).toBeVisible();
   await expect(notice).toContainText("Trace ID: 9ad6d0fa-bb8f-489e-8fdd-f8e34960921b");
-  expect((await notice.boundingBox())!.y).toBeLessThan(150);
-  // Keep retry beside the reply, with just one visible failure message at the top.
+  await expect(page.locator("[data-composer-dock]").getByRole("alert")).toContainText("Trace ID:");
+  expect((await notice.boundingBox())!.y + (await notice.boundingBox())!.height).toBeLessThanOrEqual((await composerInput(page).boundingBox())!.y);
+  // Keep retry beside the reply, with just one visible docked failure message.
   await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
   await expect(page.getByText("The assistant stopped responding. Check what it already did before asking it to continue.", { exact: false })).toHaveCount(1);
   await page.evaluate(() => {
@@ -50,8 +51,10 @@ test("the latest failed reply appears above the transcript with its durable trac
   await expect(retryToast).not.toContainText("Trace ID:");
   const retryNotice = page.getByRole("alert").filter({ hasText: "Trace ID: e48e2e01-6c09-4bb7-b5d2-2ab023038dea" });
   await expect(retryNotice).toBeVisible();
-  expect((await retryNotice.boundingBox())!.y).toBeLessThan(150);
+  await expect(page.locator("[data-composer-dock]").getByRole("alert")).toContainText("e48e2e01");
   await expect(page.getByText("Trace ID: e48e2e01-6c09-4bb7-b5d2-2ab023038dea", { exact: false })).toHaveCount(1);
+  await retryNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(retryNotice).toHaveCount(0);
 });
 
 for (const mobile of [false, true]) {
@@ -87,7 +90,7 @@ for (const mobile of [false, true]) {
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(mobile ? 390 : 1280);
     // A rejected send remains editable and does not silently retry itself.
-    await expect(page.locator("textarea")).toHaveValue("Check my services");
+    await expect(composerInput(page)).toHaveText("Check my services");
     // A successful retry clears the old inline failure.
     await sendMessage(page, "Check my services");
     await expect(page.getByText("Your connected services are ready.", { exact: false })).toBeVisible();
@@ -96,18 +99,22 @@ for (const mobile of [false, true]) {
 }
 
 test("an interrupted first reply keeps its trace in the adopted chat", async ({ page }) => {
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await openAssistant(page, { faults: { nyxagentEnabled: true, progressStallMs: 4000 } });
   await page.evaluate(() => {
     const original = globalThis.__nyxidAssistantHttpMock;
     globalThis.__nyxidAssistantHttpMock = async (request) => {
       const response = await original?.(request);
       if (response?.ok && request.endpoint.endsWith("/turns")) {
-        const wire = await response.text();
-        const first = `${wire.split("\n\n")[0]}\n\n`;
+        const reader = response.body!.getReader();
+        const first = await reader.read();
+        await reader.cancel();
         return new Response(new ReadableStream({
-          start(controller) { controller.enqueue(new TextEncoder().encode(first)); },
-          pull(controller) { controller.error(new TypeError("network error")); },
-        }), { headers: { "X-NyxID-Trace-Id": "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b" } });
+          start(controller) { controller.enqueue(first.value); },
+          async pull(controller) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            controller.error(new TypeError("network error"));
+          },
+        }), { headers: { ...Object.fromEntries(response.headers), "X-NyxID-Trace-Id": "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b" } });
       }
       return response;
     };
@@ -119,5 +126,5 @@ test("an interrupted first reply keeps its trace in the adopted chat", async ({ 
   await expect(toast).toContainText("NyxBot may still be working");
   await expect(toast).not.toContainText("Trace ID:");
   await expect(page.getByRole("alert").filter({ hasText: "Trace ID: 9ad6d0fa-bb8f-489e-8fdd-f8e34960921b" })).toBeVisible();
-  await expect(page.locator("textarea")).toHaveValue("");
+  await expect(composerInput(page)).toHaveText("");
 });

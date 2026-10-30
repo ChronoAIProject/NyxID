@@ -28,6 +28,7 @@ vi.mock("@/hooks/use-channel-bots", () => ({
 const at = "2026-09-28T00:00:00Z";
 let agent: Record<string, unknown>;
 let memory: { id: string; text: string; created_at: string; updated_at: string }[];
+let readinessReads: number;
 let writes: { method: string; endpoint: string; body: unknown }[];
 let client: QueryClient;
 let requestMode: "denied" | "routed_to_nyxbot";
@@ -83,6 +84,7 @@ beforeEach(() => {
     return new Response(JSON.stringify(fixtures[path]));
   }));
   writes = [];
+  readinessReads = 0;
   requestMode = "denied";
   agent = agentRow({});
   memory = [
@@ -94,6 +96,10 @@ beforeEach(() => {
     const body = init.body ? (JSON.parse(String(init.body)) as unknown) : null;
     if (method !== "GET") writes.push({ method, endpoint, body });
     const id = String(agent.id);
+    if (endpoint === `/assistant/nyxagent/agents/${id}/guest-readiness`) {
+      readinessReads++;
+      return new Response(JSON.stringify({ status: "not_ready", fix: "Send one message to this assistant yourself." }));
+    }
     if (endpoint === `/assistant/nyxagent/agents/${id}/memory/n1` && method === "DELETE") {
       memory = memory.filter((note) => note.id !== "n1");
       return new Response(null, { status: 204 });
@@ -594,4 +600,29 @@ it("hides the agent model selector without the internal model-controls flag", as
   renderSheet();
   const profile = await screen.findByRole("form", { name: "Profile" });
   expect(within(profile).queryByRole("combobox", { name: "Agent model" })).not.toBeInTheDocument();
+});
+
+it("saves the optional channel progress reply without changing grants or prompt", async () => {
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const profile = await within(sheet).findByRole("form", { name: "Profile" });
+  const progress = within(profile).getByRole("switch", { name: "Channel progress reply" });
+  expect(progress).not.toBeChecked();
+  await user.click(progress);
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(writes).toContainEqual({
+    method: "PATCH",
+    endpoint: "/assistant/nyxagent/agents/agent-researcher",
+    body: { channel_checking_notice: true },
+  }));
+  await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save" })).toBeDisabled());
+});
+
+it("fetches visitor readiness only in the open owner Grants settings", async () => {
+  renderSheet({ open: false });
+  expect(readinessReads).toBe(0);
+  cleanup();
+  renderSheet({ tab: "grants" });
+  expect(await screen.findByText("Send one message to this assistant yourself.")).toBeVisible();
+  expect(readinessReads).toBe(1);
 });

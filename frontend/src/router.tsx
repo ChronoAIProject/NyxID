@@ -15,6 +15,7 @@ import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
+import { captureUnexpectedNyxbotError } from "@/lib/assistant/error-telemetry";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
 import {
   channelBotSetupRewrite,
@@ -182,7 +183,7 @@ const authLayout = createRoute({
         window.location.assign(trusted);
         return;
       }
-      throw redirect({ to: "/dashboard" });
+      throw redirect({ to: "/assistant" });
     }
   },
   component: AuthLayout,
@@ -417,6 +418,8 @@ const standaloneAuthBeforeLoad = async ({
 
 const assistantRoute = createRoute({
   path: "/assistant",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant"),
   getParentRoute: () => rootRoute,
   // Shared with AssistantPage so the router and the page agree on what
   // `?draft` means; a param dropped here makes the optimistic "New chat"
@@ -428,6 +431,8 @@ const assistantRoute = createRoute({
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/plugins"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/plugins"),
   getParentRoute: () => rootRoute,
   validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
@@ -436,6 +441,8 @@ const assistantPluginsRoute = createRoute({
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/approvals"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/approvals"),
   getParentRoute: () => rootRoute,
   validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
@@ -458,14 +465,13 @@ const dashboardLayout = createRoute({
     }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
-      // Preserve the deep link (e.g. `/orgs/join/<nonce>`) so sign-in can
+      // Preserve the requested route (e.g. `/dashboard` or `/orgs/join/<nonce>`) so sign-in can
       // resume it. `onLoginSubmit` in auth-flow.tsx and the backend
       // social-login `return_to` cookie both accept an absolute URL on
-      // this origin. For plain `/dashboard` there's nothing useful to
-      // preserve, so fall through to the bare redirect.
+      // this origin. Only the root uses the default post-login destination.
       preserveTelegramClaimForLogin();
       const returnPath = `${location.pathname}${location.searchStr}`;
-      if (returnPath !== "/" && returnPath !== "/dashboard") {
+      if (returnPath !== "/") {
         const returnTo = `${window.location.origin}${returnPath}`;
         window.location.assign(
           `/login?return_to=${encodeURIComponent(returnTo)}`,
@@ -490,7 +496,7 @@ const landingRoute = createRoute({
     }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
-      throw redirect({ to: "/dashboard" });
+      throw redirect({ to: "/assistant" });
     }
   },
   component: LandingPage,
@@ -717,6 +723,8 @@ const automationsRoute = createRoute({
 
 const assistantAutomationsRoute = createRoute({
   path: "/assistant/automations",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/automations"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/automations"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: withAccountPanelSearch(parseAutomationSearch),
@@ -725,6 +733,8 @@ const assistantAutomationsRoute = createRoute({
 
 const assistantMachinesRoute = createRoute({
   path: "/assistant/machines",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: withAccountPanelSearch(parseMachinesSearch),
@@ -790,6 +800,8 @@ const nodesRoute = createRoute({
 
 const machineDesktopRoute = createRoute({
   path: "/assistant/machines/$nodeId/desktop",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/$nodeId/desktop"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/$nodeId/desktop"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: MachineDesktopPage,
@@ -798,6 +810,8 @@ const machineDesktopRoute = createRoute({
 
 const machineSetupRoute = createRoute({
   path: "/assistant/machines/new",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/new"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/new"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-setup" />,
@@ -805,6 +819,8 @@ const machineSetupRoute = createRoute({
 });
 const machinePairRoute = createRoute({
   path: "/assistant/machines/pair",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/pair"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/pair"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-pair" />,
@@ -1110,7 +1126,7 @@ function usagePageSearch(search: Record<string, unknown>): Partial<
     "sort" | "metric" | "page" | "per_page"
   >
 > & {
-  tab?: "dashboard" | "list";
+  tab?: "dashboard" | "list" | "nyxbot";
   sample?: "overview" | "operations" | "explorer";
   mock?: string;
 } {
@@ -1120,7 +1136,9 @@ function usagePageSearch(search: Record<string, unknown>): Partial<
     metric,
     page,
     per_page,
-    tab: search.tab === "list" ? ("list" as const) : ("dashboard" as const),
+    tab: search.tab === "nyxbot"
+      ? ("nyxbot" as const)
+      : search.tab === "list" ? ("list" as const) : ("dashboard" as const),
     sample:
       import.meta.env.DEV &&
       import.meta.env.MODE === "test" &&
@@ -1136,6 +1154,10 @@ const adminUsageRoute = createRoute({
   component: AdminUsagePage,
   validateSearch: usagePageSearch,
   beforeLoad: ({ search, location }) => {
+    const { user, isLoading } = useAuthStore.getState();
+    if (!isLoading && search.tab === "nyxbot" && !canReadAdminUsage(user)) {
+      throw redirect({ to: "/admin/usage", search: { ...search, tab: "dashboard" }, replace: true });
+    }
     const params = new URLSearchParams(location.searchStr);
     if (
       ["period", "from", "to", "user", "service"].some((key) => params.has(key))

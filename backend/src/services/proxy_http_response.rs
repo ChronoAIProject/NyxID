@@ -35,7 +35,17 @@ pub(crate) struct HttpResponseContext {
     pub exchange_diagnostics: ProxyExchangeDiagnostics,
 }
 
-pub(crate) async fn relay_response(
+/// Construct the response relay behind a heap boundary so dispatch callers do
+/// not embed its streaming and settlement state in their own poll frames.
+pub(crate) fn relay_response<'a>(
+    state: &'a AppState,
+    context: HttpResponseContext,
+    downstream_response: reqwest::Response,
+) -> futures::future::BoxFuture<'a, AppResult<Response>> {
+    Box::pin(relay_response_inner(state, context, downstream_response))
+}
+
+async fn relay_response_inner(
     state: &AppState,
     context: HttpResponseContext,
     downstream_response: reqwest::Response,
@@ -553,9 +563,11 @@ pub(crate) async fn relay_response(
             proven_nyxagent_refusal(nyxagent_admission, status.as_u16(), &response_body);
         if rejected_admission {
             // Returning the refusal admits a retry. Its funding must be free first.
-            if let Err(error) = state
-                .billing
-                .settle(
+            // Poll funding separately from the deep proxy stack, and await its
+            // durable release before allowing the provider retry.
+            let billing = state.billing.clone();
+            let settlement = tokio::spawn(async move {
+                Box::pin(billing.settle(
                     &metered,
                     PlatformUsage::default(),
                     resale.map(|mut usage| {
@@ -563,9 +575,17 @@ pub(crate) async fn relay_response(
                         usage
                     }),
                     model,
-                )
+                ))
                 .await
-            {
+            })
+            .await;
+            let settlement = match settlement {
+                Ok(result) => result,
+                Err(_) => Err(AppError::Internal(
+                    "Assistant admission funding release failed".into(),
+                )),
+            };
+            if let Err(error) = settlement {
                 tracing::error!(
                     code = error.error_code(),
                     "Assistant admission funding release failed"

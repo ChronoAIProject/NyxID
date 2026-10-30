@@ -40,6 +40,13 @@ async fn service_pool_operation_scope_checks_translated_backup_on_every_entry() 
                 ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
             )
             .await;
+
+            crate::test_utils::set_test_approval_preference(
+                &fixture.state.db,
+                &fixture.auth.user_id.to_string(),
+                false,
+            )
+            .await;
             // The public pool route is NOT the Anthropic member operation.
             restrict(
                 &mut fixture,

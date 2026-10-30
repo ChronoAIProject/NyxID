@@ -100,6 +100,14 @@ fn message_text(message: &Value, kind: &str) -> Option<String> {
 }
 
 fn parse_message(message: &Value, contacts: &Value) -> Option<InboundMessage> {
+    // Group IDs and participant IDs are different destinations. The relay has
+    // no group-send contract: never reinterpret a group message as a private DM,
+    // including during native gateway rollback. Receipt parsing stays separate.
+    if message.get("group_id").is_some_and(|id| !id.is_null())
+        || message["recipient_type"] == "group"
+    {
+        return None;
+    }
     let kind = message["type"].as_str()?;
     // Reactions and protocol notifications should not start agent conversations.
     if !matches!(
@@ -161,6 +169,8 @@ fn parse_message(message: &Value, contacts: &Value) -> Option<InboundMessage> {
         .and_then(|contact| contact["profile"]["name"].as_str())
         .map(String::from);
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: message_id.to_string(),
         conversation_id: sender.to_string(),
         conversation_type: "private".to_string(),
@@ -1161,6 +1171,30 @@ mod tests {
             "status": "pending_webhook", "is_active": true,
             "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
         }).unwrap()
+    }
+
+    #[test]
+    fn group_message_never_becomes_a_participant_dm_after_rollback() {
+        let private = serde_json::json!({"id":"wamid.group", "from":"15551234567", "type":"text", "text":{"body":"private"}});
+        assert_eq!(
+            parse_message(&private, &Value::Null)
+                .unwrap()
+                .conversation_id,
+            "15551234567"
+        );
+        for group in [
+            json!({"group_id":"120363group"}),
+            json!({"group_id":"123456"}),
+            json!({"group_id":""}),
+            json!({"recipient_type":"group"}),
+        ] {
+            let mut message = private.clone();
+            message
+                .as_object_mut()
+                .unwrap()
+                .extend(group.as_object().unwrap().clone());
+            assert!(parse_message(&message, &Value::Null).is_none());
+        }
     }
 
     fn secrets() -> PlatformVerifySecrets {

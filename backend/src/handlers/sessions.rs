@@ -23,6 +23,10 @@ pub struct SessionItem {
     pub user_agent: Option<String>,
     pub created_at: String,
     pub expires_at: String,
+    /// Explicit alias for the fixed deadline; expires_at is kept for old clients.
+    pub session_expires_at: String,
+    /// Latest unrevoked refresh token's rolling deadline, if one exists.
+    pub refresh_expires_at: Option<String>,
     /// True for exactly one row — the session whose access token authorized
     /// this request. Lets the UI mark the "you are here" row so users know
     /// which session they're about to revoke. Always false for API-key /
@@ -50,21 +54,31 @@ pub async fn list_sessions(
     let sessions: Vec<Session> = state
         .db
         .collection::<Session>(SESSIONS)
-        .find(doc! {
+        .find(crate::services::session_authority::authenticated(doc! {
             "user_id": &user_id,
             "revoked": false,
             "expires_at": { "$gt": now },
-        })
+        }))
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
         .await?;
 
+    let refresh_expiries = Box::pin(token_service::session_refresh_expiries(
+        &state.db,
+        &user_id,
+        &sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+    ))
+    .await?;
     let items: Vec<SessionItem> = sessions
         .into_iter()
         .map(|s| {
             let is_current = current_session_id.as_deref().is_some_and(|cur| cur == s.id);
             SessionItem {
+                refresh_expires_at: refresh_expiries
+                    .get(&s.id)
+                    .map(|expiry| expiry.to_rfc3339()),
+                session_expires_at: s.expires_at.to_rfc3339(),
                 id: s.id,
                 ip_address: s.ip_address,
                 user_agent: s.user_agent,
@@ -136,6 +150,8 @@ mod tests {
             user_agent: Some("Mozilla/5.0".to_string()),
             created_at: "2026-01-01T00:00:00+00:00".to_string(),
             expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+            session_expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+            refresh_expires_at: None,
             is_current: true,
         };
         let json = serde_json::to_value(&item).unwrap();
@@ -155,6 +171,8 @@ mod tests {
             user_agent: None,
             created_at: "2026-01-01T00:00:00+00:00".to_string(),
             expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+            session_expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+            refresh_expires_at: None,
             is_current: false,
         };
         let json = serde_json::to_value(&item).unwrap();
@@ -174,6 +192,8 @@ mod tests {
                 user_agent: None,
                 created_at: "2026-01-01T00:00:00+00:00".to_string(),
                 expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+                session_expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+                refresh_expires_at: None,
                 is_current: false,
             },
             SessionItem {
@@ -182,6 +202,8 @@ mod tests {
                 user_agent: Some("curl/8.0".to_string()),
                 created_at: "2026-01-02T00:00:00+00:00".to_string(),
                 expires_at: "2026-01-09T00:00:00+00:00".to_string(),
+                session_expires_at: "2026-01-09T00:00:00+00:00".to_string(),
+                refresh_expires_at: None,
                 is_current: true,
             },
         ];

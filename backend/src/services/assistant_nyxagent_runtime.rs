@@ -135,7 +135,7 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
         let permit = self
             .state
             .direct_chat_limiter
-            .try_acquire_pool("assistant_channel", &user_id, 2)
+            .try_acquire_pool("assistant_channel", &user_id, team::CHANNEL_TURNS_PER_OWNER)
             .await?
             .ok_or(AppError::AssistantTurnActive)?;
         let (sender, _) = broadcast::channel(256);
@@ -150,6 +150,7 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
             )),
             permit,
             Events {
+                checkpoint: None,
                 sender,
                 cursor: 0,
                 reset_notified: false,
@@ -181,6 +182,8 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
 }
 
 pub(crate) struct Events {
+    pub(crate) checkpoint:
+        Option<tokio::sync::watch::Sender<crate::models::assistant_conversation::StreamReply>>,
     pub(crate) sender: broadcast::Sender<Value>,
     pub(crate) cursor: u64,
     pub(crate) reset_notified: bool,
@@ -190,6 +193,10 @@ impl Events {
         self.cursor += 1;
         data["event"] = json!(event);
         data["cursor"] = json!(self.cursor);
+        if let Some(checkpoint) = &self.checkpoint {
+            checkpoint
+                .send_modify(|reply| super::assistant_stream_checkpoint::observe(reply, &data));
+        }
         let _ = self.sender.send(data);
     }
     pub(crate) fn notice(&mut self) {
@@ -439,8 +446,8 @@ pub(crate) fn sanitize_upstream_request_id(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
-/// What the agent's other threads are working on right now, so it neither
-/// redoes that work nor starts it twice. Lookup failures only omit it.
+/// Question excerpts for discovery only, never execution evidence.
+/// Lookup failures only omit this optional context.
 async fn in_progress_note(
     state: &AppState,
     row: &AssistantConversation,
@@ -457,19 +464,30 @@ async fn in_progress_note(
         .as_ref()
         .and_then(|turn| turn.question_key.as_deref());
     let mut note = String::from(
-        "\n\nYour other threads are working on these right now; do not start the same work \
-        again (if you are asked the same thing, say it is in progress there):",
+        "\n\nOther-thread question excerpts for duplicate-work discovery only (not execution evidence; \
+        consult nyxid__task_status before reporting progress, and say unknown without evidence):",
     );
-    for (title, question, key) in others {
+    for other in others {
         note.push_str(&format!(
             "\n- \"{}\": \"{}\"{}",
-            excerpt(&title, 60).replace('"', "'"),
-            excerpt(question.as_deref().unwrap_or("(working)"), 200).replace('"', "'"),
-            if this.is_some() && key.as_deref() == this {
+            excerpt(&other.title, 60).replace('"', "'"),
+            excerpt(
+                other
+                    .question
+                    .as_deref()
+                    .unwrap_or("(question unavailable)"),
+                200
+            )
+            .replace('"', "'"),
+            if this.is_some() && other.question_key.as_deref() == this {
                 " (the same question as this one)"
             } else {
                 ""
             }
+        ));
+        note.push_str(&format!(
+            " (thread_id {}, turn_id {})",
+            other.thread_id, other.turn_id
         ));
     }
     note
@@ -486,15 +504,20 @@ pub(crate) async fn turn_notes(
     previous_user_message: Option<DateTime<Utc>>,
 ) -> String {
     let mut notes = engine::channel_note(row);
+    notes.push_str(
+        &engine::additional_channel_length_note(&state.db, row)
+            .await
+            .unwrap_or_default(),
+    );
     if let Some(turn) = row.active_turn.as_ref() {
         if !row.guest_turn && turn.origin != TurnOrigin::Event && !turn.events.is_empty() {
             notes.push_str(
                 "\n\nNyxID events since your previous turn (authored by NyxID; only a quoted \
-                owner message is a request from the user):",
+                owner message is a request from the user; continuation lines are indented):",
             );
             for event in &turn.events {
                 notes.push_str("\n- ");
-                notes.push_str(&excerpt(&event.text, engine::event_text_limit(event)));
+                notes.push_str(&engine::event_notice_text(event));
             }
         }
         if let Some(note) = turn.note.as_deref() {
@@ -685,7 +708,7 @@ pub(crate) async fn run_owner_turn(
     text: String,
     mut credential: AssistantCredential,
     policy: Option<BillingRoutePolicy>,
-    permit: DirectChatPermit,
+    mut permit: DirectChatPermit,
     mut events: Events,
 ) -> Option<OwnerTurnSettlement> {
     if row
@@ -710,6 +733,15 @@ pub(crate) async fn run_owner_turn(
         .clone();
     let message_id = Uuid::new_v4().to_string();
     let block_id = format!("{message_id}-text");
+    let (checkpoint, _checkpoint_task) = super::assistant_stream_checkpoint::start(
+        state.db.clone(),
+        &row.id,
+        &row.user_id,
+        &turn_id,
+        message_id.clone(),
+        block_id.clone(),
+    );
+    events.checkpoint = Some(checkpoint);
     tracing::info!(turn_id = %turn_id,
         worker_instance = %super::assistant_engine_worker::instance().id,
         worker_hostname = super::assistant_engine_worker::instance().hostname.as_deref(),
@@ -742,10 +774,27 @@ pub(crate) async fn run_owner_turn(
             }
         }
     }));
-    events.emit(
-        "turn.status",
-        json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running"}),
-    );
+    let started_at = row.active_turn.as_ref().expect("claimed turn").started_at;
+    let queue_deadline = permit.is_queued().then(|| {
+        let since = Utc::now();
+        let wait = chrono::Duration::seconds(engine::TURN_QUEUE_WAIT_SECS as i64);
+        (since, since + wait)
+    });
+    if let Some((since, deadline)) = queue_deadline {
+        // `waiting` with the capacity fields keeps older clients' waiting display.
+        events.emit(
+            "turn.status",
+            json!({"conversation_id": row.id, "turn_id": turn_id, "status": "waiting",
+            "started_at": started_at, "queued": true, "waiting_for_capacity": true,
+            "capacity_wait_started_at": since, "capacity_wait_deadline": deadline}),
+        );
+    } else {
+        events.emit(
+            "turn.status",
+            json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running",
+                "started_at": started_at}),
+        );
+    }
     events.emit(
         "message.started",
         json!({"message_id": message_id, "role": "assistant"}),
@@ -759,9 +808,31 @@ pub(crate) async fn run_owner_turn(
             "block": {"type": "text", "block_id": block_id, "text": ""},
         }),
     );
+    let queued = match queue_deadline {
+        Some((since, deadline)) => {
+            let queued =
+                wait_for_running_slot(&state, &row, &turn_id, &mut permit, since, deadline).await;
+            if queued.is_ok() {
+                events.emit(
+                    "turn.status",
+                    json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running",
+                    "waiting_for_capacity": false}),
+                );
+            }
+            queued
+        }
+        None => Ok(()),
+    };
     let mut partial = String::new();
     let mut instruction_context = None;
-    let mut result = crate::services::assistant_engine_worker::contain(&row, async {
+    let mut result = match queued {
+        Err(error) => TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(error),
+        },
+        Ok(()) => crate::services::assistant_engine_worker::contain(&row, async {
         // Execution includes upload planning and upstream streaming. Keep that
         // state off the caller's stack when this task is created by a tool.
         let mut execution = Box::pin(async {
@@ -797,7 +868,8 @@ pub(crate) async fn run_owner_turn(
         session_id: None,
         response_id: None,
         error: Some(error),
-    });
+    }),
+    };
     if result
         .error
         .as_ref()
@@ -808,7 +880,7 @@ pub(crate) async fn run_owner_turn(
         if row
             .active_turn
             .as_ref()
-            .is_none_or(|turn| turn.platform_origin.is_none())
+            .is_none_or(|turn| turn.platform_origin.is_none() && turn.invocation_id.is_none())
         {
             let _ = crate::services::machine_service::cancel_conversation(
                 &state,
@@ -856,6 +928,96 @@ pub(crate) async fn run_owner_turn(
     }
 }
 
+/// Bound on the queue's own writes: a stalled write must not hold capacity.
+const QUEUE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A turn admitted while its owner's running replies were at their limit
+/// waits here, inside its claimed turn, so Stop, deletion and orphan
+/// recovery already apply to it, until one of them finishes. On failure the
+/// permit's capacity is given back at once, before the turn settles.
+pub(crate) async fn wait_for_running_slot(
+    state: &AppState,
+    row: &AssistantConversation,
+    turn_id: &str,
+    permit: &mut DirectChatPermit,
+    since: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+) -> Result<(), TurnError> {
+    let marked = engine::mark_queued(&state.db, row, turn_id, since, deadline);
+    if let Err(error) = wait_queued(state, row, turn_id, permit, deadline, marked).await {
+        permit.release();
+        return Err(error);
+    }
+    // Display only, for the moments before the engine request starts, which
+    // clears the markers durably; the lease set on queuing covers execution.
+    let (db, row, turn_id) = (state.db.clone(), row.clone(), turn_id.to_owned());
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(
+            QUEUE_WRITE_TIMEOUT,
+            engine::mark_dequeued(&db, &row, &turn_id),
+        )
+        .await;
+    });
+    Ok(())
+}
+
+/// The wait itself. `marked` records the queued state and lease; claims start
+/// only after it lands. Each claim runs on its own task, so Stop and the
+/// deadline stay observable while it is outstanding; dropping it releases any
+/// slot it later claims.
+pub(crate) async fn wait_queued(
+    state: &AppState,
+    row: &AssistantConversation,
+    turn_id: &str,
+    permit: &mut DirectChatPermit,
+    deadline: DateTime<Utc>,
+    marked: impl std::future::Future<Output = AppResult<bool>>,
+) -> Result<(), TurnError> {
+    let mut marked = std::pin::pin!(tokio::time::timeout(QUEUE_WRITE_TIMEOUT, marked));
+    let mut is_marked = false;
+    let mut claim: Option<crate::mw::rate_limit::SlotClaim> = None;
+    loop {
+        let remaining = (deadline - Utc::now()).to_std().unwrap_or_default();
+        tokio::select! {
+            () = permit.cancelled() => {
+                return Err(TurnError::internal("assistant_unavailable", "queue"));
+            }
+            error = watch_stop(state, row, turn_id) => return Err(error),
+            () = tokio::time::sleep(remaining) => {
+                return Err(TurnError::internal("queue_timeout", "queue"));
+            }
+            written = &mut marked, if !is_marked => match written {
+                Ok(Ok(true)) => is_marked = true,
+                Ok(Ok(false)) => return Err(TurnError::internal("cancelled", "stop")),
+                Ok(Err(_)) | Err(_) => {
+                    return Err(TurnError::internal("assistant_unavailable", "queue"));
+                }
+            },
+            claimed = async { claim.as_mut().expect("outstanding claim").await }, if claim.is_some() => {
+                claim = None;
+                match claimed {
+                    // A slot claimed after the deadline is released, not used.
+                    Ok(Ok(Some(slot))) if Utc::now() < deadline => {
+                        if permit.take_slot(slot) {
+                            return Ok(());
+                        }
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "Queued assistant turn could not check for a slot");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Queued assistant turn slot claim failed");
+                    }
+                }
+            }
+            () = tokio::time::sleep(crate::mw::rate_limit::DIRECT_CHAT_QUEUE_POLL), if is_marked && claim.is_none() => {
+                claim = permit.claim_slot();
+            }
+        }
+    }
+}
+
 async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str) -> TurnError {
     loop {
         match engine::stop_requested(&state.db, &row.user_id, &row.id, turn_id).await {
@@ -867,16 +1029,12 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
 }
 
 /// Typed proxy failures collapse to `assistant_unavailable`, except a billing
-/// refusal, which keeps its stable code so the client can offer a top-up.
+/// failure, which keeps its stable code and specific recovery guidance.
 pub(crate) fn proxy_turn_error(error: AppError) -> TurnError {
-    match error {
-        AppError::InsufficientCredits => TurnError::internal("insufficient_credits", "connect"),
-        AppError::WalletSuspended => TurnError::internal("wallet_suspended", "connect"),
-        AppError::PlanEntitlementRequired(_) => {
-            TurnError::internal("plan_entitlement_required", "connect")
-        }
-        _ => TurnError::internal("assistant_unavailable", "connect"),
-    }
+    TurnError::internal(
+        super::assistant_model_observer::refusal_code(&error).unwrap_or("assistant_unavailable"),
+        "connect",
+    )
 }
 
 /// Reads the NyxAgent `error.code` envelope, or NyxID's own flat envelope
@@ -887,9 +1045,9 @@ pub(crate) fn upstream_error_code(status: u16, envelope: &Value) -> &str {
         return code;
     }
     if status == 402
-        && let Some(
-            code @ ("insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"),
-        ) = envelope["error"].as_str()
+        && let Some(code) = envelope["error"]
+            .as_str()
+            .and_then(super::assistant_model_observer::billing_failure_code)
     {
         return code;
     }
@@ -975,8 +1133,11 @@ pub(crate) async fn execute_owner_turn(
         .await
         .map_err(|_| TurnError::internal("cancelled", "prepare"))?;
     }
+    let attempt = super::assistant_service_execution::begin_model_attempt(&state.db, row)
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     let mut tool_images = images::ToolImages::default();
-    let outcome = Box::pin(execute_turn_inner(
+    let mut outcome = Box::pin(execute_turn_inner(
         state,
         egress,
         authority,
@@ -991,6 +1152,36 @@ pub(crate) async fn execute_owner_turn(
         &mut tool_images,
     ))
     .await;
+    let model_refusal =
+        super::assistant_service_execution::finish_model_attempt(&state.db, &attempt)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+    // A current callback refusal can precede any reply. Cancellation in either
+    // result shape wins, and an unrelated pending action cannot mask a failure.
+    let cancelled = outcome
+        .as_ref()
+        .is_err_and(|error| error.code == "cancelled")
+        || outcome.as_ref().is_ok_and(|result| {
+            result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "cancelled")
+        });
+    if !cancelled
+        && (outcome.is_err() || outcome.as_ref().is_ok_and(|result| result.error.is_some()))
+        && let Some(summary) = model_refusal
+    {
+        let text = format!(
+            "Please review the confirmation card: {summary}. I’ll continue after you allow it."
+        );
+        *partial = text.clone();
+        outcome = Ok(TurnResult {
+            text,
+            session_id: None,
+            response_id: None,
+            error: None,
+        });
+    }
     if outcome.as_ref().is_err() || outcome.as_ref().is_ok_and(|r| r.error.is_some()) {
         tool_images.failed(state, row).await;
     }
@@ -1151,6 +1342,32 @@ async fn execute_turn_inner(
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
     tool_images: &mut images::ToolImages,
 ) -> Result<TurnResult, TurnError> {
+    let media_context = if row.active_turn.as_ref().is_some_and(|turn| {
+        turn.channel_event_id.is_some() || turn.events.iter().any(|e| !e.media_event_ids.is_empty())
+    }) {
+        Box::pin(crate::services::assistant_channel_media::ingest_and_bind(
+            state, row,
+        ))
+        .await
+        .map_err(|error| {
+            TurnError::internal(
+                if matches!(error, AppError::AssistantTurnRequired) {
+                    "cancelled"
+                } else {
+                    "assistant_unavailable"
+                },
+                "media",
+            )
+        })?
+    } else {
+        String::new()
+    };
+    let current_input = if media_context.is_empty() {
+        text.to_owned()
+    } else {
+        format!("{text}\n\n{media_context}")
+    };
+    let text = current_input.as_str();
     let turn = row.active_turn.as_ref().expect("claimed turn");
     let run_deadline = if let Some(run_id) = turn
         .trigger_run_id
@@ -1247,6 +1464,11 @@ async fn execute_turn_inner(
             }
             Err(_) => None,
         };
+    let _checking_notice = agent
+        .as_ref()
+        .filter(|agent| agent.channel_checking_notice)
+        .and_then(|_| egress.checking_notice(row))
+        .map(AbortOnDropHandle::new);
     decisions.push_str(&turn_notes(state, row, agent.as_ref(), previous).await);
     decisions.push_str(
         &crate::services::async_service_operation::input_context(
@@ -1272,12 +1494,23 @@ async fn execute_turn_inner(
     } else {
         ""
     };
+    let mut guidance = guidance.to_owned();
+    if let Some(agent) = agent.as_ref()
+        && crate::services::agent_skill_preload::enabled(agent, row.guest_turn)
+    {
+        let preloaded =
+            tokio::time::timeout(Duration::from_secs(30), egress.preload_skills(row, agent)).await;
+        guidance.push_str(&match preloaded {
+            Ok(Ok(content)) => content,
+            _ => "\nPreloaded skills are unavailable for this turn. Continue with available information or another authorized source; do not assume their contents.\n".into(),
+        });
+    }
     let prepared = crate::services::assistant_instruction_context::Prepared::with_guidance(
         state.audit_chain_hmac_key.as_ref().as_ref(),
         row,
         agent.as_ref(),
         &history,
-        guidance,
+        &guidance,
     )
     .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     *instruction_context = Some(prepared);

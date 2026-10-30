@@ -155,4 +155,24 @@ describe("DisplaySettings", () => {
     await user.click(screen.getByRole("button", { name: "Switch to dark theme to preview" }));
     expect(useThemeStore.getState().mode).toBe("dark");
   });
+
+  it("previews and saves chat colors for the edited theme independently", async () => {
+    const user = userEvent.setup();
+    render(<DisplaySettings />);
+    await user.click(within(screen.getByRole("radiogroup", { name: "Theme to edit" })).getByRole("radio", { name: "Dark" }));
+    fireEvent.change(screen.getByLabelText("Chat bubble background color"), { target: { value: "#303036" } });
+    fireEvent.change(screen.getByLabelText("Chat bubble text color"), { target: { value: "#ffffff" } });
+    const preview = within(screen.getByRole("region", { name: "Chat appearance preview" }));
+    expect(preview.getByText("Show me the services I have connected.")).toHaveStyle({ backgroundColor: "#303036", color: "#FFFFFF" });
+    expect(useThemeStore.getState().mode).toBe("light");
+    expect(useThemeStore.getState().customColors.light).toEqual({});
+    expect(JSON.parse(localStorage.getItem("nyxid.theme")!).state.customColors.dark).toEqual({
+      "chat-bubble": "#303036", "chat-bubble-foreground": "#FFFFFF",
+    });
+    fireEvent.change(screen.getByLabelText("Chat bubble text color"), { target: { value: "#303036" } });
+    expect(within(screen.getByRole("list", { name: "Contrast checks" })).getByText("1.0:1 (needs 4.5:1)")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reset dark colors" }));
+    expect(useThemeStore.getState().customColors.dark).toEqual({});
+    expect(preview.getByText("Show me the services I have connected.")).toHaveStyle({ backgroundColor: "#2C2C30", color: "#EFEFF1" });
+  });
 });

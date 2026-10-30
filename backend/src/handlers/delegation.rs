@@ -55,7 +55,7 @@ pub async fn get_operation_catalog(
         .await?
         .ok_or_else(invalid_catalog_authority)?;
 
-    if !grant_matches_token(&grant, &auth_user) {
+    if !grant_matches_token(&grant, &auth_user, &state.config) {
         return Err(invalid_catalog_authority());
     }
 
@@ -133,7 +133,11 @@ fn require_catalog_authority(auth_user: &AuthUser) -> AppResult<&str> {
 /// token whose claims have diverged from it is treated as invalid rather than
 /// reconciled. Missing actor/receiving client identity is also a rejection —
 /// a delegated token without both is never a valid catalog caller.
-fn grant_matches_token(grant: &CatalogDelegationGrant, auth_user: &AuthUser) -> bool {
+fn grant_matches_token(
+    grant: &CatalogDelegationGrant,
+    auth_user: &AuthUser,
+    config: &crate::config::AppConfig,
+) -> bool {
     let (Some(actor_client_id), Some(receiving_client_id)) = (
         auth_user.acting_client_id.as_deref(),
         auth_user.oauth_client_id.as_deref(),
@@ -145,7 +149,10 @@ fn grant_matches_token(grant: &CatalogDelegationGrant, auth_user: &AuthUser) -> 
         && grant.actor_client_id == actor_client_id
         && grant.receiving_client_id == receiving_client_id
         && grant.scope == auth_user.scope
-        && grant.resources == auth_user.resource_uris.clone().unwrap_or_default()
+        && config.resources_equal(
+            &grant.resources,
+            auth_user.resource_uris.as_deref().unwrap_or_default(),
+        )
         && grant.allow_all_services == auth_user.allow_all_services
         && grant.allowed_service_ids == auth_user.allowed_service_ids
         && grant.allow_all_nodes == auth_user.allow_all_nodes
@@ -190,6 +197,10 @@ pub async fn refresh_delegation_token(
         auth_user.oauth_client_id.as_deref(),
         &auth_user.scope,
         &crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(&auth_user),
+        auth_user
+            .token_jti
+            .as_deref()
+            .ok_or_else(|| AppError::Unauthorized("Delegated token identity is required".into()))?,
     )
     .await?;
 
@@ -202,7 +213,8 @@ pub async fn refresh_delegation_token(
             // Hash: raw UUID would be scrubbed to `[UUID_REDACTED]`.
             client_id: hash_short_id(acting_client_id),
         },
-    );
+    )
+    .await;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -446,6 +458,7 @@ mod tests {
                 status: NodeStatus::Online,
                 auth_token_hash: "scope-node-token-hash".to_string(),
                 signing_secret_encrypted: None,
+                signing_secret_context_version: None,
                 signing_secret_hash: "scope-node-signing-hash".to_string(),
                 last_heartbeat_at: Some(Utc::now()),
                 connected_at: Some(Utc::now()),
@@ -461,7 +474,17 @@ mod tests {
         let (node_tx, node_rx) = tokio::sync::mpsc::channel(8);
         crate::test_utils::register_test_node_connection(&state, TEST_NODE_ID, node_tx).await;
 
-        let source_token = jwt::generate_oauth_access_token(
+        let consent = crate::services::consent_service::grant_consent_with_services(
+            &db,
+            &user_id.to_string(),
+            &actor_client_id,
+            "openid",
+            Some(requested_service_ids.clone()),
+        )
+        .await
+        .expect("grant actual source OAuth authority");
+        let reference = crate::services::consent_service::protected_reference(&consent).unwrap();
+        let source_token = jwt::generate_oauth_access_token_with_consent(
             &state.jwt_keys,
             &state.config,
             &user_id,
@@ -477,6 +500,7 @@ mod tests {
                 allow_all_nodes: false,
             }),
             &actor_client_id,
+            Some(&reference),
         )
         .expect("mint full-router source token");
         let exchanged = token_exchange_service::exchange_token_with_authority(
@@ -1123,6 +1147,8 @@ mod tests {
 
     fn catalog_auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -1135,6 +1161,7 @@ mod tests {
             acting_client_id: Some(TEST_ACTOR.to_string()),
             oauth_client_id: Some(TEST_RECEIVER.to_string()),
             token_jti: Some(uuid::Uuid::new_v4().to_string()),
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: method,
             allow_all_services: false,
@@ -1603,6 +1630,8 @@ mod tests {
         let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)
             .expect("verify minted delegated token");
         AuthUser {
+            mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -1615,6 +1644,7 @@ mod tests {
             acting_client_id: claims.act.map(|actor| actor.sub),
             oauth_client_id: claims.client_id,
             token_jti: Some(claims.jti),
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::Delegated,
             allow_all_services: claims.allow_all_services.unwrap_or(true),
@@ -1802,7 +1832,17 @@ mod tests {
         .await
         .expect("seed per-request approval config");
 
-        let source_token = jwt::generate_oauth_access_token(
+        let consent = crate::services::consent_service::grant_consent_with_services(
+            &db,
+            &user_id.to_string(),
+            actor_client_id,
+            "openid",
+            Some(requested_service_ids.clone()),
+        )
+        .await
+        .expect("grant actual source OAuth authority");
+        let reference = crate::services::consent_service::protected_reference(&consent).unwrap();
+        let source_token = jwt::generate_oauth_access_token_with_consent(
             &state.jwt_keys,
             &state.config,
             &user_id,
@@ -1818,6 +1858,7 @@ mod tests {
                 allow_all_nodes: true,
             }),
             actor_client_id,
+            Some(&reference),
         )
         .expect("mint direct source token");
         let exchanged = token_exchange_service::exchange_token_with_authority(
@@ -2849,6 +2890,7 @@ mod tests {
                 status: NodeStatus::Online,
                 auth_token_hash: "out-of-scope-node-token-hash".to_string(),
                 signing_secret_encrypted: None,
+                signing_secret_context_version: None,
                 signing_secret_hash: "out-of-scope-node-signing-hash".to_string(),
                 last_heartbeat_at: Some(Utc::now()),
                 connected_at: Some(Utc::now()),
@@ -2994,6 +3036,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 id: credential_id.to_string(),
                 user_id: TEST_USER_ID.to_string(),
@@ -3477,6 +3520,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 id: credential_id.to_string(),
                 user_id: TEST_USER_ID.to_string(),
@@ -3643,6 +3687,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 id: "00000000-0000-4000-8000-000000000713".to_string(),
                 user_id: TEST_USER_ID.to_string(),
@@ -3817,7 +3862,7 @@ mod tests {
         let mut fixture = setup_full_router_fixture("exact_router_ac5_headers").await;
         let header = DefaultRequestHeader {
             name: "X-Test-Header".to_string(),
-            value: "alpha".to_string(),
+            value: "alpha".to_string().into(),
             overridable: false,
             sensitive: false,
         };
@@ -4779,9 +4824,28 @@ mod tests {
     }
 
     #[test]
+    fn domain_alias_catalog_grant_preserves_every_non_url_restriction() {
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        let mut auth = catalog_auth(AuthMethod::Delegated);
+        auth.resource_uris = Some(vec!["https://new.example/mcp".into()]);
+        let mut grant = matching_grant(&auth);
+        grant.resources = vec!["https://old.example/mcp".into()];
+        assert!(!grant_matches_token(&grant, &auth, &config));
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        assert!(grant_matches_token(&grant, &auth, &config));
+        grant.allow_all_nodes = !grant.allow_all_nodes;
+        assert!(!grant_matches_token(&grant, &auth, &config));
+    }
+
+    #[test]
     fn grant_agreeing_on_every_bound_field_is_accepted() {
         let auth = catalog_auth(AuthMethod::Delegated);
-        assert!(grant_matches_token(&matching_grant(&auth), &auth));
+        assert!(grant_matches_token(
+            &matching_grant(&auth),
+            &auth,
+            &crate::test_utils::test_app_config()
+        ));
     }
 
     #[test]
@@ -4835,7 +4899,7 @@ mod tests {
             let mut grant = matching_grant(&auth);
             mutate(&mut grant);
             assert!(
-                !grant_matches_token(&grant, &auth),
+                !grant_matches_token(&grant, &auth, &crate::test_utils::test_app_config()),
                 "drift in `{field}` was accepted; catalog authority must fail closed"
             );
         }
@@ -4854,7 +4918,7 @@ mod tests {
                 "oauth_client_id"
             };
             assert!(
-                !grant_matches_token(&grant, &auth),
+                !grant_matches_token(&grant, &auth, &crate::test_utils::test_app_config()),
                 "missing `{dropped}` must fail closed"
             );
         }

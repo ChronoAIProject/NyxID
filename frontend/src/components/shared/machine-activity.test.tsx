@@ -13,7 +13,10 @@ import { MachineActivity } from "./machine-activity";
 import { MachineSharingBadge } from "./machine-isolation";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
 import { api } from "@/lib/api-client";
-vi.mock("@/lib/api-client", () => ({ api: { get: vi.fn() } }));
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/api-client")>(),
+  api: { get: vi.fn() },
+}));
 const agent = "11111111-1111-4111-8111-111111111111";
 const page = {
   machine_name: "Work MacBook Air",
@@ -61,9 +64,9 @@ afterEach(() => {
   clients.splice(0).forEach((c) => c.clear());
   vi.clearAllMocks();
 });
-it("labels shared sessions independently of command isolation", () => {
+it("directs owners to each assignment rather than claiming all agents share", () => {
   render(<MachineSharingBadge />);
-  expect(screen.getByText("Shared workspace and browser")).toHaveAttribute(
+  expect(screen.getByText("Sharing set per agent")).toHaveAttribute(
     "title",
     expect.stringContaining("authenticated browser sessions"),
   );

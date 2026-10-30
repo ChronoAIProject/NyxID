@@ -1,15 +1,25 @@
+import { ChatDisplaySettings } from "../display/ChatDisplaySettings";
+import { approvalDeliveryWarning } from "./approvalDeliveryPolicy";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import {
+  Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Switch,
+  useWindowDimensions, View, type TextProps,
+} from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
-import { RootStackParamList } from "../../app/AppNavigator";
+import { ChevronRight } from "lucide-react-native";
+import type { WorkspaceScreenProps } from "../../app/navigationTypes";
 
 import { PrimaryButton } from "../../components/PrimaryButton";
+import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { OfflineBanner } from "../../components/OfflineBanner";
 import { TelegramLinkModal } from "../../components/TelegramLinkModal";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { useAuthSession } from "../auth/AuthSessionContext";
+import { useMobileConsent } from "../../lib/consent";
+import { analyticsConsentState } from "../../lib/analyticsConsentState";
+import { saveAnalyticsPermission, type AnalyticsPermission } from "../../lib/analyticsRelay";
+import { requestJson } from "../../lib/api/http";
 import { capture } from "../../lib/telemetry";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
@@ -20,10 +30,33 @@ import { activatePushAfterLogin } from "../../lib/notifications/pushNotification
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
-import { BOTTOM_NAV_CLEARANCE, radius, spacing, typeScale } from "../../theme/designTokens";
-import { useEffect, useMemo, useState } from "react";
+import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-type Props = NativeStackScreenProps<RootStackParamList, "AccountSettings">;
+type Props = WorkspaceScreenProps<"AccountSettings">;
+
+export function AccountSettingsTitle({
+  children,
+  tintColor,
+  allowFontScaling,
+  onLayout,
+}: Pick<TextProps, "allowFontScaling" | "onLayout"> & {
+  children: string;
+  tintColor?: string;
+}) {
+  return (
+    <Text
+      role="heading"
+      aria-level={1}
+      numberOfLines={1}
+      allowFontScaling={allowFontScaling}
+      onLayout={onLayout}
+      style={{ color: tintColor, fontFamily: fonts.displaySemi, fontSize: 18 }}
+    >
+      {children}
+    </Text>
+  );
+}
 
 // Push-register failure modes are surfaced as a tagged error so the
 // caller can branch on `reason` (e.g. iOS denial → Alert + Linking
@@ -80,7 +113,11 @@ function AccountRow({
   onPress?: () => void;
 }) {
   const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const { width, fontScale } = useWindowDimensions();
+  const styles = useMemo(
+    () => createStyles(colors, width, fontScale),
+    [colors, width, fontScale],
+  );
   const content = (
     <View style={[styles.accountRow, isLast && styles.accountRowLast]}>
       <Text style={styles.accountRowLabel}>{label}</Text>
@@ -137,13 +174,49 @@ function getDisplayNameValue(name?: string | null, provider?: string | null): st
   return "No display name provided";
 }
 
-export function AccountSettingsScreen({ navigation }: Props) {
+export function AccountSettingsScreen({ navigation, route }: Props) {
+  const scroll = useRef<ScrollView>(null);
+  const positions = useRef<Record<string, number>>({});
+  const section = route?.params?.section;
+  const scrollToSection = () => {
+    const y = section ? positions.current[section] : undefined;
+    if (y !== undefined) scroll.current?.scrollTo({ y, animated: false });
+  };
+  useEffect(() => {
+    const frame = requestAnimationFrame(scrollToSection);
+    return () => cancelAnimationFrame(frame);
+  }, [section]);
+  const sectionLayout = (name: string, y: number) => {
+    positions.current[name] = y;
+    if (section === name) scrollToSection();
+  };
   const { colors, mode, preference, setPreference } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const { width, fontScale } = useWindowDimensions();
+  const styles = useMemo(
+    () => createStyles(colors, width, fontScale),
+    [colors, width, fontScale],
+  );
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const [toast, setToast] = useState<ToastState | null>(null);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
+  const deviceConsent = useMobileConsent();
+  const analyticsPermission = useQuery({
+    queryKey: ["analytics-consent", deviceConsent.accountId],
+    enabled: Boolean(deviceConsent.accountId), staleTime: 0,
+    queryFn: async () => {
+      const accountId = deviceConsent.accountId!;
+      const permission = await requestJson<AnalyticsPermission>("/users/me/preferences/analytics", { expectedAccountId: accountId });
+      if (permission.account_id !== accountId) throw new Error("analytics_account_changed");
+      return permission;
+    },
+  });
+  const saveAnalytics = useMutation({
+    mutationFn: (enabled: boolean) => saveAnalyticsPermission(deviceConsent.accountId!, enabled, requestJson,
+      analyticsConsentState.getSnapshot, deviceConsent.setConsent),
+    onSuccess: () => { void analyticsPermission.refetch(); },
+    onError: () => setToast({ message: "Could not save account analytics permission. This device remains off; retry to withdraw across devices.", kind: "error" }),
+  });
   const { isConnected, recheckConnection } = useNetworkStatus();
 
   const {
@@ -173,6 +246,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
     queryKey: ["account", "notificationSettings"],
     queryFn: () => mobileApi.getNotificationSettings(),
   });
+
+  const selectedApprovalMode = notifSettings?.global_approval_mode
+    ?? (notifSettings?.approval_required ? "all" : "off");
 
   const notifMutation = useMutation({
     mutationFn: (payload: Parameters<typeof mobileApi.updateNotificationSettings>[0]) =>
@@ -300,9 +376,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
       );
       return;
     }
-    const willSuspendApproval = isLastChannel("push") && notifSettings?.approval_required;
-    const message = willSuspendApproval
-      ? "This is your only notification channel. Approval protection will be suspended until a channel is available, then resume automatically."
+    const willUseWebApproval = isLastChannel("push") && notifSettings?.approval_required;
+    const message = willUseWebApproval
+      ? approvalDeliveryWarning(notifSettings)
       : "You will no longer receive push notifications for approval requests.";
 
     Alert.alert("Disable Push Notifications", message, [
@@ -333,10 +409,10 @@ export function AccountSettingsScreen({ navigation }: Props) {
       );
       return;
     }
-    const willSuspendApproval = isLastChannel("telegram") && notifSettings?.approval_required;
+    const willUseWebApproval = isLastChannel("telegram") && notifSettings?.approval_required;
     const willDisconnect = true; // disabling always disconnects
-    const message = willSuspendApproval
-      ? "This is your only notification channel. Disabling it will disconnect Telegram and suspend approval protection until a channel is available."
+    const message = willUseWebApproval
+      ? `This disconnects Telegram. ${approvalDeliveryWarning(notifSettings)}`
       : "This will disconnect your Telegram account and stop all Telegram notifications.";
 
     Alert.alert("Disable Telegram", message, [
@@ -391,8 +467,8 @@ export function AccountSettingsScreen({ navigation }: Props) {
 
   const deleteAccountMutation = useMutation({
     mutationFn: () => mobileApi.deleteAccount(),
-    onSuccess: async () => {
-      showToast("Account deleted. You have been signed out.", "success");
+    onSuccess: async (result) => {
+      showToast(result.status === "complete" ? "Account erasure complete. You have been signed out." : "Account deletion accepted. Cleanup continues until verified. You have been signed out.", "success");
       try { await signOut(); } catch {}
       queryClient.clear();
     },
@@ -457,8 +533,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
   return (
     <ScreenContainer>
       <ScrollView
+        ref={scroll}
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl, paddingBottom: BOTTOM_NAV_CLEARANCE }]}
+        contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl, paddingBottom: spacing.huge }]}
         showsVerticalScrollIndicator={false}
       >
         {isOffline && <OfflineBanner subtitle="Some features unavailable" onRetry={async () => {
@@ -499,7 +576,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
           ) : isProfileError || !profile ? (
             <>
               <Text style={styles.errorText}>Failed to load profile</Text>
-              <PrimaryButton label="Retry" kind="ghost" onPress={() => refetchProfile()} />
+              <PrimaryButton refreshLabelOnFontScaleChange label="Retry" kind="ghost" onPress={() => refetchProfile()} />
             </>
           ) : (
             <>
@@ -514,7 +591,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
         </View>
 
         {/* Notifications card */}
-        <View style={[styles.card, isOffline && { opacity: 0.35 }]}>
+        <View onLayout={(event) => sectionLayout("notifications", event.nativeEvent.layout.y)} style={[styles.card, isOffline && { opacity: 0.35 }]}>
           <Text style={styles.cardTitle}>Notifications</Text>
           {isOffline ? (
             <Text style={styles.offlineNote}>Requires network connection</Text>
@@ -583,15 +660,42 @@ export function AccountSettingsScreen({ navigation }: Props) {
                 )}
               </View>
               {notifSettings && (
+                <View accessibilityLabel="Approval (Global Default)">
+                  <Text style={styles.accountRowLabel}>Approval (Global Default)</Text>
+                  {([
+                    ["writes_only", "Writes only (default)"],
+                    ["all", "All requests"],
+                    ["off", "Off"],
+                  ] as const).map(([value, label]) => (
+                    <Pressable
+                      key={value}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: selectedApprovalMode === value }}
+                      disabled={notifMutation.isPending}
+                      style={styles.accountRow}
+                      onPress={() => notifMutation.mutate({ global_approval_mode: value })}
+                    >
+                      <Text style={styles.accountRowLabel}>{label}</Text>
+                      <Text style={styles.accountRowValue}>
+                        {selectedApprovalMode === value ? "Selected" : ""}
+                      </Text>
+                    </Pressable>
+                  ))}
+                  <Text style={styles.channelHint}>Per-service and organization policies still apply.</Text>
+                </View>
+              )}
+              {notifSettings && (
                 <Text style={styles.channelHint}>
-                  {notifSettings.approval_suspended
-                    ? "Approval protection is suspended until a notification channel is available; it resumes automatically."
+                  {notifSettings.approval_required
+                    ? approvalDeliveryWarning(notifSettings)
                     : "Push or Telegram delivers requests when approval protection is on."}
                 </Text>
               )}
             </>
           )}
         </View>
+
+        <View onLayout={(event) => sectionLayout("display", event.nativeEvent.layout.y)}><ChatDisplaySettings /></View>
 
         {/* Appearance card */}
         <View style={styles.card}>
@@ -656,17 +760,43 @@ export function AccountSettingsScreen({ navigation }: Props) {
           </View>
         </View>
 
+        <View onLayout={(event) => sectionLayout("privacy", event.nativeEvent.layout.y)} style={styles.card}>
+          <Text style={styles.accountRowLabel}>Usage Analytics</Text>
+          <Text style={styles.accountRowValue}>Optional events require account permission and this device's choice. Security and billing records have separate retention rules.</Text>
+          <View style={styles.systemRow}>
+            <Text style={styles.accountRowLabel}>{analyticsPermission.isFetching ? "Loading permission…" : analyticsPermission.isError ? "Permission unavailable" : analyticsPermission.data?.enabled ? "Account permission enabled" : "Account permission disabled"}</Text>
+            <Switch accessibilityLabel="Allow account usage analytics"
+              value={analyticsPermission.data?.enabled === true}
+              disabled={saveAnalytics.isPending || analyticsPermission.isFetching || analyticsPermission.isError || !analyticsPermission.data}
+              onValueChange={(value) => saveAnalytics.mutate(value)} />
+          </View>
+          {analyticsPermission.isError && <PrimaryButton refreshLabelOnFontScaleChange label="Retry" kind="ghost" onPress={() => { void analyticsPermission.refetch(); }} />}
+          <View style={styles.systemRow}>
+            <Text style={styles.accountRowLabel}>Allow on this device</Text>
+            <Switch accessibilityLabel="Allow usage analytics on this device" value={deviceConsent.enabled}
+              disabled={!deviceConsent.enabled && (analyticsPermission.data?.enabled !== true || analyticsPermission.isError || analyticsPermission.isFetching)}
+              onValueChange={deviceConsent.setConsent} />
+          </View>
+        </View>
+
+        {deviceConsent.persistenceError && <View style={styles.card}>
+          <Text style={styles.accountRowValue}>This device's choice could not be saved. Analytics is off in this session; retry to save it before closing the app.</Text>
+          <PrimaryButton refreshLabelOnFontScaleChange label="Retry saving device choice" kind="ghost" onPress={deviceConsent.retryPersistence} />
+        </View>}
+
         {/* Actions */}
         <View style={styles.actionsWrap}>
-          <PrimaryButton label="Generate terminal login code" kind="ghost" disabled={isOffline}
-            onPress={() => navigation.navigate("AgentKeyLogin", { mint: true })} />
-          <PrimaryButton
+          <PrimaryButton refreshLabelOnFontScaleChange label="Usage & credits" kind="ghost"
+            onPress={() => navigation.push("UsageCredits")} />
+          <PrimaryButton refreshLabelOnFontScaleChange label="Profile & account security" kind="ghost"
+            onPress={() => navigation.push("AccountSecurity")} />
+          <PrimaryButton refreshLabelOnFontScaleChange
             label="Sign Out"
             kind="ghost"
             disabled={deleteAccountMutation.isPending || isOffline}
             onPress={handleSignOut}
           />
-          <PrimaryButton
+          <PrimaryButton refreshLabelOnFontScaleChange
             label={deleteAccountMutation.isPending ? "Deleting..." : "Delete Account"}
             kind="danger"
             disabled={deleteAccountMutation.isPending || isOffline}
@@ -682,7 +812,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
                 name: "ui.mobile_legal_page_opened",
                 props: { page: "terms" },
               });
-              navigation.navigate("TermsOfService");
+              navigation.push("TermsOfService");
             }}
           >
             <Text style={styles.legalLink}>Terms of Service</Text>
@@ -694,7 +824,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
                 name: "ui.mobile_legal_page_opened",
                 props: { page: "privacy" },
               });
-              navigation.navigate("PrivacyPolicy");
+              navigation.push("PrivacyPolicy");
             }}
           >
             <Text style={styles.legalLink}>Privacy Policy</Text>
@@ -711,24 +841,31 @@ export function AccountSettingsScreen({ navigation }: Props) {
   );
 }
 
-const createStyles = (c: ThemeColors) => StyleSheet.create({
+const createStyles = (
+  c: ThemeColors,
+  width: number,
+  fontScale: number,
+  // Reserve a full line for labels when scaled text leaves too little row space.
+  stacked = width / fontScale < 340,
+  avatarSize = Math.ceil(44 * Math.max(1, fontScale)),
+) => StyleSheet.create({
   identityHeader: {
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: stacked ? "column" : "row",
+    alignItems: stacked ? "flex-start" : "center",
     gap: spacing.lg,
     marginBottom: spacing.xxl,
   },
   avatarCircle: {
-    width: 44,
-    height: 44,
+    width: avatarSize,
+    height: avatarSize,
     borderRadius: radius.full,
     backgroundColor: c.primary,
     alignItems: "center",
     justifyContent: "center",
   },
   avatarImage: {
-    width: 44,
-    height: 44,
+    width: avatarSize,
+    height: avatarSize,
     borderRadius: radius.full,
   },
   avatarText: {
@@ -736,7 +873,8 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.onPrimary,
   },
   identityInfo: {
-    flex: 1,
+    flex: stacked ? undefined : 1,
+    width: stacked ? "100%" : undefined,
     minWidth: 0,
   },
   identityName: {
@@ -751,6 +889,8 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   // DESIGN.md §Badges: rounded-md (6px), px-2 py-0.5, text-[10px] font-medium.
   // Theme-aware via `successTone` / `dangerTone` so light + dark both render correctly.
   statusBadge: {
+    maxWidth: "100%",
+    flexShrink: 0,
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,
     borderRadius: radius.sm,
@@ -785,9 +925,10 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     marginBottom: 0,
   },
   accountRow: {
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: stacked ? "column" : "row",
+    alignItems: stacked ? "flex-start" : "center",
     justifyContent: "space-between",
+    gap: spacing.sm,
     paddingVertical: spacing.xl,
     borderBottomWidth: 1,
     borderBottomColor: c.borderSoft,
@@ -798,31 +939,46 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   accountRowLabel: {
     ...typeScale.description,
     color: c.textSecondary,
+    minWidth: 0,
+    maxWidth: "100%",
+    flexShrink: 1,
   },
   accountRowRight: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.xs,
+    minWidth: 0,
+    maxWidth: stacked ? "100%" : "60%",
+    flexShrink: 1,
   },
   accountRowValue: {
     ...typeScale.label,
     color: c.textPrimary,
+    minWidth: 0,
+    maxWidth: "100%",
+    flexShrink: 1,
+    textAlign: stacked ? "left" : "right",
   },
   accountRowArrow: {
     ...typeScale.description,
     color: c.textMuted,
   },
   channelRowLeft: {
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: stacked ? "column" : "row",
+    alignItems: stacked ? "flex-start" : "center",
+    flexWrap: "wrap",
     gap: spacing.sm,
-    flex: 1,
+    flex: stacked ? undefined : 1,
+    maxWidth: "100%",
+    minWidth: 0,
   },
   // DESIGN.md §Badges (`default`/`accent` purple variant): rounded-md, text-[10px]
   // font-medium. `primaryTone` carries the theme-aware bg/border, `primaryOnTint`
   // is the legible text color (light wordmark hex on dark; saturated brand purple
   // on light — the pale lavender disappears on a white card).
   connectedPill: {
+    maxWidth: "100%",
+    flexShrink: 1,
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.xs,
@@ -834,10 +990,15 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     paddingVertical: 2,
   },
   connectedPillText: {
+    flexShrink: 1,
     ...typeScale.badge,
     color: c.primaryOnTint,
   },
   linkPill: {
+    minHeight: 44,
+    maxWidth: "100%",
+    flexShrink: 1,
+    justifyContent: "center",
     backgroundColor: c.primaryTone.bg,
     borderWidth: 1,
     borderColor: c.primaryTone.border,
@@ -846,6 +1007,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     paddingVertical: 2,
   },
   linkPillText: {
+    flexShrink: 1,
     ...typeScale.badge,
     color: c.primaryOnTint,
   },
@@ -857,7 +1019,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   // Same visual treatment as SegmentControl and BottomNavV2 — one selected-state
   // language across the app: rounded-lg container, navActive highlight, sentence-case.
   themeToggleWrap: {
-    flexDirection: "row",
+    flexDirection: stacked ? "column" : "row",
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: c.borderSoft,
@@ -867,7 +1029,10 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     marginTop: spacing.sm,
   },
   themeToggleHalf: {
-    flex: 1,
+    flex: stacked ? undefined : 1,
+    minWidth: 0,
+    minHeight: 44,
+    paddingHorizontal: spacing.sm,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -882,6 +1047,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     width: 0,
   },
   themeToggleLabel: {
+    flexShrink: 1,
     ...typeScale.label,
     color: c.textMuted,
   },
@@ -889,9 +1055,10 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.textPrimary,
   },
   systemRow: {
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: stacked ? "column" : "row",
+    alignItems: stacked ? "flex-start" : "center",
     justifyContent: "space-between",
+    gap: spacing.sm,
     marginTop: spacing.md,
   },
   actionsWrap: {
@@ -916,6 +1083,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   },
   legalRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     justifyContent: "center",
     alignItems: "center",
     gap: spacing.sm,

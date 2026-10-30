@@ -12,6 +12,14 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_queue_notice_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_pending: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_bound: Option<super::assistant_channel_media::MediaBound>,
     /// Metadata-only handoff to manager delivery, including fresh event replies.
     #[serde(default)]
     pub platform_delivery_recovery_queued: bool,
@@ -113,7 +121,16 @@ impl std::fmt::Debug for AssistantMessage {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct VoiceFragment {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceTranscript {
+    #[serde(default)]
+    pub fragments: Vec<VoiceFragment>,
     pub session_id: String,
     pub segment_id: String,
     pub start_ms: i64,
@@ -143,6 +160,29 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    /// Closed metadata from a failed model callback, or the upstream code alone.
+    #[serde(default)]
+    pub failure_reason: Option<Box<TurnFailureReason>>,
+    #[serde(default)]
+    pub channel_delivery: Option<ChannelDelivery>,
     pub attempts: Option<u32>,
     pub capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnFailureReason {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route: Option<Box<super::assistant_conversation::ModelRouteDiagnostic>>,
+    pub source: String,
+    pub stage: String,
+    pub code: String,
+    pub http_status: Option<u16>,
+    pub nyxid_error_code: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelDelivery {
+    pub status: String,
+    pub heard_prefix_chars: Option<i64>,
+    pub heard_prefix_matches_sent: bool,
 }

@@ -34,6 +34,7 @@ type DeviceCodeScannerProps = {
   onCode: (userCode: string, kind: "device" | "agent-key") => void;
   onManualEntry: () => void;
   paused?: boolean;
+  showHeader?: boolean;
 };
 
 const INVALID_QR_REARM_DELAY_MS = 4_000;
@@ -43,6 +44,7 @@ export function DeviceCodeScanner({
   onCode,
   onManualEntry,
   paused = false,
+  showHeader = true,
 }: DeviceCodeScannerProps) {
   const { colors, mode } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -124,36 +126,37 @@ export function DeviceCodeScanner({
     }
   };
 
-  const header = (camera: boolean) => (
-    <View
-      style={[
-        styles.header,
-        camera ? styles.cameraHeader : styles.pageHeader,
-        { height: insets.top + 52, paddingTop: insets.top },
-      ]}
-    >
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Back"
-        hitSlop={4}
-        onPress={onCancel}
-        style={({ pressed }) => [
-          styles.backButton,
-          camera ? styles.cameraBackButton : styles.pageBackButton,
-          pressed && styles.pressed,
+  const header = (camera: boolean) =>
+    showHeader && (
+      <View
+        style={[
+          styles.header,
+          camera ? styles.cameraHeader : styles.pageHeader,
+          { height: insets.top + 52, paddingTop: insets.top },
         ]}
       >
-        <ChevronLeft
-          size={24}
-          color={camera ? "#FFFFFF" : colors.textPrimary}
-        />
-      </Pressable>
-      <Text style={[styles.headerTitle, camera && styles.cameraHeaderTitle]}>
-        Scan login code
-      </Text>
-      <View style={styles.headerSpacer} />
-    </View>
-  );
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          hitSlop={4}
+          onPress={onCancel}
+          style={({ pressed }) => [
+            styles.backButton,
+            camera ? styles.cameraBackButton : styles.pageBackButton,
+            pressed && styles.pressed,
+          ]}
+        >
+          <ChevronLeft
+            size={24}
+            color={camera ? "#FFFFFF" : colors.textPrimary}
+          />
+        </Pressable>
+        <Text style={[styles.headerTitle, camera && styles.cameraHeaderTitle]}>
+          Scan login code
+        </Text>
+        <View style={styles.headerSpacer} />
+      </View>
+    );
 
   if (!permission) {
     return (

@@ -32,6 +32,15 @@ impl WebhookSetupProgress {
     }
 }
 
+/// NyxBot channel family; managed Telegram keeps its raw provider slug on
+/// bot/route rows while the channel uses Telegram's runtime contract.
+pub(crate) fn canonical_platform(platform: &str) -> &str {
+    match platform {
+        "telegram-new" => "telegram",
+        other => other,
+    }
+}
+
 /// The platform name used in model instructions and delivery notices.
 pub fn platform_name(platform: &str) -> String {
     match platform {
@@ -151,6 +160,11 @@ pub struct InboundMessage {
     pub content_type: String,
     pub text: Option<String>,
     pub attachments: Vec<InboundAttachment>,
+    /// Internal provider selectors, persisted separately and excluded from callbacks.
+    #[serde(skip)]
+    pub(crate) embedded_attachments: Vec<crate::models::channel_message::StoredAttachment>,
+    #[serde(skip)]
+    pub(crate) embedded_attachments_omitted: usize,
     /// Platform message ID that this message is a reply to (if threaded)
     pub reply_to_platform_message_id: Option<String>,
     /// Thread or topic identifier (platform-specific)
@@ -484,6 +498,13 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
 pub trait PlatformAdapter: Send + Sync {
+    fn supports_text_reply(&self) -> bool {
+        true
+    }
+    fn supports_text_ingress(&self) -> bool {
+        self.registration().webhook_ingestion || matches!(self.ingestion(), Ingestion::Poll { .. })
+    }
+
     fn activity_descriptors(
         &self,
     ) -> &'static [super::channel_activity_service::ActivityDescriptor] {
@@ -1149,6 +1170,8 @@ mod tests {
     #[test]
     fn inbound_message_serde_roundtrip() {
         let msg = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: "pm-1".to_string(),
             conversation_id: "conv-1".to_string(),
             conversation_type: "private".to_string(),
@@ -1191,6 +1214,8 @@ mod tests {
     #[test]
     fn inbound_message_with_attachments_roundtrip() {
         let msg = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: "pm-2".to_string(),
             conversation_id: "conv-2".to_string(),
             conversation_type: "group".to_string(),

@@ -94,6 +94,29 @@ impl Drop for ScriptedFixture {
 }
 
 pub async fn scripted_fixture(host: &str, responses: Vec<String>) -> ScriptedFixture {
+    scripted_fixture_inner(host, responses, None).await
+}
+
+pub async fn scripted_fixture_paused(
+    host: &str,
+    responses: Vec<String>,
+) -> (
+    ScriptedFixture,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let fixture =
+        scripted_fixture_inner(host, responses, Some((entered.clone(), release.clone()))).await;
+    (fixture, entered, release)
+}
+
+async fn scripted_fixture_inner(
+    host: &str,
+    responses: Vec<String>,
+    mut pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+) -> ScriptedFixture {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cert = rcgen::generate_simple_self_signed(vec![host.into()]).unwrap();
     let config = rustls::ServerConfig::builder()
@@ -141,6 +164,10 @@ pub async fn scripted_fixture(host: &str, responses: Vec<String>) -> ScriptedFix
             }
             if tx.send(request).is_err() {
                 break;
+            }
+            if let Some((entered, release)) = pause.take() {
+                entered.notify_one();
+                release.notified().await;
             }
             if let Some(response) = responses.pop_front() {
                 let _ = stream.write_all(response.as_bytes()).await;

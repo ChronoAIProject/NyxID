@@ -4,6 +4,61 @@ Last verified against Aevatar console commit `e7ba2e6eb` (2026-08-25).
 
 The assistant page presents one continuous transcript, an anchored composer, and a conversation sidebar. Network and stream states change the same surface in place; loading, thinking, streaming, terminal, and recovery states do not replace the application shell.
 
+The NyxBot sidebar lists visible personal and organization specialists, with
+their activity and pending-request indicators. This roster is account-wide;
+it does not describe membership in the selected conversation or imply
+permission to use every listed specialist. The conversation header identifies
+the agent being addressed and offers Working context and Details controls.
+Delegation and specialist replies appear in the conversation's activity cards.
+
+In individual NyxBot and specialist threads, scrolling beyond 160px collapses
+the agent row into a compact pill at the upper right, with icon buttons for
+Working context and Details. Taller thread notices raise that threshold to
+avoid an immediate reversal when the row is removed. The full row returns
+within 24px of the start. The transcript gains the released space while its
+scroll position compensates to keep the text being read in place. Returning
+all the way to the top still shows the first message. Thread notices and
+read-only warnings remain visible, and open panels keep their state.
+
+Completed assistant replies have no generic sparkle avatar or reserved avatar
+gutter. The header identifies the current agent; group messages retain their
+author labels. Headers, transcripts, and composers share a content width,
+defaulting to 758px. On desktop, two small downward-pointing triangles sit
+flush beneath the app toolbar, before the chat padding, one at each actual
+column edge.
+Hover or keyboard focus reveals a vertical guide that stays visible while
+dragging a tab. Either tab can be dragged to resize;
+arrow keys adjust a focused edge, Home/End select its limits, and double-click
+resets it. Chat layout and Settings → Display → Chat layout also expose the width.
+One browser-wide preference applies to existing and new NyxBot, specialist,
+group, Direct, and typed chats. It is capped to the available space and fits smaller screens
+without horizontal page scrolling. Cancelled drags preserve the saved width.
+
+Desktop individual threads have a right-side conversation index, following
+Heca's rail: short ticks for user messages, longer ticks for assistant replies,
+and an accent tick for the current message. Hover or focus previews the
+message's first nonempty line; click or drag across ticks to jump. Arrow keys
+move between messages, Home/End jump to the first/latest message, and PageUp/
+PageDown move by an index window. The rail fills the available transcript
+height and ends at the composer's top edge, resizing as the composer grows.
+Tick spacing stays at 8px while all entries fit, then gradually tightens to fit
+more entries, down to 5px at default density. Both limits follow the spacing
+preference. Once the minimum spacing is reached, additional entries overflow.
+Long indices show a bounded window with pronounced fades wherever more entries
+are hidden above or below, without chevron controls. Rail fades extend up to
+64px at each overflowing edge, capped at 20% of the rail's height. Scrolling over the rail
+browses that window without moving the transcript. Fades disappear at either
+end, or when all entries fit. Ordinary transcript scrolling follows the active tick.
+The index includes loaded messages, including rows currently unmounted by the
+virtualizer, and expands as earlier history is loaded. The rail has its own
+gutter, outside the shared header/transcript/composer column, and disappears
+below the desktop breakpoint or when fewer than two messages are indexed.
+
+Scrollable navigation, transcripts, and nested message content fade at edges
+that hide more content. The top fade is short and gentle. Fades update when
+scrolling, resizing, or loading content and disappear when the content fits.
+The composer keeps its existing scroll overlays and opaque bottom band.
+
 `frontend/src/pages/assistant.tsx` selects the HTTP-fixture, typed actor, or
 Direct surface. Typed query and turn ownership live in
 `frontend/src/hooks/use-assistant-chat.ts`; Direct's memory-only seam lives in
@@ -56,7 +111,7 @@ This empty state must not appear after a turn has started or ended merely becaus
 
 ### Thinking
 
-Thinking begins as soon as a send or continuation is pending and there is not yet a printable assistant tail. The thread renders one assistant identity row with a loading halo and dots where the answer will appear.
+Thinking begins as soon as a send or continuation is pending and there is not yet a printable assistant tail. The thread renders a compact animated dot alongside its working status.
 
 The semantic contract is:
 
@@ -67,10 +122,9 @@ The semantic contract is:
 </article>
 ```
 
-`[data-assistant-halo]` is the stable test marker. It exists only while the
-streaming assistant identity has no printable content. Settled assistant
-avatars never carry it. The halo itself is decorative; the containing status
-announces the state.
+`[data-assistant-halo]` remains the stable test marker on the thinking dot. It
+exists only while the streaming assistant has no printable content. The dot
+itself is decorative; the containing status announces the state.
 
 ### Streaming before content
 
@@ -133,7 +187,11 @@ These attributes are part of the testing contract. They can move with equivalent
 ## Message composition
 
 Each canonical `ChatMessage` renders one identity row. User content is a compact
-bubble. An assistant row composes, in order:
+bubble with three 18px corners and a tighter 4px bottom-right corner. Its
+background and text use the dedicated `chat-bubble` and
+`chat-bubble-foreground` theme colors, editable per theme in Settings → Display
+with a live chat preview and a 4.5:1 text contrast check. Light mode defaults to
+a stronger neutral gray fill. An assistant row composes, in order:
 
 - a collapsible thinking/reasoning disclosure;
 - a collapsible step and tool-call activity disclosure;
@@ -156,6 +214,44 @@ surfaces are diagnostic accumulator data only and are not interactive.
 Media artifacts have an 8,000,000-character inline cap. Current history rows do
 not carry media, so an artifact is visible in the live local message but is not
 reconstructed after reload.
+
+### CMA delegation cards
+
+NyxBot and specialist threads render a `CmaOperationCard` beneath the assistant
+reply when an owner chat key actually invokes a supported CMA operation. The
+card comes from the durable MCP watch, never assistant text or a promised task
+plan. It shows the CMA identity, operation and agent IDs when available, a safe
+idempotency key, the invoking assistant's name, and the last observed status.
+Agent status labels follow CMA's own vocabulary: **Starting**, **Ready**,
+**Working**, **Needs approval**, **Paused**, **Stopped**, **Deleted**, and
+**Needs attention**. Provisioning success is **Ready**; only a completed
+Responses operation is **Completed**. Progress stages describe submission, provisioning or activity,
+and readiness; they do not infer implementation or deployment milestones.
+
+A full-width primary **View in CMA** link opens the exact agent in a new tab
+only when CMA supplies a valid `callback_url`, projected as `cma_url` in
+history. No destination is inferred from agent IDs or catalog configuration.
+An omitted callback preserves the last supplied link; explicit null or an
+invalid callback removes it. This gives users
+the CMA conversation and work details while keeping the status card compact.
+The checked timestamp includes the date and time so old observations are
+identifiable after the tracking window ends.
+
+History returns an owner/thread-scoped `cma_operations` metadata snapshot,
+including settled operations whose initiating turn is on an older message page.
+The transport attaches each card by `turn_id` after projecting stored and live
+messages. While a watch is submitting, waiting or cancelling, the selected
+thread refreshes history every five seconds, including after its assistant reply
+settles. Server polling continues independently of the page. Cards restore from
+history after reload and remain in the thread that made the call.
+
+Approval, connection, paused, failed, timeout and unavailable states remain
+distinct. A failed result download preserves an already confirmed CMA outcome.
+Stopping a watch says **Tracking stopped** and explains that CMA may still be
+running, since these adapters declare no upstream cancel operation. Card
+metadata is retained for 30 days; encrypted result retention stays at four hours.
+See [CMA operation contracts](../API_DISCOVERY.md#cma-operation-cards) for the
+supported endpoints and tracking limits.
 
 ## Long transcripts
 
@@ -188,7 +284,7 @@ send; the composer is freed without restoring duplicate text.
 
 ## Composer
 
-The composer is anchored at the bottom of the chat surface. The thread reserves its measured height and fades content behind it rather than clipping messages against a hard boundary.
+The composer is anchored at the bottom of the chat surface. The thread reserves its measured height up to half the visible viewport or 480px, whichever is smaller. Beyond that threshold, manual expansion overlays the chat without increasing its bottom inset. The opaque composer surface and fade move with the top edge.
 
 NyxAgent uses one settings menu in the composer footer. By default, it contains
 only **Thinking** (a toggle) and **Permissions**; the trigger shows the effective
@@ -215,14 +311,38 @@ upstream display names when present, with **Default model** for the legacy
 while a turn runs. New-chat selections are local to that composer, passed on the
 first send, and applied to any persisted upload draft before submission.
 
+Connection selection is separate from the permission/model menu. **Agent Details →
+Connections** groups accounts by service and identifies personal and organization
+ownership. NyxBot's Details lets the owner edit the existing saved connection
+order; this preference is account-wide and applies across agents. Eligible
+personal connections still precede organization connections. Specialist Details
+shows only granted connections; its Access section owns service grants and
+operation/resource limits. Choosing a connection does not impose folder/database
+restrictions or widen access.
+
+For a one-message exception, the composer's **Add context** (+) menu offers
+**Attach files** and **Use a connection**. The connection dialog is searchable
+by service, account, slug or organization and groups results by service. Selecting
+an account displays a removable chip naming the service, account, owner and
+**This message**, visible before sending. It clears after successful send and
+on navigation; a failed send retains it. If the selected connection becomes
+unavailable, sending is refused until the owner removes or replaces it. Voice
+is unavailable while a text-message connection is selected. Submission retains
+the leading `/service <UUID>` and actual newline; the server binds the choice
+to the admitted turn. Organization connections still require the existing action
+card in Auto and Ask every time.
+
 The composer stays in one row while empty or while its text fits alongside the
 controls. It expands only when text wraps or contains a newline, then collapses
 again when the text fits. In the expanded composer, the text occupies the full
 upper row. Attachments sit
 at the bottom left; the single settings trigger, optional voice action, and
 Send/Stop sit at the bottom right. When enabled by `assistant:voice`, the voice
-waveform occupies the send slot for an empty idle draft. Non-whitespace text or
-attachments switch that slot to the send arrow; an active turn keeps Stop available.
+waveform remains available for an empty idle draft. Send is absent for empty or
+whitespace-only drafts, regardless of voice availability. Non-whitespace text or
+attachments replace Voice with the send arrow in the same action slot; pending
+uploads keep Send disabled. Clearing the draft restores Voice. An active turn
+keeps Stop available, and an active voice call retains its in-composer call controls.
 The menu is bounded by the viewport and scrolls long model lists.
 
 For flagged users, the Reasoning row is visible but marked **Unavailable** and
@@ -239,7 +359,7 @@ supported effort field. Do not infer supported effort levels from model names.
 - Enter during IME composition does not send; both composition state and key code 229 are guarded.
 - The composer uses a minimal Tiptap/ProseMirror editor with atomic inline mention pills. Agent pills show display names; attachment pills show numbered handles: `image-1`, `file-1`, and `text-1` for long pasted text. Autocomplete, plain-text paste, copy, undo/redo, and Shift+Enter are supported. Serialization preserves the existing `@handle` text contract; attachment handles still resolve before sending. Draft storage remains plain text. Undo history resets across conversation/owner changes, after sending, and when removing an upload so deleted references cannot return. Formatting controls are not enabled in this first iteration.
 - Composer attachments occupy one horizontally scrollable row: square image previews and compact document cards with filename, type, and size. Long pastes show a text excerpt. Corner controls remove individual files; upload progress and errors remain within the fixed card height. Attachment mention handles remain available through autocomplete and card hover text. Adding attachments scrolls the row to the newest card; upload progress and removal preserve manual scrolling. Edge fades indicate additional cards offscreen.
-- The text editor grows from one through four rows by default, then scrolls internally. The expanded composer has a top-edge resize handle that changes the maximum text height (64px minimum, up to half the visible viewport or 480px). Short drafts still collapse to one row; the chosen maximum is retained within the mounted composer. Arrow keys adjust it, Home/End select its limits, and double-click resets it. A persistent, draggable thumb appears while text overflows, including after viewport resizing. Expanded controls sit 2px below the editor.
+- The text editor grows with the draft up to a shared maximum (92px by default), then scrolls internally. Settings → Display → Chat layout configures this maximum from 64px to 1600px. The expanded composer's top-edge resize handle updates the same browser-wide preference on release; cancelled drags preserve it. All existing and new chats share it, including across reloads. Explicit resizing still expands short multiline drafts; single-line drafts stay compact. The complete surface, including controls, attachments and padding, fits within 90% of the visible viewport and below the chat header without overwriting the saved maximum. Chat space stops growing at half the viewport or 480px; further expansion overlays the transcript. The index rail clears the actual composer surface even when it overlays the transcript. Arrow keys adjust the height, Home/End select its visible limits, and double-click resets it. Window and software-keyboard viewport changes recalculate the limit, keeping the grip and controls reachable. A persistent, draggable thumb appears while text overflows. Expanded controls sit 2px below the editor.
 - A long one-line draft switches controls to the multiline layout before text overlaps the button.
 
 The idle placeholder is `Message NyxID Assistant...`. During an active turn it is `Assistant is working...` and the textbox is disabled.

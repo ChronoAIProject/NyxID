@@ -1,3 +1,4 @@
+import { useMfaStepUp } from "@/hooks/use-mfa-step-up";
 import {
   Fragment,
   useCallback,
@@ -116,6 +117,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
   const [context, setContext] = useState<AgentKeyPreview | null>(null);
   const [terminal, setTerminal] = useState<Terminal | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const stepUp = useMfaStepUp(`${user?.id ?? ""}:${flow}:${code}:${terminal ?? ""}`);
   const [busy, setBusy] = useState(false);
   const [deadline, setDeadline] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now);
@@ -233,6 +235,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
     try {
       await work();
     } catch (failure) {
+      if (stepUp.handle(failure, () => run(work))) return;
       if (alive.current && !ended.current) {
         const errorCode = (failure as { errorCode?: number })?.errorCode;
         if (errorCode === 11201 || errorCode === 11901) finish("expired");
@@ -410,6 +413,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
         allowed_node_ids: [],
         allow_all_services: false,
         allow_all_nodes: false,
+        never_expires: hints.expiry_days === "none",
         expires_at:
           hints.expiry_days === "none"
             ? null
@@ -448,12 +452,13 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
     });
   const problems = inventory ? requestedProblems(requested, inventory) : [];
   const title = ["Verify request", "Choose access", "Scope & approval"];
+  if (stepUp.prompt) return <LoginDeviceShell>{stepUp.prompt}</LoginDeviceShell>;
   return (
     <LoginDeviceShell>
       <div
         className={`overflow-hidden rounded-xl border border-border bg-card ${terminal === "expired" ? "mx-auto w-full max-w-sm" : ""}`}
       >
-        <div className="space-y-5 p-5 sm:p-6">
+        <div className="space-y-5 p-3 min-[360px]:p-5 sm:p-6">
           {terminal !== "expired" && (
             <header className="space-y-3 text-center">
               <div className="mx-auto flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
@@ -951,10 +956,10 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                   <>
                                     <AgentKeyPermissions apiKey={chosen.key} />
                                     <label className="block space-y-2 text-12">
-                                      Login credential expiry (optional)
+                                      Login credential expiry (blank: 90 days, bounded by key expiry)
                                       <Input
                                         type="datetime-local"
-                                        aria-label="Login credential expiry (optional)"
+                                        aria-label="Login credential expiry (blank: 90 days, bounded by key expiry)"
                                         value={credentialExpiry}
                                         disabled={blocked}
                                         onChange={(e) =>

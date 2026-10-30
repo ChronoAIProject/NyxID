@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as telemetry from "@/lib/telemetry";
 import { api } from "@/lib/api-client";
+import { toast } from "sonner";
 import {
   ChatMessageBubble,
   ChatMessageEntry,
@@ -19,6 +20,7 @@ import {
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { messageTime } from "@/lib/assistant/message-time";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
+import { ReviewCardNavigation } from "./review-card-target";
 
 const BASE: ChatMessage = {
   id: "assistant-1",
@@ -29,6 +31,27 @@ const BASE: ChatMessage = {
 };
 
 describe("canonical chat presentation", () => {
+  it.each([
+    ["insufficient_credits", "Not enough credits", "Add credits in Billing & Usage"],
+    ["wallet_suspended", "Billing wallet suspended", "Contact support"],
+    ["plan_entitlement_required", "Service not included in your plan", "Check your plan"],
+    ["billing_not_configured", "Billing setup incomplete", "Contact support to complete the billing configuration"],
+    ["billing_provider_unavailable", "Billing service unavailable", "Try again shortly"],
+  ])("shows the billing cause and remedy before diagnostics for %s", (code, title, remedy) => {
+    render(<ChatMessageBubble message={{ ...BASE, content: "", status: "error", errorCode: code,
+      error: "Turn failed. Provide a trace.",
+      toolCalls: [{ id: "tool", name: "nyx__search_tools", status: "done", startedAt: 1 }],
+      errorDetail: { stage: "stream", turnId: "turn-billing", continuations: 0 },
+    }} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(title);
+    expect(alert).toHaveTextContent(remedy);
+    expect(screen.queryByText("Turn failed. Provide a trace.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /1 action/ })).toHaveTextContent(title);
+    const details = screen.getByText("Details");
+    expect(alert.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("shows the panic stage in failure Details", () => {
     render(<ChatMessageBubble message={{ ...BASE, status: "error", content: "",
       errorCode: "internal_error",
@@ -154,28 +177,39 @@ describe("canonical chat presentation", () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it("opens the optional feedback comment popover without submitting", () => {
+  it("offers no comment until the reader votes", () => {
     render(
       <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Add feedback comment" }),
-    );
+    expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /comment/i })).not.toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "Optional feedback comment" }),
-    ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Send" })).toBeVisible();
-  });
-  it("keeps comment submission optional", () => {
-    render(
-      <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
-    );
-    expect(
-      screen.getByRole("button", { name: "Add feedback comment" }),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("textbox", { name: "Optional feedback comment" }),
+      screen.queryByRole("dialog"),
     ).not.toBeInTheDocument();
+  });
+  it.each([
+    ["Helpful", "Give positive feedback", ["Useful", "Accurate", "Easy to understand"]],
+    ["Not helpful", "Give negative feedback", ["Not useful", "Not accurate", "Bad response", "Hard to understand"]],
+  ])("a %s vote saves at once and opens a details dialog", async (button, title, reasons) => {
+    const put = vi.spyOn(api, "put").mockResolvedValue({});
+    try {
+      render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: button }));
+      });
+      expect(put).toHaveBeenCalledTimes(1);
+      const dialog = screen.getByRole("dialog", { name: title });
+      expect(
+        within(within(dialog).getByRole("group", { name: "Reasons" }))
+          .getAllByRole("button", { pressed: false })
+          .map((pill) => pill.textContent),
+      ).toEqual(reasons);
+      expect(within(dialog).getByRole("textbox", { name: "Details (optional)" })).toBeVisible();
+      expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+      expect(within(dialog).getByRole("button", { name: "Submit" })).toBeEnabled();
+    } finally {
+      put.mockRestore();
+    }
   });
 
   it("renders an inline context reset as a system note without assistant controls", () => {
@@ -249,9 +283,7 @@ describe("canonical chat presentation", () => {
       />,
     );
     expect(screen.getByText("NyxBot")).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "Add feedback comment" }),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
     unmount();
     render(
       <ChatMessageEntry
@@ -317,6 +349,7 @@ describe("canonical chat presentation", () => {
           error: "Stopped responding",
           errorDetail: {
             stage: "no_progress",
+            failureReason: { source: "nyxid", stage: "model_proxy", code: "api_key_scope_forbidden", http_status: 403, nyxid_error_code: 9000 },
             upstreamCode: "turn_failed",
             httpStatus: 503,
             upstreamRequestId: "req-1",
@@ -329,14 +362,27 @@ describe("canonical chat presentation", () => {
       />,
     );
     fireEvent.click(screen.getByText("Details"));
-    for (const value of ["turn_failed", "no_progress", "503", "turn-1", "resp_1", "req-1", "2"]) {
+    for (const value of ["turn_failed", "no_progress", "503", "turn-1", "resp_1", "req-1", "2", "nyxid / model_proxy / api_key_scope_forbidden / HTTP 403 / NyxID 9000"]) {
       expect(screen.getByText(value)).toBeInTheDocument();
     }
     expect(
       within(screen.getByText("Details").closest("details")!).getByRole("time"),
     ).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
     fireEvent.click(screen.getByRole("button", { name: "Copy diagnostic ID" }));
-    expect(writeText).toHaveBeenCalledWith("turn turn-1 / upstream turn_failed / response resp_1 / request req-1");
+    expect(writeText).toHaveBeenCalledWith("turn turn-1 / upstream turn_failed / cause nyxid / model_proxy / api_key_scope_forbidden / HTTP 403 / NyxID 9000 / response resp_1 / request req-1");
+  });
+
+  it("explains a missing guest model route only in the owner's diagnostic details", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error",
+      error: "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.",
+      errorDetail: { stage: "stream", turnId: "turn-guest", continuations: 0, failureReason: {
+        source: "nyxid", stage: "model_proxy", code: "guest_model_route_required",
+        http_status: 403, nyxid_error_code: 9000,
+      } },
+    }} />);
+    expect(screen.getByText("The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.")).toBeVisible();
+    fireEvent.click(screen.getByText("Details"));
+    expect(screen.getByText("Send one message to this agent as its owner using its configured model to record the route for guest replies.")).toBeVisible();
   });
 
   it("shows thinking treatment only for a content-free streaming message", () => {
@@ -507,8 +553,10 @@ describe("canonical chat presentation", () => {
     const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, top: 0, left: 0, right: 600, bottom: 600, width: 600, height: 600, toJSON: () => ({}),
     } as DOMRect);
-    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
-    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+    const offsetWidth = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
     try {
       const messages = Array.from({ length: 200 }, (_, index): ChatMessage => ({
         ...BASE, id: `m-${String(index)}`, content: `Message ${String(index)}`,
@@ -529,12 +577,14 @@ describe("canonical chat presentation", () => {
       rect.mockRestore();
       width.mockRestore();
       height.mockRestore();
+      offsetWidth.mockRestore();
+      offsetHeight.mockRestore();
     }
   });
 
   it("starts windowing only while the reader follows the newest message", () => {
-    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
-    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
     try {
       const session = (count: number): ChatSessionState => ({
         clientId: "c", conversationId: "nyxagent-growing", status: "completed_text", title: "T",
@@ -742,7 +792,7 @@ describe("canonical chat presentation", () => {
     const { container, rerender } = render(
       <ChatMessageList session={first} bottomInset={0} />,
     );
-    const scroller = container.firstElementChild as HTMLDivElement;
+    const scroller = container.querySelector<HTMLDivElement>("[data-chat-transcript]")!;
     let scrollHeight = 1_000;
     Object.defineProperty(scroller, "scrollHeight", {
       configurable: true,
@@ -813,6 +863,51 @@ describe("canonical chat presentation", () => {
 });
 
 describe("turn status and action ledger", () => {
+  it("keeps total turn time across tool changes, remounts and returning to the tab", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-21T00:00:30Z"));
+      const startedAt = "2026-10-21T00:00:00Z";
+      const message = { ...BASE, status: "streaming" as const, turnStatus: { phase: "tool" as const, label: "Running first", startedAt, toolStartedAt: "2026-10-21T00:00:20Z" } };
+      const { container, rerender, unmount } = render(<ChatMessageBubble message={message} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      rerender(<ChatMessageBubble message={{ ...message, turnStatus: { ...message.turnStatus, toolStartedAt: "2026-10-21T00:00:29Z", label: "Running second" } }} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      rerender(<ChatMessageBubble message={{ ...message, turnStatus: { phase: "working", label: "Working…", startedAt } }} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      // Browser background throttling skips ticks; visibility must catch up at once.
+      vi.setSystemTime(new Date("2026-10-21T00:01:05Z"));
+      fireEvent(document, new Event("visibilitychange"));
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("1:05 total");
+      unmount();
+      const reopened = render(<ChatMessageBubble message={message} />);
+      expect(reopened.container.querySelector("[data-turn-status]")).toHaveTextContent("1:05 total");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps each tool's own duration beside the correct action", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-21T00:00:30Z"));
+      const from = Date.parse("2026-10-21T00:00:00Z");
+      const { container } = render(<ChatMessageBubble message={{ ...BASE, toolCalls: [
+        { id: "finished", name: "github__read", status: "done", startedAt: from, finishedAt: from + 8000 },
+        { id: "running", name: "github__search", status: "running", startedAt: from + 20000 },
+      ] }} />);
+      fireEvent.click(screen.getByRole("button", { name: /2 actions/ }));
+      const done = container.querySelector('[data-tool-status="done"]')!;
+      const running = container.querySelector('[data-tool-status="running"]')!;
+      expect(done).toHaveTextContent("8s");
+      expect(running).toHaveTextContent("10s");
+      act(() => vi.advanceTimersByTime(5000));
+      expect(done).toHaveTextContent("8s");
+      expect(running).toHaveTextContent("15s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it.each(["approval", "retrying", "continuing", "working", "active"] as const)("keeps %s status visible after reply text", (phase) => {
     const labels = { approval: "Waiting for approval", retrying: "Retrying…", continuing: "Continuing task…", working: "Working…", active: "Working — the reply appears when it is ready" };
     const { container, rerender } = render(<ChatMessageBubble message={{ ...BASE, status: "streaming", turnStatus: { phase, label: labels[phase] } }} />);
@@ -887,20 +982,172 @@ it.each(["", "Partial reply"])("shows a persistent stopped label without activit
   expect(container.querySelector("[data-empty-turn-error]")).toBeNull();
 });
 
-it("focuses the comment field and closes it with Escape, showing save failures", async () => {
-  render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
-  fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
-  const textarea = screen.getByRole("textbox", {
-    name: "Optional feedback comment",
-  });
-  expect(textarea).toHaveFocus();
-  fireEvent.keyDown(textarea, { key: "Escape" });
-  expect(
-    screen.queryByRole("textbox", { name: "Optional feedback comment" }),
-  ).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
-  fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
-  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+it("submits the chosen reasons ahead of the details, then thanks the reader", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  const thanks = vi.spyOn(toast, "success");
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+    });
+    expect(put).toHaveBeenLastCalledWith(
+      "/assistant/nyxagent/conversations/conversation-1/messages/assistant-1/feedback",
+      { vote: "down", comment: undefined },
+    );
+    // Reasons keep their offered order, whatever order they were chosen in.
+    fireEvent.click(screen.getByRole("button", { name: "Bad response" }));
+    fireEvent.click(screen.getByRole("button", { name: "Not accurate" }));
+    expect(screen.getByRole("button", { name: "Not accurate" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.change(screen.getByRole("textbox", { name: "Details (optional)" }), {
+      target: { value: "  wrong date  " },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    });
+    expect(put).toHaveBeenLastCalledWith(
+      "/assistant/nyxagent/conversations/conversation-1/messages/assistant-1/feedback",
+      { vote: "down", comment: "Not accurate, Bad response — wrong date" },
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(thanks).toHaveBeenCalledWith("Thanks for the feedback.");
+  } finally {
+    put.mockRestore();
+    thanks.mockRestore();
+  }
+});
+
+it("reopens a saved feedback comment, edits and clears it without withdrawing the vote", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  const remove = vi.spyOn(api, "delete").mockResolvedValue(undefined);
+  try {
+    render(<ChatMessageBubble conversationId="conversation-1" message={{ ...BASE, feedback: { vote: "up", comment: "Original comment" } }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit feedback comment" }));
+    expect(screen.getByRole("textbox", { name: "Details (optional)" })).toHaveValue("Original comment");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Updated comment" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Submit" })));
+    expect(put).toHaveBeenLastCalledWith(expect.any(String), { vote: "up", comment: "Updated comment" });
+    fireEvent.click(screen.getByRole("button", { name: "Edit feedback comment" }));
+    expect(screen.getByRole("textbox")).toHaveValue("Updated comment");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Submit" })));
+    expect(put).toHaveBeenLastCalledWith(expect.any(String), { vote: "up", comment: "" });
+    expect(remove).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "true");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Helpful" })));
+    expect(remove).toHaveBeenCalledOnce();
+  } finally {
+    put.mockRestore(); remove.mockRestore();
+  }
+});
+
+it("submits details with Cmd/Ctrl+Enter and keeps plain Enter for new lines", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    const field = screen.getByRole("textbox", { name: "Details (optional)" });
+    fireEvent.change(field, { target: { value: "clear steps" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(put).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      fireEvent.keyDown(field, { key: "Enter", ctrlKey: true });
+    });
+    expect(put).toHaveBeenLastCalledWith(
+      "/assistant/nyxagent/conversations/conversation-1/messages/assistant-1/feedback",
+      { vote: "up", comment: "clear steps" },
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  } finally {
+    put.mockRestore();
+  }
+});
+
+it("an empty Submit keeps the saved vote without another write", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    });
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "true");
+  } finally {
+    put.mockRestore();
+  }
+});
+
+it("keeps the dialog open with its text when the details fail to save", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("offline"));
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Details (optional)" }), {
+      target: { value: "missed the point" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    });
+    const dialog = screen.getByRole("dialog", { name: "Give negative feedback" });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Unable to save feedback");
+    expect(within(dialog).getByRole("textbox", { name: "Details (optional)" })).toHaveValue("missed the point");
+  } finally {
+    put.mockRestore();
+  }
+});
+
+it("Cancel and Escape close the dialog and keep the vote; clicking the vote again withdraws it", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  const remove = vi.spyOn(api, "delete").mockResolvedValue(undefined);
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Details (optional)" }), {
+      key: "Escape",
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "true");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Not helpful" })).toHaveAttribute("aria-pressed", "true");
+    expect(remove).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+    });
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Not helpful" })).toHaveAttribute("aria-pressed", "false");
+  } finally {
+    put.mockRestore();
+    remove.mockRestore();
+  }
+});
+
+it("opens no dialog when the vote fails to save", async () => {
+  const put = vi.spyOn(api, "put").mockRejectedValue(new Error("offline"));
+  try {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Unable to save feedback");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "false");
+  } finally {
+    put.mockRestore();
+  }
 });
 
 it("separates the described tool label from elapsed time without duplicate Thinking", () => {
@@ -981,8 +1228,8 @@ describe("message timestamps", () => {
         <ChatMessageEntry message={message} conversationId="conversation-1" />,
       );
       const time = sentTime(container);
-      expect(time).toHaveTextContent(expected.label);
-      expect(time).not.toHaveAttribute("title");
+      expect(time).toHaveTextContent(expected.short);
+      expect(time).toHaveAttribute("title", expected.label);
       unmount();
     }
   });
@@ -995,7 +1242,7 @@ describe("message timestamps", () => {
       />,
     );
     expect(screen.getByText("From Telegram")).toBeInTheDocument();
-    expect(sentTime(container)).toHaveTextContent(messageTime(at)!.label);
+    expect(sentTime(container)).toHaveTextContent(messageTime(at)!.short);
   });
 
   it("puts a reply's time on its feedback line, and keeps it without feedback", () => {
@@ -1069,6 +1316,16 @@ it("shows capacity waiting without an error and links billing remedies", () => {
   expect(screen.queryByText("Details")).not.toBeInTheDocument();
 });
 
+it("labels a queued reply with its queue clock", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-15T00:00:12Z"));
+  render(<ChatMessageBubble message={{ ...BASE, content: "", status: "streaming", waitingForCapacity: true, queued: true,
+    capacityWaitStartedAt: "2026-10-15T00:00:00Z", capacityWaitDeadline: "2026-10-15T00:10:00Z" }} />);
+  expect(screen.queryByText(/Waiting for the assistant/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Queued until another reply finishes/).closest("[data-waiting-status]")).toHaveTextContent("0:12 of up to 10:00");
+  vi.useRealTimers();
+});
+
 it("restores the shared capacity clock after remount and clears it on acceptance", () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-15T00:00:23Z"));
@@ -1095,7 +1352,10 @@ it("shows attempt and capacity wait details for failed and successful replies", 
     errorDetail: { stage: "stream", turnId: "turn", continuations: 0, attempts: 7, capacityWaitMs: 80_000 } }} />);
   expect(screen.getByText("attempts").nextElementSibling).toHaveTextContent("7");
   expect(screen.getByText("waited 1 minute 20 seconds for capacity")).toBeInTheDocument();
+  // A settled reply keeps them inside its turn summary.
   rerender(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 3, capacityWaitMs: 33_000 } }} />);
+  const summary = screen.getByRole("button", { name: /^Turn details: Completed, waited 33 seconds/ });
+  fireEvent.click(summary);
   expect(screen.getByText("attempts").nextElementSibling).toHaveTextContent("3");
   expect(screen.getByText("waited 33 seconds for capacity")).toBeInTheDocument();
 });
@@ -1119,11 +1379,12 @@ it("renders the system acknowledgement in the pending agent bubble and replaces 
   expect(container.querySelector('[data-system-note]')).not.toBeInTheDocument();
 });
 
-it("hides ordinary successful Details and shows retries without a wait", () => {
+it("hides ordinary successful turn details and shows retries without a wait", () => {
   const { rerender } = render(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 1, capacityWaitMs: 0 } }} />);
-  expect(screen.queryByText("Details")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^Turn details/ })).not.toBeInTheDocument();
   rerender(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 2, capacityWaitMs: 0 } }} />);
-  expect(screen.getByText("Details")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Turn details: Completed" }));
+  expect(screen.getByText("attempts").nextElementSibling).toHaveTextContent("2");
   expect(screen.queryByText(/waited/)).not.toBeInTheDocument();
   rerender(<ChatMessageBubble message={{ ...BASE, status: "error", errorDetail: {
     stage: "stream", turnId: "turn", continuations: 0, attempts: 1, capacityWaitMs: 0,
@@ -1131,11 +1392,17 @@ it("hides ordinary successful Details and shows retries without a wait", () => {
   expect(screen.getByText("Details")).toBeInTheDocument();
 });
 
-it.each(["/assistant", "/assistant/automations", "/replay"])("opens billing over the current assistant shell only: %s", async (path) => {
+it.each([
+  ["/assistant", "wallet_suspended"],
+  ["/assistant/automations", "wallet_suspended"],
+  ["/replay", "wallet_suspended"],
+  ["/assistant", "insufficient_credits"],
+  ["/assistant", "plan_entitlement_required"],
+])("opens billing over the current assistant shell only: %s (%s)", async (path, code) => {
   const root = createRootRoute();
   const route = createRoute({ getParentRoute: () => root, path,
     validateSearch: withAccountPanelSearch((search) => ({ c: String(search.c ?? "") })),
-    component: () => <ChatMessageBubble message={{ ...BASE, status: "error", errorCode: "wallet_suspended" }} />,
+    component: () => <ChatMessageBubble message={{ ...BASE, status: "error", errorCode: code }} />,
   });
   const router = createRouter({ routeTree: root.addChildren([route]),
     history: createMemoryHistory({ initialEntries: [`${path}?c=current-chat&panel=settings&panelTab=profile`] }),
@@ -1149,4 +1416,217 @@ it.each(["/assistant", "/assistant/automations", "/replay"])("opens billing over
   fireEvent.click(await screen.findByRole("button", { name: "Open Billing & Usage" }));
   await vi.waitFor(() => expect(router.state.location.search).toEqual({ c: "current-chat", panel: "billing" }));
   expect(router.state.location.pathname).toBe(path);
+});
+
+
+describe("message body copy integration", () => {
+  it("copies sanitized assistant Markdown without thinking, activities or controls", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const markdown = "**回答**\n\n```rust\n    let n = 1;\n```";
+    render(<ChatMessageBubble message={{ ...BASE, content: `${markdown}\n<function_calls><invoke>private-tool-input</invoke></function_calls>`, thinking: "private-thought" }} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeVisible();
+  });
+  it("copies the user's original body including literal markup and whitespace", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const original = "  <function_calls>example</function_calls>\n```js\n  x()\n```  ";
+    render(<ChatMessageBubble message={{ ...BASE, role: "user", content: original }} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(original);
+  });
+  it.each([
+    { content: "", status: "complete" as const },
+    { content: "Streaming text", status: "streaming" as const },
+    { content: "<function_calls>hidden</function_calls>", status: "complete" as const },
+  ])("has no body copy control for $status / $content", (message) => {
+    render(<ChatMessageBubble message={{ ...BASE, ...message }} />);
+    expect(screen.queryByRole("button", { name: "Copy message" })).not.toBeInTheDocument();
+  });
+});
+
+describe("turn summary", () => {
+  const decision = (
+    id: string,
+    fields: Partial<import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement> = {},
+  ): import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement => ({
+    id,
+    kind: "action",
+    status: "allowed",
+    summary:
+      "Organization connection api-firecrawl (33dc1c9b-e1f3-4be8-a35e-fef09b999021) in ChronoAI: POST scrape on api-firecrawl",
+    decider: "user",
+    decided_by: "access_mode",
+    reason: null,
+    confirmation: { risk: "change", access_mode: "autopilot", reason: "policy" },
+    service_slug: null,
+    service_name: null,
+    tool_name: "nyxid.service_execution",
+    created_at: "2026-10-27T00:00:00Z",
+    decided_at: "2026-10-27T00:00:00Z",
+    expires_at: "2026-10-27T00:00:00Z",
+    ...fields,
+  });
+
+  it.each([true, false])("opens, scrolls and highlights a linked folded decision (tool-bound: %s)", async (bound) => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    const { container, rerender } = render(<NyxAgentAssistantEntry
+      conversationId="conversation" retry={vi.fn()} checkRecovery={vi.fn()}
+      message={{ ...BASE, toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1 }], decisions: [decision("first"), decision("target", { activity_id: bound ? "act" : null })] }}
+    />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+    rerender(<NyxAgentAssistantEntry selectedDecisionId="target"
+      conversationId="conversation" retry={vi.fn()} checkRecovery={vi.fn()}
+      message={{ ...BASE, toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1 }], decisions: [decision("first"), decision("target", { activity_id: bound ? "act" : null })] }}
+    />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "true");
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    const highlighted = container.querySelector(".ring-input-focus");
+    expect(highlighted).toHaveTextContent("Full access");
+    expect(highlighted).toContainElement(bound ? container.querySelector("summary") : screen.getByText("×2"));
+    expect(scroll).toHaveBeenCalledWith({ block: "center", behavior: "instant" });
+    fireEvent.click(screen.getByRole("button", { name: /^Turn details/ }));
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+    scroll.mockRestore();
+  });
+
+  it("opens a linked decision when a later history update folds it into the reply", async () => {
+    const props = { conversationId: "conversation", retry: vi.fn(), checkRecovery: vi.fn(), selectedDecisionId: "target" };
+    const message = { ...BASE, decisions: [decision("first")] };
+    const { container, rerender } = render(<NyxAgentAssistantEntry {...props} message={message} />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+    rerender(<NyxAgentAssistantEntry {...props} message={{ ...message, decisions: [...message.decisions, decision("target")] }} />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "true");
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    expect(container.querySelector(".ring-input-focus")).toHaveTextContent("Full access");
+    fireEvent.click(screen.getByRole("button", { name: /^Turn details/ }));
+    rerender(<NyxAgentAssistantEntry {...props} message={{ ...message, decisions: [...message.decisions, decision("target")] }} />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it.each([true, false])("revisits the same row when a different folded decision is linked (tool-bound: %s)", async (bound) => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    try {
+      const props = { conversationId: "conversation", retry: vi.fn(), checkRecovery: vi.fn() };
+      const message: ChatMessage = { ...BASE,
+        toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1, result: "Result" }],
+        decisions: [decision("first", { activity_id: bound ? "act" : null }), decision("second", { activity_id: bound ? "act" : null })],
+      };
+      const { container, rerender } = render(<NyxAgentAssistantEntry {...props} selectedDecisionId="first" message={message} />);
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      const target = container.querySelector(".ring-input-focus")!;
+      expect(target).toHaveTextContent("Full access");
+      expect(scroll).toHaveBeenCalledTimes(1);
+      // The highlight expires without changing which row is selected.
+      target.classList.remove("ring-2", "ring-input-focus");
+      const details = container.querySelector("details")!;
+      details.open = true;
+      rerender(<NyxAgentAssistantEntry {...props} selectedDecisionId="second" message={message} />);
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(container.querySelector(".ring-input-focus")).toHaveTextContent("Full access");
+      expect(scroll).toHaveBeenCalledTimes(2);
+      expect(details).toBeInTheDocument();
+      expect(details.open).toBe(true);
+    } finally {
+      scroll.mockRestore();
+    }
+  });
+
+  it.each([true, false])("reveals a linked decision once across virtualized remounts (tool-bound: %s)", async (bound) => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    const message: ChatMessage = { ...BASE,
+      toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1 }],
+      decisions: [decision("first", { activity_id: bound ? "act" : null }), decision("second", { activity_id: bound ? "act" : null })],
+    };
+    const tree = (show: boolean, card = "first") => <ReviewCardNavigation selectionKey={card}>
+      {show ? <NyxAgentAssistantEntry conversationId="conversation" retry={vi.fn()} checkRecovery={vi.fn()} selectedDecisionId={card} message={message} /> : null}
+    </ReviewCardNavigation>;
+    try {
+      const view = render(tree(true));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(view.container.querySelector(".ring-input-focus")).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /^Turn details/ }));
+      view.rerender(tree(false));
+      view.rerender(tree(true));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(view.container.querySelector(".ring-input-focus")).toBeNull();
+      view.rerender(tree(true, "second"));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "true");
+      expect(scroll).toHaveBeenCalledTimes(2);
+      view.rerender(tree(true, "first"));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(scroll).toHaveBeenCalledTimes(3);
+    } finally { scroll.mockRestore(); }
+  });
+
+  it("keeps a manually expanded summary open when selection moves to another reply", () => {
+    const tree = (card?: string) => <>
+      {["first", "second"].map((id) => <ChatMessageBubble key={id} selectedDecisionId={card} message={{ ...BASE, id, decisions: [decision(id)] }} />)}
+    </>;
+    const view = render(tree());
+    fireEvent.click(screen.getAllByRole("button", { name: /^Turn details/ })[0]!);
+    view.rerender(tree("first"));
+    view.rerender(tree("second"));
+    for (const button of screen.getAllByRole("button", { name: /^Turn details/ })) expect(button).toHaveAttribute("aria-expanded", "true");
+    view.rerender(tree());
+    for (const button of screen.getAllByRole("button", { name: /^Turn details/ })) expect(button).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("folds permissions into one line: on their tool call, or grouped once with a count", () => {
+    const tool = (id: string) => ({ id, name: "api-firecrawl__scrape", status: "done" as const, startedAt: 1, finishedAt: 2 });
+    render(
+      <ChatMessageBubble
+        message={{
+          ...BASE,
+          toolCalls: [tool("act-1"), tool("act-2")],
+          decisions: [
+            decision("11111111-1111-4111-8111-111111111111", { activity_id: "act-1" }),
+            decision("22222222-2222-4222-8222-222222222222"),
+            decision("33333333-3333-4333-8333-333333333333"),
+            decision("44444444-4444-4444-8444-444444444444", {
+              decided_by: "user",
+              status: "denied",
+              summary: "Delete the page",
+              confirmation: null,
+            }),
+          ],
+        }}
+      />,
+    );
+    // Nothing is listed until asked for; the line carries the counts.
+    expect(screen.queryByText(/bypassed policy confirmation/)).not.toBeInTheDocument();
+    const summary = screen.getByRole("button", {
+      name: "Turn details: Completed, 2 actions, 1 denied, 3 allowed by Full access",
+    });
+    expect(within(summary).getByText("1 denied")).toHaveClass("text-warning");
+    fireEvent.click(summary);
+    // The receipt that knows its tool call sits on it, the full text on hover.
+    const pill = screen.getAllByText("Full access")[0]!;
+    expect(pill.closest("summary")).toHaveTextContent("api-firecrawl__scrape");
+    expect(pill).toHaveAttribute("title", expect.stringContaining("bypassed policy confirmation"));
+    // The rest collapse to one line each, without record IDs.
+    const list = screen.getByRole("list", { name: "Permissions used" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("Full access · Organization connection api-firecrawl in ChronoAI: POST scrape on api-firecrawl×2");
+    expect(rows[0]).not.toHaveTextContent("33dc1c9b");
+    expect(rows[1]).toHaveTextContent("You denied · Delete the page");
+  });
+
+  it("keeps channel delivery inside the summary, flagging a failure on the line", () => {
+    const { rerender } = render(
+      <ChatMessageBubble message={{ ...BASE, channelDelivery: { status: "delivered", heard_prefix_matches_sent: false } }} />,
+    );
+    expect(screen.queryByText("Provider confirmed message delivery.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Turn details: Completed" }));
+    expect(screen.getByText("Provider confirmed message delivery.")).toBeInTheDocument();
+    rerender(<ChatMessageBubble message={{ ...BASE, id: "assistant-2", channelDelivery: { status: "failed", heard_prefix_matches_sent: false } }} />);
+    expect(screen.getByRole("button", { name: "Turn details: Completed, delivery failed" })).toHaveTextContent("delivery failed");
+  });
 });

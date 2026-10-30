@@ -112,7 +112,7 @@ async fn issuance_rejects_short_secret_without_inserting_a_child() {
                 &Uuid::new_v4().to_string(),
                 &Uuid::new_v4().to_string(),
                 "CLI",
-                None,
+                Utc::now() + Duration::days(1),
                 secret,
                 &mut session
             )
@@ -141,7 +141,16 @@ async fn approve(
     ip: Option<&str>,
 ) -> AppResult<()> {
     super::approve(
-        db, encryption, hmac_key, actor, user_code, selection, expires_at, ip, None,
+        db,
+        encryption,
+        hmac_key,
+        actor,
+        user_code,
+        selection,
+        expires_at,
+        ip,
+        None,
+        crate::services::session_authority::DerivedMfaAuthority::new(false, false),
     )
     .await
 }
@@ -565,9 +574,10 @@ async fn poll_preview_and_sweep_expiry_revoke_undelivered_credentials() {
         let request = start(&db).await;
         accept(&db, &actor, &key, &request).await;
         let row = expire_request(&db, &request.user_code).await;
-        let encrypted = row.delivery_credential_encrypted.as_ref().unwrap();
-        let raw = encryption.decrypt(encrypted).await.unwrap();
-        let secret = std::str::from_utf8(&raw).unwrap();
+        let raw = crate::services::agent_login_record_service::decrypt(&encryption, &row)
+            .await
+            .unwrap();
+        let secret = raw.as_str();
         match path {
             "poll" => assert!(matches!(
                 poll(&db, &encryption, HMAC_KEY, &request.device_code).await,
@@ -637,8 +647,7 @@ async fn failed_delivery_preparation_remains_sweepable() {
         .await
         .unwrap();
     let encryption = test_encryption_keys();
-    let secret = encryption
-        .decrypt(row.delivery_credential_encrypted.as_deref().unwrap())
+    let secret = crate::services::agent_login_record_service::decrypt(&encryption, &row)
         .await
         .unwrap();
     db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME)
@@ -665,7 +674,7 @@ async fn failed_delivery_preparation_remains_sweepable() {
     expire_request(&db, &request.user_code).await;
     sweep_expired(&db).await.unwrap();
     assert!(
-        key_service::validate_api_key(&db, std::str::from_utf8(&secret).unwrap())
+        key_service::validate_api_key(&db, secret.as_str())
             .await
             .is_err()
     );
@@ -994,17 +1003,31 @@ async fn eligibility_org_admin_and_management_ownership() {
 }
 
 #[test]
-fn credential_expiry_cannot_outlive_parent() {
-    let parent = Utc::now() + Duration::days(1);
+fn new_child_default_is_finite_clamped_and_stored_none_is_unchanged() {
+    let now = bson::DateTime::from_chrono(Utc::now()).to_chrono();
+    let resolve = credentials::resolve_new_credential_expiry;
+    let short_parent = now + Duration::days(1);
     assert_eq!(
-        credentials::credential_expiry(Some(parent), None).unwrap(),
-        Some(parent)
+        resolve(Some(short_parent), None, now).unwrap(),
+        short_parent
+    );
+    let default = now + Duration::days(90);
+    assert_eq!(resolve(None, None, now).unwrap(), default);
+    assert_eq!(
+        resolve(Some(now + Duration::days(365)), None, now).unwrap(),
+        default
     );
     assert!(
-        credentials::credential_expiry(Some(parent), Some(parent + Duration::seconds(1))).is_err()
+        resolve(
+            Some(short_parent),
+            Some(short_parent + Duration::seconds(1)),
+            now
+        )
+        .is_err()
     );
-    assert!(credentials::credential_expiry(None, Some(Utc::now() - Duration::seconds(1))).is_err());
-    assert_eq!(credentials::credential_expiry(None, None).unwrap(), None);
+    assert!(resolve(None, Some(now - Duration::seconds(1)), now).is_err());
+    assert!(credentials::validate_stored_credential_expiry(None, None, now).is_ok());
+    assert!(credentials::validate_stored_credential_expiry(Some(short_parent), None, now).is_ok());
 }
 
 #[tokio::test]
@@ -1173,8 +1196,17 @@ async fn refreshable_oauth_remains_eligible_and_refresh_does_not_change_permissi
 
 #[tokio::test]
 async fn new_client_consent_rejects_broadened_existing_and_new_connection_grants_atomically() {
+    let (db, actor, key, service, credential) = consent_fixture("login_consent_drift").await;
     for existing in [true, false] {
-        let (db, actor, key, service, credential) = consent_fixture("login_consent_drift").await;
+        // Reuse the initialized database; both rejected approvals must leave
+        // the same parent and no child behind. Review the narrow state anew.
+        db.collection::<bson::Document>("user_api_keys")
+            .update_one(
+                doc! {"_id": &credential},
+                doc! {"$set": {"token_scopes": "repo:read", "credential_epoch": 1_i64}},
+            )
+            .await
+            .unwrap();
         let options = options_for_actor(&db, &actor).await.unwrap();
         let selection = if existing {
             Selection::Existing {
@@ -1203,7 +1235,10 @@ async fn new_client_consent_rejects_broadened_existing_and_new_connection_grants
             None,
         )
         .await;
-        assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(AppError::Conflict(_))),
+            "stale connection consent must conflict"
+        );
         assert_eq!(
             db.collection::<ApiKeyCredential>(CREDENTIALS)
                 .count_documents(doc! {})
@@ -1226,12 +1261,13 @@ async fn new_client_consent_rejects_broadened_existing_and_new_connection_grants
             Status::Pending
         );
     }
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
 async fn new_client_unchanged_consent_issues_real_existing_and_new_credentials() {
+    let (db, actor, key, service, _) = consent_fixture("login_consent_approve").await;
     for existing in [true, false] {
-        let (db, actor, key, service, _) = consent_fixture("login_consent_approve").await;
         let options = options_for_actor(&db, &actor).await.unwrap();
         let selection = if existing {
             Selection::Existing {
@@ -1258,8 +1294,12 @@ async fn new_client_unchanged_consent_issues_real_existing_and_new_credentials()
             .await
             .unwrap();
         assert!(delivery.credential.starts_with("nyxid_ag_"));
-        assert_eq!(delivery.api_key.allowed_service_ids, [service]);
+        assert_eq!(
+            delivery.api_key.allowed_service_ids.as_slice(),
+            std::slice::from_ref(&service)
+        );
     }
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -1368,6 +1408,7 @@ async fn concurrent_post_read_scope_change_conflicts_then_rejects_stale_consent(
                             permission_snapshot: Some(summary.permission_snapshot.clone()),
                         },
                         None,
+                        Utc::now(),
                         &key.id,
                         "concurrent-child",
                         &credentials::generate_secret(),
@@ -1530,4 +1571,209 @@ fn assistant_conversation_keys_never_back_a_cli_login() {
     assert!(!key_is_eligible(&key(Some(
         crate::services::assistant_agent_credential_service::ASSISTANT_PLATFORM
     ))));
+}
+
+#[tokio::test]
+async fn new_parent_nonexpiry_is_explicit_and_children_remain_finite_on_delivery() {
+    let (db, actor, existing, _) = fixture("w9_parent_child_lifetimes").await;
+    for selection in [
+        Selection::Existing {
+            api_key_id: existing.id.clone(),
+            permission_snapshot: None,
+        },
+        new_selection(serde_json::json!({})),
+        new_selection(serde_json::json!({"never_expires": true})),
+    ] {
+        let request = start(&db).await;
+        let explicit_none = matches!(&selection, Selection::Existing { .. })
+            || matches!(&selection, Selection::New(input) if input.never_expires);
+        approve(
+            &db,
+            &test_encryption_keys(),
+            HMAC_KEY,
+            &actor,
+            &request.user_code,
+            selection,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let delivery = poll(&db, &test_encryption_keys(), HMAC_KEY, &request.device_code)
+            .await
+            .unwrap();
+        let parent = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"_id": &delivery.api_key.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let child = db
+            .collection::<ApiKeyCredential>(CREDENTIALS)
+            .find_one(doc! {"_id": &delivery.credential_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parent.expires_at.is_none(), explicit_none);
+        assert!(child.expires_at.is_some());
+        assert_eq!(
+            delivery.credential_expires_at,
+            child.expires_at.map(|value| value.to_rfc3339())
+        );
+        if let Some(parent_expiry) = parent.expires_at {
+            assert!(child.expires_at.unwrap() <= parent_expiry);
+        }
+        assert!(child.expires_at.unwrap() <= child.created_at + Duration::days(90));
+    }
+    let unchanged = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": &existing.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged, existing);
+    // A legacy stored nonexpiring child remains unchanged at delivery.
+    let request = start(&db).await;
+    accept(&db, &actor, &existing, &request).await;
+    let row = find_by_user_code(&db, HMAC_KEY, &request.user_code)
+        .await
+        .unwrap();
+    db.collection::<ApiKeyCredential>(CREDENTIALS)
+        .update_one(
+            doc! {"_id": row.credential_id.unwrap()},
+            doc! {"$set": {"expires_at": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    let delivery = poll(&db, &test_encryption_keys(), HMAC_KEY, &request.device_code)
+        .await
+        .unwrap();
+    assert!(delivery.credential_expires_at.is_none());
+}
+
+#[tokio::test]
+async fn transaction_retry_after_issuance_keeps_frozen_parent_child_expiries_and_ids() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (db, actor, _, _) = fixture("w9_frozen_transaction_retry").await;
+    let mut selection = new_selection(serde_json::json!({}));
+    let created_at = Utc::now();
+    let child_expiry = prepare_issuance(&db, &actor, &mut selection, None, created_at)
+        .await
+        .unwrap();
+    let Selection::New(input) = &selection else {
+        panic!("new intent")
+    };
+    let parent_expiry = input.expires_at.clone();
+    let key_id = Uuid::new_v4().to_string();
+    let credential_id = Uuid::new_v4().to_string();
+    let secret = credentials::generate_secret();
+    let markers = db.collection::<bson::Document>("w9_retry_marker");
+    markers
+        .insert_one(doc! {"_id": "retry", "value": 0})
+        .await
+        .unwrap();
+    let observed = Arc::new(tokio::sync::Notify::new());
+    let changed = Arc::new(tokio::sync::Notify::new());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let tx_db = db.clone();
+    let tx_actor = actor.clone();
+    let tx_key = key_id.clone();
+    let tx_child = credential_id.clone();
+    let tx_observed = observed.clone();
+    let tx_changed = changed.clone();
+    let tx_attempts = attempts.clone();
+    let issuance = async move {
+        let mut session = tx_db.client().start_session().await.unwrap();
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let result: AppResult<()> = async {
+                    let attempt = tx_attempts.fetch_add(1, Ordering::SeqCst);
+                    issue_selected(
+                        &tx_db,
+                        &tx_actor,
+                        "frozen-retry",
+                        &LoginClientContext::default(),
+                        None,
+                        &selection,
+                        Some(child_expiry),
+                        created_at,
+                        &tx_key,
+                        &tx_child,
+                        &secret,
+                        &mut *session,
+                    )
+                    .await?;
+                    let markers = tx_db.collection::<bson::Document>("w9_retry_marker");
+                    markers
+                        .find_one(doc! {"_id": "retry"})
+                        .session(&mut *session)
+                        .await?;
+                    if attempt == 0 {
+                        tx_observed.notify_one();
+                        tx_changed.notified().await;
+                    }
+                    // The first attempt has already inserted the parent and child.
+                    // A real concurrent write now aborts them and retries this closure.
+                    markers
+                        .update_one(doc! {"_id": "retry"}, doc! {"$inc": {"value": 1}})
+                        .session(&mut *session)
+                        .await?;
+                    Ok(())
+                }
+                .await;
+                mutations::transaction_result(result)
+            })
+            .await
+            .map_err(mutations::map_transaction_error)
+            .unwrap();
+    };
+    let mutation = async {
+        observed.notified().await;
+        markers
+            .update_one(doc! {"_id": "retry"}, doc! {"$inc": {"value": 1}})
+            .await
+            .unwrap();
+        changed.notify_one();
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(issuance, mutation);
+    })
+    .await
+    .expect("bounded transaction conflict fixture");
+    assert!(attempts.load(Ordering::SeqCst) >= 2);
+    let parent = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": &key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let child = db
+        .collection::<ApiKeyCredential>(CREDENTIALS)
+        .find_one(doc! {"_id": &credential_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        parent.expires_at.map(|value| value.to_rfc3339()),
+        parent_expiry
+    );
+    assert_eq!(child.expires_at, Some(child_expiry));
+    assert_eq!(
+        db.collection::<ApiKey>(API_KEYS)
+            .count_documents(doc! {"_id": &key_id})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.collection::<ApiKeyCredential>(CREDENTIALS)
+            .count_documents(doc! {"api_key_id": &key_id})
+            .await
+            .unwrap(),
+        1
+    );
 }

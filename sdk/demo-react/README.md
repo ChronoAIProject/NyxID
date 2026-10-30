@@ -40,3 +40,10 @@ npm run dev
 ```
 
 Open `http://localhost:4173`.
+
+The demo uses SDK 0.9.0's expiry-aware `getAccessToken()` before UserInfo calls.
+The provider checks expiry on mount and every 30 seconds, persists rotated
+refresh tokens, and synchronizes other tabs through storage events. A retryable
+refresh error keeps the current session; `invalid_grant` requires login again.
+Shared browser storage requires Web Locks; configure sessionStorage for a
+tab-local demo in older browsers.

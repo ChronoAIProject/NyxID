@@ -18,12 +18,6 @@ import { CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
 import { telegramLoginDataSchema } from "@/schemas/providers";
 
-declare global {
-  interface Window {
-    onTelegramAuth?: (user: TelegramLoginData) => void;
-  }
-}
-
 type FlowStep = "loading" | "ready" | "submitting" | "success" | "error";
 
 interface TelegramLoginDialogProps {
@@ -42,6 +36,7 @@ export function TelegramLoginDialog({
     provider.id,
   );
   const connectMutation = useConnectTelegramWidget();
+  const { mutate, reset } = connectMutation;
 
   // Derive step from query/mutation state instead of useState
   const step: FlowStep = useMemo(() => {
@@ -78,23 +73,41 @@ export function TelegramLoginDialog({
     (user: TelegramLoginData) => {
       const result = telegramLoginDataSchema.safeParse(user);
       if (!result.success) {
-        connectMutation.reset();
+        reset();
         return;
       }
-      connectMutation.mutate({ providerId: provider.id, data: result.data });
+      mutate({ providerId: provider.id, data: result.data });
     },
-    [connectMutation, provider.id],
+    [mutate, reset, provider.id],
   );
 
   useEffect(() => {
     if (!config || !widgetContainerRef.current) return;
 
-    // Set up global callback for the Telegram widget
-    window.onTelegramAuth = handleTelegramAuth;
-
     // Clear previous widget content
     const container = widgetContainerRef.current;
     container.innerHTML = "";
+    let accepted = false;
+
+    // Telegram's data-onauth string callback uses eval. Receive the same
+    // widget protocol directly, binding both the origin and this iframe.
+    const onMessage = (event: MessageEvent) => {
+      const iframe = container.querySelector<HTMLIFrameElement>("iframe");
+      if (accepted || event.origin !== "https://oauth.telegram.org" || !iframe?.contentWindow
+        || event.source !== iframe.contentWindow || typeof event.data !== "string"
+        || event.data.length > 16_384) return;
+      try {
+        const message: unknown = JSON.parse(event.data);
+        if (!message || typeof message !== "object" || !("event" in message)
+          || message.event !== "auth_user" || !("auth_data" in message)) return;
+        const result = telegramLoginDataSchema.safeParse(message.auth_data);
+        if (result.success) {
+          accepted = true;
+          handleTelegramAuth(result.data);
+        }
+      } catch { /* Ignore unrelated or malformed widget messages. */ }
+    };
+    window.addEventListener("message", onMessage);
 
     // Create and append the Telegram Login Widget script
     const script = document.createElement("script");
@@ -102,12 +115,12 @@ export function TelegramLoginDialog({
     script.async = true;
     script.setAttribute("data-telegram-login", config.bot_username);
     script.setAttribute("data-size", "large");
-    script.setAttribute("data-onauth", "onTelegramAuth(user)");
     container.appendChild(script);
     scriptRef.current = script;
 
     return () => {
-      delete window.onTelegramAuth;
+      window.removeEventListener("message", onMessage);
+      container.querySelector("iframe")?.remove();
       if (scriptRef.current?.parentNode) {
         scriptRef.current.parentNode.removeChild(scriptRef.current);
         scriptRef.current = null;

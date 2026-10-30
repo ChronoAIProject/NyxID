@@ -299,7 +299,16 @@ pub struct ChannelBotSubscriptionResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DiscordGatewayStatusResponse {
+    pub state: String,
+    pub reason: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ChannelBotDiagnosticsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_gateway: Option<DiscordGatewayStatusResponse>,
     pub last_inbound_at: Option<String>,
     pub last_inbound_source: Option<String>,
     pub last_outbound_at: Option<String>,
@@ -399,6 +408,14 @@ fn diagnostics_response(
         at: e.at.to_rfc3339(),
     };
     ChannelBotDiagnosticsResponse {
+        discord_gateway: d
+            .discord_gateway
+            .as_ref()
+            .map(|gateway| DiscordGatewayStatusResponse {
+                state: gateway.state.clone(),
+                reason: gateway.reason.clone(),
+                updated_at: gateway.updated_at.to_rfc3339(),
+            }),
         last_inbound_at: d.last_inbound_at.map(|v| v.to_rfc3339()),
         last_inbound_source: d.last_inbound_source.clone(),
         last_outbound_at: d.last_outbound_at.map(|v| v.to_rfc3339()),
@@ -869,7 +886,7 @@ pub(crate) async fn create_bot_with_link(
             adapter,
             &bot_id,
             &owner_id,
-            &state.config.base_url,
+            &state.config,
         )
         .await
         .map(|_| ())
@@ -882,6 +899,7 @@ pub(crate) async fn create_bot_with_link(
             &body.bot_token,
             &webhook_url,
             &webhook_secret,
+            &state.config,
         )
         .await
     };
@@ -905,7 +923,8 @@ pub(crate) async fn create_bot_with_link(
             TelemetryEvent::ChannelBotRegistered {
                 platform: body.platform.clone(),
             },
-        );
+        )
+        .await;
     }
 
     audit_service::log_for_user(
@@ -1290,7 +1309,8 @@ pub async fn delete_bot(
         TelemetryEvent::ChannelBotDeleted {
             platform: bot.platform.clone(),
         },
-    );
+    )
+    .await;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -1447,7 +1467,7 @@ pub(crate) async fn verify_bot_with_adapter(
             adapter,
             &bot.id,
             &bot.user_id,
-            &state.config.base_url,
+            &state.config,
         )
         .await?;
         return Ok(Json(VerifyBotResponse {
@@ -1641,6 +1661,7 @@ pub(crate) async fn verify_bot_with_adapter(
         &bot_token,
         &webhook_url,
         &raw_secret,
+        &state.config,
     )
     .await;
 
@@ -1884,6 +1905,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -1961,6 +1983,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,

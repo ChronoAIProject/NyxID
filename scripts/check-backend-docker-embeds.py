@@ -38,8 +38,15 @@ def parse_dep_info(path: Path) -> list[Path]:
 
 
 def builder_copy_sources(path: Path) -> list[Path]:
+    """Build-context COPY sources of the `builder` stage and the stages before it.
+
+    The builder may extend earlier stages (dependency recipe and dependency
+    build), so every context COPY up to the end of `builder` is a compile
+    input. `COPY --from=<stage>` reads another stage, not the build context.
+    """
     logical_lines = path.read_text(encoding="utf-8").replace("\\\n", " ").splitlines()
     sources: list[Path] = []
+    in_builder = False
     saw_builder = False
     for raw_line in logical_lines:
         line = raw_line.strip()
@@ -47,14 +54,18 @@ def builder_copy_sources(path: Path) -> list[Path]:
             continue
         instruction = line.split(None, 1)[0].upper()
         if instruction == "FROM":
-            if saw_builder:
+            if in_builder:
                 break
-            saw_builder = True
+            words = line.split()
+            in_builder = len(words) >= 4 and words[-2].upper() == "AS" and words[-1] == "builder"
+            saw_builder = saw_builder or in_builder
             continue
-        if not saw_builder or instruction != "COPY":
+        if instruction != "COPY":
             continue
-        args = shlex.split(line.split(None, 1)[1], comments=True)
-        args = [arg for arg in args if not arg.startswith("--")]
+        raw_args = shlex.split(line.split(None, 1)[1], comments=True)
+        if any(arg.startswith("--from=") for arg in raw_args):
+            continue
+        args = [arg for arg in raw_args if not arg.startswith("--")]
         if len(args) < 2 or args[0].startswith("["):
             raise ValueError(f"unsupported builder COPY syntax: {raw_line}")
         sources.extend((REPO_ROOT / source).resolve() for source in args[:-1])

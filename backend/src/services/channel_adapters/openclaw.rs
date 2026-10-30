@@ -33,6 +33,9 @@ impl Default for OpenClawAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for OpenClawAdapter {
+    fn supports_text_reply(&self) -> bool {
+        false
+    }
     fn display_name(&self) -> &str {
         "OpenClaw"
     }
@@ -94,6 +97,8 @@ impl PlatformAdapter for OpenClawAdapter {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: message_id,
             conversation_id: msg.channel_user_id.clone(),
             conversation_type: "private".to_string(),
@@ -308,6 +313,7 @@ mod tests {
 
     fn make_test_bot() -> ChannelBot {
         ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,

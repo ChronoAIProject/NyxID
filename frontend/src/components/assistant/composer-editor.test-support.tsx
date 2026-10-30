@@ -36,6 +36,16 @@ export function ComposerEditor({
     focus() {
       input.current!.focus();
     },
+    insertDictation(text, selection) {
+      const element = input.current!;
+      if (element.value !== selection.value) return false;
+      const next =
+        element.value.slice(0, selection.selectionStart) +
+        text +
+        element.value.slice(selection.selectionEnd);
+      onChange(next);
+      return true;
+    },
     setSelectionRange(start, end) {
       input.current!.setSelectionRange(start, end);
     },

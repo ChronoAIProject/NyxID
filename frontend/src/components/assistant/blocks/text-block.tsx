@@ -243,6 +243,7 @@ const COMPONENTS: Components = {
   hr: () => <hr className={`${BLOCK} border-hairline`} />,
   pre: ({ children }) => (
     <pre
+      data-scroll-fade=""
       className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono text-14 leading-relaxed text-foreground [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit`}
     >
       {children}
@@ -261,6 +262,7 @@ const COMPONENTS: Components = {
   },
   table: ({ children }) => (
     <div
+      data-scroll-fade=""
       className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline`}
     >
       <table className="w-full border-collapse text-left text-14 text-foreground/90">

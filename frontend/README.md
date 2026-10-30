@@ -71,3 +71,23 @@ export default defineConfig([
   },
 ])
 ```
+
+
+### Feature flag UI preview
+
+Run `node scripts/feature-flag-preview.mjs` from `frontend/`, then open
+http://127.0.0.1:4851/admin/feature-flags. This uses the actual admin page with
+in-memory sample data, including groups, tags, sunset flags and actor-attributed
+history. Changes reset when the preview stops. It does not connect to production.
+Set `FLAG_PREVIEW_PORT` to use another frontend port (the sample API uses the next
+port). Use the normal backend for persistence and authorization verification.
+
+Run the feature flag component and query tests with:
+
+```sh
+npm test -- src/pages/admin-feature-flags.test.tsx src/hooks/use-admin-feature-flags.test.tsx src/components/admin/feature-flags/flag-history.test.tsx
+```
+
+Run the desktop and mobile browser regressions with
+`npx playwright test --config playwright.feature-flags.config.ts`. This starts
+its own Vite server on port 4861 and uses API fixtures.

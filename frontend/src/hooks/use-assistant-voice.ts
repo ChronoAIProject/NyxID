@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AssistantVoiceClient } from "@/lib/assistant-voice-client";
+import {
+  microphoneDevice,
+  silentActivity,
+  type PreparedMicrophone,
+} from "@/lib/microphone-capture";
+import {
+  AssistantVoiceClient,
+  type VoiceConnectionStatus,
+} from "@/lib/assistant-voice-client";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import type {
@@ -12,14 +20,18 @@ export function useAssistantVoice(thread: string) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useRef<AssistantVoiceClient | null>(null);
   const generation = useRef(0);
+  const [activity, setActivity] = useState(silentActivity);
   const [holding, setHolding] = useState(false);
   const [connected, setConnected] = useState(false);
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [connectionStatus, setConnectionStatus] =
+    useState<VoiceConnectionStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [conflictSession, setConflictSession] =
-    useState<VoiceSession | null>(null);
+  const [conflictSession, setConflictSession] = useState<VoiceSession | null>(
+    null,
+  );
   useEffect(
     () => () => {
       generation.current++;
@@ -33,6 +45,8 @@ export function useAssistantVoice(thread: string) {
     async (
       preferences: VoicePreferences,
       protocol?: "openai_live" | "xai_realtime",
+      beforeProvider?: () => Promise<void>,
+      preparation?: PreparedMicrophone,
     ) => {
       if (client.current) return;
       const ticket = ++generation.current;
@@ -46,12 +60,11 @@ export function useAssistantVoice(thread: string) {
         (value) => {
           if (generation.current === ticket) {
             setSnapshot(value);
-            if (protocol === "xai_realtime")
-              setStarting(value.session.state === "starting");
-            setConnected(
-              value.session.state === "active" ||
-                value.session.state === "closing",
-            );
+            if (value.session.state === "closing") {
+              setStarting(false);
+              setConnected(true);
+              setHolding(false);
+            }
           }
         },
         (message) => {
@@ -62,20 +75,39 @@ export function useAssistantVoice(thread: string) {
             client.current = null;
             setStarting(false);
             setConnected(false);
+            setHolding(false);
+            setConnectionStatus(null);
           }
         },
         (session) => {
           if (generation.current === ticket) setConflictSession(session);
         },
+        (value) => {
+          if (generation.current === ticket) setActivity(value);
+        },
+        (status) => {
+          if (generation.current === ticket) {
+            setConnectionStatus(status);
+            setStarting(status !== "ready");
+            setConnected(status === "ready");
+            if (status !== "ready") setHolding(false);
+          }
+        },
       );
       client.current = next;
-      await next.start(preferences, protocol);
-      if (generation.current === ticket) {
-        if (protocol !== "xai_realtime" || next.isClosed) setStarting(false);
-        if (next.isClosed) client.current = null;
+      await next.start(
+        preferences,
+        protocol,
+        beforeProvider,
+        preparation,
+        microphoneDevice(actor ?? ""),
+      );
+      if (generation.current === ticket && next.isClosed) {
+        setStarting(false);
+        client.current = null;
       }
     },
-    [thread],
+    [actor, thread],
   );
   const end = useCallback(async () => {
     const previous = client.current;
@@ -84,7 +116,12 @@ export function useAssistantVoice(thread: string) {
     setHolding(false);
     setStarting(false);
     setConnected(false);
+    setConnectionStatus(null);
     setSnapshot(null);
+    setActivity((previous) => ({
+      ...silentActivity(),
+      playbackMs: previous.playbackMs,
+    }));
     if (previous) await previous.end();
     else if (conflictSession) {
       try {
@@ -111,10 +148,11 @@ export function useAssistantVoice(thread: string) {
         if (generation.current === ticket) {
           setConflictSession(null);
           setSnapshot(value);
-          setConnected(
-            value.session.state === "active" ||
-              value.session.state === "closing",
-          );
+          if (value.session.state === "closing") {
+            setStarting(false);
+            setConnected(true);
+            setHolding(false);
+          }
         }
       },
       (message) => {
@@ -123,11 +161,23 @@ export function useAssistantVoice(thread: string) {
       () => {
         if (generation.current === ticket) {
           client.current = null;
+          setStarting(false);
           setConnected(false);
+          setHolding(false);
+          setConnectionStatus(null);
         }
       },
       (session) => {
         if (generation.current === ticket) setConflictSession(session);
+      },
+      undefined,
+      (status) => {
+        if (generation.current === ticket) {
+          setConnectionStatus(status);
+          setStarting(status !== "ready");
+          setConnected(status === "ready");
+          if (status !== "ready") setHolding(false);
+        }
       },
     );
     client.current = next;
@@ -136,10 +186,12 @@ export function useAssistantVoice(thread: string) {
     next.rejoin(conflictSession);
   }, [conflictSession, thread]);
   return {
+    activity,
     holding,
     connected,
     snapshot,
     starting,
+    connectionStatus,
     error,
     conflictSession,
     rejoin,
@@ -151,6 +203,7 @@ export function useAssistantVoice(thread: string) {
       setSpeakerMuted(muted);
     },
     hold: (pressed: boolean) => {
+      if (pressed && (starting || !connected)) return;
       setHolding(pressed);
       client.current?.hold(pressed);
     },

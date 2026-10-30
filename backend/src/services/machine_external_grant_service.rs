@@ -101,6 +101,11 @@ pub struct GrantAssignment {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantSelection {
+    /// Human consent only. External authority does not yet carry contexts.
+    #[serde(default)]
+    pub separation: Option<nyxid_machine::context::Choice>,
+    #[serde(default)]
+    pub legacy_warning_acknowledged: bool,
     pub assignments: BTreeMap<String, GrantAssignment>,
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
@@ -351,6 +356,38 @@ async fn touch_source(
 }
 
 pub async fn validate_selection_in_session(
+    db: &Database,
+    user: &str,
+    selection: &GrantSelection,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    require_legacy_consent(selection)?;
+    validate_existing_selection_in_session(db, user, selection, session).await
+}
+
+fn require_legacy_consent(selection: &GrantSelection) -> AppResult<()> {
+    match selection.separation {
+        Some(nyxid_machine::context::Choice::SharedLegacy)
+            if selection.legacy_warning_acknowledged =>
+        {
+            Ok(())
+        }
+        Some(
+            nyxid_machine::context::Choice::Automatic
+            | nyxid_machine::context::Choice::RequireSeparated,
+        ) => Err(invalid(
+            "External OAuth and API-key Machine authority does not support separated contexts. Choose shared_legacy explicitly and acknowledge the complete legacy warning, or use an assistant context on a supported node.",
+        )),
+        _ => Err(invalid(&format!(
+            "machine_selection_required: Explicit shared_legacy consent and warning acknowledgement are required for a new external Machine grant. {}",
+            nyxid_machine::context::SHARED_LEGACY_WARNING
+        ))),
+    }
+}
+
+/// Revalidation of already-approved authority must not demand new consent.
+/// The stored mode and all live source, ACL and capability fences still apply.
+async fn validate_existing_selection_in_session(
     db: &Database,
     user: &str,
     selection: &GrantSelection,
@@ -1369,6 +1406,44 @@ impl VerifiedExternalSource {
     }
 }
 
+/// Cancellation validates and fences its current source without requiring an
+/// active Machine grant. It cannot admit execution, output access or renewal.
+pub(super) async fn admit_stop_source_in_session(
+    db: &Database,
+    source: &VerifiedExternalSource,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    if source.authentication_expires_at() <= Utc::now() {
+        return Err(AppError::MachinePermissionRevoked);
+    }
+    owner_in_session(db, &source.user_id, session).await?;
+    match &source.source {
+        Source::ApiKey {
+            api_key_id,
+            credential_id,
+        } => {
+            load_key(db, &source.user_id, api_key_id, session).await?;
+            let mut filter = doc! {"_id":api_key_id,"user_id":&source.user_id,"is_active":true};
+            filter.extend(expiry_filter());
+            touch_source(db, KEYS, filter, session).await?;
+            if let Some(child) = credential_id {
+                super::machine_external_source_service::fence_child_in_session(
+                    db,
+                    &source.user_id,
+                    api_key_id,
+                    child,
+                    session,
+                )
+                .await?;
+            }
+        }
+        Source::OAuth { client_id, consent } => {
+            validate_oauth_source(db, &source.user_id, client_id, consent, session).await?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct AdmittedGrant {
     pub grant: MachineExternalGrant,
@@ -1454,6 +1529,8 @@ pub async fn admit_in_session(
         return Err(AppError::MachineNotAllowed);
     }
     let mut selection = GrantSelection {
+        separation: None,
+        legacy_warning_acknowledged: false,
         assignments: BTreeMap::from([(
             node.into(),
             GrantAssignment {
@@ -1464,7 +1541,7 @@ pub async fn admit_in_session(
         )]),
         expires_at: None,
     };
-    validate_selection_in_session(db, &source.user_id, &selection, session).await?;
+    validate_existing_selection_in_session(db, &source.user_id, &selection, session).await?;
     let mut expires_at = source.expires_at.min(grant.expires_at);
     let _credential_id = match (&source.source, &grant.binding) {
         (

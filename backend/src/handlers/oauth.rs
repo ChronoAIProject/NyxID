@@ -74,6 +74,10 @@ pub struct AuthorizeQuery {
     pub incremental_consent: Option<IncrementalConsent>,
     #[serde(skip)]
     pub machine_approval_request_id: Option<String>,
+    #[serde(skip)]
+    pub consent_request_iat: Option<i64>,
+    #[serde(skip)]
+    pub consent_request_fence: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +110,10 @@ pub struct ConsentDecisionForm {
     /// Older consent pages submitted controls the server never enforced.
     #[serde(default)]
     pub write_access: Option<String>,
+    /// Deterministic browser-document signal supplied by the consent form.
+    /// Fetch Metadata is retained as an additional signal for newer browsers.
+    #[serde(default)]
+    pub browser_form: bool,
 }
 
 fn validate_consent_write_access(write_access: Option<&str>) -> AppResult<()> {
@@ -126,7 +134,7 @@ pub struct AuthorizeResponse {
     pub redirect_url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct TokenRequest {
     pub grant_type: String,
     pub code: Option<String>,
@@ -157,7 +165,7 @@ pub struct TokenRequest {
     pub resource: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct TokenResponse {
     pub access_token: String,
     pub token_type: String,
@@ -197,17 +205,23 @@ pub struct UserinfoResponse {
 
 // --- Introspection / Revocation types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct IntrospectRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+    /// Catalog service whose registered confidential client verifies an agent key.
+    pub service_id: Option<String>,
+    #[serde(flatten)]
+    pub resource_request: crate::services::resource_request_proof::IntrospectionInput,
 }
 
 #[derive(Debug, Serialize)]
 pub struct IntrospectResponse {
     pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -236,7 +250,7 @@ pub struct IntrospectResponse {
     pub resource: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RevokeRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
@@ -244,7 +258,7 @@ pub struct RevokeRequest {
     pub client_secret: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct GetBindingQuery {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -263,7 +277,7 @@ pub struct GetBindingResponse {
     pub revoked: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ListBindingsByExternalSubjectQuery {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -289,7 +303,7 @@ pub struct ListBindingsResponse {
     pub bindings: Vec<BindingSummary>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct PushedAuthorizationRequestForm {
     pub response_type: String,
     pub client_id: Option<String>,
@@ -326,11 +340,16 @@ pub struct PushedAuthorizationRequestResponse {
 /// RFC 6749 §5.2 compliant error body for the token endpoint.
 /// Standard OAuth clients expect `error` + `error_description`, not our
 /// internal `ErrorResponse` format which carries `error_code` / `message`.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct OAuthErrorBody {
     error: &'static str,
     error_description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_token: Option<zeroize::Zeroizing<String>>,
 }
+crate::errors::redacted_debug!(OAuthErrorBody);
 
 const CONSENT_REQUEST_AUDIENCE: &str = "nyxid/oauth-consent";
 const CONSENT_REQUEST_TOKEN_TYPE: &str = "oauth_consent_request";
@@ -343,6 +362,8 @@ struct ConsentRequestClaims {
     aud: String,
     exp: i64,
     iat: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    consent_request_fence: Option<String>,
     token_type: String,
     response_type: String,
     client_id: String,
@@ -382,14 +403,27 @@ fn oauth_error_response(err: AppError) -> Response {
         other => other.to_string(),
     };
 
-    (
+    let mut response = (
         status,
         axum::Json(OAuthErrorBody {
             error: oauth_error,
             error_description: description,
+            error_code: matches!(err, AppError::MfaRequired { .. }).then_some(err.error_code()),
+            session_token: match &err {
+                AppError::MfaRequired { session_token } => {
+                    Some(zeroize::Zeroizing::new(session_token.clone()))
+                }
+                _ => None,
+            },
         }),
     )
-        .into_response()
+        .into_response();
+    if matches!(err, AppError::OAuthAuthorityUnavailable) {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, "1".parse().expect("fixed Retry-After"));
+    }
+    response
 }
 
 fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(String, String)>> {
@@ -462,13 +496,16 @@ async fn sender_constraint_from_headers(
             let proof = value
                 .to_str()
                 .map_err(|_| AppError::InvalidDpopProof("invalid DPoP proof".to_string()))?;
-            let htu =
-                crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, "/oauth/token")
-                    .map_err(dpop_token_error)?;
             Some(
-                crate::crypto::dpop::validate_proof(proof, "POST", &htu, &state.db)
-                    .await
-                    .map_err(dpop_token_error)?,
+                crate::crypto::dpop::validate_configured_proof(
+                    proof,
+                    "POST",
+                    "/oauth/token",
+                    &state.config,
+                    &state.db,
+                )
+                .await
+                .map_err(dpop_token_error)?,
             )
         }
         None => None,
@@ -604,6 +641,8 @@ fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
         requested_service_ids: form.requested_service_ids.clone(),
         incremental_consent: None,
         machine_approval_request_id: None,
+        consent_request_iat: None,
+        consent_request_fence: None,
         prompt: form.prompt.clone(),
         resource: form.resource.clone(),
         request_uri: None,
@@ -629,6 +668,7 @@ fn sign_consent_request(
         aud: CONSENT_REQUEST_AUDIENCE.to_string(),
         exp: now + CONSENT_REQUEST_TTL_SECS,
         iat: now,
+        consent_request_fence: params.consent_request_fence.clone(),
         token_type: CONSENT_REQUEST_TOKEN_TYPE.to_string(),
         response_type: params.response_type.clone(),
         client_id: params.client_id.clone(),
@@ -679,16 +719,23 @@ fn verify_consent_request_with_expiry(
     allow_expired: bool,
 ) -> AppResult<AuthorizeQuery> {
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(&[&state.config.jwt_issuer]);
+    validation.set_issuer(&state.config.accepted_jwt_issuers());
     validation.set_audience(&[CONSENT_REQUEST_AUDIENCE]);
     validation.validate_exp = !allow_expired;
 
-    let claims = decode::<ConsentRequestClaims>(token, &state.jwt_keys.decoding, &validation)
-        .map_err(|error| match error.kind() {
-            jsonwebtoken::errors::ErrorKind::ExpiredSignature => consent_service::grant_changed(),
-            _ => AppError::BadRequest("Invalid consent request".to_string()),
-        })?
-        .claims;
+    let claims = decode::<ConsentRequestClaims>(
+        token,
+        state
+            .jwt_keys
+            .decoding_key(token)
+            .map_err(|_| AppError::BadRequest("Invalid consent request".into()))?,
+        &validation,
+    )
+    .map_err(|error| match error.kind() {
+        jsonwebtoken::errors::ErrorKind::ExpiredSignature => consent_service::grant_changed(),
+        _ => AppError::BadRequest("Invalid consent request".to_string()),
+    })?
+    .claims;
 
     if claims.token_type != CONSENT_REQUEST_TOKEN_TYPE
         || claims.sub != user_id
@@ -715,6 +762,8 @@ fn verify_consent_request_with_expiry(
         requested_service_ids: claims.requested_service_ids,
         incremental_consent: claims.incremental_consent,
         machine_approval_request_id: claims.machine_approval_request_id,
+        consent_request_iat: Some(claims.iat),
+        consent_request_fence: claims.consent_request_fence,
         prompt: claims.prompt,
         resource: claims.resource,
         request_uri: None,
@@ -796,7 +845,6 @@ pub async fn authorize(
         client_id = %params.client_id,
         is_browser_mode,
         is_authenticated,
-        redirect_uri = %params.redirect_uri,
         "OAuth authorize endpoint hit"
     );
 
@@ -819,7 +867,7 @@ pub async fn authorize(
         Err(ref err) if is_browser_mode => {
             tracing::warn!(
                 client_id = %params.client_id,
-                error = %err,
+                reason = err.error_key(),
                 "OAuth authorize failed, redirecting to error page"
             );
             if (params.service_access_mode.is_some() || params.include_granted_scopes)
@@ -857,6 +905,7 @@ pub async fn authorize_incremental_decision(
     }
     let review_user = opt_auth.0.as_ref().map(|user| user.user_id.to_string());
     let signed_request = form.consent_request.clone();
+    let browser_form = form.browser_form;
     match authorize_decision(State(state.clone()), opt_auth, tele, Form(form)).await {
         Ok(response) => Ok(response),
         Err(error) => {
@@ -872,7 +921,12 @@ pub async fn authorize_incremental_decision(
                 .await
                 .is_ok()
             {
-                return Ok(incremental_error_callback(&params, &error));
+                let response = incremental_error_callback(&params, &error);
+                return Ok(if browser_form {
+                    crate::handlers::oauth_consent_response::mark_browser_form_response(response)
+                } else {
+                    response
+                });
             }
             Err(error)
         }
@@ -942,6 +996,21 @@ pub async fn prepare_machine_consent(
 }
 
 pub async fn authorize_decision(
+    State(state): State<AppState>,
+    opt_auth: OptionalAuthUser,
+    tele: TelemetryContext,
+    Form(form): Form<ConsentDecisionForm>,
+) -> Result<Response, AppError> {
+    let browser_form = form.browser_form;
+    let response = authorize_decision_inner(State(state), opt_auth, tele, Form(form)).await?;
+    Ok(if browser_form {
+        crate::handlers::oauth_consent_response::mark_browser_form_response(response)
+    } else {
+        response
+    })
+}
+
+async fn authorize_decision_inner(
     State(state): State<AppState>,
     opt_auth: OptionalAuthUser,
     tele: TelemetryContext,
@@ -1024,6 +1093,7 @@ pub async fn authorize_decision(
     } else {
         None
     };
+    let mut code_service_access: Option<(bool, Vec<String>)> = None;
     let consent = if params.service_access_mode.is_some() {
         let snapshot = params.incremental_consent.as_ref().ok_or_else(|| {
             AppError::BadRequest("Missing incremental consent snapshot".to_string())
@@ -1048,9 +1118,9 @@ pub async fn authorize_decision(
         params.incremental_consent = Some(approved);
         // The code below uses the approved binding-specific grant. This value
         // supplies the existing API's ordinary consent argument only.
-        consent_service::check_consent(&state.db, &user_id_str, &params.client_id, "")
-            .await?
-            .ok_or_else(consent_service::grant_changed)?
+        let consent =
+            consent_service::check_consent(&state.db, &user_id_str, &params.client_id, "").await?;
+        consent.ok_or_else(consent_service::grant_changed)?
     } else {
         let consent_allowed_service_ids = if form.allow_all_services {
             None
@@ -1075,7 +1145,11 @@ pub async fn authorize_decision(
             validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
             Some(selected_service_ids)
         };
-        consent_service::grant_consent_with_machine(
+        code_service_access = Some((
+            consent_allowed_service_ids.is_none(),
+            consent_allowed_service_ids.clone().unwrap_or_default(),
+        ));
+        consent_service::grant_consent_union_with_machine(
             &state.db,
             &user_id_str,
             &params.client_id,
@@ -1083,6 +1157,8 @@ pub async fn authorize_decision(
             consent_allowed_service_ids.is_none(),
             consent_allowed_service_ids.or_else(|| Some(Vec::new())),
             machine.as_ref(),
+            params.consent_request_iat,
+            params.consent_request_fence.clone(),
         )
         .await?
     };
@@ -1094,6 +1170,7 @@ pub async fn authorize_decision(
         &validated_scope,
         &consent,
         external_subject.as_ref(),
+        code_service_access,
     )
     .await?;
     let redirect_url = build_callback_url(&params, &code);
@@ -1122,6 +1199,8 @@ pub async fn authorize_decision(
     let tele_consent = TelemetryContext {
         surface: consent_surface,
         client_version: None,
+        analytics_allowed: false,
+        analytics_account: None,
     };
     emit_event(
         state.telemetry.as_deref(),
@@ -1135,7 +1214,8 @@ pub async fn authorize_decision(
             client_id: hash_short_id(&params.client_id),
             grant_type: "authorization_code".to_string(),
         },
-    );
+    )
+    .await;
     let _ = &tele;
 
     if needs_success_page(&params.redirect_uri) {
@@ -1302,6 +1382,7 @@ async fn authorize_inner(
                     &validated_scope,
                     &consent,
                     external_subject,
+                    None,
                 )
                 .await?;
                 let redirect_url = build_callback_url(params, &code);
@@ -1388,6 +1469,7 @@ async fn authorize_inner(
             &validated_scope,
             &consent,
             external_subject,
+            None,
         )
         .await?;
         let redirect_url = build_callback_url(params, &code);
@@ -1509,7 +1591,7 @@ fn redirect_302(uri: &str) -> Response {
 /// - Custom URI schemes (cursor://, vscode://) where the browser can't render
 ///   anything after the OS handles the protocol
 fn needs_success_page(uri: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(uri) else {
+    let Ok(parsed) = oauth_service::validate_redirect_uri_scheme(uri) else {
         return false;
     };
     // Custom URI scheme (cursor://, vscode://, claude-code://, etc.)
@@ -1526,72 +1608,21 @@ fn needs_success_page(uri: &str) -> bool {
 /// server receives the code via the redirect while the user sees a clear
 /// success message instead of a blank white page.
 ///
-/// Overrides the global CSP to allow inline style/script for this one-off
-/// HTML page (the global CSP is `default-src 'none'` which blocks them).
+/// Uses a meta refresh and visible link for the protocol handoff. Browser
+/// engines treat the refresh as a new navigation, so it is not subject to the
+/// submitting form's cross-origin `form-action` redirect-chain restriction;
+/// the link covers browsers that decline custom-scheme meta refreshes. The
+/// shared renderer permits inline style only and never executable script.
 fn oauth_success_page(redirect_url: &str) -> Response {
-    let escaped = redirect_url
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    let js_escaped = redirect_url.replace('\\', "\\\\").replace('\'', "\\'");
-
-    let html = format!(
-        r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta http-equiv="refresh" content="2;url={escaped}">
-<meta name="referrer" content="no-referrer">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NyxID — Authenticated</title>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:"Mona Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:100vh;background:#0D0D0D;color:#FAFAFA;line-height:1.4;-webkit-font-smoothing:antialiased}}
-.wrap{{display:flex;flex-direction:column;align-items:center;gap:2rem;width:100%;max-width:28.75rem;padding:1rem}}
-.logo svg{{display:block;height:30px;width:auto}}
-.card{{width:100%;text-align:center;padding:1.25rem;border:1px solid rgba(16,185,129,.25);border-radius:12px;background:rgba(16,185,129,.03);box-shadow:0 1px 2px 0 rgba(0,0,0,.05)}}
-.icon{{width:2.75rem;height:2.75rem;margin:0 auto 1rem;border-radius:12px;border:1px solid rgba(16,185,129,.30);background:rgba(16,185,129,.10);display:flex;align-items:center;justify-content:center}}
-.icon svg{{width:1.25rem;height:1.25rem;color:#10B981}}
-h1{{font-size:15px;font-weight:600;margin-bottom:.25rem}}
-.sub{{font-size:12px;color:#A3A3A3}}
-.bar{{margin-top:1.25rem;height:3px;border-radius:2px;background:#262626;overflow:hidden}}
-.bar .fill{{height:100%;width:0;border-radius:2px;background:linear-gradient(to right,#A672FB 0%,#5E00F5 100%);animation:progress 1.8s ease-in-out forwards}}
-@keyframes progress{{to{{width:100%}}}}
-@media (prefers-reduced-motion:reduce){{.bar .fill{{animation:none;width:100%}}}}
-.foot{{font-size:11px;color:#525252}}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="logo">
-    <svg role="img" aria-label="NyxID" viewBox="0 0 1062 301" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M258.614 53.8457V205.377C258.614 234.778 234.78 258.612 205.38 258.612H131.074C130.268 258.612 129.613 257.957 129.613 257.15V117.358C129.613 115.867 127.645 115.332 126.891 116.619L44.0376 257.889C43.7745 258.337 43.2951 258.612 42.7777 258.612H2.073C1.26616 258.612 0.611328 257.957 0.611328 257.15V2.07323C0.611328 1.26639 1.26616 0.611557 2.073 0.611557H85.1516C85.9584 0.611557 86.6133 1.26639 86.6133 2.07323V141.865C86.6133 143.356 88.5807 143.891 89.3349 142.604L172.191 1.33362C172.454 0.886352 172.934 0.611557 173.451 0.611557H205.377C234.777 0.611557 258.611 24.4456 258.611 53.8457H258.614Z" fill="url(#paint0_linear_5_302)"/> <g filter="url(#filter0_f_5_302)"> <path d="M2.07324 1.37621H85.1514C85.536 1.37621 85.8486 1.68882 85.8486 2.07347V141.864C85.8486 144.134 88.845 144.95 89.9941 142.991L172.85 1.71996L172.851 1.72093C172.977 1.50652 173.206 1.37625 173.451 1.37621H205.377C234.355 1.37621 257.847 24.868 257.847 53.8459V54.6106H257.85V205.377C257.85 234.355 234.358 257.847 205.38 257.847H131.074C130.69 257.847 130.377 257.534 130.377 257.15V117.359C130.377 115.089 127.38 114.272 126.231 116.232L43.3789 257.502C43.2526 257.717 43.0228 257.847 42.7773 257.847H2.07324C1.68859 257.847 1.37598 257.534 1.37598 257.15V2.07347C1.37598 1.68882 1.68859 1.37621 2.07324 1.37621Z" stroke="url(#paint1_linear_5_302)" stroke-opacity="0.5" stroke-width="1.52891"/> </g> <path d="M581.159 193.441L587.61 215.028H589.099L595.302 193.441L615.648 125.951H654.604L602.994 265.148C599.52 274.411 595.385 281.607 590.588 286.735C585.791 291.862 580.332 295.42 574.212 297.405C568.092 299.39 561.226 300.381 553.617 300.381H531.038V270.359H546.67C550.474 270.359 553.617 269.863 556.099 268.87C558.745 268.043 560.896 266.554 562.55 264.404C564.369 262.419 565.858 259.855 567.016 256.712L570.144 248.577L519.128 125.951H559.324L581.159 193.441ZM462.01 204.606H463.498L461.762 148.034V78.0637H499.228V258.946H454.317L378.641 133.891H377.151L378.641 186.245V258.946H339.188V78.0637H386.58L462.01 204.606ZM731.847 163.17L734.824 168.132H736.065L739.043 163.17L762.614 125.951H804.051L759.885 189.719L808.765 258.946H765.592L738.05 217.012L734.824 211.306H733.584L730.11 217.012L701.328 258.946H660.388L710.509 190.711L665.102 125.951H708.275L731.847 163.17ZM867.114 258.946H828.407V78.0637H867.114V258.946ZM978.508 78.0637C996.372 78.0637 1011.51 81.8679 1023.91 89.4768C1036.32 96.9204 1045.75 107.425 1052.2 120.989C1058.65 134.553 1061.88 150.433 1061.88 168.628C1061.88 182.027 1060.06 194.351 1056.42 205.599C1052.78 216.682 1047.4 226.193 1040.29 234.133C1033.18 242.073 1024.41 248.193 1013.99 252.493C1003.73 256.794 991.906 258.946 978.508 258.946H901.342V78.0637H978.508ZM940.049 225.945H972.057C979.335 225.945 986.035 224.952 992.155 222.967C998.275 220.982 1003.57 217.756 1008.04 213.29C1012.5 208.824 1015.97 202.869 1018.46 195.426C1020.94 187.982 1022.18 178.801 1022.18 167.884C1022.18 153.658 1020.03 142.41 1015.73 134.139C1011.59 125.868 1005.72 119.914 998.109 116.275C990.666 112.636 981.981 110.816 972.057 110.816H940.049V225.945Z" fill="white"/> <defs> <filter id="filter0_f_5_302" x="-0.000234365" y="-5.48363e-06" width="259.226" height="259.223" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"> <feFlood flood-opacity="0" result="BackgroundImageFix"/> <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/> <feGaussianBlur stdDeviation="0.305781" result="effect1_foregroundBlur_5_302"/> </filter> <linearGradient id="paint0_linear_5_302" x1="129.613" y1="0.611557" x2="129.613" y2="258.612" gradientUnits="userSpaceOnUse"> <stop stop-color="#A672FB"/> <stop offset="1" stop-color="#5E00F5"/> </linearGradient> <linearGradient id="paint1_linear_5_302" x1="129.613" y1="0.611557" x2="129.613" y2="258.612" gradientUnits="userSpaceOnUse"> <stop stop-color="white"/> <stop offset="1" stop-color="white" stop-opacity="0"/> </linearGradient> </defs> </svg>
-  </div>
-  <div class="card">
-    <div class="icon">
-      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
-    </div>
-    <h1>Authentication successful</h1>
-    <p class="sub">Redirecting you back to the application&hellip;</p>
-    <div class="bar"><div class="fill"></div></div>
-  </div>
-  <p class="foot">You can close this tab if it doesn&rsquo;t redirect automatically.</p>
-</div>
-<script>setTimeout(function(){{window.location.replace('{js_escaped}')}},1800)</script>
-</body>
-</html>"##
-    );
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/html; charset=utf-8")
-        .header(header::REFERRER_POLICY, "no-referrer")
-        .header(
-            header::CONTENT_SECURITY_POLICY,
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
-        )
-        .body(axum::body::Body::from(html))
-        .unwrap()
+    // This page is also used by authorization GETs with existing consent and
+    // by native callbacks. Keep the destination under the same execution-time
+    // policy used by client admission, and use the shared script-free renderer.
+    crate::handlers::oauth_consent_response::redirect_interstitial(
+        redirect_url,
+        "Authentication successful",
+        "Redirecting you back to the application…",
+        2,
+    )
 }
 
 /// Returns true when the request explicitly asks for JSON (API / XHR clients).
@@ -1669,6 +1700,8 @@ async fn resolve_pushed_authorize_params(
         requested_service_ids: record.requested_service_ids,
         incremental_consent: None,
         machine_approval_request_id: None,
+        consent_request_iat: None,
+        consent_request_fence: None,
         prompt: record.prompt,
         resource: record.resources,
         request_uri: None,
@@ -1767,7 +1800,16 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
 
 /// Build the callback redirect URL with code and optional state.
 fn build_callback_url(params: &AuthorizeQuery, code: &str) -> String {
-    let mut url = format!("{}?code={}", params.redirect_uri, urlencoding::encode(code),);
+    let separator = if params.redirect_uri.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    let mut url = format!(
+        "{}{separator}code={}",
+        params.redirect_uri,
+        urlencoding::encode(code)
+    );
     if let Some(ref state_param) = params.state {
         url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
     }
@@ -1775,8 +1817,13 @@ fn build_callback_url(params: &AuthorizeQuery, code: &str) -> String {
 }
 
 fn build_callback_error_url(params: &AuthorizeQuery, error: &str, description: &str) -> String {
+    let separator = if params.redirect_uri.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
     let mut url = format!(
-        "{}?error={}&error_description={}",
+        "{}{separator}error={}&error_description={}",
         params.redirect_uri,
         urlencoding::encode(error),
         urlencoding::encode(description),
@@ -1788,7 +1835,7 @@ fn build_callback_error_url(params: &AuthorizeQuery, error: &str, description: &
 }
 
 fn incremental_error_callback(params: &AuthorizeQuery, error: &AppError) -> Response {
-    tracing::warn!(client_id = %params.client_id, error = %error, "Incremental consent failed");
+    tracing::warn!(client_id = %params.client_id, reason = error.error_key(), "Incremental consent failed");
     let code = match error {
         AppError::Conflict(_) | AppError::InvalidTarget(_) => "interaction_required",
         _ => "server_error",
@@ -1808,7 +1855,7 @@ fn incremental_authorize_error_callback(params: &AuthorizeQuery, error: &AppErro
         AppError::Conflict(_) => "interaction_required",
         _ => "server_error",
     };
-    tracing::warn!(client_id = %params.client_id, error = %error, "Incremental authorization failed");
+    tracing::warn!(client_id = %params.client_id, reason = error.error_key(), "Incremental authorization failed");
     redirect_302(&build_callback_error_url(
         params,
         code,
@@ -1979,7 +2026,10 @@ async fn build_review_consent_url(
     validated_scope: &str,
     hints: &AppDefaultServiceHints,
 ) -> AppResult<String> {
-    let signed = sign_consent_request(state, user_id, params, validated_scope)?;
+    let mut signed_params = params.clone();
+    signed_params.consent_request_fence =
+        Some(consent_service::consent_request_fence(&state.db, user_id, &params.client_id).await?);
+    let signed = sign_consent_request(state, user_id, &signed_params, validated_scope)?;
     if params.service_access_mode.is_some() {
         let handle = oauth_consent_request_service::create(&state.db, user_id, &signed).await?;
         return Ok(format!(
@@ -2124,6 +2174,7 @@ async fn issue_authorization_code(
     validated_scope: &str,
     consent: &Consent,
     external_subject: Option<&ExternalSubjectRef>,
+    code_service_access: Option<(bool, Vec<String>)>,
 ) -> AppResult<String> {
     if validated_scope
         .split_whitespace()
@@ -2132,11 +2183,8 @@ async fn issue_authorization_code(
         super::login_client_context::require_first_party_human(auth_user)?;
     }
     let user_id_str = auth_user.user_id.to_string();
-    let protected_consent = validated_scope
-        .split_whitespace()
-        .any(|s| s == "machine")
-        .then(|| consent_service::protected_reference(consent))
-        .transpose()?;
+    let protected_consent =
+        Some(consent_service::ensure_issuance_reference(&state.db, consent).await?);
     if let Some(snapshot) = &params.incremental_consent {
         incremental_consent_service::validate_current(
             &state.db,
@@ -2193,9 +2241,15 @@ async fn issue_authorization_code(
         .as_ref()
         .and_then(|resolved| resolved.mcp_resource_uri.clone());
     let service_resources = resolved_resources.filter(|resolved| !resolved.service_ids.is_empty());
+    let (code_allow_all, code_allowed_ids) = code_service_access
+        .map(|(allow_all, ids)| (allow_all, Some(ids)))
+        .unwrap_or((
+            consent.allow_all_services,
+            consent.allowed_service_ids.clone(),
+        ));
     let (mut resource_uris, allowed_service_ids, service_restricted) =
-        match (service_resources, consent.allowed_service_ids.as_ref()) {
-            (Some(resolved), _) if consent.allow_all_services => {
+        match (service_resources, code_allowed_ids.as_ref()) {
+            (Some(resolved), _) if code_allow_all => {
                 (resolved.resource_uris, resolved.service_ids, true)
             }
             (Some(resolved), Some(consented_ids)) => {
@@ -2214,7 +2268,7 @@ async fn issue_authorization_code(
                 (resources, allowed, true)
             }
             (Some(_), None) => (Vec::new(), Vec::new(), true),
-            (None, _) if consent.allow_all_services => (Vec::new(), Vec::new(), false),
+            (None, _) if code_allow_all => (Vec::new(), Vec::new(), false),
             (None, Some(consented_ids)) => (Vec::new(), consented_ids.clone(), true),
             (None, None) => (Vec::new(), Vec::new(), true),
         };
@@ -2405,15 +2459,18 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 }
 
 /// RFC 6749 §5.2: a refresh token that is malformed, expired, revoked,
-/// rotated away, or unknown is `invalid_grant`. MCP clients (Claude Code,
+/// rotated away, unknown, or no longer covered by consent is `invalid_grant`.
+/// MCP clients (Claude Code,
 /// Codex, web connectors) answer `invalid_grant` by discarding their tokens
 /// and asking the user to sign in again. `invalid_client` would make them
 /// discard their client registration too, and other codes leave them failing
 /// silently. A deactivated issuing client (`AuthenticationFailed`) stays
 /// `invalid_client` so the client re-registers.
 fn refresh_token_grant_error(error: AppError) -> AppError {
-    match error {
-        AppError::Unauthorized(message) => AppError::ExternalTokenInvalid(message),
+    match error.into_refresh_source() {
+        AppError::Unauthorized(message) | AppError::Conflict(message) => {
+            AppError::ExternalTokenInvalid(message)
+        }
         AppError::TokenExpired => {
             AppError::ExternalTokenInvalid("Refresh token has expired".to_string())
         }
@@ -2716,10 +2773,6 @@ async fn token_inner(
             // - provider present: social token exchange (provider-specific token type validation)
             // - provider absent + access_token type: delegated token exchange
             if let Some(provider) = body.provider.as_deref() {
-                // TODO(telemetry): social branch blocked — see TELEMETRY.md §6.5
-                // (auth.token_exchanged). `SocialTokenExchangeResponse` does not
-                // carry `user_id`, so no distinct_id is available at this site.
-                // Lift once §6.5 is resolved and the service response is extended.
                 let result = social_token_exchange_service::exchange_social_token(
                     &state.db,
                     &state.config,
@@ -2734,6 +2787,31 @@ async fn token_inner(
                 )
                 .await?;
 
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &result.user_id_for_telemetry,
+                    None,
+                    tele,
+                    TelemetryEvent::AuthTokenExchanged {
+                        // Provider verification has validated the token type.
+                        // Short canonical values survive telemetry scrubbing.
+                        subject_token_type: subject_token_type
+                            .trim_start_matches("urn:ietf:params:oauth:token-type:")
+                            .to_string(),
+                        exchange_provider: Some(provider.to_string()),
+                    },
+                )
+                .await;
+                if result.mobile_mfa_exempt {
+                    emit_event(
+                        state.telemetry.as_deref(),
+                        &result.user_id_for_telemetry,
+                        None,
+                        tele,
+                        TelemetryEvent::AuthMobileMfaExempted,
+                    )
+                    .await;
+                }
                 Ok(Json(TokenResponse {
                     access_token: result.access_token,
                     token_type: "Bearer".to_string(),
@@ -2796,7 +2874,8 @@ async fn token_inner(
                         subject_token_type: subject_token_type.to_string(),
                         exchange_provider: None,
                     },
-                );
+                )
+                .await;
 
                 Ok(Json(TokenResponse {
                     access_token: result.access_token,
@@ -3051,9 +3130,10 @@ pub async fn userinfo(
 pub async fn introspect(
     State(state): State<AppState>,
     Form(body): Form<IntrospectRequest>,
-) -> Json<IntrospectResponse> {
+) -> Response {
     let inactive = IntrospectResponse {
         active: false,
+        aud: None,
         scope: None,
         resource: None,
         client_id: None,
@@ -3072,18 +3152,80 @@ pub async fn introspect(
     // Authenticate the calling client (RFC 7662 requirement)
     let caller_client_id = match body.client_id.as_deref() {
         Some(id) if !id.is_empty() => id,
-        _ => return Json(inactive),
+        _ => return Json(inactive).into_response(),
     };
 
-    if oauth_service::authenticate_client(
+    let client = match oauth_service::authenticate_client(
         &state.db,
         caller_client_id,
         body.client_secret.as_deref(),
     )
     .await
-    .is_err()
     {
-        return Json(inactive);
+        Ok(client) => client,
+        Err(AppError::DatabaseError(_) | AppError::OAuthAuthorityUnavailable) => {
+            return AppError::OAuthAuthorityUnavailable.into_response();
+        }
+        Err(AppError::Internal(_)) => {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        Err(_) => return Json(inactive).into_response(),
+    };
+
+    if body.token_type_hint.as_deref() == Some("resource_request") {
+        let Some(service_id) = body.service_id.as_deref() else {
+            return Json(inactive).into_response();
+        };
+        let Ok(descriptor) = body.resource_request.descriptor() else {
+            return Json(inactive).into_response();
+        };
+        return match crate::services::resource_request_proof::introspect(
+            &state,
+            &client,
+            service_id,
+            &body.token,
+            descriptor,
+        )
+        .await
+        {
+            Ok(evidence) => Json(evidence).into_response(),
+            Err(AppError::DatabaseError(_) | AppError::Internal(_) | AppError::OrgQueryTimeout) => {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
+            Err(_) => Json(inactive).into_response(),
+        };
+    }
+
+    if body.token.starts_with("nyx_") || body.token.starts_with("nyxid_ag_") {
+        let Some(service_id) = body.service_id.as_deref() else {
+            return Json(inactive).into_response();
+        };
+        let evidence = match crate::services::agent_key_introspection::introspect(
+            &state.db,
+            &client,
+            service_id,
+            &body.token,
+        )
+        .await
+        {
+            Ok(evidence) => evidence,
+            Err(AppError::Unauthorized(_)) => return Json(inactive).into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        return Json(IntrospectResponse {
+            active: true,
+            aud: Some(evidence.service_id),
+            sub: Some(evidence.subject),
+            token_type: Some("api_key".into()),
+            scope: Some(evidence.scope),
+            exp: evidence.expires_at.map(|date| date.timestamp()),
+            iat: Some(evidence.created_at.timestamp()),
+            jti: Some(evidence.key_id),
+            permissions: Some(evidence.permissions),
+            iss: Some(state.config.jwt_issuer.clone()),
+            ..inactive
+        })
+        .into_response();
     }
 
     // Broker-binding introspection: detect via the explicit token_type_hint
@@ -3107,11 +3249,12 @@ pub async fn introspect(
         .await
         {
             Ok(binding) if !binding.revoked => binding,
-            _ => return Json(inactive),
+            _ => return Json(inactive).into_response(),
         };
 
         return Json(IntrospectResponse {
             active: true,
+            aud: None,
             scope: Some(binding.scopes.join(" ")),
             resource: None,
             client_id: Some(binding.client_id),
@@ -3125,15 +3268,36 @@ pub async fn introspect(
             roles: None,
             groups: None,
             permissions: None,
-        });
+        })
+        .into_response();
     }
 
     // Try to verify the token
     let claims = match crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &body.token)
     {
         Ok(c) => c,
-        Err(_) => return Json(inactive),
+        Err(_) => return Json(inactive).into_response(),
     };
+
+    if !matches!(claims.token_type.as_str(), "access" | "refresh") {
+        return Json(inactive).into_response();
+    }
+    let route_class = if claims.token_type == "refresh" {
+        "refresh"
+    } else {
+        "access"
+    };
+    match crate::services::oauth_token_authority_service::validate_claims_for_route(
+        &state.db,
+        &claims,
+        route_class,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(error @ AppError::OAuthAuthorityUnavailable) => return error.into_response(),
+        Err(_) => return Json(inactive).into_response(),
+    }
 
     // For refresh tokens, check if revoked in the database
     if claims.token_type == "refresh" {
@@ -3146,9 +3310,30 @@ pub async fn introspect(
             .await;
 
         match stored {
-            Ok(Some(rt)) if rt.revoked => return Json(inactive),
-            Err(_) => return Json(inactive),
-            _ => {}
+            Ok(Some(rt))
+                if !rt.revoked && rt.user_id == claims.sub && rt.expires_at > Utc::now() =>
+            {
+                match consent_service::validate_protected_reference_for_route(
+                    &state.db,
+                    &rt.user_id,
+                    &rt.client_id,
+                    rt.scope
+                        .as_deref()
+                        .unwrap_or(crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES),
+                    rt.protected_consent.as_ref(),
+                    "refresh",
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(error @ AppError::OAuthAuthorityUnavailable) => {
+                        return error.into_response();
+                    }
+                    Err(_) => return Json(inactive).into_response(),
+                }
+            }
+            Err(_) => return AppError::OAuthAuthorityUnavailable.into_response(),
+            _ => return Json(inactive).into_response(),
         }
     }
 
@@ -3157,7 +3342,7 @@ pub async fn introspect(
             .await
             .is_err()
     {
-        return Json(inactive);
+        return Json(inactive).into_response();
     }
 
     // Fetch user email for username field
@@ -3177,11 +3362,30 @@ pub async fn introspect(
     let rbac = match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &claims.sub).await
     {
         Ok(rbac) => rbac,
-        Err(_) => return Json(inactive),
+        Err(_) => return Json(inactive).into_response(),
     };
+
+    let creator_permissions =
+        match crate::services::nyxbot_gateway_service::creator_gateway_permissions(
+            &state.db, &claims, &client,
+        )
+        .await
+        {
+            Ok(permissions) => permissions,
+            Err(error) => return error.into_response(),
+        };
+    let mut permissions = rbac.permissions;
+    permissions.extend(
+        creator_permissions
+            .iter()
+            .map(|permission| (*permission).to_owned()),
+    );
+    let mut seen = std::collections::HashSet::new();
+    permissions.retain(|permission| seen.insert(permission.clone()));
 
     Json(IntrospectResponse {
         active: true,
+        aud: None,
         scope: Some(claims.scope),
         resource: response_resources(claims.resources.unwrap_or_default()),
         client_id: None,
@@ -3194,8 +3398,9 @@ pub async fn introspect(
         jti: Some(claims.jti),
         roles: Some(rbac.role_slugs),
         groups: Some(rbac.group_slugs),
-        permissions: Some(rbac.permissions),
+        permissions: Some(permissions),
     })
+    .into_response()
 }
 
 /// GET /oauth/bindings?external_subject_*=...
@@ -4018,6 +4223,132 @@ mod tests {
         test_user, test_user_service,
     };
 
+    #[tokio::test]
+    async fn social_exchange_emits_canonical_telemetry_and_one_outer_audit() {
+        Box::pin(async {
+            let db = crate::test_utils::connect_transaction_test_database("social_exchange_events").await;
+            let mut state = test_app_state(db.clone());
+            state.config.google_client_id = Some("test-mobile-client".into());
+            let (captures, mut received) = tokio::sync::mpsc::channel::<serde_json::Value>(8);
+            let app = axum::Router::new().route("/capture/", axum::routing::post(
+                move |Json(body): Json<serde_json::Value>| {
+                    let captures = captures.clone();
+                    async move { captures.send(body).await.unwrap(); StatusCode::OK }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            state.config.telemetry_dsn = Some("phc_test".into());
+            state.config.telemetry_host = Some(format!("http://{}", listener.local_addr().unwrap()));
+            let server = tokio::spawn(async move {axum::serve(listener, app).await.unwrap()});
+            state.telemetry = crate::telemetry::TelemetryClient::from_config(&state.config, Some(db.clone()));
+            state.jwks_cache.seed_google_test_key(state.jwt_keys.decoding.clone()).await;
+            let client_id = Uuid::new_v4().to_string();
+            insert_public_client(&db, &client_id, "openid email profile").await;
+            for mfa in [false, true] {
+                let id = Uuid::new_v4().to_string();
+                let mut user = test_user(&id, UserType::Person);
+                user.mfa_enabled = mfa;
+                user.social_provider = Some("google".into());
+                user.social_provider_id = Some(id.clone());
+                let email = user.email.clone();
+                db.collection::<crate::models::user::User>(USERS).insert_one(user).await.unwrap();
+                crate::services::analytics_consent_service::set(&db, &id, true).await.unwrap();
+                let tele = TelemetryContext {surface: "mobile", client_version: None,
+                    analytics_allowed: true, analytics_account: Some(id.clone())};
+                let now = Utc::now().timestamp();
+                let subject = jsonwebtoken::encode(&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+                    &serde_json::json!({"sub": id, "iss": "https://accounts.google.com",
+                        "aud": "test-mobile-client", "iat": now, "exp": now + 300,
+                        "email": email, "email_verified": true}), &state.jwt_keys.encoding).unwrap();
+                let request = || serde_json::from_value::<TokenRequest>(serde_json::json!({
+                    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                    "client_id": client_id, "subject_token": subject,
+                    "subject_token_type": "urn:ietf:params:oauth:token-type:id_token", "provider": "google"
+                })).unwrap();
+                let response = token_inner(&state, &tele, &HeaderMap::new(), request()).await.unwrap().0;
+                assert!(!response.access_token.is_empty());
+                let event = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
+                assert_eq!(event["event"], "auth.token_exchanged");
+                assert_eq!(event["distinct_id"], id);
+                assert_eq!(event["properties"]["exchange_provider"], "google");
+                assert_eq!(event["properties"]["subject_token_type"], "id_token");
+                if mfa {
+                    let event = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
+                    assert_eq!(event["event"], "auth.mobile_mfa_exempted");
+                }
+                let audits = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+                let filter = doc! {"user_id": &id, "event_type": "social_token_exchange"};
+                for _ in 0..100 {
+                    if audits.count_documents(filter.clone()).await.unwrap() == 1 {break;}
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                assert_eq!(audits.count_documents(doc! {"user_id": &id}).await.unwrap(), 1);
+                let audit = audits.find_one(filter).await.unwrap().unwrap();
+                let data = audit.get_document("event_data").unwrap();
+                assert_eq!(data.get_str("provider").unwrap(), "google");
+                assert_eq!(data.get_str("client_id").unwrap(), client_id);
+                assert_eq!(data.get_str("mfa").unwrap(), if mfa {"skipped_mobile_rollout"} else {"not_required"});
+                assert!(data.get_str("session_id").is_ok());
+                // The same successful exchange cannot bypass pre-auth narrowing.
+                let pre_auth = token_inner(&state, &TelemetryContext::pre_auth(&HeaderMap::new()), &HeaderMap::new(), request()).await.unwrap().0;
+                assert!(!pre_auth.access_token.is_empty());
+                assert!(tokio::time::timeout(std::time::Duration::from_millis(50), received.recv()).await.is_err());
+            }
+            server.abort();
+            db.drop().await.unwrap();
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn domain_alias_consent_ticket_keeps_its_subject_and_dedicated_audience() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.jwt_issuer = "https://old.example".into();
+        let user = Uuid::new_v4().to_string();
+        let params: AuthorizeQuery = serde_json::from_value(serde_json::json!({
+            "response_type":"code", "client_id":"client", "redirect_uri":"https://client.example/callback",
+            "scope":"openid", "state":Uuid::new_v4().to_string(), "code_challenge":Uuid::new_v4().to_string(),
+            "code_challenge_method":"S256"
+        })).unwrap();
+        let token = sign_consent_request(&state, &user, &params, "openid").unwrap();
+        state.config.jwt_issuer = "https://new.example".into();
+        assert!(verify_consent_request(&state, &token, &user).is_err());
+        state.config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        assert_eq!(
+            verify_consent_request(&state, &token, &user)
+                .unwrap()
+                .redirect_uri,
+            params.redirect_uri
+        );
+        assert!(verify_consent_request(&state, &token, &Uuid::new_v4().to_string()).is_err());
+        assert!(jwt::verify_token(&state.jwt_keys, &state.config, &token).is_err());
+    }
+
+    #[tokio::test]
+    async fn consent_requests_validate_retained_signer_and_reject_retired_or_wrong_subject() {
+        let (old, current) = jwt::test_rotation_keys();
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.jwt_keys = old;
+        let user_id = Uuid::new_v4().to_string();
+        let params: AuthorizeQuery = serde_json::from_value(serde_json::json!({
+            "response_type":"code", "client_id":"retained-consent-client",
+            "redirect_uri":"https://client.example.test/callback", "scope":"openid email",
+            "state":"retained-state", "code_challenge":"retained-pkce",
+            "code_challenge_method":"S256"
+        }))
+        .unwrap();
+        let token = sign_consent_request(&state, &user_id, &params, "openid email").unwrap();
+        state.jwt_keys = current;
+        let restored = verify_consent_request(&state, &token, &user_id).unwrap();
+        assert_eq!(restored.client_id, params.client_id);
+        assert_eq!(restored.redirect_uri, params.redirect_uri);
+        assert_eq!(restored.scope, params.scope);
+        assert_eq!(restored.code_challenge, params.code_challenge);
+        assert!(verify_consent_request(&state, &token, &Uuid::new_v4().to_string()).is_err());
+        let fresh = sign_consent_request(&state, &user_id, &params, "openid email").unwrap();
+        state.jwt_keys.retained.clear();
+        assert!(verify_consent_request(&state, &token, &user_id).is_err());
+        verify_consent_request(&state, &fresh, &user_id).unwrap();
+    }
+
     #[test]
     fn consent_decision_form_defaults_service_access_to_deny() {
         let form: ConsentDecisionForm = serde_json::from_value(serde_json::json!({
@@ -4112,9 +4443,28 @@ mod tests {
         let (refresh_jwt, refresh_jti) =
             jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user_uuid)
                 .expect("generate refresh jwt");
+        let consent =
+            match consent_service::check_consent(&state.db, user_id, client_id, &scopes.join(" "))
+                .await
+                .unwrap()
+            {
+                Some(consent) => consent,
+                None => consent_service::grant_consent_with_services(
+                    &state.db,
+                    user_id,
+                    client_id,
+                    &scopes.join(" "),
+                    None,
+                )
+                .await
+                .unwrap(),
+            };
+        let reference = consent_service::ensure_issuance_reference(&state.db, &consent)
+            .await
+            .unwrap();
         let now = Utc::now();
         let refresh = RefreshToken {
-            protected_consent: None,
+            protected_consent: Some(reference),
             id: Uuid::new_v4().to_string(),
             jti: refresh_jti.clone(),
             client_id: client_id.to_string(),
@@ -4126,8 +4476,8 @@ mod tests {
             replaced_by: None,
             revoked_at: None,
             resource_uris: Vec::new(),
-            allowed_service_ids: Vec::new(),
-            allow_all_services: true,
+            allowed_service_ids: consent.allowed_service_ids.clone().unwrap_or_default(),
+            allow_all_services: consent.allow_all_services,
             created_at: now,
         };
         state
@@ -4144,6 +4494,7 @@ mod tests {
             .await
             .expect("encrypt binding refresh token");
         let binding = OauthBrokerBinding {
+            secret_context_versions: Default::default(),
             id: binding_hash,
             client_id: client_id.to_string(),
             user_id: user_id.to_string(),
@@ -4190,10 +4541,17 @@ mod tests {
         user_id: &str,
         scope: &str,
     ) {
+        let consent =
+            consent_service::grant_consent_with_services(db, user_id, client_id, scope, None)
+                .await
+                .unwrap();
+        let reference = consent_service::ensure_issuance_reference(db, &consent)
+            .await
+            .unwrap();
         let now = Utc::now();
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
-                protected_consent: None,
+                protected_consent: Some(reference),
                 incremental_consent: None,
 
                 id: Uuid::new_v4().to_string(),
@@ -4227,6 +4585,7 @@ mod tests {
         db.collection::<Consent>(CONSENTS)
             .insert_one(Consent {
                 revision: None,
+                write_version: None,
                 issuance_fence: None,
                 id: Uuid::new_v4().to_string(),
                 user_id: user_id.to_string(),
@@ -4433,6 +4792,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4499,6 +4860,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4574,6 +4937,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "https://app.example/callback".to_string(),
@@ -4649,6 +5014,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4711,6 +5078,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4773,6 +5142,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4830,6 +5201,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4889,6 +5262,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "https://app.example/callback".to_string(),
@@ -4953,6 +5328,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -5033,6 +5410,7 @@ mod tests {
                 consent_request: Some(consent_request),
                 resource: Vec::new(),
                 decision: "allow".to_string(),
+                browser_form: false,
             }),
         )
         .await
@@ -5453,6 +5831,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: redirect_uri.to_string(),
@@ -5522,6 +5902,7 @@ mod tests {
                 consent_request: Some(consent_request),
                 resource: resources.clone(),
                 decision: "allow".to_string(),
+                browser_form: false,
             }),
         )
         .await
@@ -5791,6 +6172,7 @@ mod tests {
         let client_id = "public-broker-exchange";
         let raw_binding_id = crate::models::oauth_broker_binding::generate_binding_id();
         let user_id = Uuid::new_v4().to_string();
+        insert_person_user(&db, &user_id).await;
         insert_public_client(
             &db,
             client_id,
@@ -5911,6 +6293,24 @@ mod tests {
         let err = AppError::UnsupportedGrantType("magic_grant".to_string());
         let response = oauth_error_response(err);
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oauth_mfa_challenge_has_oauth_error_shape_and_no_session_tokens() {
+        let response = oauth_error_response(AppError::MfaRequired {
+            session_token: "private-challenge".into(),
+        });
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "mfa_required");
+        assert_eq!(body["error_code"], 2002);
+        assert_eq!(body["session_token"], "private-challenge");
+        assert!(body.get("access_token").is_none());
+        assert!(body.get("refresh_token").is_none());
     }
 
     #[test]
@@ -6181,6 +6581,29 @@ mod tests {
             refresh_grant_error(&state, &stale).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
+
+        // PD-3: a live legacy row without current consent must ask the client
+        // to authorize again, while leaving the unconsumed record untouched.
+        let (unbound, unbound_jti) =
+            jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
+                .expect("mint legacy refresh token");
+        let row = stored_refresh_token(&unbound_jti, &client_id, &user.to_string());
+        refresh_tokens
+            .insert_one(&row)
+            .await
+            .expect("insert legacy");
+        assert_eq!(
+            refresh_grant_error(&state, &unbound).await,
+            (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
+        );
+        let unchanged = refresh_tokens
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!unchanged.revoked);
+        assert!(unchanged.replaced_by.is_none());
+        assert!(unchanged.protected_consent.is_none());
     }
 
     #[tokio::test]
@@ -6288,6 +6711,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -6333,6 +6758,7 @@ mod tests {
                 consent_request: Some(consent_request),
                 resource: vec![tampered_resource],
                 decision: "allow".to_string(),
+                browser_form: false,
             }),
         )
         .await
@@ -6502,6 +6928,26 @@ mod tests {
     #[test]
     fn needs_success_page_returns_false_for_remote_url() {
         assert!(!needs_success_page("https://app.example.com/callback"));
+    }
+
+    #[tokio::test]
+    async fn success_page_is_script_free_and_escapes_native_callback() {
+        let response = oauth_success_page("cursor://callback?state=\"&code=fixture");
+        let csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .expect("success page CSP header")
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("read success page");
+        let html = String::from_utf8(body.to_vec()).expect("UTF-8 success page");
+        assert!(!html.contains("<script"));
+        assert!(html.contains("state=&quot;"));
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("style-src 'unsafe-inline'"));
+        assert!(!csp.contains("script-src"));
     }
 
     #[test]
@@ -6710,6 +7156,8 @@ mod tests {
             requested_service_ids: Vec::new(),
             incremental_consent: None,
             machine_approval_request_id: None,
+            consent_request_iat: None,
+            consent_request_fence: None,
             response_type: "code".to_string(),
             client_id: "c1".to_string(),
             redirect_uri: "http://localhost/cb".to_string(),
@@ -6791,3 +7239,51 @@ mod tests {
 #[cfg(test)]
 #[path = "oauth_registration_tests.rs"]
 mod registration_tests;
+
+crate::errors::redacted_debug!(TokenRequest, TokenResponse);
+
+impl std::fmt::Debug for IntrospectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IntrospectRequest").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RevokeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevokeRequest").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for GetBindingQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GetBindingQuery").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ListBindingsByExternalSubjectQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListBindingsByExternalSubjectQuery")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PushedAuthorizationRequestForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushedAuthorizationRequestForm")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod credential_debug_tests {
+    use super::*;
+    #[test]
+    fn introspection_and_revocation_debug_redact_bearer_and_client_secrets() {
+        let secret = "distinctive-oauth-diagnostic-secret-28a4";
+        let value = serde_json::json!({"token":secret,"client_id":"client","client_secret":secret});
+        let introspect: IntrospectRequest = serde_json::from_value(value.clone()).unwrap();
+        let revoke: RevokeRequest = serde_json::from_value(value).unwrap();
+        assert!(!format!("{introspect:?}").contains(secret));
+        assert!(!format!("{revoke:?}").contains(secret));
+    }
+}

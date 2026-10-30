@@ -23,6 +23,7 @@ const bodySchema = z
     specialist_id: z.string().min(1).nullable().optional(),
     action: z.enum(["pause", "resume", "rekey", "delete"]).optional(),
     expected_revision: z.number().int().nonnegative().optional(),
+    expected_retry_count: z.number().int().nonnegative().optional(),
     policy_version: z.literal(REMOTE_MACHINE_POLICY).optional(),
     data_policy_version: z.literal(REMOTE_MACHINE_DATA_POLICY).optional(),
     acknowledge_shared_environment: z.boolean().optional(),

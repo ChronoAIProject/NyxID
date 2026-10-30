@@ -71,10 +71,15 @@ export function getChallengeActionState(
     };
   }
 
-  // Only apply time-based expiry to PENDING items
-  const expiredByTime = Number.isFinite(Date.parse(challenge.expires_at))
-    ? Date.parse(challenge.expires_at) <= Date.now()
-    : false;
+  if (!Number.isFinite(Date.parse(challenge.expires_at))) {
+    return {
+      statusLabel: "PENDING",
+      canDecide: false,
+      reason: "The request expiry could not be verified. Refresh before deciding.",
+    };
+  }
+
+  const expiredByTime = Date.parse(challenge.expires_at) <= Date.now();
 
   if (expiredByTime) {
     return {

@@ -362,6 +362,12 @@ pub async fn insights(
 fn request_filter(actor_id: &str, managed: &[&str], own: &[&str]) -> Document {
     doc! {
         "event_type": "service_request",
+        // Owning the shared connection does not reveal another person's
+        // private chat activity. Platform audit access remains separate.
+        "$and": [{"$or": [
+            {"event_data.execution_mode": {"$ne": "shared"}},
+            {"user_id": actor_id},
+        ]}],
         "created_at": { "$gte": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::days(30)) },
         "$or": [
             { "event_data.user_service_id": { "$in": managed } },
@@ -555,7 +561,7 @@ impl RequestAudit {
         execution_id: &str,
         credential_class: crate::models::usage_meter::CredentialClass,
     ) -> Self {
-        Self::from_attribution(
+        let mut result = Self::from_attribution(
             db,
             RequestAttribution {
                 actor: audit_service::AuditActor::from_auth_user(auth),
@@ -577,7 +583,9 @@ impl RequestAudit {
             owner_id,
             execution_id,
             credential_class,
-        )
+        );
+        result.assistant(auth.assistant_chat.as_deref());
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -601,6 +609,28 @@ impl RequestAudit {
                 "auth_kind": attribution.auth_kind,
                 "outcome": "unknown",
             }),
+        }
+    }
+
+    pub fn assistant(
+        &mut self,
+        chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+    ) {
+        if let Some(chat) = chat {
+            self.event["actor_user_id"] = chat.user_id.clone().into();
+            self.event["agent_id"] = chat.agent_id.clone().into();
+            if let Some(access) = chat.org_agent_access.as_ref() {
+                self.event["agent_owner_id"] = access.owner().into();
+                self.event["execution_mode"] = if access.shared().is_some() {
+                    "shared"
+                } else {
+                    "org_member"
+                }
+                .into();
+            } else {
+                self.event["agent_owner_id"] = chat.user_id.clone().into();
+                self.event["execution_mode"] = if chat.guest { "guest" } else { "owner" }.into();
+            }
         }
     }
 
@@ -970,6 +1000,57 @@ mod tests {
                 .iter()
                 .any(|request| request.id == last.id)
         );
+    }
+
+    #[tokio::test]
+    async fn shared_activity_is_private_even_from_the_connection_owner() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("shared_activity_privacy").await;
+        for (actor, mode) in [
+            ("owner", "shared"),
+            ("recipient", "shared"),
+            ("member", "org_member"),
+        ] {
+            audit_service::log_actor_event(
+                db.clone(),
+                &audit_service::AuditActor {
+                    user_id: actor.into(),
+                    ip_address: None,
+                    user_agent: None,
+                    api_key_id: None,
+                    api_key_name: None,
+                },
+                "service_request",
+                Some(serde_json::json!({
+                    "user_service_id": "service", "execution_mode": mode,
+                })),
+            )
+            .await
+            .unwrap();
+        }
+        let events = db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME);
+        assert_eq!(
+            events
+                .count_documents(request_filter("owner", &["service"], &[]))
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            events
+                .count_documents(request_filter("recipient", &[], &["service"]))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            events
+                .count_documents(request_filter("manager", &["service"], &[]))
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
