@@ -2640,7 +2640,10 @@ mod tests {
         assert_eq!(api_key.status, "failed");
         assert_eq!(
             api_key.error_message.as_deref(),
-            Some(safe_provider_error_message("access_denied", None).as_str())
+            Some(
+                safe_provider_error_message("access_denied", Some("provider-controlled text"))
+                    .as_str()
+            )
         );
     }
 
