@@ -6,6 +6,7 @@ import {
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -22,7 +23,9 @@ import type {
 } from "@/schemas/monitoring";
 let response: MonitoringResponse;
 let calls: { path: string; method: string; body: unknown }[];
-let failure: { status: number; message: string; error?: string; code?: number } | undefined;
+let failure:
+  | { status: number; message: string; error?: string; code?: number }
+  | undefined;
 const monitoringUser = (id = "owner", enabled = true): User => ({
   id,
   email: `${id}@example.com`,
@@ -111,10 +114,14 @@ function mount() {
     </QueryClientProvider>,
   );
 }
-it("page load performs one scoped read and Check now is explicit", async () => {
+it("Check now updates the main status and survives refresh and remount", async () => {
   const user = userEvent.setup();
-  mount();
-  await screen.findByText("Healthy");
+  response.status.health.status = "unknown";
+  response.status.health.checked_at = null;
+  const view = mount();
+  await within(
+    await screen.findByRole("region", { name: "Health" }),
+  ).findByText("Not checked");
   expect(calls).toEqual([
     {
       path: "/api/v1/keys/exact-id/monitoring",
@@ -122,11 +129,23 @@ it("page load performs one scoped read and Check now is explicit", async () => {
       body: undefined,
     },
   ]);
+  // The probe service now publishes explicit checks to its latest status.
+  response = { ...response, status: observation() };
   await user.click(screen.getByRole("button", { name: "Check now" }));
-  await screen.findByText("Manual check result");
+  await screen.findByText("Healthy");
+  expect(screen.getAllByRole("region", { name: "Health" })).toHaveLength(1);
+  expect(screen.queryByText("Manual check result")).not.toBeInTheDocument();
   expect(
     calls.filter((call) => call.method === "POST").map((call) => call.path),
   ).toEqual(["/api/v1/keys/exact-id/monitoring/probe"]);
+  await user.click(
+    screen.getByRole("button", { name: "Refresh monitoring status" }),
+  );
+  await screen.findByText("Healthy");
+  view.unmount();
+  mount();
+  await screen.findByText("Healthy");
+  expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
 });
 it("members can view and check without manager controls", async () => {
   response.can_manage = false;
@@ -140,6 +159,57 @@ it("members can view and check without manager controls", async () => {
   expect(
     screen.queryByRole("button", { name: "Clear configuration" }),
   ).not.toBeInTheDocument();
+});
+it("shows a fresh check immediately between display timer ticks", async () => {
+  vi.useFakeTimers();
+  try {
+    mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByText("Healthy")).toBeVisible();
+    // Advance the wall clock without firing the ten-second display timer.
+    vi.setSystemTime(Date.now() + 6_000);
+    response = { ...response, status: observation() };
+    fireEvent.click(screen.getByRole("button", { name: "Check now" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(
+      within(screen.getByRole("region", { name: "Health" })).getByText(
+        "Healthy",
+      ),
+    ).toBeVisible();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+it("shows saved configuration without inventing a successful observation", async () => {
+  response.status.health = {
+    ...observation().health,
+    status: "unknown",
+    source: "none",
+    path: "",
+    checked_at: null,
+    stale_at: null,
+    freshness: "unknown",
+    duration_ms: null,
+    status_code: null,
+  };
+  response.configuration!.owner_config.health = {
+    path: "models",
+    expect_status: [200, 204],
+    body_contains: '"data"',
+  };
+  mount();
+  const health = within(await screen.findByRole("region", { name: "Health" }));
+  expect(health.getByText("models")).toBeVisible();
+  expect(health.getByText("Owner")).toBeVisible();
+  expect(health.getByText("200, 204")).toBeVisible();
+  expect(health.getByText('"data"')).toBeVisible();
+  expect(health.getByText("Not checked")).toBeVisible();
+  expect(health.queryByText("Healthy")).not.toBeInTheDocument();
+  expect(calls.every((call) => call.method === "GET")).toBe(true);
 });
 it("tests a draft without saving, then saves with exact revision", async () => {
   const user = userEvent.setup();
@@ -448,12 +518,30 @@ it("flag off hides monitoring without making a monitoring request", async () => 
 });
 
 it("not configured hides monitoring after one discovery read with no follow-up requests", async () => {
-  failure = { status: 404, error: "monitoring_not_configured", code: 13301, message: "Service monitoring is not configured" };
+  failure = {
+    status: 404,
+    error: "monitoring_not_configured",
+    code: 13301,
+    message: "Service monitoring is not configured",
+  };
   mount();
-  await waitFor(() => expect(screen.queryByText("Monitoring")).not.toBeInTheDocument());
-  expect(screen.queryByText(/Monitoring is unavailable/)).not.toBeInTheDocument();
-  expect(calls).toEqual([{ path: "/api/v1/keys/exact-id/monitoring", method: "GET", body: undefined }]);
-  await act(async () => { onlineManager.setOnline(false); onlineManager.setOnline(true); });
+  await waitFor(() =>
+    expect(screen.queryByText("Monitoring")).not.toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByText(/Monitoring is unavailable/),
+  ).not.toBeInTheDocument();
+  expect(calls).toEqual([
+    {
+      path: "/api/v1/keys/exact-id/monitoring",
+      method: "GET",
+      body: undefined,
+    },
+  ]);
+  await act(async () => {
+    onlineManager.setOnline(false);
+    onlineManager.setOnline(true);
+  });
   expect(calls).toHaveLength(1);
 });
 
