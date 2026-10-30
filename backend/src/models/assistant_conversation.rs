@@ -320,6 +320,8 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     /// Bounded resource handles issued in this turn.
@@ -491,6 +493,8 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     /// Invocation conversations always enforce live execution independently of the legacy rollout.
     #[serde(default)]
     pub invocation_controlled: bool,

@@ -527,7 +527,7 @@ pub(crate) async fn turn_notes(
     }
     // Someone other than the owner is talking: nothing private to the owner
     // (memory, other chats, the team, pending requests) goes into this turn.
-    if row.guest_turn {
+    if row.guest_turn || row.collaboration.is_some() {
         return notes;
     }
     if let Some(agent) = agent {

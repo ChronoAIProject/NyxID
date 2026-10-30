@@ -148,6 +148,14 @@ pub(crate) async fn authority_with_access(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    if conversation.collaboration.is_some() {
+        return Box::pin(super::collaboration_group_service::runtime::key_authority(
+            db,
+            conversation,
+            session,
+        ))
+        .await;
+    }
     let resolved = if snapshot.is_none() {
         super::org_agent_service::resolve_agent_access(db, &conversation.user_id, &agent).await?
     } else {
@@ -651,6 +659,7 @@ pub async fn load_or_provision_in_session(
     let raw = Zeroizing::new(created.full_key);
     let now = Utc::now();
     let mut row = AssistantAgentCredential {
+        collaboration: false,
         secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         user_id: user_id.into(),

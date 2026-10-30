@@ -1126,6 +1126,12 @@ pub(crate) async fn execute_tool(
     if chat.guest {
         return (acks::guest_refusal(), true);
     }
+    if chat.collaboration_thread && !matches!(name, "get_agent_skills" | "skill_read") {
+        return refusal(
+            "collaboration_scope",
+            "Group agents may read their pinned skills, but cannot use private memory or account management tools. Manage memory and permissions outside the group.",
+        );
+    }
     if chat
         .org_agent_access
         .as_ref()

@@ -460,7 +460,7 @@ fn pipeline() -> Vec<Document> {
         doc! {"$project": {
             "operationType": 1, "ns": 1, "documentKey": 1,
             "fullDocument.user_id": 1, "fullDocument.group_id": 1,
-            "fullDocument.created_by_user_id": 1, "fullDocument.org_group": 1,
+            "fullDocument.collaboration": 1, "fullDocument.created_by_user_id": 1, "fullDocument.org_group": 1,
             "fullDocument.group_request_id": 1,
             "fullDocument.assistant_group.group_id": 1,
             "fullDocument.status": 1, "fullDocument.is_active": 1,
@@ -502,13 +502,21 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
             user_id,
         });
     }
-    if (collection == GROUPS && full.get_str("created_by_user_id").is_ok())
+    if ((collection == GROUPS || collection == GROUP_MESSAGES || collection == CONVERSATIONS)
+        && full.get_document("collaboration").is_ok())
+        || (collection == GROUPS && full.get_str("created_by_user_id").is_ok())
         || (collection == GROUP_MESSAGES && full.get_bool("org_group").unwrap_or(false))
         || (collection == CONVERSATIONS && full.get_str("group_request_id").is_ok())
     {
         return Some(LiveEvent::OrgGroup {
             id: if collection == GROUPS {
                 key
+            } else if collection == CONVERSATIONS && full.get_document("collaboration").is_ok() {
+                full.get_document("collaboration")
+                    .ok()?
+                    .get_str("group_id")
+                    .ok()?
+                    .into()
             } else {
                 full.get_str("group_id").ok()?.into()
             },
@@ -668,6 +676,26 @@ mod tests {
                 .unwrap()
                 .contains_key("fullDocument.author_user_id")
         );
+    }
+
+    #[test]
+    fn collaboration_hidden_thread_routes_to_group_not_credential_owner() {
+        for version in [1, 99] {
+            let change: ChangeStreamEvent<Document> = mongodb::bson::from_document(doc! {
+                "_id":{"_data":"token"},"operationType":"insert",
+                "ns":{"db":"test","coll":CONVERSATIONS},"documentKey":{"_id":"hidden"},
+                "fullDocument":{"user_id":"guest-credential-owner","collaboration":{"version":version,"group_id":"group"}}
+            }).unwrap();
+            assert_eq!(
+                decode(&change),
+                Some(LiveEvent::OrgGroup {
+                    id: "group".into(),
+                    user_id: "guest-credential-owner".into()
+                })
+            );
+        }
+        // Resolution rechecks the stored classifier/ACL; no direct Conversation
+        // event may expose a hidden thread ID even for an unknown marker version.
     }
 
     #[tokio::test]

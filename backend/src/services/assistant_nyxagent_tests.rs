@@ -1227,6 +1227,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        collaboration: None,
         owner_model_route: None,
         invocation_controlled: false,
         credential_invocation_id: None,
@@ -1250,6 +1251,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            collaboration: None,
             channel_adapter_origin: None,
             invocation_id: None,
             resource_refs: Vec::new(),

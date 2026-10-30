@@ -930,6 +930,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,
@@ -962,6 +963,8 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    /// Explicitly bound collaboration thread; never a private memory/account lane.
+    pub collaboration_thread: bool,
     pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
     pub invocation_controlled: bool,
     pub invocation_id: Option<String>,
@@ -1422,13 +1425,24 @@ pub async fn for_key_with_access(
     let Some(row) = db
         .collection::<bson::Document>(CREDENTIALS)
         .find_one(doc! {"user_id": user, "api_key_id": key})
-        .projection(doc! {"conversation_id": 1})
+        .projection(doc! {"conversation_id": 1, "collaboration": 1})
         .await?
     else {
         return Ok(None);
     };
     let conversation_id = row.get_str("conversation_id").map_err(|_| not_found())?;
-    let (conversation, agent) = if let Some(access) = access {
+    let (conversation, agent) = if row.get_bool("collaboration").unwrap_or(false) {
+        let conversation = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id":conversation_id,"user_id":user,"credential_api_key_id":key})
+            .await?
+            .ok_or_else(not_found)?;
+        let agent = Box::pin(
+            super::collaboration_group_service::runtime::agent_for_thread(db, &conversation),
+        )
+        .await?;
+        (conversation, agent)
+    } else if let Some(access) = access {
         // Authentication already resolved live membership. Retain the private
         // thread/owner/agent fences while reusing that request's snapshot.
         let conversation = access.conversation(db, user, conversation_id).await?;
@@ -1477,6 +1491,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        collaboration_thread: conversation.collaboration.is_some(),
         channel_adapter_origin: conversation
             .active_turn
             .as_ref()
@@ -2910,6 +2925,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        collaboration_thread: target.collaboration.is_some(),
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: row.invocation_id.clone(),

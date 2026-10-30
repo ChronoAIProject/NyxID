@@ -45,7 +45,10 @@ groups, routines/scheduled triggers and cross-user agents. Groups, handoffs and
 automations are documented below; cross-user sharing and multi-person groups are
 specified in [Shared agents and multi-person groups](12-shared-agents-and-groups.md).
 Phase 1 shared-agent support is implemented behind the default-off
-`assistant:shared-agents` flag; multi-person groups remain Phase 2.
+`assistant:shared-agents` flag; multi-person groups remain Phase 2. The Phase 2
+reader-first foundation adds an explicit `collaboration` marker and fences those
+rows off from legacy personal/org dispatch. Its writers are not yet mounted;
+the staged rollout and remaining runtime/UI work are tracked in that design.
 
 ## 3. What exists today and constrains the design
 

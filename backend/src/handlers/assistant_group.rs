@@ -216,6 +216,7 @@ async fn group_response_for(
 pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
     let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
+        crate::services::assistant_group_kind::require_legacy(&group)?;
         if crate::services::org_group_service::is_org(&group) {
             Box::pin(super::org_group::advance(state, &group)).await;
             return Ok(());

@@ -941,6 +941,7 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
     };
     let guest = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            collaboration_thread: false,
             invocation_controlled: false,
             invocation_id: None,
             report_to: None,
@@ -984,6 +985,7 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
 
     let webhook = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            collaboration_thread: false,
             invocation_controlled: false,
             invocation_id: None,
             report_to: None,

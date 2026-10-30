@@ -134,7 +134,7 @@ pub(crate) async fn fence_shared_group(
     let result = db
         .collection::<AssistantGroup>(GROUPS)
         .update_one(
-            doc! {"_id": id, "user_id": &row.user_id, "created_by_user_id": null,
+            doc! {"_id": id, "user_id": &row.user_id, "created_by_user_id": null, "collaboration": null,
             "member_agent_ids": row.agent_id.as_deref().unwrap_or_default(),
             "participant_user_ids": {"$not": {"$elemMatch": {"$ne": &row.user_id}}}},
             doc! {"$set": {"updated_at": bson::DateTime::now()}},
@@ -162,7 +162,7 @@ fn owner_filter(owner: &str, id: &str) -> AppResult<bson::Document> {
     if !valid_id(id) {
         return Err(not_found());
     }
-    Ok(doc! {"_id": id, "user_id": owner})
+    Ok(doc! {"_id": id, "user_id": owner, "collaboration": null})
 }
 
 /// Resolve and check members: live agents of this owner, unique, bounded.
@@ -235,6 +235,7 @@ pub async fn create(
     let members = resolve_members(db, owner, member_ids).await?;
     let now = Utc::now();
     let group = AssistantGroup {
+        collaboration: None,
         id: format!("nyxg-{}", Uuid::new_v4().simple()),
         user_id: owner.into(),
         participant_user_ids: Vec::new(),
@@ -306,7 +307,7 @@ pub async fn find(db: &Database, owner: &str, reference: &str) -> AppResult<Assi
 pub async fn list(db: &Database, owner: &str) -> AppResult<Vec<AssistantGroup>> {
     Ok(db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"user_id": owner})
+        .find(doc! {"user_id": owner, "collaboration": null})
         .sort(doc! {"updated_at": -1})
         .limit(100)
         .await?
@@ -335,6 +336,7 @@ impl std::ops::Deref for Member {
 /// Members in group order, including destroyed/revoked members. Only public
 /// profile fields may be returned to the caller; `available` is request-local.
 pub async fn members(db: &Database, owner: &str, group: &AssistantGroup) -> AppResult<Vec<Member>> {
+    super::assistant_group_kind::require_legacy(group)?;
     let agents: Vec<AssistantAgent> = db
         .collection(crate::models::assistant_agent::COLLECTION_NAME)
         .find(doc! {"_id": {"$in": &group.member_agent_ids}})
@@ -631,6 +633,7 @@ pub async fn append_following(
                     .await?
                     .ok_or_else(not_found)?;
                 let message = GroupMessage {
+                    collaboration: None,
                     activities: Vec::new(),
                     org_group: false,
                     author_user_id: None,
@@ -742,6 +745,7 @@ pub async fn append_with_recipients(
     ))
     .await?;
     let message = GroupMessage {
+        collaboration: None,
         activities: Vec::new(),
         org_group: false,
         author_user_id: None,
@@ -775,7 +779,7 @@ pub async fn messages(
     limit: i64,
     before_seq: Option<i64>,
 ) -> AppResult<Vec<GroupMessage>> {
-    let mut filter = doc! {"group_id": group_id, "user_id": owner};
+    let mut filter = doc! {"group_id": group_id, "user_id": owner, "collaboration": null};
     if let Some(before) = before_seq {
         filter.insert("seq", doc! {"$lt": before});
     }
@@ -1191,7 +1195,7 @@ pub async fn set_seen(db: &Database, owner: &str, thread_id: &str, seq: i64) -> 
 pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
     let rows: Vec<AssistantGroup> = db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"$or": [{"pending_agent_ids.0": {"$exists": true}}, {"followers.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
+        .find(doc! {"collaboration": null, "$or": [{"pending_agent_ids.0": {"$exists": true}}, {"followers.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
         .sort(doc! {"pending_checked_at": 1})
         .limit(50)
         .await?
@@ -1221,7 +1225,7 @@ fn pull_recipient(group: &AssistantGroup, agent_id: &str) -> bson::Document {
 pub async fn remove_agent(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> {
     let groups: Vec<AssistantGroup> = db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"user_id": owner, "member_agent_ids": agent_id})
+        .find(doc! {"user_id": owner, "member_agent_ids": agent_id, "collaboration": null})
         .await?
         .try_collect()
         .await?;

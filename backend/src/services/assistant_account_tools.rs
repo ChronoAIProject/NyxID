@@ -280,6 +280,12 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
         e.name != super::assistant_skill_authoring::TOOL_NAME
             && (!chat.guest || e.name != "task_status")
     });
+    if chat.collaboration_thread {
+        service.endpoints.retain(|e| {
+            !chat.guest && matches!(e.name.as_str(), "get_agent_skills" | "skill_read")
+        });
+        service.description = Some("Read this specialist's pinned skills. Private memory and account tools are unavailable in collaboration groups.".into());
+    }
     service
 }
 
@@ -292,6 +298,7 @@ pub async fn virtual_service_for(
     // need this rollout lookup. A flag-store failure hides authoring alone,
     // preserving the existing tools for every caller.
     if !chat.guest
+        && !chat.collaboration_thread
         && super::assistant_skill_authoring::enabled(db, &chat.user_id)
             .await
             .unwrap_or(false)
