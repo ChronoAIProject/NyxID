@@ -969,7 +969,18 @@ pub(crate) async fn channel_target_agent(
             team::ensure_nyxbot(&state.db, owner).await
         }
         Some(name) => match team::live_specialist(&state.db, owner, name).await {
-            Ok(agent) => Ok(agent),
+            Ok(agent) => {
+                if agent.user_id != owner
+                    && !crate::services::org_agent_service::access(&state.db, owner, &agent.user_id)
+                        .await?
+                        .can_read()
+                {
+                    return Err(AppError::ValidationError(
+                        "Shared agents cannot be linked to platform or channel threads".into(),
+                    ));
+                }
+                Ok(agent)
+            }
             Err(error @ AppError::NotFound(_)) => {
                 if team::names_readable_organization_specialist(&state.db, owner, name).await? {
                     Err(AppError::organization_agent_channel_unsupported())

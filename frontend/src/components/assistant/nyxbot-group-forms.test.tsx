@@ -280,3 +280,13 @@ it("preserves organization agents as choices in personal groups", () => {
   render(<QueryClientProvider client={client}><NewGroupDialog agents={[...AGENTS, orgAgent]} onClose={vi.fn()} onCreated={vi.fn()} /></QueryClientProvider>);
   expect(within(screen.getByRole("list", { name: "Agents" })).getByText("Org specialist")).toBeInTheDocument();
 });
+
+it("offers eligible shared agents in personal crew settings and marks lost access unavailable", () => {
+  const shared = agent({ id: "shared", kind: "specialist", name: "Shared researcher", share_role: "user", owner_name: "Publisher", can_use: true });
+  const unavailable = agent({ id: "revoked", kind: "specialist", name: "Revoked", share_role: "user", can_use: true }); // stale agent-list cache
+  const group = { ...GROUP, members: [...GROUP.members, { id: "revoked", name: "Revoked", kind: "specialist" as const, destroyed: false, working: false, unavailable: true }] };
+  render(<QueryClientProvider client={client}><GroupSettingsDialog group={group} agents={[...AGENTS, shared, unavailable]} open onOpenChange={vi.fn()} onDeleted={vi.fn()} /></QueryClientProvider>);
+  expect(screen.getByText(/Shared agent · Publisher/)).toBeVisible();
+  expect(screen.getByRole("checkbox", { name: /Shared researcher/ })).toBeEnabled();
+  expect(screen.getByRole("checkbox", { name: /Revoked/ })).toBeDisabled();
+});

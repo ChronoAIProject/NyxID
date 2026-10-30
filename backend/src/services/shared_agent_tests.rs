@@ -1940,6 +1940,15 @@ async fn shared_agent_http_policy_and_final_egress_revoke_owner_connection() {
 
 #[tokio::test]
 async fn shared_agent_rest_and_mcp_dispatch_reads_and_refuse_without_provider_effects() {
+    shared_agent_transport_dispatch(false).await;
+}
+
+#[tokio::test]
+async fn shared_agent_crew_rest_and_mcp_keep_shared_acl_and_refuse_revoked_keys() {
+    shared_agent_transport_dispatch(true).await;
+}
+
+async fn shared_agent_transport_dispatch(crew: bool) {
     use super::billing::route_inventory::{BillingIngress, BillingRoutePolicy};
     use axum::{
         body::Body,
@@ -2008,10 +2017,33 @@ async fn shared_agent_rest_and_mcp_dispatch_reads_and_refuse_without_provider_ef
     let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.outsider, &agent)
         .await
         .unwrap();
+    if crew {
+        let group = super::assistant_group_service::create(
+            &f.state.db,
+            &f.outsider,
+            "Transport crew",
+            std::slice::from_ref(&agent.id),
+            "user",
+        )
+        .await
+        .unwrap();
+        f.state
+            .db
+            .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"group_id": &group.id}},
+            )
+            .await
+            .unwrap();
+        // assistant_group_id on a key is reserved for organization groups.
+        // Personal crews bind membership through the recipient conversation.
+    }
     let row =
         super::assistant_authority_tests::pin_assignment(&f.state.db, &f.outsider, &row.id, None)
             .await;
     let key = f.key(&row).await;
+    assert!(key.assistant_group_id.is_none());
     let credential = super::assistant_agent_credential_service::load_for_conversation(
         &f.state.db,
         &f.state.encryption_keys,
@@ -2022,6 +2054,40 @@ async fn shared_agent_rest_and_mcp_dispatch_reads_and_refuse_without_provider_ef
     .unwrap()
     .unwrap();
     let listed = mcp(&f.state, &credential.raw_key, "tools/list", json!({})).await;
+    for tool in listed["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("shared tools listing: {listed}"))
+    {
+        let name = tool["name"].as_str().unwrap_or_default();
+        assert!(
+            !name.starts_with("nyx__machine_")
+                && !name.starts_with("nyx__ssh_")
+                && !name.starts_with("nyx__oracle_")
+                && name != "nyx__saved_logins",
+            "Excluded tool exposed: {name}"
+        );
+        assert!(!matches!(
+            name,
+            "nyxid__create_agent"
+                | "nyxid__set_agent_grants"
+                | "nyxid__set_agent_sharing"
+                | "nyxid__connect_channel_bot"
+        ));
+    }
+    for name in [
+        "nyx__machine_list",
+        "nyx__saved_logins",
+        "nyx__machine_job_cancel",
+    ] {
+        let refused = mcp(
+            &f.state,
+            &credential.raw_key,
+            "tools/call",
+            json!({"name": name, "arguments": {}}),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+    }
     let tool = listed["result"]["tools"]
         .as_array()
         .expect("shared tools listing")
@@ -2398,3 +2464,185 @@ async fn shared_agent_actor_connection_dispatch_requires_consumable_private_cons
 
 #[path = "shared_agent_transport_tests.rs"]
 mod transports;
+
+#[tokio::test]
+async fn shared_agent_crew_projection_keeps_skills_notes_and_rejects_other_surfaces() {
+    use super::{
+        assistant_agent_credential_service as credentials, assistant_group_service as groups,
+    };
+    use crate::models::assistant_agent::MemoryNote;
+    let f = Fixture::new("shared_agent_crew_projection").await;
+    let agent = publish(&f, false).await;
+    pin_shared_test_skill(&f, &agent).await;
+    let note = |text: &str| MemoryNote {
+        id: Uuid::new_v4().to_string(),
+        text: text.into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    f.state.db.collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(doc! {"_id": &agent.id}, doc! {"$set": {
+            "memory": mongodb::bson::to_bson(&vec![note("Owner secret")]).unwrap(),
+            "machine_node_ids": ["owner-machine"], "saved_login_ids": ["owner-login"], "grants.account_read": true,
+        }}).await.unwrap();
+    sharing::update_memory(
+        &f.state.db,
+        &f.admin,
+        &agent,
+        sharing::NotesUpdate {
+            expected_revision: 1,
+            notes: vec!["Published team note".into()],
+        },
+    )
+    .await
+    .unwrap();
+    sharing::update_notes(
+        &f.state.db,
+        &f.outsider,
+        &agent,
+        sharing::NotesUpdate {
+            expected_revision: 0,
+            notes: vec!["Recipient private note".into()],
+        },
+    )
+    .await
+    .unwrap();
+    let nyxbot = team::ensure_nyxbot(&f.state.db, &f.outsider).await.unwrap();
+    let group = groups::create(
+        &f.state.db,
+        &f.outsider,
+        "Private crew",
+        &[nyxbot.id.clone(), agent.id.clone()],
+        "user",
+    )
+    .await
+    .unwrap();
+    let mut thread =
+        team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.outsider, &agent)
+            .await
+            .unwrap();
+    // The same projection/credential admission is used by a newly created group slot.
+    thread.group_id = Some(group.id.clone());
+    let projected = team::agent_for_conversation(&f.state.db, &thread)
+        .await
+        .unwrap();
+    assert_eq!(projected.skills.len(), 1);
+    assert_eq!(
+        projected.skill_metadata["shared-skill"].description,
+        "Pinned shared guidance"
+    );
+    assert_eq!(
+        projected
+            .memory
+            .iter()
+            .map(|n| n.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Published team note", "Recipient private note"]
+    );
+    assert!(
+        projected.machine_node_ids.is_empty()
+            && projected.saved_login_ids.is_empty()
+            && projected.guest_access.is_empty()
+    );
+    assert!(!projected.grants.account_read);
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(matches!(
+        credentials::authority_in_session(&f.state.db, &thread, &mut session)
+            .await
+            .unwrap(),
+        credentials::KeyAuthority::Shared(..)
+    ));
+    session.abort_transaction().await.unwrap();
+    assert!(matches!(
+        crate::handlers::assistant_team::channel_target_agent(
+            &f.state,
+            &f.outsider,
+            Some(&agent.id)
+        )
+        .await,
+        Err(crate::errors::AppError::ValidationError(_))
+    ));
+    let request = super::assistant_nyxagent::TurnRequest {
+        conversation_id: None,
+        agent_id: Some(agent.id.clone()),
+        text: "Crew request".into(),
+        model: None,
+        access_mode: None,
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: Vec::new(),
+    };
+    let mut start = super::assistant_nyxagent::TurnStart::from(&request);
+    start.origin = crate::models::assistant_conversation::TurnOrigin::Group;
+    start.group_id = Some(group.id.clone());
+    let active = super::assistant_nyxagent::begin_turn(
+        &f.state.db,
+        &f.outsider,
+        start,
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert!(active.shared_agent_thread);
+    assert!(
+        !active.active_turn.as_ref().unwrap().with_nyxbot,
+        "NyxBot membership cannot donate decision authority"
+    );
+    let chat = super::assistant_acknowledgement_service::for_key(
+        &f.state.db,
+        &f.outsider,
+        Some(&active.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        super::assistant_access_policy::routing_for(&chat, &active),
+        crate::models::assistant_acknowledgement::CardRouting::NotInvolved
+    ));
+    for kind in ["automation", "channel", "org-group", "platform"] {
+        let mut invalid = thread.clone();
+        match kind {
+            "automation" => invalid.automation_thread = true,
+            "channel" => invalid.guest_turn = true,
+            "org-group" => invalid.group_request_id = Some("org-request".into()),
+            _ => {
+                invalid.platform_thread = Some(crate::models::assistant_conversation::PlatformThread {
+                    platform: "telegram".into(), profile_id: "profile".into(), manager_bot_id: "123".into(),
+                    entry: crate::models::platform_entry_projection::StoredEntryIdentity::TelegramV1 { telegram_bot_id: 123 },
+                    binding_id: "binding".into(), binding_generation: 1, user_id: f.outsider.clone(), nyxbot_agent_id: agent.id.clone(),
+                });
+            }
+        }
+        assert!(matches!(
+            team::agent_for_conversation(&f.state.db, &invalid).await,
+            Err(crate::errors::AppError::ValidationError(_))
+        ));
+    }
+    assert!(
+        super::org_group_service::resolve_agents(
+            &f.state.db,
+            &f.org,
+            std::slice::from_ref(&agent.id)
+        )
+        .await
+        .is_err()
+    );
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(matches!(
+        team::create_automation_thread(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.outsider,
+            &agent,
+            "No automation",
+            &mut session
+        )
+        .await,
+        Err(crate::errors::AppError::ValidationError(_))
+    ));
+    session.abort_transaction().await.unwrap();
+    f.state.db.drop().await.unwrap();
+}

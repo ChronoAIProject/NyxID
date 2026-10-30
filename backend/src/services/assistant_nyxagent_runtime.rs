@@ -608,8 +608,22 @@ pub(crate) async fn group_note(
         .ok()?;
     let others: Vec<String> = members
         .iter()
-        .filter(|member| member.id != agent.id && member.destroyed_at.is_none())
-        .map(|member| format!("@{}", identifier(&member.name)))
+        .filter(|member| member.id != agent.id && member.available)
+        .map(|member| {
+            if members
+                .iter()
+                .filter(|other| other.name.eq_ignore_ascii_case(&member.name))
+                .count()
+                > 1
+                || members
+                    .iter()
+                    .any(|other| other.id.eq_ignore_ascii_case(&member.name))
+            {
+                format!("@{} ({})", member.id, identifier(&member.name))
+            } else {
+                format!("@{}", identifier(&member.name))
+            }
+        })
         .collect();
     Some(format!(
         "You are {} in the group chat {} with the user and {}. Your reply is posted to the \

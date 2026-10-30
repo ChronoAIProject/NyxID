@@ -34,6 +34,14 @@ use crate::{
 
 /// The group ID comes from the fenced conversation row, never from tool input.
 pub fn routing_for(chat: &ChatAuthority, conversation: &AssistantConversation) -> CardRouting {
+    if conversation.group_id.is_some()
+        && chat
+            .org_agent_access
+            .as_ref()
+            .is_some_and(|access| access.shared().is_some())
+    {
+        return CardRouting::NotInvolved;
+    }
     if !chat.involved() || !same_live_turn(chat, conversation, Utc::now()) {
         return CardRouting::NotInvolved;
     }

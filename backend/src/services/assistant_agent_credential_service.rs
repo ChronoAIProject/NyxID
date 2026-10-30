@@ -159,6 +159,7 @@ pub(crate) async fn authority_with_access(
             .expect("shared snapshot")
             .check_conversation(conversation)?;
         super::shared_agent_service::fence(db, shared, session).await?;
+        super::assistant_group_service::fence_shared_group(db, conversation, session).await?;
         db.collection::<bson::Document>(CONVERSATIONS)
             .update_one(
                 doc! {"_id": &conversation.id, "user_id": &conversation.user_id},
