@@ -530,3 +530,5 @@ mod shared_agent_tests;
 
 pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
+
+pub mod monitoring_service;
