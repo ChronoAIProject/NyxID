@@ -222,9 +222,20 @@ reply when an owner chat key actually invokes a supported CMA operation. The
 card comes from the durable MCP watch, never assistant text or a promised task
 plan. It shows the CMA identity, operation and agent IDs when available, a safe
 idempotency key, the invoking assistant's name, and the last observed status.
-Provisioning success is **Agent ready**; only a completed Responses operation is
-**Completed**. Progress stages describe submission, provisioning or activity,
+Agent status labels follow CMA's own vocabulary: **Starting**, **Ready**,
+**Working**, **Needs approval**, **Paused**, **Stopped**, **Deleted**, and
+**Needs attention**. Provisioning success is **Ready**; only a completed
+Responses operation is **Completed**. Progress stages describe submission, provisioning or activity,
 and readiness; they do not infer implementation or deployment milestones.
+
+A full-width primary **View in CMA** link opens the exact agent in a new tab
+only when CMA supplies a valid `callback_url`, projected as `cma_url` in
+history. No destination is inferred from agent IDs or catalog configuration.
+An omitted callback preserves the last supplied link; explicit null or an
+invalid callback removes it. This gives users
+the CMA conversation and work details while keeping the status card compact.
+The checked timestamp includes the date and time so old observations are
+identifiable after the tracking window ends.
 
 History returns an owner/thread-scoped `cma_operations` metadata snapshot,
 including settled operations whose initiating turn is on an older message page.

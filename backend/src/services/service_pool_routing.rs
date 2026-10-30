@@ -75,10 +75,10 @@ async fn route_member_is_eligible(
     )
     .await
     {
-        Ok(Some(resolution)) => Ok(!resolution
+        Ok(Some(resolution)) => Ok(resolution
             .node_id
             .as_ref()
-            .is_some_and(|id| allowed_node_ids.is_some_and(|ids| !ids.contains(id)))),
+            .is_none_or(|id| allowed_node_ids.is_none_or(|ids| ids.contains(id)))),
         Ok(None) => Ok(false),
         Err(error) if service_pool_service::member_unavailable(&error) => Ok(false),
         Err(error) => Err(error),
