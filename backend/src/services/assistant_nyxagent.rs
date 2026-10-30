@@ -1539,7 +1539,22 @@ pub(crate) async fn authorize_thread_read(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<Option<std::sync::Arc<super::org_agent_service::RequestAccess>>> {
-    if row.shared_agent_thread && row.group_id.is_none() {
+    if row.shared_agent_thread {
+        if let Some(id) = &row.group_id {
+            let group = super::assistant_group_service::get(db, &row.user_id, id).await?;
+            if super::org_group_service::is_org(&group)
+                || group
+                    .participant_user_ids
+                    .iter()
+                    .any(|id| id != &row.user_id)
+            {
+                return Err(AppError::Forbidden(
+                    "Shared agent history requires your personal crew".into(),
+                ));
+            }
+        }
+        // Retained history is the recipient's. Execution still resolves and
+        // fences the live shared ACL, independent of this metadata marker.
         return Ok(None);
     }
     let user_id = row.user_id.as_str();
@@ -2400,6 +2415,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         return Ok(OwnerTurnAdmission::Drained);
     }
     let with_nyxbot = start.origin == TurnOrigin::Group
+        && !row.shared_agent_thread
         && row.role == AgentRole::Subagent
         && match row.group_id.as_deref() {
             Some(group_id) => {

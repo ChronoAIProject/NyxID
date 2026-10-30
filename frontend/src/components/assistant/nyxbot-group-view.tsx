@@ -47,9 +47,12 @@ import {
   withDisplayName,
   workingLabel,
 } from "@/lib/assistant/nyxbot-labels";
-import { mentionSegments } from "@/lib/assistant/nyxbot-mentions";
+import { mentionSegments, mentionTokens } from "@/lib/assistant/nyxbot-mentions";
+import { SharedConsentCards } from "./shared-agent-controls";
 import {
   NO_RECIPIENT_EDITS,
+  memberMention,
+  mentionedIds,
   resolveRecipients,
   withAdded,
   withDraft,
@@ -426,10 +429,10 @@ function MemberButton({
         <button
           type="button"
           onClick={onOpen}
-          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
+          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : member.unavailable ? " (unavailable)" : member.shared ? " (shared agent)" : ""} — agent details`}
           className={cn(
             "relative rounded-full transition-opacity hover:opacity-80",
-            member.destroyed && "opacity-50",
+            (member.destroyed || member.unavailable) && "opacity-50",
           )}
         >
           <AgentAvatar agent={member} size={size} />
@@ -444,6 +447,7 @@ function MemberButton({
       <TooltipContent side="bottom" className="text-11">
         <p className="font-medium">{agentTitle(member)}</p>
         {handle ? <p className="text-text-tertiary">{handle}</p> : null}
+        {member.unavailable ? <p>Unavailable</p> : member.shared ? <p>Shared agent{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -649,7 +653,7 @@ export function GroupRecipientPills({
   readonly onRemove: (id: string) => void;
   readonly onAdd: (id: string) => void;
 }) {
-  const live = members.filter((member) => !member.destroyed);
+  const live = members.filter((member) => !member.destroyed && !member.unavailable);
   const others = live.filter((member) => !recipientIds.includes(member.id));
   return (
     <div
@@ -671,7 +675,7 @@ export function GroupRecipientPills({
                 aria-label={`Remove recipient ${agentTitle(member)}`}
                 onClick={() => onRemove(id)}
               >
-                {agentTitle(member)} ×
+                {agentTitle(member)}{member.shared ? ` · Shared agent${member.owner_name ? ` · ${member.owner_name}` : ""}` : ""} ×
               </Button>,
             ]
           : [];
@@ -697,7 +701,7 @@ export function GroupRecipientPills({
           <DropdownMenuContent align="start">
             {others.map((member) => (
               <DropdownMenuItem key={member.id} onSelect={() => onAdd(member.id)}>
-                {agentTitle(member)}
+                {agentTitle(member)}{member.shared ? " · Shared agent" : ""}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
@@ -779,12 +783,14 @@ export function NyxAgentGroupPage({
   }
 
   const mentions = (group?.members ?? [])
-    .filter((member) => !member.destroyed)
+    .filter((member) => !member.destroyed && !member.unavailable)
     .map((member) => ({
       id: member.id,
-      name: member.name,
+      name: memberMention(member, group?.members ?? []),
       kind: member.kind,
-      display_name: withDisplayName(member, agents.data?.agents).display_name,
+      display_name: withDisplayName(member, agents.data?.agents).display_name || member.name,
+      shared: member.shared,
+      owner_name: member.owner_name,
     }));
 
   return (
@@ -858,6 +864,9 @@ export function NyxAgentGroupPage({
           onDeleted={() => setDetailsAgentId(undefined)}
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          {(group?.members ?? []).filter((member) => member.shared && !member.unavailable && member.conversation_id).map((member) => (
+            <SharedConsentCards key={member.id} agentId={member.id} conversationId={member.conversation_id!} />
+          ))}
           <GroupPendingActions
             actions={
               transcript.error ? [] : (transcript.data?.pending_actions ?? [])
@@ -918,12 +927,26 @@ export function NyxAgentGroupPage({
                 throw error;
               }
               try {
+                const members = group?.members ?? [];
+                const tokens = mentionTokens(text);
+                const ambiguous = tokens.some(({ name }) =>
+                  !members.some((member) => member.id.toLowerCase() === name.toLowerCase())
+                  && members.filter((member) => member.name.toLowerCase() === name.toLowerCase()).length > 1,
+                );
+                // Bind the displayed selection (including sticky defaults) to
+                // exact IDs. Preserve stale mentions for the server's refusal;
+                // never replace an unavailable target with the lead.
+                const exactRecipients = mentionedIds(text, members.map((member) => ({
+                  ...member, destroyed: false, unavailable: false,
+                })));
                 await transcript.post.mutateAsync({
                   text,
                   attachmentIds: uploads?.attachmentIds ?? [],
                   ...(recipients.edited
                     ? { recipientAgentIds: recipients.ids }
-                    : {}),
+                    : !ambiguous
+                      ? { recipientAgentIds: exactRecipients.length ? exactRecipients : recipients.ids }
+                      : {}),
                 });
                 setRecipientSelection(NO_RECIPIENT_EDITS);
               } catch (error) {

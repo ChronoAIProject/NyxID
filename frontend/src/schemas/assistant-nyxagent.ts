@@ -785,6 +785,10 @@ export const assistantGroupMemberSchema = z.object({
   name: z.string(),
   kind: assistantAgentKindSchema,
   destroyed: z.boolean().default(false),
+  unavailable: z.boolean().optional(),
+  shared: z.boolean().optional(),
+  owner_name: z.string().nullable().optional(),
+  conversation_id: z.string().nullable().optional(),
   working: z.boolean().default(false),
 });
 export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
