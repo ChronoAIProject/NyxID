@@ -532,9 +532,14 @@ pub async fn agent_for_conversation(
             let access =
                 super::org_agent_service::resolve_agent_access(db, &row.user_id, &agent).await?;
             if let Some(shared) = access.as_ref().and_then(|a| a.shared()) {
-                if row.group_id.is_some() || row.automation_thread || row.platform_thread.is_some()
-                {
-                    return Err(super::shared_agent_service::missing());
+                super::assistant_group_service::check_shared_surface(row)?;
+                if row.group_id.is_some() {
+                    super::org_group_service::check_thread_participation(
+                        db,
+                        row,
+                        access.as_ref().expect("shared access"),
+                    )
+                    .await?;
                 }
                 agent.memory = shared.team_memory().to_vec();
                 agent.memory.extend(

@@ -106,10 +106,15 @@ async fn researcher(state: &AppState) -> AssistantAgent {
 }
 
 async fn specialist(state: &AppState, name: &str) -> AssistantAgent {
-    team::create_specialist(
+    specialist_for(state, OWNER, name).await
+}
+
+async fn specialist_for(state: &AppState, owner: &str, name: &str) -> AssistantAgent {
+    team::create_specialist_for(
         &state.db,
         &state.encryption_keys,
         OWNER,
+        owner,
         CreateRequest {
             machines: None,
             logins: None,
@@ -305,8 +310,15 @@ async fn unknown_or_destroyed_recipient_ids_are_rejected() {
         .await
         .unwrap()
         .len();
+    let error = send(&state, &group.id, "hello", Some(vec![writer.id.clone()]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, AppError::ValidationError(message)
+        if message == "writer was destroyed and can't be messaged"),
+        "{error:?}"
+    );
     for ids in [
-        vec![writer.id.clone()],
         vec![Uuid::new_v4().to_string()],
         vec![researcher.id.clone(), Uuid::new_v4().to_string()],
         vec![],
@@ -1562,5 +1574,488 @@ async fn nyxbot_posts_register_followers_atomically_and_receive_bounded_summarie
             .followers
             .is_empty()
     );
+    server.abort();
+}
+
+async fn shared_researcher(state: &AppState) -> AssistantAgent {
+    use crate::services::{feature_flag_service as flags, shared_agent_service as sharing};
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    sharing::ensure_indexes(&state.db).await.unwrap();
+    let publisher = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection(USERS)
+        .insert_one(test_user(&publisher, UserType::Person))
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        &state.db,
+        sharing::FLAG,
+        &flags::FlagTarget::Global,
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let (agent, _) = team::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        &publisher,
+        CreateRequest {
+            machines: None,
+            logins: None,
+            name: "researcher".into(),
+            description: "Shared researcher".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    share_researcher(state, &agent, true).await;
+    agent
+}
+
+async fn share_researcher(state: &AppState, agent: &AssistantAgent, enabled: bool) {
+    use crate::services::shared_agent_service as sharing;
+    let policy = sharing::policy(&state.db, agent).await.unwrap();
+    let input = serde_json::from_value(json!({
+        "expected_version": policy.version, "enabled": enabled, "shared_access": {},
+        "audience": [{"subject_kind":"person", "email":format!("{OWNER}@example.com"), "role":"user"}]
+    })).unwrap();
+    sharing::update(&state.db, &agent.user_id, &agent.id, input, true)
+        .await
+        .unwrap();
+}
+
+async fn org_writer(state: &AppState) -> AssistantAgent {
+    use crate::models::org_membership::OrgRole;
+    use crate::services::feature_flag_service as flags;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    flags::set_platform_override(
+        &state.db,
+        "assistant:org-agents",
+        &flags::FlagTarget::Global,
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let org = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    state
+        .db
+        .collection(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            OWNER,
+            OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    specialist_for(state, &org, "org-writer").await
+}
+
+#[tokio::test]
+async fn destroyed_own_and_org_members_do_not_receive_handoffs_or_spend_budget() {
+    let (state, calls, server) = setup("crew_destroyed_handoffs").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let writer = specialist(&state, "writer").await;
+    let org = org_writer(&state).await;
+    let group = group_with(&state, "Retired members", &[&nyxbot, &writer, &org]).await;
+    send(&state, &group.id, "hello", Some(vec![nyxbot.id.clone()]))
+        .await
+        .unwrap();
+    let before_rows = settled(&state, &group.id, 3).await;
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
+        .await
+        .unwrap()
+        .unwrap();
+    for agent in [&writer, &org] {
+        team::destroy(&state.db, OWNER, &agent.id).await.unwrap();
+    }
+    let before = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    let calls_before = calls.lock().await.len();
+    member_settled(
+        &state,
+        &thread,
+        "@writer @org-writer @NyxBot your turn",
+        None,
+    )
+    .await;
+    let after = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    assert_eq!(after.hops_remaining, before.hops_remaining);
+    assert!(after.pending_agent_ids.is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::coordination::RATE_WINDOW_COLLECTION_NAME
+            )
+            .count_documents(doc! {"namespace": "assistant_group_handoffs"})
+            .await
+            .unwrap(),
+        0
+    );
+    let rows = groups::messages(&state.db, OWNER, &group.id, 100, None)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), before_rows.len() + 1);
+    assert_eq!(rows.last().unwrap().role, "agent");
+    // A member already queued when it was destroyed also remains silent.
+    for agent in [&writer, &org] {
+        run_member(&state, OWNER, &after, &agent.id).await.unwrap();
+    }
+    assert_eq!(
+        groups::messages(&state.db, OWNER, &group.id, 100, None)
+            .await
+            .unwrap()
+            .len(),
+        rows.len()
+    );
+    assert_eq!(calls.lock().await.len(), calls_before);
+    server.abort();
+}
+
+#[tokio::test]
+async fn human_mentions_distinguish_destroyed_members_from_revoked_shares() {
+    let (state, calls, server) = setup("crew_unavailable_messages").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let writer = specialist(&state, "writer").await;
+    let org = org_writer(&state).await;
+    let shared = shared_researcher(&state).await;
+    let group = group_with(
+        &state,
+        "Unavailable members",
+        &[&nyxbot, &writer, &org, &shared],
+    )
+    .await;
+    for agent in [&writer, &org] {
+        team::destroy(&state.db, OWNER, &agent.id).await.unwrap();
+    }
+    share_researcher(&state, &shared, false).await;
+    // Owner inactivity must not make a destroyed organization agent look like
+    // a revoked personal share when resolving the retained roster.
+    state
+        .db
+        .collection::<mongodb::bson::Document>(USERS)
+        .update_one(
+            doc! {"_id": &org.user_id},
+            doc! {"$set": {"is_active": false}},
+        )
+        .await
+        .unwrap();
+    let members = groups::members(&state.db, OWNER, &group).await.unwrap();
+    for agent in [&writer, &org] {
+        let member = members.iter().find(|m| m.id == agent.id).unwrap();
+        assert!(!member.available && !member.shared);
+        for (text, ids) in [
+            (format!("@{} hello", agent.name), None),
+            (format!("@{} hello", agent.id), None),
+            ("hello".into(), Some(vec![agent.id.clone()])),
+        ] {
+            let error = send(&state, &group.id, &text, ids).await.unwrap_err();
+            assert!(
+                matches!(&error, AppError::ValidationError(message)
+                if message == &format!("{} was destroyed and can't be messaged", agent.name)),
+                "{error:?}"
+            );
+        }
+    }
+    assert_eq!(
+        groups::messages(&state.db, OWNER, &group.id, 100, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let member = members.iter().find(|m| m.id == shared.id).unwrap();
+    assert!(member.shared && !member.available);
+    for (text, ids) in [
+        ("@researcher hello".to_owned(), None),
+        ("hello".to_owned(), Some(vec![shared.id.clone()])),
+    ] {
+        let response = send(&state, &group.id, &text, ids).await.unwrap();
+        assert_eq!(response["addressed_agent_ids"], json!([shared.id]));
+        let rows = groups::messages(&state.db, OWNER, &group.id, 100, None)
+            .await
+            .unwrap();
+        let notice = rows.last().unwrap();
+        assert_eq!(notice.role, "notice");
+        // The fixed share-specific refusal is attributed to the public member
+        // name; no generic recipient error or private publisher data is used.
+        assert_eq!(notice.agent_name.as_deref(), Some(shared.name.as_str()));
+        assert_eq!(notice.text, "Ask this agent's owner to share it with you.");
+    }
+    assert!(calls.lock().await.is_empty());
+    assert!(
+        groups::member_thread(&state.db, OWNER, &group.id, &shared.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn shared_agents_in_personal_crews_list_route_handoff_and_revalidate() {
+    let (state, calls, server) = setup("shared_agent_personal_crew").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let shared = shared_researcher(&state).await;
+    let group = group_of(&state, "test crew", &[&nyxbot, &shared]).await;
+    assert_eq!(group.members.len(), 2);
+    assert!(
+        group
+            .members
+            .iter()
+            .any(|m| m.id == shared.id && m.shared && !m.unavailable)
+    );
+    // Existing stored groups work without recreation; update returns the same member.
+    let updated = groups::update(
+        &state.db,
+        OWNER,
+        &group.id,
+        Some("renamed crew"),
+        Some(&[nyxbot.id.clone(), shared.id.clone()]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        groups::members(&state.db, OWNER, &updated)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    send(&state, &group.id, "@NyxBot ask the researcher", None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 4).await;
+    assert!(rows.iter().any(
+        |m| m.agent_id.as_deref() == Some(&shared.id) && m.text == "Researcher summary ready."
+    ));
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &shared.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(thread.shared_agent_thread && !thread.guest_turn);
+    assert_eq!(thread.user_id, OWNER);
+    assert_eq!(
+        thread.agent_owner_id.as_deref(),
+        Some(shared.user_id.as_str())
+    );
+    let key = key_service::get_api_key(&state.db, OWNER, &thread.credential_api_key_id)
+        .await
+        .unwrap();
+    assert_eq!(key.user_id, OWNER);
+    assert!(!key.allow_all_services && !key.allow_all_nodes && !key.allow_auto_connected_services);
+    assert!(key.allowed_node_ids.is_empty());
+    assert!(
+        !key.scopes
+            .contains(crate::mw::auth::ASSISTANT_ACCOUNT_SCOPE)
+    );
+    let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(chat.org_agent_access.as_ref().unwrap().shared().is_some());
+    assert!(!chat.with_nyxbot);
+    for class in [
+        crate::models::usage_meter::CredentialClass::UserOwned,
+        crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
+    ] {
+        let payer = state
+            .billing
+            .owner_resolver()
+            .resolve_for_assistant_execution(
+                OWNER,
+                &shared.user_id,
+                class,
+                chat.org_agent_access.as_deref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(payer.owner_id, OWNER);
+    }
+    let projected = team::agent_for_conversation(&state.db, &thread)
+        .await
+        .unwrap();
+    assert!(
+        projected.machine_node_ids.is_empty()
+            && projected.saved_login_ids.is_empty()
+            && projected.guest_access.is_empty()
+    );
+    assert!(!projected.grants.account_read);
+    // Explicit UUID recipients and the sticky selection route to the same member.
+    send(&state, &group.id, "hello", Some(vec![shared.id.clone()]))
+        .await
+        .unwrap();
+    settled(&state, &group.id, rows.len() + 2).await;
+    assert_eq!(defaults(&state, &group.id).await, vec![shared.id.clone()]);
+    send(&state, &group.id, "hello again", None).await.unwrap();
+    settled(&state, &group.id, rows.len() + 4).await;
+    share_researcher(&state, &shared, false).await;
+    let response = group_response(
+        &state,
+        groups::get(&state.db, OWNER, &group.id).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        response
+            .members
+            .iter()
+            .any(|m| m.id == shared.id && m.unavailable)
+    );
+    assert_eq!(
+        response.default_recipient_ids,
+        vec![group.lead_agent_id.clone()]
+    );
+    // Unaddressed messages follow the available defaults shown by the UI.
+    let fallback = send(&state, &group.id, "who is here?", None).await.unwrap();
+    assert_eq!(
+        fallback["addressed_agent_ids"],
+        json!([group.lead_agent_id])
+    );
+    let rows = groups::messages(&state.db, OWNER, &group.id, 200, None)
+        .await
+        .unwrap();
+    // Wait for the lead's response before measuring the revoked-member refusal.
+    settled(&state, &group.id, rows.len()).await;
+    let before = calls.lock().await.len();
+    send(&state, &group.id, "hello", Some(vec![shared.id.clone()]))
+        .await
+        .unwrap();
+    assert_eq!(calls.lock().await.len(), before);
+    let rows = groups::messages(&state.db, OWNER, &group.id, 200, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.last().unwrap().text,
+        "Ask this agent's owner to share it with you."
+    );
+    assert_eq!(
+        rows.last().unwrap().agent_id.as_deref(),
+        Some(shared.id.as_str())
+    );
+    assert!(
+        team::agent_for_conversation(&state.db, &thread)
+            .await
+            .is_err()
+    );
+    share_researcher(&state, &shared, true).await;
+    send(&state, &group.id, "@researcher hello after re-share", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, rows.len() + 2).await;
+    assert!(calls.lock().await.len() > before);
+    assert_eq!(
+        groups::member_thread(&state.db, OWNER, &group.id, &shared.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        thread.id
+    );
+    team::destroy(&state.db, &shared.user_id, &shared.id)
+        .await
+        .unwrap();
+    let before = calls.lock().await.len();
+    send(&state, &group.id, "@researcher hello", None)
+        .await
+        .unwrap();
+    assert_eq!(calls.lock().await.len(), before);
+    server.abort();
+}
+
+#[tokio::test]
+async fn shared_agent_crew_name_collisions_require_exact_identity() {
+    let (state, calls, server) = setup("shared_agent_crew_collision").await;
+    let own = researcher(&state).await;
+    let shared = shared_researcher(&state).await;
+    let other_shared = shared_researcher(&state).await;
+    let group = group_of(&state, "collision", &[&own, &shared, &other_shared]).await;
+    let error = send(&state, &group.id, "@researcher hello", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::ValidationError(_)));
+    assert!(calls.lock().await.is_empty());
+    assert!(groups::mentions("@researcher hello", &[own.clone(), shared.clone()]).is_empty());
+    assert_eq!(
+        groups::mentions(
+            &format!("@{} hello", shared.id),
+            &[own.clone(), shared.clone()]
+        ),
+        vec![shared.id.clone()]
+    );
+    send(&state, &group.id, &format!("@{} hello", shared.id), None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 3).await;
+    assert!(
+        rows.iter()
+            .any(|m| m.role == "agent" && m.agent_id.as_deref() == Some(shared.id.as_str()))
+    );
+    assert!(
+        groups::member_thread(&state.db, OWNER, &group.id, &own.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &shared.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let before = calls.lock().await.len();
+    member_settled(&state, &thread, "@researcher ambiguous handoff", None).await;
+    assert_eq!(calls.lock().await.len(), before);
+    assert!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .pending_agent_ids
+            .is_empty()
+    );
+    share_researcher(&state, &shared, false).await;
+    assert!(
+        send(&state, &group.id, "@researcher hello", None)
+            .await
+            .is_err()
+    );
+    // A destroyed personal namesake is still part of mention identity. Neither
+    // a human nor an agent may silently retarget its old name to the share.
+    let retired = group_of(&state, "retired namesake", &[&own, &other_shared]).await;
+    team::destroy(&state.db, OWNER, &own.id).await.unwrap();
+    assert!(matches!(
+        send(&state, &retired.id, &format!("@{} hello", own.id), None).await,
+        Err(AppError::ValidationError(_))
+    ));
+    assert!(matches!(
+        send(&state, &retired.id, "@researcher hello", None).await,
+        Err(AppError::ValidationError(_))
+    ));
+    assert!(matches!(
+        post(
+            &state,
+            OWNER,
+            &retired.id,
+            "@researcher handoff",
+            Some(&other_shared)
+        )
+        .await,
+        Err(AppError::ValidationError(_))
+    ));
+    assert_eq!(calls.lock().await.len(), before);
     server.abort();
 }

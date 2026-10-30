@@ -9,8 +9,9 @@ This extends [NyxBot groups and guests](09-nyxbot-orchestrator.md) and the
 [connection selection](../API_DISCOVERY.md#connection-selection-and-slug-collisions),
 and [service execution](../NYXBOT_SERVICE_EXECUTION.md) remain the foundations.
 Where this proposal changes behavior, it applies only to explicitly shared
-specialists and the new multi-person group surface. Legacy personal groups,
-organization groups and channel guests retain their contracts.
+specialists, including in a recipient's own single-person personal groups
+(crews), and the planned multi-person group surface. Organization groups and
+channel guests retain their contracts.
 
 ## 1. Outcome and fixed boundaries
 
@@ -19,6 +20,32 @@ recipient gets private conversations, their own thread key, action cards and
 billing. Owners and managers cannot read those conversations. In a multi-person
 group, participants see one transcript while each agent answers through an
 isolated execution thread for the original requester.
+
+Recipients can also add shared specialists to their existing personal crews,
+alongside their own NyxBot and other eligible agents. These remain single-person
+groups; there are no invites, additional people or guest fallback. Existing
+stored shared member IDs work without recreating the crew. Each shared member
+uses its own hidden `(recipient, group, agent)` thread and the private shared-chat
+contract: live ACL, recipient key/cards/consents/billing, pinned skills, published
+team memory and that recipient's private notes. NyxBot's presence or handoff
+never transfers its account or decision authority to that member.
+
+Lost access or destruction leaves an unavailable member in the roster, excluded
+from the picker and recipient pills. Addressing it posts the fixed refusal below
+without a model turn or charge; re-sharing restores it. Explicit recipient UUIDs
+and `@UUID` select the exact member. Duplicate bare handles are ambiguous, including
+unavailable namesakes: human text without an explicit selection is refused and
+agent handoffs do not route that token. The picker and group instructions use IDs
+for colliding names. Org groups, automation and platform/channel threads refuse
+shared agents before execution. Shared consent cards are scoped to the hidden
+member thread and remain human-only.
+
+These crew changes add response metadata only, with no new persisted enum or
+group kind. The composer binds displayed recipients, including sticky selections,
+to explicit IDs so revocation cannot silently redirect a stale selection. UUID mentions also send explicit recipient IDs,
+so older replicas reject unavailable shared recipients rather than falling back
+to a different member. During a mixed deployment, old replicas may still omit
+or refuse shared members; upgrade all replicas for consistent crew availability.
 
 Shared chats use the agent's pinned skills for instructions and package reads,
 just as the owner's turns do. Skills are untrusted behavior and never grant a
@@ -613,7 +640,7 @@ decisions. No tool sends an invitation message automatically.
 Shared specialists cannot invoke account/team/share/grant/connection management
 tools against either person's account. The limited note interface, if exposed
 through existing `remember`/`forget`, must route to the actor's private-note store
-only in private shared threads; shared-memory edits require explicit authorized
+only in the recipient's private or personal-crew shared threads; shared-memory edits require explicit authorized
 human management. Guest turns expose none of these native tools.
 
 Execution parity means one access/selection/policy evaluator covers
@@ -686,13 +713,15 @@ binary rollback. Unrelated legacy data stays untouched.
 
 ## 12. Phased implementation after review
 
-Phase 1 currently supports private shared conversations and foreground HTTP/MCP
-service execution, including model callbacks. Pools, detached/managed jobs,
-async-watch continuations, voice sessions, WebSocket/CONNECT and group/channel publishing are
+Phase 1 supports private shared conversations, shared members of the recipient's
+own legacy personal crews, and foreground HTTP/MCP service execution, including
+model callbacks. Pools, detached/managed jobs, async-watch continuations, voice
+sessions, WebSocket/CONNECT and organization-group/platform/channel publishing are
 refused for shared keys before effects. These transports require a separate
 extension carrying the same durable payer, consent and revocation fences.
 Consent uses separate human-only inline cards; after choosing, the person
-continues the chat. The current Share dialog accepts exact person/org UUIDs;
+continues the chat. The Share dialog adds people by verified email and accepts
+existing recipient UUIDs and organizations the publisher belongs to;
 there is no public user-directory enumeration.
 
 

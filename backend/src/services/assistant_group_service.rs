@@ -105,6 +105,50 @@ use mongodb::ClientSession;
 const TRANSCRIPT_CHARS: usize = 12_000;
 const TRANSCRIPT_MESSAGES: i64 = 60;
 
+/// Shared authority is confined to private chats and the recipient's own
+/// single-person crews. This check is also used when minting/revalidating keys.
+pub fn check_shared_surface(row: &AssistantConversation) -> AppResult<()> {
+    if row.automation_thread
+        || row.platform_thread.is_some()
+        || row.channel.is_some()
+        || row.reply_channel.is_some()
+        || row.guest_turn
+        || row.group_request_id.is_some()
+        || row.voice_parent_conversation_id.is_some()
+    {
+        return Err(AppError::ValidationError(
+            "Shared agents support private chats and personal crews only; organization groups, automation and platform/channel threads are unavailable".into()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn fence_shared_group(
+    db: &Database,
+    row: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let Some(id) = row.group_id.as_deref() else {
+        return Ok(());
+    };
+    let result = db
+        .collection::<AssistantGroup>(GROUPS)
+        .update_one(
+            doc! {"_id": id, "user_id": &row.user_id, "created_by_user_id": null,
+            "member_agent_ids": row.agent_id.as_deref().unwrap_or_default(),
+            "participant_user_ids": {"$not": {"$elemMatch": {"$ne": &row.user_id}}}},
+            doc! {"$set": {"updated_at": bson::DateTime::now()}},
+        )
+        .session(&mut *session)
+        .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::ValidationError(
+            "Shared agents require membership in your own personal crew".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn not_found() -> AppError {
     AppError::NotFound("Group not found".into())
 }
@@ -270,17 +314,108 @@ pub async fn list(db: &Database, owner: &str) -> AppResult<Vec<AssistantGroup>> 
         .await?)
 }
 
-/// Members in group order, including destroyed agents (shown as such).
-pub async fn members(
-    db: &Database,
-    owner: &str,
-    group: &AssistantGroup,
-) -> AppResult<Vec<AssistantAgent>> {
-    let agents = team::agents(db, owner, true).await?;
+/// A stored member is not execution authority. Keep unavailable members visible
+/// so losing a share never silently changes the meaning of an addressed message.
+pub struct Member {
+    pub agent: AssistantAgent,
+    pub available: bool,
+    /// A specialist owned by another person, even after its share is revoked.
+    /// Organization ownership is never personal sharing. This is not authority.
+    pub shared: bool,
+    pub owner_name: Option<String>,
+}
+
+impl std::ops::Deref for Member {
+    type Target = AssistantAgent;
+    fn deref(&self) -> &Self::Target {
+        &self.agent
+    }
+}
+
+/// Members in group order, including destroyed/revoked members. Only public
+/// profile fields may be returned to the caller; `available` is request-local.
+pub async fn members(db: &Database, owner: &str, group: &AssistantGroup) -> AppResult<Vec<Member>> {
+    let agents: Vec<AssistantAgent> = db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find(doc! {"_id": {"$in": &group.member_agent_ids}})
+        .await?
+        .try_collect()
+        .await?;
+    let foreign_owners: Vec<_> = agents
+        .iter()
+        .filter(|a| a.user_id != owner)
+        .map(|a| &a.user_id)
+        .collect();
+    let people: Vec<crate::models::user::User> = if foreign_owners.is_empty() {
+        Vec::new()
+    } else {
+        // Retain owner type after deactivation: an unavailable organization
+        // member must never be mistaken for a revoked personal share.
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": foreign_owners}})
+            .await?
+            .try_collect()
+            .await?
+    };
+    let memberships = if people.iter().any(|p| p.user_type.is_org()) {
+        super::org_service::list_memberships_for_member(db, owner, false).await?
+    } else {
+        Vec::new()
+    };
+    let mut owners = vec![owner.to_owned()];
+    owners.extend(
+        people
+            .iter()
+            .filter(|p| {
+                p.is_active
+                    && p.user_type.is_org()
+                    && memberships
+                        .iter()
+                        .any(|m| m.org_user_id == p.id && m.role.can_proxy())
+            })
+            .map(|p| p.id.clone()),
+    );
+    let foreign: Vec<_> = agents
+        .iter()
+        .filter(|a| {
+            people
+                .iter()
+                .any(|p| p.id == a.user_id && p.user_type.is_person())
+        })
+        .map(|a| a.id.clone())
+        .collect();
+    // Owned/org-only groups do not acquire shared-policy reads.
+    let shared = if !foreign.is_empty() && !super::org_group_service::is_org(group) {
+        super::shared_agent_service::load(db, owner, Some(&foreign))
+            .await?
+            .agents
+    } else {
+        Default::default()
+    };
     Ok(group
         .member_agent_ids
         .iter()
         .filter_map(|id| agents.iter().find(|agent| &agent.id == id).cloned())
+        .map(|agent| {
+            let has_shared_access = shared.contains_key(&agent.id);
+            let shared_member = agent.user_id != owner
+                && people
+                    .iter()
+                    .any(|p| p.id == agent.user_id && p.user_type.is_person());
+            let available = agent.destroyed_at.is_none()
+                && (owners.contains(&agent.user_id) || has_shared_access)
+                && (!super::org_group_service::is_org(group) || agent.user_id == group.user_id);
+            let owner_name = people
+                .iter()
+                .find(|p| has_shared_access && p.id == agent.user_id)
+                .and_then(|p| p.display_name.clone());
+            Member {
+                agent,
+                available,
+                shared: shared_member,
+                owner_name,
+            }
+        })
         .collect())
 }
 
@@ -309,6 +444,7 @@ pub async fn update(
         let left: Vec<AssistantAgent> = before
             .into_iter()
             .filter(|member| !ids.contains(&member.id))
+            .map(|member| member.agent)
             .collect();
         let mut parts = Vec::new();
         if !joined.is_empty() {
@@ -655,28 +791,44 @@ pub async fn messages(
     Ok(rows)
 }
 
-/// The members a text @mentions (by agent name, case-insensitive).
-pub fn mentions(text: &str, members: &[AssistantAgent]) -> Vec<String> {
-    let mut found = Vec::new();
-    for (index, _) in text.match_indices('@') {
-        // `mail@researcher` is not a mention: only a word start counts.
+/// Mention tokens, with the same word-boundary rule as the web composer.
+fn mention_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.match_indices('@').filter_map(|(index, _)| {
         if text[..index]
             .chars()
             .next_back()
             .is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
-            continue;
+            return None;
         }
-        let name: String = text[index + 1..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-            .collect();
-        if name.is_empty() {
-            continue;
-        }
-        if let Some(member) = members
-            .iter()
-            .find(|member| member.name.eq_ignore_ascii_case(&name))
+        let tail = &text[index + 1..];
+        let len = tail
+            .bytes()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+            .count();
+        (len > 0).then_some(&tail[..len])
+    })
+}
+
+pub fn ambiguous_mention(text: &str, members: &[AssistantAgent]) -> bool {
+    mention_tokens(text).any(|name| {
+        !members.iter().any(|m| m.id.eq_ignore_ascii_case(name))
+            && members
+                .iter()
+                .filter(|m| m.name.eq_ignore_ascii_case(name))
+                .count()
+                > 1
+    })
+}
+
+/// Exact IDs always win; ambiguous handles never select an arbitrary member.
+pub fn mentions(text: &str, members: &[AssistantAgent]) -> Vec<String> {
+    let mut found = Vec::new();
+    for name in mention_tokens(text) {
+        let exact = members.iter().find(|m| m.id.eq_ignore_ascii_case(name));
+        let mut named = members.iter().filter(|m| m.name.eq_ignore_ascii_case(name));
+        let first = named.next();
+        if let Some(member) = exact.or_else(|| first.filter(|_| named.next().is_none()))
             && !found.contains(&member.id)
         {
             found.push(member.id.clone());
