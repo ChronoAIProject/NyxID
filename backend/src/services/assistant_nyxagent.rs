@@ -1579,6 +1579,7 @@ pub async fn list(
         None => doc! {"user_id": user_id, "group_id": bson::Bson::Null,
         "voice_parent_conversation_id": bson::Bson::Null},
     };
+    filter.insert("guest_model_setup", doc! {"$ne":true});
     if let Some(cursor) = cursor {
         let (ms, id) = cursor
             .split_once(':')
@@ -2132,6 +2133,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             platform_cleanup_id: None,
             automation_thread: false,
             voice_parent_conversation_id: None,
+            guest_model_setup: false,
             shared_agent_thread: false,
             agent_owner_id: (agent.user_id != user_id).then(|| agent.user_id.clone()),
             id: id.clone(),
@@ -2176,6 +2178,18 @@ pub(crate) async fn begin_owner_turn_in_session(
             guest_turn: false,
         }
     };
+    if row.guest_model_setup
+        && (start.origin != TurnOrigin::Event
+            || start.guest
+            || row
+                .pending_events
+                .iter()
+                .any(|event| event.kind != super::assistant_guest_model_setup::KIND))
+    {
+        return Err(AppError::Forbidden(
+            "Visitor setup only accepts its system event".into(),
+        ));
+    }
     if row.message_count == 0
         && super::assistant_title_service::eligible(&row)
         && start.origin == TurnOrigin::User
@@ -2838,6 +2852,12 @@ pub(crate) async fn begin_owner_turn_in_session(
         also_deliver: Vec::new(),
     });
     if let Some(event_id) = start.channel_event_id.as_deref() {
+        Box::pin(
+            super::channel_turn_delivery::validate_guest_setup_in_session(
+                db, session, event_id, &row,
+            ),
+        )
+        .await?;
         super::channel_turn_delivery::bind_in_session(
             db,
             session,
@@ -5442,6 +5462,12 @@ pub async fn delete(
                             .session(&mut *session)
                             .await?;
                     }
+                    // Pending guest input has not yet been bound to a turn.
+                    // Revoke its resumability with the conversation, preserving dedup metadata.
+                    db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+                        .update_many(doc!{"user_id":user_id,"guest_setup_conversation_id":id,"turn_id":bson::Bson::Null},
+                            doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset":{"guest_setup_payload":""}})
+                        .session(&mut *session).await?;
                     db.collection::<bson::Document>(CHECKPOINTS)
                         .delete_one(doc! {"_id": id, "user_id": user_id})
                         .session(&mut *session)
@@ -6143,11 +6169,9 @@ impl TurnError {
     /// Unknown or absent reasons never claim that an owner notice was queued.
     pub fn with_model_route_reason(mut self, reason: Option<&str>) -> Self {
         if self.code == "guest_model_route_required"
-            && reason.is_some_and(
-                super::assistant_service_execution::model_diagnostic::Reason::setup_code,
-            )
+            && reason.is_some_and(super::assistant_guest_model_setup::failure_code)
         {
-            self.message = "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.".into();
+            self.message = "Visitor setup could not finish. The owner has been notified. Please try again later.".into();
         }
         self
     }

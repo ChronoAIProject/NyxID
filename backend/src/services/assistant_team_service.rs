@@ -95,7 +95,7 @@ pub async fn in_progress(
     let rows: Vec<bson::Document> = db
         .collection::<bson::Document>(CONVERSATIONS)
         .find(
-            doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},
+            doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},"guest_model_setup":{"$ne":true},
             "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
         )
         .projection(doc! {"title": 1, "active_turn.turn_id": 1, "active_turn.question": 1, "active_turn.question_key": 1})
@@ -563,12 +563,12 @@ pub async fn agent_for_conversation(
 /// the agent's, and never listed as threads.
 pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
-        doc! {"user_id": actor, "group_id": bson::Bson::Null,
+        doc! {"user_id": actor, "group_id": bson::Bson::Null,"guest_model_setup":{"$ne":true},
             "voice_parent_conversation_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
-        doc! {"user_id": actor, "agent_id": &agent.id, "group_id": bson::Bson::Null,
+        doc! {"user_id": actor, "agent_id": &agent.id, "group_id": bson::Bson::Null,"guest_model_setup":{"$ne":true},
         "voice_parent_conversation_id": bson::Bson::Null}
     }
 }
@@ -733,6 +733,7 @@ async fn create_thread_with_kind(
         agent_id: Some(agent.id.clone()),
         automation_thread,
         voice_parent_conversation_id: None,
+        guest_model_setup: false,
         shared_agent_thread: false,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
@@ -1767,7 +1768,9 @@ pub(crate) async fn sync_thread_authority(
 ) -> AppResult<()> {
     let policy = super::shared_agent_service::policy(db, agent).await?;
     for row in rows {
-        let authority = if row.shared_agent_thread {
+        let authority = if row.guest_model_setup {
+            KeyAuthority::ModelSetup(agent.user_id.clone())
+        } else if row.shared_agent_thread {
             let grants = crate::models::assistant_agent::AgentGrants {
                 service_ids: agent
                     .grants

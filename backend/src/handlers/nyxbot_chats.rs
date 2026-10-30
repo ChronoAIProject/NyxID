@@ -1410,6 +1410,17 @@ pub(crate) async fn update_chat(
     )
     .await?;
     let mut result = json!({"chat": follow_response(state,&row,&updated,on,*counts.get(&updated.id).unwrap_or(&0))});
+    if (group && members_may_talk(&updated))
+        || (!group && row.private_chats.as_deref() == Some("everyone"))
+    {
+        super::prepare_guest_model(
+            state,
+            owner,
+            updated.agent_id.as_deref().or(row.agent_id.as_deref()),
+            updated.conversation_id.as_deref(),
+        )
+        .await?;
+    }
     result["chat"]["guest_readiness"] = json!(
         crate::services::assistant_service_execution::guest_readiness(
             &state.db,
@@ -1485,6 +1496,9 @@ pub(crate) async fn set_private_chats(
         json!({"channel_agent_id": &row.id, "private_chats": private_chats}),
     )
     .await;
+    if private_chats == "everyone" {
+        super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None).await?;
+    }
     let readiness = crate::services::assistant_service_execution::guest_readiness(
         &state.db,
         &state.encryption_keys,
@@ -2674,9 +2688,7 @@ pub(super) fn foreign_bot(bot: &ChannelBot, own_open_id: Option<&str>, sender: &
 }
 
 pub(super) fn bot_guest_allowed(chat: &NyxbotThread, addressed: Option<bool>) -> bool {
-    matches!(chat.kind.as_deref(), Some("group"))
-        && addressed == Some(true)
-        && members_may_talk(chat)
+    crate::services::channel_turn_delivery::bot_guest_allowed(chat, addressed)
 }
 
 pub(super) async fn existing_bot_chat(

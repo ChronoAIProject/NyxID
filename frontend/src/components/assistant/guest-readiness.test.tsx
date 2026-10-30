@@ -18,4 +18,10 @@ describe("guest model readiness", () => {
     expect(screen.getByText("Send one message to this assistant yourself.")).toBeTruthy();
     expect(container.textContent).not.toContain("connection_not_platform");
   });
+  it("shows automatic setup without asking the owner to send a message", () => {
+    const { container } = render(<GuestReadiness readiness={{ status: "setting_up" }} />);
+    expect(screen.getByText("Setting up for visitors…")).toBeTruthy();
+    expect(container.textContent).not.toContain("needs attention");
+    expect(container.textContent).not.toContain("Send one message");
+  });
 });

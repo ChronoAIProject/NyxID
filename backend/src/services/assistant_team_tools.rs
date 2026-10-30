@@ -464,7 +464,7 @@ pub fn schema(name: &str) -> Value {
                 "members": {"type": "string", "enum": ["everyone", "owner", "default"],
                     "description": "Groups and channels: whether members other than the \
                     user may talk to the agent, as guests; default lets them once the user \
-                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone does not complete model setup"},
+                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
                 "allow_posts": {"type": "boolean",
                     "description": "Let the chat's agent post there without being asked"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
@@ -478,7 +478,7 @@ pub fn schema(name: &str) -> Value {
                 "private_chats": {"type": "string", "enum": ["owner", "everyone"],
                     "description": "Who may talk to the agent in private chats with the bot: \
                     only the user (owner), or anyone (everyone, each as a guest in their own \
-                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone does not complete model setup"}}),
+                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"}}),
             vec!["channel_agent_id", "private_chats"],
         ),
         "create_group" => (
