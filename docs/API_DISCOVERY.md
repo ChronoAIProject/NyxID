@@ -706,3 +706,39 @@ excludes encrypted results. CMA watch metadata has a 30-day TTL; result encrypti
 and the four-hour payload deadline remain the same as other watches. The
 [frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
 placement and refresh behavior.
+
+## Private generated assistant files
+
+The default-off personal `assistant:generated-artifacts` flag admits declared
+Sandbox execution files only from owner Web user turns. The operation-scoped
+result adapter reads `GET /executions/{operation_id}/result` with a separate
+13 MiB JSON cap, eight files, 9 MiB decoded total, 5 MiB per raster image and
+8 MiB per video/download. Existing status/text limits remain 16 KiB. A terminal
+Sandbox status is distinct from verified generation, retained bytes and
+materialized attachment delivery. Sandbox lifecycle version is diagnostic and
+must match across the result fetch, including token presence; drift rejects the
+result with `artifact_source_changed`. NyxID derives content identity from the
+exact server operation and canonical verified file bytes and metadata.
+
+Private owner API additions/behavior:
+
+| Route | Contract |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/conversations/{id}/attachments/{attachment_id}` | Existing human owner route; current retention, private/no-store/nosniff/sandbox, one bounded byte range (206), valid unsatisfiable single range (416), unsupported/malformed ranges ignored (200). Generated files use safe filenames and preview/download disposition; legacy tool/user-upload files preserve stored MIME and inline disposition. Never redirects. |
+| `POST /api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery` | Empty body only; idle owner conversation and server-written exact delivery association. Idempotently materializes retained files without another execution. Client-selected watch/operation/revision/URL input is rejected. |
+| `nyx__artifact_delivery` | Internal MCP action for a live owner Web user turn; `{}` only. Server selects the preceding assistant message and the same saved association. The owner action policy applies to direct and wrapped calls; approval continuation uses the server-written initiating message/card rather than a tool argument. |
+
+Attachment DTOs add optional safe filename/source, local `result_version`,
+`preview_kind` and expiry. Message history adds a safe `artifact_delivery` state,
+count and recovery availability. Internal operation IDs and hashes are not public
+retrieval capabilities. Supported raster previews retain existing behavior;
+structured MP4 validation and the real AVC Baseline browser fixture determine
+video eligibility. Other retained formats and browser decoder failures keep a
+private download. Expired, missing, unauthorized, cancelled and delivery-failed
+states are distinct. Live media events remain unchanged.
+
+Deploy all API/worker capabilities and indexes, drain old workers/writers, and
+verify readiness before enabling admission. Disable admission before rollback;
+keep upgraded workers until saved artifact watches and encrypted pending bytes
+have drained or expired. See [assistant uploads](chat/10-uploads.md#generated-result-storage-and-owner-delivery)
+for encryption, memory/BSON bounds, cleanup and the full rollout sequence.

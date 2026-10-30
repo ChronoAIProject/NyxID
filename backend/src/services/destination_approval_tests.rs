@@ -223,7 +223,8 @@ async fn workspace_old_shape_drive_approval_and_new_docs_approval_redeem() {
         let service = connect(&db, &owner, slug).await;
         let echo = Echo::start().await;
         let mut state = test_app_state(db.clone());
-        state.http_client = echo.client.clone();
+        state.http_client =
+            crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
         crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(),async {
         for operation in ["drive_list_files","docs_batch_update_document"] {
             let (caller,pending) = setup_approval(&state,&owner,&service,operation).await;
@@ -263,7 +264,8 @@ async fn google_corrected_contracts_drift_pending_exact_approvals_then_reapprove
     seed(&db).await;
     let echo = Echo::start().await;
     let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
+    state.http_client =
+        crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     let old: serde_json::Value = serde_json::from_str(include_str!(
         "../../specs/fixtures/google-drive-before-auto-activation.json"
     ))

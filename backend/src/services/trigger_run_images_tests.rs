@@ -16,6 +16,7 @@ const OWNER: &str = "owner";
 
 fn image(id: &str) -> TurnAttachment {
     TurnAttachment {
+        artifact: Default::default(),
         chat_delivery: Some(true),
         image_input: None,
         image_inspection: None,

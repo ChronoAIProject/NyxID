@@ -193,12 +193,67 @@ for the complete limits, failure behavior and deployment contract.
 
 ### Engine and diagnostics
 
-The default NyxAgent assistant introduces **no environment variable**. Its catalog
+The default NyxAgent assistant uses catalog and feature-flag configuration. Its catalog
 slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
 configuration. The catalog row provides the upstream base URL. Readiness reports
 its required authentication settings; see [NyxAgent engine](chat/08-nyxagent-engine.md).
 Existing encryption-provider settings protect its per-conversation assistant credentials. Chat acknowledgements and access modes
 introduce no environment variables; permissions are stored per conversation.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ASSISTANT_MODEL_CONTROL_V1_ENABLED` | `false` | Exact `true` permits issuance of private owner model controls after exact paired `nyxid-owner-model-control-v1-initial-compact-1` negotiation and security readiness. Separate from the `assistant:model-controls` UI flag; does not change automatic Read classification. |
+
+Before enabling, upgrade both NyxID and NxyAgent and drain all old serving replicas
+and participating writers. Declare the complete `INSTANCE_NAME` roster in
+`SECURITY_ROLLOUT_REPLICAS`, acknowledge `SECURITY_ROLLOUT_DRAINED=true`, and verify
+readiness for `assistant:model-control-initial-compact-recorder-v1`. The paired
+runtime must enable `NYXAGENT_MODEL_CONTROL_V1_ENABLED`, trust the exact NyxID
+`JWT_ISSUER` through `NYXID_ISSUER`, and use the matching existing NyxID
+model-source profile. Runtime negotiation does not replace roster/drain readiness.
+The original `nyxid-owner-model-control-v1`,
+`nyxid-owner-model-control-v1-tool-projection-1`, and
+`nyxid-owner-model-control-v1-canonical-compact-1` revisions are incompatible: drain
+their roots under matching writers before switching; new peers never migrate old
+tokens or allow old-root dispatch. Digest-proven old cards can still be Denied and
+settled via the supported deterministic notice path.
+
+New reusable consent seals the complete generation configuration and exact
+standalone compact body before Allow. Truly first compact requires an explicit
+prospective generation proposal from the actual caller, after trusted selected-model
+binding and before tool/store filtering; the bridge does not
+reconstruct it from a profile. After any known Read, compact initial consent
+requires actual complete provider output/EOF and genuine host-result receipts.
+Passive observations grant no Write, card, dispatch token or replay permission.
+Unsupported transport/history remains ordinary Read with durably ineligible lineage.
+Authority or persistence failure that cannot fence a send is an error; it is never
+swallowed into an unfenced send.
+
+The recorder capability is required at actual new initial-turn admission even while
+issuance is disabled. Admission atomically binds owner, conversation, credential
+key, turn and revision; a readiness miss omits coverage without blocking the
+ordinary turn. Missing coverage makes that turn ineligible for initial compact
+consent. Current readiness, Retry, Allow and reissue never backfill an old turn.
+Positive coverage and negative unobserved markers have no TTL: only existing
+conversation/owner erasure removes them. Marker removal cannot make a still-issuable
+turn pristine. Preserve these rows and encrypted roots/journals across upgrades and
+recovery.
+
+The companion retains at most 2,048 uncertain exact control/request bindings, not
+2,048 total requests. Only matching authoritative completion removes a binding;
+fresh requests and restart never evict old uncertainty. Exhaustion refuses another
+passive send. Full JSON and upstream EOF bind the canonical compact replacement
+window. Native reset/scaffold/opaque-correlation changes, native compact projection
+and original live acceptance remain open. An old envelope without the family cannot
+acquire it through a later callback.
+
+Disabling stops issuance; active roots cannot downgrade to legacy execution if
+control or negotiation is lost. Drain and settle affected work before rollback;
+retain durable dispatch/uncertainty tombstones and revocations, and never let an old
+writer serve an activated root. See the [owner model approval
+contract](chat/08-nyxagent-engine.md#negotiated-owner-model-approval) for supported
+envelopes, recovery limits and explicit unsupported cases, and [security rollout
+readiness](SECURITY_ROLLOUT_READINESS.md) for roster checks.
 
 The Aevatar assistant chat wire-log diagnostic has no environment variable. It
 is gated by the `experimental:aevatar-chat-wire-log` runtime feature flag
@@ -639,6 +694,19 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 | `TRIGGER_DELIVERY_RETENTION_HOURS` | `72` | Hours to retain encrypted webhook-target envelopes for durable dedup and replay. `0` disables payload storage/replay while metadata remains bounded to 72 hours. |
 
 Webhook-target dedup uses durable delivery records. Agent and notification targets use fenced claims in the shared MongoDB coordination collection. `CHANNEL_EVENT_DEDUP_TTL_SECS` controls how long a successful event ID remains deduplicated.
+
+## Automation coordinator continuations
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTOMATION_CONTINUATION_V2_ENABLED` | `false` | Exact `true` enables new v2 coordinator waits after the durable `trigger_migrations/continuation-v2.completed_at` marker exists. With the flag off, legacy assistant creation, editing, schedules, ordinary webhooks and confirmation continuations remain available. Persisted v2 runs still require v2 readiness; disabling the flag never downgrades their authority or protocol. |
+| `AUTOMATION_CONTINUATION_V2_MIGRATE_DRAIN_STARTED_AT` | *(unset)* | One-shot startup mode: RFC3339 UTC time when the operator finished draining old writers. Requires the flag off, at least 60 seconds (two work-lease intervals) elapsed, and no live work lease. Runs fenced migration against the configured database and exits before normal workers start. Clear after use. |
+| `AUTOMATION_CONTINUATION_V2_CHECK_ROLLBACK` | `false` | Exact `true` runs the rollback drain check and exits before normal workers start. Refuses while nonterminal v2 runs or bound handoff work remain. It does not stop workers, cancel work or revert data. Clear after use. |
+
+The release operator must pause admission and stop old writers externally; the
+feature flag is not a maintenance switch or proof that writers have drained.
+Never set both one-shot mode variables together: rollback-check mode takes
+precedence. See the ordered [activation and rollback runbook](NYXBOT_SCHEDULES.md#coordinator-completion-and-continuation-v2-operations).
 
 ## Mobile Push Notifications (Optional)
 

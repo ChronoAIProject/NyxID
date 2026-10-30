@@ -3246,6 +3246,7 @@ async fn start_chat_turn(
         attachment_ids: Vec::new(),
         group_request_id: None,
         group_attachments: Vec::new(),
+        automation_parent: None,
         trigger: None,
         conversation_id: exists.then(|| conversation_id.clone()),
         new_id: (!exists).then(|| conversation_id.clone()),

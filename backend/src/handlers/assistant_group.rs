@@ -243,12 +243,16 @@ pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
 async fn notify_followers(state: &AppState, owner: &str, group_id: &str) {
     let result: AppResult<()> = async {
         let (followers, upper_seq) =
-            groups::take_followers_if_quiet(&state.db, owner, group_id).await?;
+            groups::claim_followers_if_quiet(&state.db, owner, group_id).await?;
         if followers.is_empty() {
             return Ok(());
         }
         let group = groups::get(&state.db, owner, group_id).await?;
         for follower in followers {
+            let upper_seq = follower
+                .notification
+                .as_ref()
+                .map_or(upper_seq, |n| n.upper_seq);
             let replies =
                 groups::replies_since(&state.db, owner, group_id, follower.since_seq, upper_seq)
                     .await?;
@@ -265,13 +269,21 @@ async fn notify_followers(state: &AppState, owner: &str, group_id: &str) {
                     identifier(&group.name)
                 )
             };
-            super::assistant_team::notify(
-                state,
-                owner,
-                &follower.conversation_id,
-                vec![team::bound_event("group_settled", text, None, None)],
-            )
-            .await;
+            let mut event = team::bound_event("group_settled", text, None, None)
+                .for_trigger(follower.trigger_run_id.as_deref());
+            event.id = follower
+                .notification
+                .as_ref()
+                .map(|n| n.event_id.clone())
+                .unwrap_or_default();
+            if groups::deliver_follower(&state.db, owner, group_id, &follower, &event).await? {
+                Box::pin(super::assistant_team::wake(
+                    state,
+                    owner,
+                    &follower.conversation_id,
+                ))
+                .await;
+            }
         }
         Ok(())
     }
@@ -313,6 +325,7 @@ async fn run_member(
             &state.db, owner, &group.id, since,
         )
         .await?,
+        automation_parent: None,
         trigger: None,
         conversation_id: thread.as_ref().map(|row| row.id.clone()),
         text: engine::excerpt(
@@ -519,6 +532,7 @@ pub(crate) async fn post_and_follow(
     text: &str,
     author: Option<&AssistantAgent>,
     follower: &str,
+    trigger_run_id: Option<&str>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
     post_with_uploads(
         state,
@@ -528,7 +542,7 @@ pub(crate) async fn post_and_follow(
         author,
         &[],
         None,
-        Some(follower),
+        Some((follower, trigger_run_id)),
     )
     .await
 }
@@ -542,7 +556,7 @@ async fn post_with_uploads(
     author: Option<&AssistantAgent>,
     ids: &[String],
     explicit_recipients: Option<&[String]>,
-    follower: Option<&str>,
+    follower: Option<(&str, Option<&str>)>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
     let text = text.trim();
     if (text.is_empty() && ids.is_empty()) || text.chars().count() > MAX_MESSAGE_CHARS {

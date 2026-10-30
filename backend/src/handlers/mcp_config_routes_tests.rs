@@ -247,6 +247,18 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
         definitions.push(crate::services::assistant_upload_service::definition());
         definitions.push(crate::services::assistant_upload_service::list_definition());
         definitions.push(crate::services::assistant_nyxagent::conversation_history_definition());
+        if !chat.platform_thread
+            && !chat.invocation_controlled
+            && chat.turn_live
+            && !chat.turn_stopped
+            && chat.channel_adapter_origin.is_none()
+            && chat.org_agent_access.is_none()
+            && crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
+                .await
+                .unwrap()
+        {
+            definitions.push(crate::services::generated_artifacts::recovery_definition());
+        }
     }
     if auth
         .chat
@@ -625,6 +637,7 @@ async fn service_account_purpose_scope_and_revocation_match_mcp() {
 async fn chat_catalog_matches_mcp_before_and_after_acknowledgement() {
     use crate::services::{
         assistant_agent_credential_service as credentials, assistant_authority_tests,
+        feature_flag_service as flags,
     };
     let f = assistant_authority_tests::fixture("mcp_config_chat").await;
     let key = credentials::load_for_conversation(
@@ -678,14 +691,44 @@ async fn chat_catalog_matches_mcp_before_and_after_acknowledgement() {
             auth.allowed_platform_service_ids.contains(&catalog.id),
             acknowledged
         );
-        let (status, _, body) = request(&f.state, "GET", CONFIG, &headers, None).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["total_services"], 2, "{body}");
-        assert_parity(&f.state, &headers, &body).await;
-        if acknowledged {
-            assert_eq!(body["catalog_digest"], previous_digest);
+        for artifacts_enabled in [false, true, false] {
+            flags::set_platform_override(
+                &f.state.db,
+                flags::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
+                &flags::FlagTarget::User(f.owner.clone()),
+                artifacts_enabled,
+                &f.owner,
+            )
+            .await
+            .unwrap();
+            let (status, _, body) = request(&f.state, "GET", CONFIG, &headers, None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["total_services"], 2, "{body}");
+            assert_parity(&f.state, &headers, &body).await;
+            let (status, _, listing) = request(
+                &f.state,
+                "POST",
+                "/mcp",
+                &headers,
+                Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{listing}");
+            assert_eq!(
+                listing["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|tool| tool["name"] == "nyx__artifact_delivery")
+                    .count(),
+                usize::from(artifacts_enabled),
+                "{listing}"
+            );
+            if !previous_digest.is_null() {
+                assert_eq!(body["catalog_digest"], previous_digest);
+            }
+            previous_digest = body["catalog_digest"].clone();
         }
-        previous_digest = body["catalog_digest"].clone();
         assert_eq!(
             request(&f.state, "POST", "/api/v1/keys", &headers, Some(json!({})))
                 .await

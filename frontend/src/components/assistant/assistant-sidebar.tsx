@@ -676,7 +676,9 @@ function CreateAgentMenu({
 }) {
   return (
     <>
-      <DropdownMenu>
+      {/* The selected dialog owns modality. Overlapping modal menu/dialog
+          cleanup can otherwise leave the page's pointer events disabled. */}
+      <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           {compact ? (
             <button

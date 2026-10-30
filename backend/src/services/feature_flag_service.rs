@@ -207,6 +207,13 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY: &str = "assistant:generated-artifacts";
+const ASSISTANT_GENERATED_ARTIFACTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
+    description: "Admit generated Sandbox files for Web user turns only after all API and async workers upgrade and old writers drain.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_CHANNEL_MEDIA_FLAG_KEY: &str = "assistant:channel-media";
 const ASSISTANT_CHANNEL_MEDIA_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
@@ -344,6 +351,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
@@ -386,6 +394,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
@@ -2919,6 +2928,7 @@ mod tests {
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
                 "assistant:channel-media",
                 "assistant:attachment-writes",
@@ -3562,8 +3572,9 @@ mod tests {
     }
 
     #[test]
-    fn channel_media_and_attachment_writes_are_registered_default_off() {
+    fn channel_media_attachment_writes_and_generated_artifacts_are_registered_default_off() {
         for key in [
+            ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
             ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
             ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
         ] {

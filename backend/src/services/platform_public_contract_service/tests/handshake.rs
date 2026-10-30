@@ -385,7 +385,10 @@ impl Handshake {
             )
             .route(
                 "/mcp",
-                post(crate::handlers::mcp_transport::mcp_post).layer(axum::Extension(
+                // Keep the handler future's Send boundary concrete in this fixture.
+                post(|state, policy, request| -> futures::future::BoxFuture<'static, axum::response::Response> {
+                    Box::pin(crate::handlers::mcp_transport::mcp_post(state, policy, request))
+                }).layer(axum::Extension(
                     crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                         crate::services::billing::BillingIngress::Mcp,
                     ),

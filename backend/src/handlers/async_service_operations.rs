@@ -83,6 +83,15 @@ async fn call(
         return Err(denied());
     }
     watches::validate_endpoints(&watch.contract, service, submit).map_err(|_| denied())?;
+    if crate::services::generated_artifacts::admitted(watch) {
+        let trusted = crate::services::generated_artifacts::trusted_sandbox_catalog(
+            &state.db, service, submit,
+        )
+        .await?;
+        if trusted.is_none() || trusted != watch.artifact_catalog_service_id {
+            return Err(AppError::Conflict("artifact_source_changed".into()));
+        }
+    }
     let endpoint = service
         .endpoints
         .iter()
@@ -126,7 +135,19 @@ async fn call(
         crate::services::billing::route_inventory::BillingIngress::Mcp,
     )?;
     let mut exec = mcp_exec_context(&auth);
-    exec.response_body_limit = Some(watches::RESULT_BYTES);
+    exec.response_body_limit = Some(
+        if crate::services::generated_artifacts::admitted(watch)
+            && name == watch.contract.result_operation
+        {
+            if !crate::services::generated_artifacts::sandbox_contract(service, submit) {
+                return Err(denied());
+            }
+            exec.strict_response_utf8 = true;
+            crate::services::generated_artifacts::sandbox::RESPONSE_BYTES
+        } else {
+            watches::RESULT_BYTES
+        },
+    );
     mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
@@ -265,6 +286,9 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         return watches::ready(&state.db, w, None, "submission_uncertain", None).await;
     }
     let status = call(state, w, &w.contract.status_operation).await?;
+    if status.status == 410 && crate::services::generated_artifacts::admitted(w) {
+        return watches::ready(&state.db, w, None, "result_expired", None).await;
+    }
     if matches!(status.status, 401 | 403 | 404 | 410) {
         return watches::ready(&state.db, w, None, "authority_lost", None).await;
     }
@@ -274,9 +298,21 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
     if status.text.len() > watches::RESULT_BYTES {
         return watches::ready(&state.db, w, None, "result_too_large", None).await;
     }
-    let parsed: serde_json::Value = serde_json::from_str(&status.text).map_err(|_| {
-        crate::errors::AppError::ValidationError("Invalid async operation status".into())
-    })?;
+    let parsed: serde_json::Value = match serde_json::from_str(&status.text) {
+        Ok(value) => value,
+        Err(_) if crate::services::generated_artifacts::admitted(w) => {
+            // Generated-artifact status is a bounded, server-owned lifecycle
+            // contract. A successful response that is not JSON cannot become
+            // a retrying defer: settle it terminally before any result fetch.
+            return watches::ready(&state.db, w, None, "artifact_invalid", None).await;
+        }
+        Err(_) => {
+            // Preserve ordinary async operation behavior and error contract.
+            return Err(crate::errors::AppError::ValidationError(
+                "Invalid async operation status".into(),
+            ));
+        }
+    };
     // The result is a separate proxy call and must acquire its own slot.
     drop(status);
     let phase = parsed
@@ -305,6 +341,9 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
     if agent_not_started || !w.contract.success_states.iter().any(|s| s == phase) {
         return watches::defer(&state.db, w).await;
     }
+    if crate::services::generated_artifacts::admitted(w) {
+        return artifact_result(state, w, &parsed).await;
+    }
     let result = call(state, w, &w.contract.result_operation).await?;
     if !(200..300).contains(&result.status) {
         return watches::ready(&state.db, w, None, "result_unavailable", None).await;
@@ -318,6 +357,95 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         Some(&state.encryption_keys),
         "completed",
         Some(&result.text),
+    )
+    .await
+}
+
+// One artifact decode/encrypt worker per process. Other watches remain text-bounded.
+static ARTIFACT_WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+async fn artifact_result(
+    state: &AppState,
+    w: &AsyncServiceOperation,
+    before: &serde_json::Value,
+) -> crate::errors::AppResult<()> {
+    use crate::services::{
+        assistant_upload_service::byte_budget,
+        generated_artifacts::{self as artifacts, sandbox},
+    };
+    let fail = |reason: &'static str| watches::ready(&state.db, w, None, reason, None);
+    let operation = w
+        .operation_id
+        .as_deref()
+        .ok_or_else(|| crate::errors::AppError::Conflict("artifact_source_changed".into()))?;
+    let before = match sandbox::status(before, operation, chrono::Utc::now()) {
+        Ok(s) => s,
+        Err(reason) => return fail(reason).await,
+    };
+    let _worker = ARTIFACT_WORKER
+        .acquire()
+        .await
+        .map_err(|_| crate::errors::AppError::Internal("Artifact worker unavailable".into()))?;
+    let reservation = byte_budget::reserve(sandbox::RESERVATION).await?;
+    let mut response = call(state, w, &w.contract.result_operation).await?;
+    if response.status == 410 {
+        return fail("result_expired").await;
+    }
+    // Explicit source expiry keeps its contract above. Otherwise known
+    // malformed/over-cap bytes are terminal even when the provider returned 5xx.
+    if response.is_body_too_large() {
+        return fail("artifact_too_large").await;
+    }
+    if response.is_malformed_utf8() {
+        return fail("artifact_invalid").await;
+    }
+    if response.status >= 500 {
+        return watches::defer(&state.db, w).await;
+    }
+    if !(200..300).contains(&response.status) {
+        return fail("result_unavailable").await;
+    }
+    let body = zeroize::Zeroizing::new(std::mem::take(&mut response.text));
+    let result = match sandbox::parse(&body, operation) {
+        Ok(result) => result,
+        Err(reason) => return fail(reason).await,
+    };
+    drop(body);
+    drop(response); // Releases service concurrency before the recheck.
+    let response = call(state, w, &w.contract.status_operation).await?;
+    if response.status == 410 {
+        return fail("result_expired").await;
+    }
+    if !(200..300).contains(&response.status) {
+        return watches::defer(&state.db, w).await;
+    }
+    let value: serde_json::Value = match serde_json::from_str(&response.text) {
+        Ok(value) => value,
+        Err(_) => return fail("artifact_invalid").await,
+    };
+    let mut after = match sandbox::status(&value, operation, chrono::Utc::now()) {
+        Ok(s) => s,
+        Err(reason) => return fail(reason).await,
+    };
+    // Lifecycle versions fence this fetch, including a token appearing or
+    // disappearing. Content identity remains derived from the operation/bytes.
+    if before.version != after.version {
+        return fail("artifact_source_changed").await;
+    }
+    after.expires_at = before.expires_at.into_iter().chain(after.expires_at).min();
+    drop(response);
+    if w.artifact_result
+        .as_ref()
+        .is_some_and(|m| m.source_result_identity != result.identity)
+    {
+        return fail("artifact_source_changed").await;
+    }
+    artifacts::persist(
+        &state.db,
+        &state.encryption_keys,
+        w,
+        &result,
+        &after,
+        &reservation,
     )
     .await
 }
@@ -340,6 +468,12 @@ async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
         };
         match tokio::time::timeout(Duration::from_secs(45), Box::pin(step(state, &w))).await {
             Ok(Ok(())) => {}
+            Ok(Err(AppError::Conflict(reason)))
+                if crate::services::generated_artifacts::admitted(&w)
+                    && reason == "artifact_source_changed" =>
+            {
+                watches::ready(&state.db, &w, None, "artifact_source_changed", None).await?;
+            }
             Ok(Err(
                 AppError::Forbidden(_)
                 | AppError::Unauthorized(_)

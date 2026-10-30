@@ -223,6 +223,9 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     crate::services::assistant_access_policy::ensure_cutover(&db)
         .await
         .expect("initialize fresh test assistant cutover");
+    db.collection::<mongodb::bson::Document>("trigger_migrations").insert_one(
+        mongodb::bson::doc! {"_id":"continuation-v2","completed_at":mongodb::bson::DateTime::now()},
+    ).await.expect("initialize fresh automation migration marker");
     Some(db)
 }
 
@@ -1938,6 +1941,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         gcp_kms_key_name_previous: None,
         instance_name: "test-backend".to_string(),
         security_rollout: Default::default(),
+        assistant_model_control_v1_enabled: false,
         internal_bind_addr: "127.0.0.1:3002".to_string(),
         internal_advertise_url: "http://127.0.0.1:3002".to_string(),
         internal_dispatch_hmac_key: None,
@@ -2200,7 +2204,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
-        http_client: http_client.clone(),
+        http_client: crate::services::assistant_model_control::HttpClient::unobserved(
+            http_client.clone(),
+        ),
         jwk_json: serde_json::json!({}),
         mcp_sessions: Arc::new(McpSessionStore::new()),
         jwks_cache: Arc::new(JwksCache::new(http_client.clone())),

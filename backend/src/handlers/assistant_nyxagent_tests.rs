@@ -161,6 +161,7 @@ async fn new_user_nyxagent_chat_transport_completes_without_approval_preferences
             Some(json!({"input":"hello", "stream":true})),
             Some("new-user-turn"),
             Some(SERVER_TURN_POLICY),
+            None,
         )
         .await
         .unwrap();

@@ -159,8 +159,8 @@ pub(crate) async fn migrate_credential_snapshot(
         .update_one(filter,bson::doc! {"$set":{"key_ciphertext":target.get("key_ciphertext").unwrap(),"secret_context_versions":target.get("secret_context_versions").unwrap()}}).await?.matched_count == 1)
 }
 
-fn image_path(row: &AssistantAttachment) -> [&str; 8] {
-    [
+fn image_path(row: &AssistantAttachment) -> Vec<&str> {
+    let mut path = vec![
         "data_encrypted",
         "origin",
         &row.origin,
@@ -177,7 +177,26 @@ fn image_path(row: &AssistantAttachment) -> [&str; 8] {
         } else {
             &row.turn_id
         },
-    ]
+    ];
+    if row.origin == "generated_artifact" {
+        path.extend([
+            "originating_turn",
+            row.artifact.source_turn_id.as_deref().unwrap_or_default(),
+            "watch",
+            row.artifact.source_watch_id.as_deref().unwrap_or_default(),
+            "operation",
+            row.artifact
+                .source_operation_id
+                .as_deref()
+                .unwrap_or_default(),
+            "source",
+            row.artifact
+                .source_result_identity
+                .as_deref()
+                .unwrap_or_default(),
+        ]);
+    }
+    path
 }
 pub(crate) async fn encrypt_image(
     keys: &EncryptionKeys,
@@ -185,6 +204,19 @@ pub(crate) async fn encrypt_image(
     bytes: &[u8],
 ) -> AppResult<Vec<u8>> {
     let path = image_path(row);
+    if row.origin == "generated_artifact" {
+        return keys
+            .encrypt_record(
+                bytes,
+                &RecordContext::new(
+                    crate::models::assistant_attachment::COLLECTION_NAME,
+                    &row.id,
+                    &row.user_id,
+                    &path,
+                )?,
+            )
+            .await;
+    }
     fields::encrypt_context(
         keys,
         &RecordContext::new(
@@ -351,7 +383,10 @@ async fn attachment_identity(
         } else {
             let row: AssistantAttachment =
                 bson::from_document(source.clone()).map_err(|_| invalid())?;
-            if !matches!(row.origin.as_str(), "tool" | "machine_preview") {
+            if !matches!(
+                row.origin.as_str(),
+                "tool" | "machine_preview" | "generated_artifact"
+            ) {
                 return Err(invalid());
             }
             let size = usize::try_from(row.size).map_err(|_| invalid())?;

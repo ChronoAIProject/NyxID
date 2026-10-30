@@ -4,6 +4,7 @@ use crate::models::assistant_conversation::{
 };
 use crate::models::async_service_operation::{AsyncServiceOperation, COLLECTION_NAME as WATCHES};
 use crate::services::{assistant_nyxagent as engine, async_service_operation as watches};
+use axum::response::IntoResponse;
 
 struct AsyncFixture {
     f: Fixture,
@@ -11,9 +12,14 @@ struct AsyncFixture {
     server: tokio::task::JoinHandle<()>,
     service: String,
     output: Arc<std::sync::Mutex<Value>>,
+    result_bytes: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     phase: Arc<std::sync::Mutex<String>>,
     callback: Arc<std::sync::Mutex<Value>>,
     status_gate: Arc<tokio::sync::Semaphore>,
+    result_status: Arc<std::sync::atomic::AtomicU16>,
+    status_override: Arc<std::sync::Mutex<Option<Value>>>,
+    after_result_status: Arc<std::sync::Mutex<Option<Value>>>,
+    result_gate: Arc<tokio::sync::Semaphore>,
 }
 impl Drop for AsyncFixture {
     fn drop(&mut self) {
@@ -35,18 +41,45 @@ impl AsyncFixture {
         ));
         let phase = Arc::new(std::sync::Mutex::new("succeeded".to_owned()));
         let result_body = output.clone();
+        let result_bytes = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+        let raw_result = result_bytes.clone();
         let status_phase = phase.clone();
         let callback = Arc::new(std::sync::Mutex::new(Value::Null));
         let status_callback = callback.clone();
+        let result_status = Arc::new(std::sync::atomic::AtomicU16::new(200));
+        let response_status = result_status.clone();
+        let status_override = Arc::new(std::sync::Mutex::new(None::<Value>));
+        let status_body = status_override.clone();
+        let after_result_status = Arc::new(std::sync::Mutex::new(None::<Value>));
+        let after_result = after_result_status.clone();
+        let result_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let result_wait = result_gate.clone();
         let upstream = Router::new().route(
             "/{*path}",
             any(move |uri: axum::http::Uri| {
                 captured.lock().unwrap().push(uri.path().into());
                 let gate = gate.clone();
                 let result_body = result_body.lock().unwrap().clone();
+                let raw_result = if uri.path().ends_with("/result") {
+                    raw_result.lock().unwrap().clone()
+                } else {
+                    None
+                };
                 let status_phase = status_phase.lock().unwrap().clone();
                 let callback = status_callback.lock().unwrap().clone();
+                let override_body = status_body.lock().unwrap().clone();
+                let result_code = response_status.load(Ordering::SeqCst);
+                let result_wait = result_wait.clone();
+                let malformed_status = !uri.path().ends_with("/result")
+                    && override_body.as_ref().and_then(Value::as_str)
+                        == Some("__malformed_json_after_result_status__");
+                if uri.path().ends_with("/result")
+                    && let Some(next) = after_result.lock().unwrap().take()
+                {
+                    *status_body.lock().unwrap() = Some(next);
+                }
                 async move {
+                    let _result_permit = if uri.path().ends_with("/result") { Some(result_wait.acquire().await.unwrap()) } else { None };
                     let _permit = if uri
                         .path()
                         .strip_prefix("/executions/")
@@ -56,7 +89,21 @@ impl AsyncFixture {
                     } else {
                         None
                     };
-                    Json(match uri.path() {
+                    if malformed_status {
+                        return (
+                            axum::http::StatusCode::OK,
+                            axum::body::Body::from("{"),
+                        )
+                            .into_response();
+                    }
+                    if let Some(bytes) = raw_result {
+                        return (
+                            axum::http::StatusCode::from_u16(result_code).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            bytes,
+                        ).into_response();
+                    }
+                    let body = Json(match uri.path() {
                         "/api/v1/agents" => json!({"id":"lifecycle-1","status":"queued"}),
                         "/api/v1/agent-lifecycle/lifecycle-1" => json!({"id":"lifecycle-1","status":status_phase,"agent_id":"agt_coffee","phase":"agent_startup","callback_url":callback}),
                         "/api/v1/agents/agt_coffee/input" => json!({"queued":true}),
@@ -76,10 +123,12 @@ impl AsyncFixture {
                             .strip_prefix("/executions/")
                             .is_some_and(|id| !id.contains('/')) =>
                         {
-                            json!({"status":status_phase})
+                            override_body.unwrap_or_else(|| json!({"operation_id":path.trim_start_matches("/executions/"),"status":status_phase,"result_available":true,"version":1}))
                         }
                         _ => json!({"status":"cancelled"}),
-                    })
+                    });
+                    (axum::http::StatusCode::from_u16(if uri.path().ends_with("/result") {result_code} else {200}).unwrap(), body)
+                        .into_response()
                 }
             }),
         );
@@ -129,9 +178,14 @@ impl AsyncFixture {
             server,
             service,
             output,
+            result_bytes,
             phase,
             callback,
             status_gate,
+            result_status,
+            status_override,
+            after_result_status,
+            result_gate,
         }
     }
     async fn submit(&self) -> AsyncServiceOperation {
@@ -1962,3 +2016,6 @@ mod service_policy;
 
 #[path = "async_service_invocation_tests.rs"]
 mod invocation_policy;
+
+#[path = "generated_artifact_delivery_tests.rs"]
+mod generated_artifact_delivery_tests;

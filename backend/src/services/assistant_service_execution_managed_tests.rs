@@ -264,6 +264,7 @@ async fn call(f: &Fixture, id: &str, mcp: bool) -> crate::errors::AppResult<u16>
     let context = mcp_service::McpExecContext {
         assistant_chat: f.auth.api_key_id.as_ref().map(|_| &f.chat),
         response_body_limit: None,
+        strict_response_utf8: false,
         actor_user_id: None,
         caller_token: None,
         delegation_restrictions: Default::default(),

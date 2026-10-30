@@ -703,6 +703,107 @@ pub(crate) async fn cancel_conversation(state: &AppState, user: &str, id: &str) 
     Ok(())
 }
 
+/// Stop carries its exact snapshot through transport cleanup. Idle cleanup
+/// snapshots job IDs while still idle; neither path can stop a replacement turn.
+pub(crate) async fn cancel_stopped_turn(
+    state: &AppState,
+    row: &AssistantConversation,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    let saved = row.clone();
+    let mut session = db.client().start_session().await?;
+    let jobs = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<Vec<MachineJob>> = Box::pin(async {
+                let mut filter =
+                    doc! {"conversation_id":&saved.id,"user_id":&saved.user_id,"state":"running"};
+                if let Some(turn) = &saved.active_turn {
+                    filter.insert("issuing_turn_id", &turn.turn_id);
+                } else if db
+                    .collection::<bson::Document>(CONVERSATIONS)
+                    .update_one(
+                        doc! {"_id":&saved.id,"user_id":&saved.user_id,"active_turn":null},
+                        doc! {"$inc":{"machine_stop_generation":1_i64}},
+                    )
+                    .session(&mut *session)
+                    .await?
+                    .matched_count
+                    != 1
+                {
+                    return Ok(Vec::new());
+                }
+                let mut cursor = db
+                    .collection::<MachineJob>(JOBS)
+                    .find(filter)
+                    .session(&mut *session)
+                    .await?;
+                let jobs: Vec<MachineJob> = cursor.stream(&mut *session).try_collect().await?;
+                let ids: Vec<&str> = jobs.iter().map(|job| job.id.as_str()).collect();
+                db.collection::<MachineJob>(JOBS)
+                    .update_many(
+                        doc! {"_id":{"$in":ids},"user_id":&saved.user_id},
+                        doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now()}},
+                    )
+                    .session(session)
+                    .await?;
+                Ok(jobs)
+            })
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)?;
+    let mut nodes = std::collections::BTreeMap::<String, Vec<String>>::new();
+    if let Some(turn) = &row.active_turn {
+        for node in &turn.machine_node_ids {
+            nodes.entry(node.clone()).or_default();
+        }
+    }
+    for job in jobs {
+        nodes.entry(job.node_id).or_default().push(job.id);
+    }
+    let turn = row
+        .active_turn
+        .as_ref()
+        .map(|turn| turn.turn_id.as_str())
+        .unwrap_or_default();
+    futures::stream::iter(nodes)
+        .for_each_concurrent(16, |(node, ids)| async move {
+            // Ordinary Cancel intentionally broadens jobs to the conversation on
+            // the node. Use the established exact protocol; never fall back to it.
+            // CancelExact has a 1024-ID wire limit. An empty batch still fences
+            // an admitted turn whose first machine job has not arrived yet.
+            for ids in ids.chunks(1024).chain(ids.is_empty().then_some(&[][..])) {
+                let work = async {
+                    if let Some(node) = state
+                        .db
+                        .collection::<Node>(NODES)
+                        .find_one(doc! {"_id":&node})
+                        .await?
+                    {
+                        dispatch(
+                            state,
+                            &node,
+                            Operation::CancelExact,
+                            json!({"conversation_id":&row.id,"turn_id":turn,"job_ids":ids}),
+                        )
+                        .await?;
+                    }
+                    AppResult::Ok(())
+                };
+                if !tokio::time::timeout(std::time::Duration::from_millis(800), work)
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+                {
+                    tracing::warn!(node_id=%node,"Exact machine stop delivery pending or node offline");
+                }
+            }
+        })
+        .await;
+    Ok(())
+}
+
 pub(crate) async fn send_cancel(state: &AppState, id: &str, args: serde_json::Value) {
     let work = async {
         if let Some(node) = state

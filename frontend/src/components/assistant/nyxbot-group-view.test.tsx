@@ -14,8 +14,8 @@ let groupLoaded = true;
 let groupError: Error | null = null;
 
 vi.mock("@/components/assistant/blocks/tool-image", () => ({
-  ToolImage: ({ image }: { image: { endpoint: string; label: string } }) => (
-    <img src={image.endpoint} alt={image.label} />
+  ToolImage: ({ image }: { image: { endpoint: string; label: string; origin?: string; contentType?: string } }) => (
+    <img src={image.endpoint} alt={image.label} data-origin={image.origin ?? "generic"} data-content-type={image.contentType} />
   ),
 }));
 
@@ -288,6 +288,26 @@ describe("delivered message recipients", () => {
     expect(screen.getByRole("img", { name: "camera__snapshot" })).toHaveAttribute(
       "src", `/assistant/nyxagent/groups/${group.id}/attachments/image-1`,
     );
+  });
+
+  it.each(["user", "agent"] as const)("normalizes future attachment origins in %s group messages without losing the private endpoint", (role) => {
+    group = makeGroup([NYXBOT]);
+    const message = {
+      id: "future-reply", group_id: group.id, seq: 2, role, agent_id: RESEARCHER,
+      agent_name: "researcher", text: "Files.", created_at: "2026-10-01T00:00:00Z",
+      activities: [], recipient_agent_ids: [],
+      attachments: ["future_generator", "generated_artifact"].map((origin, index) => ({
+        id: `future-${index}`, label: `file-${index}`, origin, content_type: "video/mp4", size: 20,
+        filename: "movie.mp4", result_version: "2", preview_kind: "video",
+      })),
+    } as unknown as AssistantGroupMessage;
+    render(<GroupMessageRow groupId={group.id} message={message} names={[]} members={group.members} onOpenAgent={() => undefined} />);
+    for (const [index, origin] of ["generic", "generated_artifact"].entries()) {
+      const file = screen.getByRole("img", { name: `file-${index}` });
+      expect(file).toHaveAttribute("src", `/assistant/nyxagent/groups/${group.id}/attachments/future-${index}`);
+      expect(file).toHaveAttribute("data-content-type", "video/mp4");
+      expect(file).toHaveAttribute("data-origin", origin);
+    }
   });
 
   it("names the recipients of a sent message instead of their ids", () => {

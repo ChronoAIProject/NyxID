@@ -299,6 +299,7 @@ pub async fn store_preview(
     }
     let id = Uuid::new_v4().to_string();
     let mut attachment = AssistantAttachment {
+        artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: id.clone(),
         origin: "machine_preview".into(),
