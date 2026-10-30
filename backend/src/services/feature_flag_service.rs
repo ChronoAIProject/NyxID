@@ -1257,7 +1257,7 @@ async fn mutate_machine_review_override(
                 .collection::<FeatureFlagOverride>(COLLECTION_NAME)
                 .find_one_and_update(filter, update)
                 .upsert(true)
-                .return_document(ReturnDocument::After)
+                .return_document(mongodb::options::ReturnDocument::After)
                 .await?),
             None => Ok(db
                 .collection::<FeatureFlagOverride>(COLLECTION_NAME)
@@ -1284,7 +1284,7 @@ async fn mutate_machine_review_override(
                         .collection::<FeatureFlagOverride>(COLLECTION_NAME)
                         .find_one_and_update(filter.clone(), update.clone())
                         .upsert(true)
-                        .return_document(ReturnDocument::After)
+                        .return_document(mongodb::options::ReturnDocument::After)
                         .session(&mut *session)
                         .await?),
                     None => Ok(db
