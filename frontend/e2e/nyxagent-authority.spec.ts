@@ -756,7 +756,7 @@ test("conversation index previews and navigates messages outside the rendered wi
   async function expectRailFitsAboveComposer() {
     const bounds = (await rail.boundingBox())!;
     // Tall editors overlay the transcript beyond the dock's capped reservation.
-    const composer = (await page.locator("[data-composer-dock]").boundingBox())!;
+    const composer = (await page.locator("[data-composer-surface]").boundingBox())!;
     const transcriptBounds = (await transcript.boundingBox())!;
     expect(bounds.y).toBeCloseTo(transcriptBounds.y, 0);
     expect(bounds.y + bounds.height).toBeCloseTo(composer.y, 0);

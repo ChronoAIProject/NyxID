@@ -676,7 +676,9 @@ function CreateAgentMenu({
 }) {
   return (
     <>
-      <DropdownMenu>
+      {/* The selected dialog owns modality. Overlapping modal menu/dialog
+          cleanup can otherwise leave the page's pointer events disabled. */}
+      <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           {compact ? (
             <button
@@ -701,7 +703,9 @@ function CreateAgentMenu({
             </button>
           )}
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side={compact ? "right" : undefined} className="min-w-[200px]">
+        {/* Unmount on close before the dialog takes focus. A lingering exiting
+            menu can dismiss a quick reopen after that dialog is cancelled. */}
+        <DropdownMenuContent align="start" side={compact ? "right" : undefined} className="min-w-[200px] data-[state=closed]:animate-none!">
           <DropdownMenuItem onSelect={() => agents.onNewAgent("personal")}>
             <User aria-hidden="true" />
             Personal agent

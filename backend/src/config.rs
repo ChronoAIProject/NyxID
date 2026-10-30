@@ -469,6 +469,9 @@ pub struct AppConfig {
     /// Stable pod/host identity. The process generation is created at startup.
     pub instance_name: String,
     pub security_rollout: crate::services::security_readiness_service::RolloutConfig,
+    /// Issuance only, default off. Active roots retain their replay tombstones
+    /// and require the v1 reader even after new issuance is disabled.
+    pub assistant_model_control_v1_enabled: bool,
     /// Dedicated private listener for inter-replica traffic.
     pub internal_bind_addr: String,
     /// Peer-reachable base URL for this exact replica.
@@ -1313,6 +1316,8 @@ impl AppConfig {
                 &env::var("SECURITY_ROLLOUT_REPLICAS").unwrap_or_default(),
                 env::var("SECURITY_ROLLOUT_DRAINED").is_ok_and(|v| v == "true"),
             ).expect("invalid security rollout configuration"),
+            assistant_model_control_v1_enabled: env::var("ASSISTANT_MODEL_CONTROL_V1_ENABLED")
+                .is_ok_and(|v| v == "true"),
             internal_bind_addr,
             internal_advertise_url,
             internal_dispatch_hmac_key: env::var("INTERNAL_DISPATCH_HMAC_KEY")
@@ -2028,6 +2033,7 @@ mod tests {
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
             security_rollout: Default::default(),
+            assistant_model_control_v1_enabled: false,
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,

@@ -401,7 +401,8 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
             | "attachment_read"
             | "machine_list"
             | "saved_logins" => Read,
-            "connect_service" | "oracle_ask" | "oracle_attach" | "oracle_extract" => Change,
+            "connect_service" | "oracle_ask" | "oracle_attach" | "oracle_extract"
+            | "artifact_delivery" => Change,
             // A wrapped service call is classified from the operation it reaches.
             "call_tool" => Read,
             "ssh_exec" => Destructive,
@@ -930,6 +931,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            trigger_run_id: None,
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,
@@ -962,6 +964,8 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    /// Exact live, unstopped server turn; never derived from tool arguments.
+    pub trigger_run_id: Option<String>,
     pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
     pub invocation_controlled: bool,
     pub invocation_id: Option<String>,
@@ -1477,6 +1481,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        trigger_run_id: live.and_then(|t| t.trigger_run_id.clone()),
         channel_adapter_origin: conversation
             .active_turn
             .as_ref()
@@ -2910,6 +2915,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        trigger_run_id: None,
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: row.invocation_id.clone(),
@@ -3089,6 +3095,9 @@ pub(crate) async fn decide_in_session(
     if allow && row.kind == "action" {
         row.expires_at = now + Duration::seconds(ACTION_SECONDS);
     }
+    // Reusable model authority inherits the actual saved Allow deadline.
+    super::assistant_model_control::decision_in_session(db, &row, session).await?;
+    super::assistant_model_denial_notice::decision_in_session(db, &row, session).await?;
     row.continuation_receipt_id = if row.invocation_id.is_some() {
         Box::pin(super::assistant_invocation_service::decision_in_session(
             db, session, &row,

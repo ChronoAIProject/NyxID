@@ -3152,6 +3152,7 @@ async fn nyxagent_dispatch_after_forwarded_mark_rechecks_turn_and_key_and_settle
                     &authority,
                     &credential,
                     NyxAgentRequest {
+                        model_control: None,
                         method: axum::http::Method::POST,
                         relative_path: "v1/responses".into(),
                         body: Some(json!({"input":"Read the FAQ"})),

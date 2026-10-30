@@ -130,6 +130,16 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
 }
 #[derive(Serialize)]
 pub struct AttachmentResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<DateTime<Utc>>,
     expired: bool,
     image_input: Option<String>,
     origin: String,
@@ -142,6 +152,11 @@ pub struct AttachmentResponse {
 impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentResponse {
     fn from(row: crate::models::assistant_conversation::TurnAttachment) -> Self {
         Self {
+            filename: row.artifact.filename,
+            source: row.artifact.source,
+            result_version: row.artifact.content_revision,
+            preview_kind: row.artifact.preview_kind,
+            expires_at: row.artifact.expires_at,
             expired: false,
             image_input: row.image_input,
             origin: row.origin,
@@ -493,6 +508,36 @@ pub struct ModelRouteDiagnosticResponse {
 }
 
 #[derive(Serialize)]
+pub struct ArtifactDeliveryResponse {
+    rejected: Vec<RejectedArtifactResponse>,
+    state: String,
+    count: usize,
+    recovery_available: bool,
+}
+
+#[derive(Serialize)]
+pub struct RejectedArtifactResponse {
+    index: usize,
+    filename: String,
+    reason: &'static str,
+}
+impl From<crate::models::generated_artifact::RejectedFile> for RejectedArtifactResponse {
+    fn from(file: crate::models::generated_artifact::RejectedFile) -> Self {
+        use crate::models::generated_artifact::RejectionReason;
+        Self {
+            index: file.index,
+            filename: file.filename,
+            reason: match file.reason {
+                RejectionReason::Invalid => "invalid",
+                RejectionReason::TooLarge => "too_large",
+                RejectionReason::Unavailable => "unavailable",
+                RejectionReason::Missing => "missing",
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
 pub struct TurnFailureReasonResponse {
     model_route: Option<ModelRouteDiagnosticResponse>,
     source: String,
@@ -504,6 +549,7 @@ pub struct TurnFailureReasonResponse {
 
 #[derive(Serialize)]
 pub struct MessageResponse {
+    artifact_delivery: Option<ArtifactDeliveryResponse>,
     platform_origin: Option<PlatformTurnOriginResponse>,
     recovery: Option<RecoveryResponse>,
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
@@ -543,6 +589,7 @@ pub struct AutomationRunResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            artifact_delivery: None,
             platform_origin: row
                 .platform_origin
                 .as_ref()
@@ -1007,6 +1054,21 @@ pub async fn history(
     }
     Box::pin(attach_automations(&state.db, &user_id, &id, &mut messages)).await;
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
+    let mut artifact_deliveries =
+        crate::services::generated_artifacts::delivery_states(&state.db, &user_id, &id, &ids)
+            .await?;
+    for message in &mut messages {
+        message.artifact_delivery =
+            artifact_deliveries
+                .remove(&message.id)
+                .map(|s| ArtifactDeliveryResponse {
+                    rejected: s.rejected.into_iter().map(Into::into).collect(),
+                    state: s.state,
+                    count: s.count,
+                    recovery_available: s.recovery_available,
+                });
+    }
+
     let feedback =
         crate::services::assistant_feedback_service::states_for_messages(&state.db, &user_id, &ids)
             .await?;
@@ -1159,12 +1221,12 @@ pub async fn reset_context(
     let summary = engine::checkpoint_summary(&state.db, &user_id, &id).await?;
     Ok(Json(summary.into()))
 }
-/// An image a tool returned during one of the owner's turns. Only verified
-/// raster types are ever stored, and they are served inline with nosniff.
+/// Private owner bytes with current retention and origin-specific HTTP policy.
 pub async fn attachment(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((id, attachment_id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> AppResult<Response> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
@@ -1173,31 +1235,46 @@ pub async fn attachment(
     if Uuid::parse_str(&attachment_id).is_err() {
         return Err(AppError::NotFound("Attachment not found".into()));
     }
-    let (content_type, bytes) = engine::read_attachment(
+    crate::services::generated_artifacts::http::owner_response(
         &state.db,
         &state.encryption_keys,
         &user_id,
         &id,
         &attachment_id,
+        &headers,
+    )
+    .await
+}
+
+pub async fn artifact_delivery(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, message_id)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    crate::services::generated_artifacts::audit_recovery_request(
+        &state.db,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        true,
+    )
+    .await;
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "Artifact recovery requires an empty body".into(),
+        ));
+    }
+    crate::services::generated_artifacts::recover(
+        &state.db,
+        &state.encryption_keys,
+        &user_id,
+        &id,
+        &message_id,
     )
     .await?;
-    let mut response = bytes.into_response();
-    let headers = response.headers_mut();
-    for (name, value) in [
-        ("content-type", content_type.as_str()),
-        ("cache-control", "private, no-store"),
-        ("x-content-type-options", "nosniff"),
-        ("content-disposition", "inline"),
-        ("content-security-policy", "default-src 'none'; sandbox"),
-    ] {
-        headers.insert(
-            name,
-            value
-                .parse()
-                .map_err(|_| AppError::Internal("Invalid attachment header".into()))?,
-        );
-    }
-    Ok(response)
+    Ok(Json(json!({"status":"materialized"})))
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
@@ -1404,9 +1481,16 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    engine::request_stop(&state.db, &user_id, &id).await?;
-    super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id).await?;
-    super::machine_cancel::conversation(&state, &user_id, &id).await?;
+    let target = engine::request_stop_target(&state.db, &user_id, &id).await?;
+    let watches =
+        super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id).await;
+    let machines = if let Some(target) = target {
+        crate::services::machine_service::cancel_stopped_turn(&state, &target).await
+    } else {
+        Ok(())
+    };
+    watches?;
+    machines?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1676,6 +1760,7 @@ async fn proxy(
         body,
         turn_id,
         policy,
+        None,
     )
     .await
 }
@@ -1690,6 +1775,7 @@ async fn proxy_raw(
     body: Option<Value>,
     turn_id: Option<&str>,
     policy: Option<BillingRoutePolicy>,
+    model_control: Option<&crate::services::assistant_model_control::TargetedControl>,
 ) -> AppResult<Response> {
     let service =
         assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG).await?;
@@ -1728,6 +1814,15 @@ async fn proxy_raw(
     let mut headers = vec![("authorization".into(), format!("Bearer {}", raw_key))];
     if let Some(turn_id) = turn_id {
         headers.push(("idempotency-key".into(), turn_id.into()));
+    }
+    if let Some(control) = model_control {
+        if method != "POST" || path != "v1/responses" {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        headers.push((
+            crate::services::assistant_model_control_protocol::CONTROL_HEADER.into(),
+            control.for_target(&service.id)?.expose().into(),
+        ));
     }
     super::proxy::execute_admin_proxy(
         state,
@@ -1827,6 +1922,7 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
             request.body,
             (!request.idempotency_key.is_empty()).then_some(request.idempotency_key.as_str()),
             request.billing_policy,
+            request.model_control.as_ref(),
         )
         .await
     }

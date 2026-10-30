@@ -384,6 +384,7 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
         .db
         .collection::<AssistantAttachment>(ATTACHMENTS)
         .insert_one(AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             origin: "machine_preview".into(),

@@ -18,6 +18,7 @@ pub struct Admission {
     pub(super) job_id: Option<String>,
     pub(super) async_continuation: Option<AsyncContinuation>,
     pub(super) chat: acks::ChatAuthority,
+    pub(crate) model_control: Option<crate::services::assistant_model_control::PreparedDispatch>,
 }
 impl Admission {
     pub fn bind_ssh(

@@ -540,3 +540,23 @@ The page must not render incoherent overlaps or empty gaps during state handoff.
 - fixed message, card, toolbar, and composer dimensions prevent dynamic content from shifting controls.
 
 The Playwright continuity probe described in [Testing and gaps](07-testing-and-gaps.md) observes DOM mutations to catch transient states that ordinary final assertions would miss.
+
+## Generated result cards
+
+Generated attachments share the authenticated owner endpoint across preview and
+download. A card shows sanitized filename, verified content type, authoritative
+byte count, local revision and effective expiry. Images retain thumbnail, full
+preview and download. Tested MP4 displays native video controls with
+`preload=metadata` and an accessible `Preview {filename}` name. The visible
+`Download {filename}` link is keyboard operable. Unsupported types receive an
+explicit download-only message. A browser decoder error removes the preview and
+keeps the same verified download bytes available.
+
+One authenticated fetch creates the local object URL shared by those controls;
+unmount, replacement and expiry abort requests and revoke the URL. Loading,
+expiry, missing and unauthorized reads have distinct status text. A failed or
+pending materialization displays a separate delivery state and, where eligible,
+`Retry attachment delivery`. This sends an empty POST to the server-associated
+owner/message route and refreshes history. It does not resubmit the user turn or
+Sandbox execution. Generated-file metadata never changes the legacy image
+mapper's object shape or the live media-block protocol.

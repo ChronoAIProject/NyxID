@@ -60,6 +60,7 @@ pub(crate) use guest_model::{is_shared_chat, owner_model_route_allowed};
 #[cfg(test)]
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
+pub(crate) use request_identity::inference_fallback_reason;
 use request_identity::selection_fingerprint;
 pub use request_identity::{bind_headers, http_operation};
 pub(crate) use request_identity::{stateless_inference, stateless_model_transport};
@@ -186,6 +187,7 @@ async fn check_job_http_inner(
             summary: "Machine job service use".into(),
             job_id: Some(job.to_owned()),
             async_continuation: None,
+            model_control: None,
             chat: chat.clone(),
         }),
     })
@@ -224,6 +226,7 @@ pub fn check<'a>(
         model_consent,
         semantic_input,
         false,
+        None,
     ))
 }
 
@@ -259,6 +262,7 @@ pub(crate) fn check_source_resource<'a>(
         false,
         semantic_input,
         true,
+        None,
     ))
 }
 
@@ -289,6 +293,7 @@ async fn check_inner(
     model_consent: bool,
     semantic_input: Option<(&[u8], Option<&str>)>,
     resource_replay: bool,
+    model_control: Option<ModelControlConfirmation<'_>>,
 ) -> AppResult<Decision> {
     chat.ensure_live_turn(db, None, None, "assistant.service_execution")
         .await?;
@@ -372,6 +377,7 @@ async fn check_inner(
             refusal: None,
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
+                model_control: None,
                 shared_permit: permit,
                 connection: connection_id.into(),
                 binding,
@@ -726,6 +732,7 @@ async fn check_inner(
                 summary: summary.to_owned(),
                 job_id: None,
                 async_continuation: None,
+                model_control: None,
                 chat: chat.clone(),
             }),
             automatic: None,
@@ -753,7 +760,16 @@ async fn check_inner(
         } else {
             summary.to_owned()
         };
-        let gate = if resource_replay && acknowledgement.is_some() {
+        let gate = if let Some(control) = &model_control {
+            // All selection, grant, owner, credential and semantic-input checks
+            // above still apply. This private gate replaces only its OWN new
+            // explicit Write card. Generic approval policy remains separate.
+            if control.callback.prepared().is_none() {
+                return Ok(Decision {refusal:Some(super::assistant_model_control::observe(control.state,chat,control.callback).await?),
+                    admission:None,automatic:None});
+            }
+            acks::Gate::Proceed
+        } else if resource_replay && acknowledgement.is_some() {
             acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
         } else { acks::confirmation_needed(db, chat, facts, org && !model_consent).await? };
         if gate.ask().is_some() {
@@ -799,12 +815,18 @@ async fn check_inner(
                 summary: summary.to_owned(),
                 job_id: None,
                 async_continuation: None,
+                model_control: model_control.as_ref().and_then(|c| c.callback.prepared()),
                 chat: chat.clone(),
             }),
             automatic: gate.auto_allowed(),
         })
     })
     .await
+}
+
+struct ModelControlConfirmation<'a> {
+    state: &'a crate::AppState,
+    callback: &'a super::assistant_model_control::Callback,
 }
 
 fn execution_digest(target: &super::proxy_service::ProxyTarget) -> String {

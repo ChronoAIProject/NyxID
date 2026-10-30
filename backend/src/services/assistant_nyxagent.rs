@@ -82,6 +82,18 @@ fn answer_routing_parts(
     reply_channel: Option<&ChannelOrigin>,
     turn: &ActiveTurn,
 ) -> AnswerRouting {
+    if turn
+        .events
+        .iter()
+        .any(super::assistant_model_denial_notice::is_notice)
+    {
+        // App replies stay in the app. Captured platform notices use the
+        // separate saved-personal-reply path, never today's legacy home/chat.
+        return AnswerRouting {
+            primary: PrimaryDestination::App,
+            also: Vec::new(),
+        };
+    }
     let primary = if let Some(group_id) = group_id {
         PrimaryDestination::Group {
             group_id: group_id.to_owned(),
@@ -673,6 +685,8 @@ pub struct TurnStart {
     pub group_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     pub group_request_id: Option<String>,
     pub trigger: Option<super::trigger_schedule::TurnClaim>,
+    /// Direct specialist notification authority; never a trigger claim.
+    pub automation_parent: Option<super::trigger_schedule::direct::Parent>,
     pub conversation_id: Option<String>,
     pub text: String,
     pub model: Option<String>,
@@ -842,6 +856,7 @@ impl From<&TurnRequest> for TurnStart {
             attachment_ids: request.attachment_ids.clone(),
             group_request_id: None,
             group_attachments: Vec::new(),
+            automation_parent: None,
             trigger: None,
             conversation_id: request.conversation_id.clone(),
             text: request.text.clone(),
@@ -1128,6 +1143,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::channel_media_events::ensure_indexes(db).await?;
     super::assistant_channel_media::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
+    super::generated_artifacts::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
@@ -1333,6 +1349,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             crate::models::assistant_group::COLLECTION_NAME,
             doc! {"user_id": 1, "updated_at": -1},
+            false,
+        ),
+        (
+            crate::models::assistant_group::COLLECTION_NAME,
+            doc! {"user_id":1,"followers.trigger_run_id":1,"followers.conversation_id":1},
             false,
         ),
         (
@@ -2123,6 +2144,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            coordinator_run_ids: Vec::new(),
             owner_model_route: None,
             invocation_controlled: false,
             credential_invocation_id: None,
@@ -2275,10 +2297,27 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     if let Some(claim) = &start.trigger {
-        if start.origin != TurnOrigin::Trigger || start.guest {
+        if !matches!(start.origin, TurnOrigin::Trigger | TurnOrigin::Event)
+            || start.guest
+            || (start.origin == TurnOrigin::Event && !claim.continuation)
+        {
             return Err(AppError::Forbidden("Invalid trigger turn".into()));
         }
-        super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
+        super::trigger_schedule::admit_turn(
+            db,
+            user_id,
+            claim,
+            &id,
+            &turn_id,
+            start.origin,
+            session,
+        )
+        .await?;
+        if super::trigger_schedule::continuation::enabled()
+            && !row.coordinator_run_ids.contains(&claim.run_id)
+        {
+            row.coordinator_run_ids.push(claim.run_id.clone());
+        }
     }
     let voice_request = if let Some(request_id) = &voice_request_id {
         if start.origin != TurnOrigin::User || start.guest {
@@ -2351,12 +2390,22 @@ pub(crate) async fn begin_owner_turn_in_session(
     {
         Vec::new()
     } else {
+        let selected = if start.origin == TurnOrigin::Event
+            && let Some(claim) = &start.trigger
+        {
+            let (selected, rest) = std::mem::take(&mut row.pending_events)
+                .into_iter()
+                .partition(|e| {
+                    e.trigger_run_id.as_deref() == Some(claim.run_id.as_str())
+                        && e.continuation_protocol_version == 2
+                });
+            row.pending_events = rest;
+            selected
+        } else {
+            super::assistant_model_denial_notice::select_events(&mut row, start.origin)
+        };
         Box::pin(super::channel_thread_follow_service::filter_events(
-            db,
-            user_id,
-            &id,
-            super::async_service_operation::select_events(&mut row, start.origin),
-            session,
+            db, user_id, &id, selected, session,
         ))
         .await?
     };
@@ -2454,7 +2503,9 @@ pub(crate) async fn begin_owner_turn_in_session(
     row.guest_turn = guest;
     let (role, mut text) = match start.origin {
         TurnOrigin::Event => {
-            row.event_streak = row.event_streak.saturating_add(1);
+            if start.trigger.is_none() {
+                row.event_streak = row.event_streak.saturating_add(1);
+            }
             let text = event_turn_text(
                 &events,
                 row.group_request_id.as_ref().map(|_| start.text.as_str()),
@@ -2580,7 +2631,23 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
         .await?;
     }
-    if let Some(lost) = row.active_turn.take() {
+    if let Some(lost) = row.active_turn.as_ref() {
+        let lost_reply_id = Uuid::new_v4().to_string();
+        let lost_error = if lost.stop_requested {
+            TurnError::internal("cancelled", "stop")
+        } else {
+            TurnError::internal("turn_lost", "lease_expiry")
+        };
+        Box::pin(super::assistant_model_denial_notice::settled_in_session(
+            db,
+            &row,
+            &lost_reply_id,
+            lost.reply.as_ref().map_or("", |reply| reply.text.as_str()),
+            Some(&lost_error),
+            session,
+        ))
+        .await?;
+        let lost = row.active_turn.take().expect("retained reclaimed turn");
         let lost_turn = lost.clone();
         let lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
         Box::pin(super::assistant_turn_observability::failed_in_session(
@@ -2620,7 +2687,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             author: None,
             voice: None,
             execution_pending: false,
-            id: Uuid::new_v4().to_string(),
+            id: lost_reply_id,
             conversation_id: id.clone(),
             user_id: user_id.into(),
             seq: row.message_count,
@@ -2900,7 +2967,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     Box::pin(super::async_service_operation::bind_in_session(
-        db, &mut row, session,
+        db, keys, &mut row, session,
     ))
     .await?;
     Box::pin(super::assistant_invocation_service::bind_in_session(
@@ -2943,8 +3010,22 @@ pub(crate) async fn begin_owner_turn_in_session(
         _ => {}
     }
     row.updated_at = now;
+    if let Some(parent) = &start.automation_parent {
+        Box::pin(super::trigger_schedule::direct::register(
+            db, session, parent, &row,
+        ))
+        .await?;
+    }
+    Box::pin(super::assistant_model_denial_notice::claim_in_session(
+        db, &mut row, session,
+    ))
+    .await?;
     Box::pin(super::assistant_service_execution::bind_owner_selection(
         db, session, &row, start, &text,
+    ))
+    .await?;
+    Box::pin(super::assistant_model_control::admit_recorder_in_session(
+        db, &row, start, session,
     ))
     .await?;
     if voice_request.is_none() || hidden_voice {
@@ -3345,7 +3426,10 @@ pub async fn append_events_in_session(
             return Err(AppError::AssistantTurnRequired);
         }
         if let Some(existing) = row.pending_events.iter().find(|e| e.id == event.id) {
-            if existing.invocation_id != event.invocation_id {
+            if existing.invocation_id != event.invocation_id
+                || existing.trigger_run_id != event.trigger_run_id
+                || existing.continuation_protocol_version != event.continuation_protocol_version
+            {
                 return Err(AppError::Conflict(
                     "Assistant event identity changed".into(),
                 ));
@@ -3354,6 +3438,7 @@ pub async fn append_events_in_session(
         }
         if row.pending_events.len() >= MAX_PENDING_EVENTS {
             if event.invocation_id.is_some()
+                || event.trigger_run_id.is_some()
                 || row.pending_events.iter().any(|e| e.invocation_id.is_some())
             {
                 return Err(AppError::Conflict("Assistant event queue is full".into()));
@@ -3361,7 +3446,11 @@ pub async fn append_events_in_session(
             let index = row
                 .pending_events
                 .iter()
-                .position(|e| e.source_event_ids.is_empty())
+                .position(|e| {
+                    e.source_event_ids.is_empty()
+                        && e.trigger_run_id.is_none()
+                        && !super::assistant_model_denial_notice::is_notice(e)
+                })
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);
         }
@@ -3461,64 +3550,83 @@ pub async fn audit_model_change(
 }
 
 pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
+    request_stop_target(db, user_id, id).await.map(|_| ())
+}
+
+/// Return the exact stopped snapshot for transport cancellation. A lost CAS
+/// never authorizes a caller to stop whichever turn happened to replace it.
+pub async fn request_stop_target(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<Option<AssistantConversation>> {
     let now = Utc::now();
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let existing = get(db, user_id, id).await?;
-    let Some(existing_turn) = existing.active_turn.as_ref() else {
-        return super::async_service_operation::cancel(db, user_id, id).await;
-    };
-    // Rows written before heartbeat support retain the old lease boundary: an
-    // already-expired legacy fence is reclaimed by the next send instead.
-    if existing_turn.heartbeat_at.is_none() && live_turn(&existing, now).is_none() {
-        return super::async_service_operation::cancel(db, user_id, id).await;
-    }
-    let expected_turn_id = existing_turn.turn_id.clone();
-    let row = db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one_and_update(
-            doc! {
-                "_id": id,
-                "user_id": user_id,
-                "active_turn.turn_id": &expected_turn_id,
-            },
-            doc! {"$set": {"active_turn.stop_requested": true}},
-        )
-        .return_document(ReturnDocument::After)
-        .await?;
-    // Fence new submissions before cancelling existing watches. A reserve
-    // racing this update writes the same conversation inside its transaction.
-    super::async_service_operation::cancel(db, user_id, id).await?;
-    let Some(row) = row else {
-        // A concurrent settlement, delete, or new turn won the exact fence.
-        return Ok(());
-    };
-    let Some(turn) = row.active_turn.as_ref() else {
-        return Ok(());
-    };
-    // A legacy row has no worker liveness signal. Keep its historical Stop
-    // behavior: the worker may observe the durable flag, while an absent worker
-    // is reclaimed only by the existing lease/TTL path.
-    let Some(heartbeat) = turn.heartbeat_at else {
-        return Ok(());
-    };
-    let turn_id = turn.turn_id.clone();
-    let delay = if heartbeat <= stale_before {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(STOP_SETTLEMENT_GRACE_SECS)
-    };
-    let db = db.clone();
-    let user_id = user_id.to_owned();
-    let id = id.to_owned();
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        if let Err(error) = force_stop(&db, &user_id, &id, &turn_id).await
-            && !matches!(error, AppError::NotFound(_))
-        {
-            tracing::debug!(conversation_id = %id, turn_id = %turn_id, %error, "Forced assistant stop deferred");
+    let row = if let Some(turn) = &existing.active_turn {
+        // Preserve the pre-heartbeat lease boundary.
+        if turn.heartbeat_at.is_none() && live_turn(&existing, now).is_none() {
+            super::async_service_operation::cancel_for_stop(db, &existing).await?;
+            return Ok(None);
         }
-    });
-    Ok(())
+        let Some(row) = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one_and_update(
+                doc! {"_id":id,"user_id":user_id,"active_turn.turn_id":&turn.turn_id},
+                doc! {"$set":{"active_turn.stop_requested":true}},
+            )
+            .return_document(ReturnDocument::After)
+            .await?
+        else {
+            // Settlement or a replacement turn won; do not cancel its work.
+            return Ok(None);
+        };
+        // Schedule actual settlement before fallible automation/watch cleanup.
+        if let Some(turn) = row.active_turn.as_ref()
+            && let Some(heartbeat) = turn.heartbeat_at
+        {
+            let turn_id = turn.turn_id.clone();
+            let delay = if heartbeat <= stale_before {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(STOP_SETTLEMENT_GRACE_SECS)
+            };
+            let db = db.clone();
+            let user_id = user_id.to_owned();
+            let id = id.to_owned();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if let Err(error) = force_stop(&db, &user_id, &id, &turn_id).await
+                    && !matches!(error, AppError::NotFound(_))
+                {
+                    tracing::debug!(conversation_id=%id,turn_id=%turn_id,%error,"Forced assistant stop deferred");
+                }
+            });
+        }
+        row
+    } else {
+        existing
+    };
+    // After an active-turn Stop is durable, auxiliary cleanup must not suppress
+    // forced settlement or subsequent upstream/machine cancellation attempts.
+    // An idle Stop has no such durable flag, so failed cleanup must be reported.
+    let mut cleanup_error = None;
+    if let Err(error) = super::trigger_schedule::continuation::cancel_thread(db, &row).await {
+        tracing::warn!(conversation_id=%id,%error,"Automation stop cleanup deferred");
+        cleanup_error = Some(error);
+    }
+    if let Err(error) = super::async_service_operation::cancel_for_stop(db, &row).await {
+        tracing::warn!(conversation_id=%id,%error,"Async stop cleanup deferred");
+        if cleanup_error.is_none() {
+            cleanup_error = Some(error);
+        }
+    }
+    if row.active_turn.is_none()
+        && let Some(error) = cleanup_error
+    {
+        return Err(error);
+    }
+    Ok(Some(row))
 }
 
 /// Record that a claimed turn waits for one of its owner's running slots,
@@ -3690,6 +3798,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                artifact_delivery: None,
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
@@ -3777,6 +3886,7 @@ async fn finish_turn_inner(
                         activity
                     })
                     .collect();
+                super::generated_artifacts::prepare_settlement_in_session(&db, &mut current, session).await?;
                 let attachments = current
                     .active_turn
                     .as_ref()
@@ -3809,11 +3919,16 @@ async fn finish_turn_inner(
                     == 1;
                 current.message_count += 1;
                 current.updated_at = now;
+                Box::pin(super::assistant_model_denial_notice::settled_in_session(
+                    &db, &current, &message_id, &result.text, error.as_ref(), session,
+                )).await?;
                 current.deliver_also = current
                     .active_turn
                     .as_ref()
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
+                super::generated_artifacts::associate_in_session(&db, &current, &message_id, session).await?;
+                turn_metadata.artifact_delivery = super::generated_artifacts::settled_outcome_in_session(&db, &current, session).await?;
                 super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
                     let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;
@@ -4237,6 +4352,7 @@ pub async fn attach_routed_image(
         assistant_conversation::TurnAttachment,
     };
     let meta = TurnAttachment {
+        artifact: Default::default(),
         chat_delivery: Some(chat_delivery),
         image_input: None,
         image_inspection: None,
@@ -4280,6 +4396,7 @@ pub async fn attach_routed_image(
     );
     let stored = async {
         let mut attachment = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             origin: "tool".into(),
             id: meta.id.clone(),
@@ -4338,6 +4455,7 @@ pub(crate) async fn attach_resource_image(
         assistant_resource::{AssistantResource, COLLECTION_NAME as RESOURCES},
     };
     let meta = media.map(|media| TurnAttachment {
+        artifact: Default::default(),
         id: resource.attachment_id.clone(),
         label: resource
             .source
@@ -4359,6 +4477,7 @@ pub(crate) async fn attach_resource_image(
     let attachment = if let Some(media) = media {
         let meta = meta.as_ref().ok_or_else(resources::missing)?;
         let mut row = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: meta.id.clone(),
             origin: "tool".into(),
@@ -5395,6 +5514,9 @@ pub async fn delete(
                         )
                         .await?;
                     }
+                    Box::pin(super::trigger_schedule::continuation::delete_thread_in_session(
+                        db,user_id,id,session,
+                    )).await?;
                     // Revoke the conversation's key and ciphertext in this transaction.
                     let credential = db
                         .collection::<bson::Document>(
@@ -5423,10 +5545,15 @@ pub async fn delete(
                     }
                     for collection in [
                         crate::models::async_service_operation::COLLECTION_NAME,
+                        crate::models::generated_artifact::COLLECTION_NAME,
+                        crate::models::generated_artifact::DELIVERIES,
+                        crate::models::generated_artifact::SERIES,
                         crate::models::assistant_voice::REQUESTS,
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         super::assistant_service_execution::COLLECTION,
+                        crate::models::assistant_model_control::COLLECTION_NAME,
+                        "assistant_model_denial_notices",
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::assistant_resource::COLLECTION_NAME,
                         crate::models::nyxbot_gateway_response::COLLECTION_NAME,

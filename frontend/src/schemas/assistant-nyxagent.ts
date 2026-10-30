@@ -20,15 +20,16 @@ export const nyxAgentTurnActivitySchema = z.object({
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
-/// A tool image or human upload, fetched from the owner-only attachment route.
+/// Attachment readers accept future types; upload policy remains server-owned.
 export const nyxAgentAttachmentSchema = z.object({
+  filename: z.string().nullable().optional(),
+  source: z.string().nullable().optional(),
+  result_version: z.string().nullable().optional(),
+  preview_kind: z.enum(["image", "video", "download"]).nullable().optional(),
+  expires_at: z.string().nullable().optional(),
   id: z.string(),
-  content_type: z.enum([
-    "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "text/plain", "text/markdown", "text/csv", "application/json",
-  ]),
-  origin: z.enum(["tool", "user_upload", ""]).optional(),
+  content_type: z.string(),
+  origin: z.string().optional(),
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
   image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
@@ -162,6 +163,7 @@ const turnMetadataSchema = z.object({
   channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
 });
 export const nyxAgentMessageSchema = z.object({
+  artifact_delivery: z.object({state: z.string(),count: z.number().int().nonnegative(),recovery_available: z.boolean(),rejected: z.array(z.object({index: z.number().int().nonnegative().max(7), filename: z.string(), reason: z.enum(["invalid", "too_large", "unavailable", "missing"])})).max(8).default([])}).nullable().optional(),
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),

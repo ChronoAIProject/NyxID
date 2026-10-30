@@ -628,6 +628,10 @@ pub struct RunsQuery {
 
 #[derive(Serialize)]
 pub struct RunResponse {
+    pub wait_kind: Option<crate::models::trigger_run::RunWaitKind>,
+    pub coordinator_deadline: Option<String>,
+    pub continuation_count: u32,
+    pub continuation_limit: u32,
     pub id: String,
     pub scheduled_at: String,
     pub started_at: Option<String>,
@@ -650,6 +654,10 @@ pub struct MissedResponse {
 
 pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunResponse {
     RunResponse {
+        wait_kind: run.wait_kind,
+        coordinator_deadline: run.coordinator_deadline.map(|t| t.to_rfc3339()),
+        continuation_count: run.continuation_count,
+        continuation_limit: run.continuation_limit,
         id: run.id,
         scheduled_at: run.scheduled_at.to_rfc3339(),
         started_at: run.started_at.map(|t| t.to_rfc3339()),
@@ -786,6 +794,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<Trigger>(TRIGGERS)
             .insert_one(Trigger {
+                continuation_protocol_version: 0,
                 secret_context_versions: Default::default(),
                 source: Default::default(),
                 setup_watch_id: None,

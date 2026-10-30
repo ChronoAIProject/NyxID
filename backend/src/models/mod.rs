@@ -7,6 +7,9 @@ pub mod api_key_credential;
 pub mod approval_grant;
 pub mod approval_request;
 pub mod assistant_action_receipt;
+pub mod assistant_direct_handoff;
+pub mod assistant_model_control;
+pub mod assistant_model_denial_notice;
 pub mod assistant_resource;
 pub mod assistant_sharing;
 pub mod assistant_wire_log;
@@ -236,3 +239,4 @@ pub mod platform_help;
 pub mod nyxbot_gateway_release;
 
 pub mod discord_gateway;
+pub mod generated_artifact;

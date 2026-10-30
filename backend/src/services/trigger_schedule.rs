@@ -1,6 +1,8 @@
 //! Trigger schedules: derived leased work, durable UUID-v5 occurrence identity,
 //! and admission fenced in the same transaction as an assistant turn.
 pub mod compute;
+pub mod continuation;
+pub mod direct;
 pub mod result_delivery;
 use super::api_key_mutation_service as transactions;
 use super::assistant_engine_policy as policy;
@@ -42,6 +44,24 @@ pub fn run_id(trigger_id: &str, at: DateTime<Utc>) -> String {
 
 pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
     for (collection, keys, name, ttl) in [
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"run_id":1,"state":1},
+            "direct_handoff_run",
+            false,
+        ),
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"state":1,"retry_at":1,"_id":1},
+            "direct_handoff_retry",
+            false,
+        ),
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"expires_at":1},
+            "direct_handoff_ttl",
+            true,
+        ),
         (WORK, doc! { "at": 1, "_id": 1 }, "trigger_work_due", false),
         (
             WORK,
@@ -59,6 +79,15 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
             RUNS,
             doc! { "trigger_id": 1, "outcome": 1 },
             "trigger_run_overlap",
+            false,
+        ),
+        // Migration/readiness are global queries, outside a trigger's history
+        // prefix. Equality/$in on protocol and outcome permits bounded legacy
+        // discovery without walking terminal history or another owner's runs.
+        (
+            RUNS,
+            doc! { "continuation_protocol_version": 1, "outcome": 1, "_id": 1 },
+            "trigger_run_continuation_state",
             false,
         ),
         (RUNS, doc! { "expires_at": 1 }, "trigger_run_ttl", true),
@@ -182,6 +211,12 @@ pub async fn set_schedule_job(
 
 pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) -> TriggerRun {
     TriggerRun {
+        wait_kind: None,
+        coordinator_wait: None,
+        coordinator_deadline: Some((deadline + Duration::hours(1)).min(at + Duration::days(90))),
+        continuation_count: 0,
+        continuation_limit: 0,
+        continuation_protocol_version: 0,
         trigger_generation: None,
         dispatch_at: None,
         terminal_result_recorded: false,
@@ -261,6 +296,13 @@ pub(crate) async fn insert_run(
         .session(&mut *session)
         .await?;
     let mut run = run.clone();
+    if matches!(trigger.delivery, TriggerDelivery::Assistant { .. })
+        && continuation::requires_v2(trigger.continuation_protocol_version)
+    {
+        continuation::ready_in_session(db, session).await?;
+        run.continuation_protocol_version = 2;
+        run.continuation_limit = continuation::AUTOMATION_CONTINUATION_LIMIT;
+    }
     if outstanding > 0 && trigger.overlap == crate::models::trigger_schedule::OverlapPolicy::Skip {
         run.reason = Some("overlap_skip".into());
     } else if outstanding >= 2 {
@@ -625,45 +667,80 @@ async fn finish_update(
         ))
         .await?;
         run.terminal_result_recorded = true;
+        continuation::cleanup_in_session(db, run, session).await?;
     }
     Ok(run)
 }
 
 async fn finish_record(db: &Database, run: &TriggerRun) -> AppResult<()> {
-    db.collection::<Document>(WORK)
-        .delete_one(doc! { "_id": &run.id })
-        .await?;
+    Box::pin(finish_record_with_session(db, run, None)).await
+}
+
+/// Migration joins these terminal effects to the classification transaction.
+/// Ordinary completion retains its existing best-effort audit behavior.
+async fn finish_record_with_session(
+    db: &Database,
+    run: &TriggerRun,
+    mut session: Option<&mut ClientSession>,
+) -> AppResult<()> {
+    let work = db.collection::<Document>(WORK);
+    let deletion = work.delete_one(doc! { "_id": &run.id });
+    if let Some(session) = session.as_deref_mut() {
+        super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
+        deletion.session(session).await?;
+    } else {
+        deletion.await?;
+    }
     let last_run = bson::to_bson(run)
         .map_err(|error| AppError::Internal(format!("Serialize trigger run: {error}")))?;
-    db.collection::<Trigger>(TRIGGERS)
-        .update_one(
-            doc! {
-                "_id": &run.trigger_id,
-                "$or": [
-                    { "schedule_state.last_run": null },
-                    { "schedule_state.last_run.scheduled_at": { "$lte": date(run.scheduled_at) } },
-                ],
+    let triggers = db.collection::<Trigger>(TRIGGERS);
+    let projection = triggers.update_one(
+        doc! {
+            "_id": &run.trigger_id,
+            "user_id": &run.user_id,
+            "$or": [
+                { "schedule_state.last_run": null },
+                { "schedule_state.last_run.scheduled_at": { "$lte": date(run.scheduled_at) } },
+            ],
+        },
+        doc! {
+            "$set": {
+                "schedule_state.last_run": last_run,
             },
-            doc! {
-                "$set": {
-                    "schedule_state.last_run": last_run,
-                },
+        },
+    );
+    if let Some(session) = session.as_deref_mut() {
+        projection.session(session).await?;
+    } else {
+        projection.await?;
+    }
+    let metadata = doc! {
+        "trigger_id": &run.trigger_id,
+        "run_id": &run.id,
+        "outcome": run.outcome.as_str(),
+        "reason": &run.reason,
+    };
+    if let Some(session) = session {
+        super::audit_service::log_actor_event_in_transaction(
+            db,
+            session,
+            &super::audit_service::AuditActor {
+                user_id: run.user_id.clone(),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
             },
+            "trigger_run_outcome",
+            serde_json::to_value(metadata)
+                .map_err(|_| AppError::Internal("Encode trigger outcome audit".into()))?,
         )
         .await?;
-    audit(
-        db,
-        &run.user_id,
-        "trigger_run_outcome",
-        doc! {
-            "trigger_id": &run.trigger_id,
-            "run_id": &run.id,
-            "outcome": run.outcome.as_str(),
-            "reason": &run.reason,
-        },
-    )
-    .await;
-    trim_history(db, &run.trigger_id).await
+        trim_history_in_session(db, &run.trigger_id, session).await
+    } else {
+        audit(db, &run.user_id, "trigger_run_outcome", metadata).await;
+        trim_history(db, &run.trigger_id).await
+    }
 }
 
 async fn trim_history(db: &Database, trigger_id: &str) -> AppResult<()> {
@@ -690,67 +767,89 @@ async fn trim_history(db: &Database, trigger_id: &str) -> AppResult<()> {
     session
         .start_transaction()
         .and_run2(async move |session| {
-            let result: AppResult<()> = async {
-                db.collection::<Document>(TRIGGERS)
-                    .update_one(
-                        doc! { "_id": &trigger_id },
-                        doc! { "$inc": {"history_version": 1} },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                let count = db
-                    .collection::<Document>(RUNS)
-                    .count_documents(doc! { "trigger_id": &trigger_id })
-                    .session(&mut *session)
-                    .await?;
-                let mut deleted = 0;
-                if count > HISTORY_LIMIT {
-                    let mut cursor = db
-                        .collection::<Document>(RUNS)
-                        .find(doc! {
-                            "trigger_id": &trigger_id,
-                            "outcome": {
-                                "$in": [
-                                    RunOutcome::Completed.as_str(),
-                                    RunOutcome::Failed.as_str(),
-                                    RunOutcome::Skipped.as_str(),
-                                ],
-                            },
-                        })
-                        .sort(doc! { "scheduled_at": 1, "_id": 1 })
-                        .limit((count - HISTORY_LIMIT).min(HISTORY_LIMIT) as i64)
-                        .projection(doc! { "_id": 1 })
-                        .session(&mut *session)
-                        .await?;
-                    let mut ids = Vec::new();
-                    while let Some(row) = cursor.next(&mut *session).await.transpose()? {
-                        if let Ok(id) = row.get_str("_id") {
-                            ids.push(id.to_owned());
-                        }
-                    }
-                    if !ids.is_empty() {
-                        deleted = db
-                            .collection::<Document>(RUNS)
-                            .delete_many(doc! { "_id": {"$in": ids} })
-                            .session(&mut *session)
-                            .await?
-                            .deleted_count;
-                    }
-                }
-                db.collection::<Document>(TRIGGERS)
-                    .update_one(
-                        doc! { "_id": &trigger_id },
-                        doc! { "$set": {"history_count": (count - deleted) as i64} },
-                    )
-                    .session(session)
-                    .await?;
-                Ok(())
-            }
-            .await;
-            transactions::transaction_result(result)
+            transactions::transaction_result(
+                trim_history_in_session(&db, &trigger_id, session).await,
+            )
         })
         .await
         .map_err(transactions::map_transaction_error)
+}
+
+async fn trim_history_in_session(
+    db: &Database,
+    trigger_id: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let Some(trigger) = db
+        .collection::<Document>(TRIGGERS)
+        .find_one(doc! { "_id": trigger_id })
+        .projection(doc! { "history_count": 1 })
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    let count = trigger
+        .get_i64("history_count")
+        .ok()
+        .or_else(|| trigger.get_i32("history_count").ok().map(i64::from));
+    if count.is_some_and(|count| count <= HISTORY_LIMIT as i64) {
+        return Ok(());
+    }
+    db.collection::<Document>(TRIGGERS)
+        .update_one(
+            doc! { "_id": trigger_id },
+            doc! { "$inc": {"history_version": 1} },
+        )
+        .session(&mut *session)
+        .await?;
+    let count = db
+        .collection::<Document>(RUNS)
+        .count_documents(doc! { "trigger_id": trigger_id })
+        .session(&mut *session)
+        .await?;
+    let mut deleted = 0;
+    if count > HISTORY_LIMIT {
+        let mut cursor = db
+            .collection::<Document>(RUNS)
+            .find(doc! {
+                "trigger_id": trigger_id,
+                "outcome": {
+                    "$in": [
+                        RunOutcome::Completed.as_str(),
+                        RunOutcome::Failed.as_str(),
+                        RunOutcome::Skipped.as_str(),
+                    ],
+                },
+            })
+            .sort(doc! { "scheduled_at": 1, "_id": 1 })
+            .limit((count - HISTORY_LIMIT).min(HISTORY_LIMIT) as i64)
+            .projection(doc! { "_id": 1 })
+            .session(&mut *session)
+            .await?;
+        let mut ids = Vec::new();
+        while let Some(row) = cursor.next(&mut *session).await.transpose()? {
+            if let Ok(id) = row.get_str("_id") {
+                ids.push(id.to_owned());
+            }
+        }
+        if !ids.is_empty() {
+            deleted = db
+                .collection::<Document>(RUNS)
+                .delete_many(doc! { "_id": {"$in": ids} })
+                .session(&mut *session)
+                .await?
+                .deleted_count;
+        }
+    }
+    db.collection::<Document>(TRIGGERS)
+        .update_one(
+            doc! { "_id": trigger_id },
+            doc! { "$set": {"history_count": (count - deleted) as i64} },
+        )
+        .session(session)
+        .await?;
+    Ok(())
 }
 
 pub async fn audit(db: &Database, owner: &str, event: &str, metadata: Document) {
@@ -785,11 +884,14 @@ pub fn admit_turn<'a>(
     claim: &'a TurnClaim,
     thread: &'a str,
     turn: &'a str,
+    origin: crate::models::assistant_conversation::TurnOrigin,
     session: &'a mut ClientSession,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
     // Keep the schedule's transaction state out of the enclosing owner-turn
     // admission future, which also carries the assistant's authority fences.
-    Box::pin(admit_turn_inner(db, owner, claim, thread, turn, session))
+    Box::pin(admit_turn_inner(
+        db, owner, claim, thread, turn, origin, session,
+    ))
 }
 
 async fn admit_turn_inner(
@@ -798,6 +900,7 @@ async fn admit_turn_inner(
     claim: &TurnClaim,
     thread: &str,
     turn: &str,
+    origin: crate::models::assistant_conversation::TurnOrigin,
     session: &mut ClientSession,
 ) -> AppResult<()> {
     let now = Utc::now();
@@ -819,6 +922,37 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_run_unavailable".into()))?;
+    use crate::models::{assistant_conversation::TurnOrigin, trigger_run::RunWaitKind};
+    let coordinator = claim.continuation && run.wait_kind == Some(RunWaitKind::Coordinator);
+    let expected_origin = if coordinator {
+        TurnOrigin::Event
+    } else {
+        TurnOrigin::Trigger
+    };
+    if origin != expected_origin || (claim.continuation && run.thread_id.as_deref() != Some(thread))
+    {
+        return Err(AppError::Conflict(
+            "trigger_continuation_identity_mismatch".into(),
+        ));
+    }
+    if coordinator {
+        if let Some(reason) = continuation::exhausted(&run, now) {
+            return Err(AppError::Conflict(reason.into()));
+        }
+        if run
+            .coordinator_wait
+            .as_ref()
+            .is_none_or(|w| w.thread_id != thread)
+            || run.trigger_generation != Some(claim.trigger_updated_at)
+        {
+            return Err(AppError::Conflict(
+                "trigger_continuation_identity_mismatch".into(),
+            ));
+        }
+        if db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME).find_one(doc!{"_id":thread,"user_id":owner,"pending_events":{"$elemMatch":{"trigger_run_id":&run.id,"continuation_protocol_version":2}}}).session(&mut *session).await?.is_none() {
+            return Err(AppError::Conflict("trigger_event_unavailable".into()));
+        }
+    }
     if db
         .collection::<Document>(WORK)
         .update_one(
@@ -850,6 +984,17 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_paused".into()))?;
+    if matches!(trigger.delivery, TriggerDelivery::Assistant { .. })
+        && (continuation::requires_v2(run.continuation_protocol_version)
+            || trigger.continuation_protocol_version >= 2)
+    {
+        continuation::ready_in_session(db, session).await?;
+        if run.continuation_protocol_version != 2 {
+            return Err(AppError::Conflict(
+                "automation_run_migration_required".into(),
+            ));
+        }
+    }
     let running = db
         .collection::<TriggerRun>(RUNS)
         .count_documents(doc! {
@@ -892,7 +1037,7 @@ async fn admit_turn_inner(
     if !owner_row.user_type.is_person() {
         return Err(AppError::Forbidden("Automations belong to a person".into()));
     }
-    if !claim.continuation {
+    if !claim.continuation || coordinator {
         let settings = db
             .collection::<crate::models::assistant_settings::AssistantSettings>(
                 crate::models::assistant_settings::COLLECTION_NAME,
@@ -947,7 +1092,14 @@ async fn admit_turn_inner(
         "thread_id": thread,
         "turn_id": turn,
         "waiting_for": [],
+        "wait_kind": null,
+        "coordinator_wait": null,
+        "coordinator_handoff_closed": false,
     };
+    if coordinator {
+        set.insert("continuation_count", run.continuation_count + 1);
+        set.insert("coordinator_capacity_retry", false);
+    }
     if !claim.continuation {
         set.insert("trigger_generation", date(trigger.updated_at));
         set.insert("started_at", date(now));

@@ -57,6 +57,7 @@ pub fn validate_ids(ids: &[String]) -> AppResult<()> {
 
 pub fn metadata(row: &AssistantUpload) -> TurnAttachment {
     TurnAttachment {
+        artifact: Default::default(),
         chat_delivery: None,
         image_input: None,
         image_inspection: None,
@@ -3043,6 +3044,7 @@ mod integration_tests {
     #[test]
     fn assistant_uploads_capability_fallback_is_explicit_and_bounded() {
         let item = TurnAttachment {
+            artifact: Default::default(),
             id: Uuid::new_v4().to_string(),
             content_type: "image/png".into(),
             label: "photo.png".into(),
@@ -3252,6 +3254,7 @@ mod integration_tests {
     #[test]
     fn tool_image_plan_keeps_user_selection_separate_and_enforces_capabilities() {
         let item = TurnAttachment {
+            artifact: Default::default(),
             id: Uuid::new_v4().to_string(),
             origin: "tool".into(),
             content_type: "image/png".into(),
