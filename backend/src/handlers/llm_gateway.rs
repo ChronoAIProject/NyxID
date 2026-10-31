@@ -2706,6 +2706,7 @@ async fn enforce_agent_llm_operations(
             operations::GuestHttpContext {
                 query,
                 websocket: headers.contains_key(axum::http::header::UPGRADE),
+                ..Default::default()
             },
         ))
         .await?;
@@ -2736,6 +2737,7 @@ async fn enforce_agent_llm_operations(
         operations::GuestHttpContext {
             query,
             websocket: headers.contains_key(axum::http::header::UPGRADE),
+            ..Default::default()
         },
     ))
     .await?;

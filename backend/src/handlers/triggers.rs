@@ -634,11 +634,21 @@ pub struct RunResponse {
     pub finished_at: Option<String>,
     pub outcome: crate::models::trigger_run::RunOutcome,
     pub reason: Option<String>,
+    pub failure_reason: Option<RunFailureReasonResponse>,
     pub thread_id: Option<String>,
     pub duration_ms: Option<i64>,
     pub attempts: Option<u32>,
     pub capacity_wait_ms: Option<u64>,
     pub missed: Option<MissedResponse>,
+}
+
+#[derive(Serialize)]
+pub struct RunFailureReasonResponse {
+    pub source: String,
+    pub stage: String,
+    pub code: String,
+    pub http_status: Option<u16>,
+    pub nyxid_error_code: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -656,6 +666,13 @@ pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunRe
         finished_at: run.finished_at.map(|t| t.to_rfc3339()),
         outcome: run.outcome,
         reason: run.reason,
+        failure_reason: run.failure_reason.map(|reason| RunFailureReasonResponse {
+            source: reason.source,
+            stage: reason.stage,
+            code: reason.code,
+            http_status: reason.http_status,
+            nyxid_error_code: reason.nyxid_error_code,
+        }),
         thread_id: run.thread_id,
         duration_ms: run.duration_ms,
         attempts: run.attempts,
