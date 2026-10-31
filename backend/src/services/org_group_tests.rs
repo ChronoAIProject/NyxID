@@ -42,6 +42,7 @@ async fn enqueue(
 ) -> String {
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
+        collaboration: None,
         id: id.clone(),
         group_id: access.group.id.clone(),
         user_id: f.org.clone(),
@@ -2086,6 +2087,7 @@ async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplic
     let first = TransactionCollisionHook::new(barrier.clone());
     let second = TransactionCollisionHook::new(barrier);
     let request = |id: &str| GroupRequest {
+        collaboration: None,
         id: id.into(),
         group_id: access.group.id.clone(),
         user_id: f.org.clone(),

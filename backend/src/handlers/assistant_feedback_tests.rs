@@ -86,6 +86,7 @@ mod fixtures {
 
     pub fn group_message(id: &str, group_id: &str, user_id: &str) -> GroupMessage {
         GroupMessage {
+            collaboration: None,
             recipient_agent_ids: Vec::new(),
             activities: vec![],
             org_group: false,
@@ -107,6 +108,7 @@ mod fixtures {
 
     pub fn group(id: &str, owner: &str) -> AssistantGroup {
         AssistantGroup {
+            collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: Default::default(),
             id: id.into(),
@@ -803,6 +805,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: std::collections::HashMap::new(),
             id: group_id.into(),
@@ -828,6 +831,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<GroupMessage>(GROUP_MESSAGES)
         .insert_one(GroupMessage {
+            collaboration: None,
             recipient_agent_ids: Vec::new(),
             activities: vec![],
             org_group: false,
@@ -902,6 +906,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: std::collections::HashMap::new(),
             id: org_group_id.into(),
@@ -927,6 +932,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<GroupMessage>(GROUP_MESSAGES)
         .insert_one(GroupMessage {
+            collaboration: None,
             recipient_agent_ids: Vec::new(),
             activities: vec![],
             org_group: true,
@@ -1677,6 +1683,7 @@ async fn feedback_group_vote_persists_group_context() {
         .db
         .collection::<GroupMessage>(GROUP_MESSAGES)
         .insert_one(GroupMessage {
+            collaboration: None,
             seq: 4,
             text: "group reply".into(),
             activities: vec![

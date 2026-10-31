@@ -491,6 +491,7 @@ async fn candidate_threads(
         "learning_epoch": config.learning_epoch,
         "automation_thread": false,
         "channel": bson::Bson::Null,
+        "collaboration": bson::Bson::Null,
         "group_id": bson::Bson::Null,
         "guest_turn": false,
         "active_turn": bson::Bson::Null,
@@ -1062,7 +1063,8 @@ async fn evidence_is_current(
             "learning_epoch": run.learning_epoch,
             "automation_thread": false,
             "channel": bson::Bson::Null,
-            "group_id": bson::Bson::Null,
+            "collaboration": bson::Bson::Null,
+        "group_id": bson::Bson::Null,
             "guest_turn": false,
             "active_turn": bson::Bson::Null,
         })

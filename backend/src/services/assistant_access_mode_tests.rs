@@ -1501,3 +1501,114 @@ async fn full_access_startup_retires_pre_upgrade_floor_cards_without_claiming_su
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn collaboration_guest_enable_always_requires_exact_owner_delegation_card() {
+    use super::collaboration_group_service as groups;
+    let f = orchestrator_fixture("collaboration_guest_tool_card").await;
+    let (agent, _, _) = sharing_agent(&f).await;
+    super::security_readiness_service::ready_test_replica(&f.state.db).await;
+    let group = groups::membership::create(
+        &f.state.db,
+        &f.owner,
+        "Guests",
+        std::slice::from_ref(&agent),
+    )
+    .await
+    .unwrap();
+    set_mode(&f, AccessMode::Autopilot).await;
+    let args = json!({"group":group.id,"expected_revision":1,"change":{"action":"guest_access","agent_id":agent,"enabled":true,"guest_revision":1}});
+    let (card, error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__manage_collaboration_group",
+        &args,
+    )
+    .await;
+    assert!(error);
+    assert_eq!(card["error"], "acknowledgement_required", "{card}");
+    assert!(
+        card["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Current and future participants")
+    );
+    let policies = f
+        .state
+        .db
+        .collection::<crate::models::assistant_group_collaboration::AgentAccess>(
+            crate::models::assistant_group_collaboration::AGENT_ACCESS,
+        );
+    assert!(
+        !policies
+            .find_one(doc! {"group_id":&group.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .guest_enabled
+    );
+    let ack = allow(&f, &card).await;
+    let mut approved = args.clone();
+    approved["acknowledgement_id"] = ack.into();
+    let (done, error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__manage_collaboration_group",
+        &approved,
+    )
+    .await;
+    assert!(!error, "{done}");
+    assert!(
+        policies
+            .find_one(doc! {"group_id":&group.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .guest_enabled
+    );
+    // A stale consumed card cannot authorize a replacement policy generation.
+    let (_, error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__manage_collaboration_group",
+        &approved,
+    )
+    .await;
+    assert!(error);
+    flags::set_platform_override(
+        &f.state.db,
+        sharing::FLAG,
+        &flags::FlagTarget::Global,
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let (listed, error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__list_collaboration_groups",
+        &json!({}),
+    )
+    .await;
+    assert!(!error, "{listed}");
+    assert_eq!(listed["groups"][0]["id"], group.id);
+    let disabled = json!({"group":group.id,"expected_revision":1,"change":{"action":"guest_access","agent_id":agent,"enabled":false,"guest_revision":2}});
+    let (done, error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__manage_collaboration_group",
+        &disabled,
+    )
+    .await;
+    assert!(!error, "{done}");
+    assert!(
+        !policies
+            .find_one(doc! {"group_id":&group.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .guest_enabled
+    );
+    f.state.db.drop().await.unwrap();
+}
