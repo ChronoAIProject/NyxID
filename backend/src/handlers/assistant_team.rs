@@ -437,6 +437,9 @@ pub(crate) async fn after_turn(
     text: &str,
     error: Option<&TurnError>,
 ) {
+    if row.guest_model_setup {
+        return;
+    }
     let Some(turn) = row.active_turn.as_ref() else {
         return;
     };
@@ -969,7 +972,18 @@ pub(crate) async fn channel_target_agent(
             team::ensure_nyxbot(&state.db, owner).await
         }
         Some(name) => match team::live_specialist(&state.db, owner, name).await {
-            Ok(agent) => Ok(agent),
+            Ok(agent) => {
+                if agent.user_id != owner
+                    && !crate::services::org_agent_service::access(&state.db, owner, &agent.user_id)
+                        .await?
+                        .can_read()
+                {
+                    return Err(AppError::ValidationError(
+                        "Shared agents cannot be linked to platform or channel threads".into(),
+                    ));
+                }
+                Ok(agent)
+            }
             Err(error @ AppError::NotFound(_)) => {
                 if team::names_readable_organization_specialist(&state.db, owner, name).await? {
                     Err(AppError::organization_agent_channel_unsupported())
@@ -1121,7 +1135,12 @@ pub(crate) async fn execute_tool(
         .is_some_and(|a| a.shared().is_some())
         && !matches!(
             name,
-            "remember" | "forget" | "get_agent_skills" | "skill_read"
+            "remember"
+                | "forget"
+                | "get_agent_skills"
+                | "skill_read"
+                | "list_channel_chats"
+                | "post_to_chat"
         )
     {
         return refusal(
@@ -1129,7 +1148,14 @@ pub(crate) async fn execute_tool(
             "Shared agents cannot use account, team, machine or permission management tools. Ask the owner to change the agent's sharing settings.",
         );
     }
-    if !chat.is_orchestrator() && !assistant_team_tools::is_agent_tool(name) {
+    if !chat.is_orchestrator()
+        && !assistant_team_tools::is_agent_tool(name)
+        && !(name == "list_channel_chats"
+            && chat
+                .org_agent_access
+                .as_ref()
+                .is_some_and(|a| a.shared().is_some()))
+    {
         return refusal(
             "orchestrator_only",
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
@@ -2698,6 +2724,12 @@ async fn dispatch_channels(
         }
         "list_channel_agents" => (super::nyxbot::list_tool(state, owner).await?, false),
         "list_channel_chats" => {
+            if crate::services::assistant_service_execution::is_shared_chat(chat) {
+                crate::services::shared_agent_transport::require_ready(&state.db).await?;
+                if !super::nyxbot::chats::post_turn_is_live(state, chat).await? {
+                    return Err(AppError::AssistantTurnRequired);
+                }
+            }
             let chats = Box::pin(super::nyxbot::chats::list_chats(
                 state,
                 owner,
@@ -3639,6 +3671,18 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if super::nyxbot::guest_setup_queue::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Guest model queue deferred");
+            }
+            if crate::services::assistant_guest_model_setup::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Guest model recovery deferred");
+            }
             if super::nyxbot::guest_model_notices::sweep(&state)
                 .await
                 .is_err()

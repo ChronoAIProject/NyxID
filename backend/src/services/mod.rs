@@ -26,6 +26,7 @@ pub mod assistant_direct;
 pub mod assistant_engine_policy;
 pub mod assistant_engine_worker;
 pub mod assistant_feedback_service;
+pub(crate) mod assistant_guest_model_setup;
 mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_model_observer;
@@ -117,6 +118,7 @@ pub(crate) mod erasure_admission;
 pub mod event_dedup_cache;
 pub mod exact_service_approval_service;
 pub mod execution_authority;
+pub mod feature_flag_admin_service;
 pub mod feature_flag_service;
 pub mod gcp_sa_service;
 pub mod google_workspace;
@@ -238,6 +240,7 @@ pub mod service_pool_health_service;
 pub mod service_pool_service;
 pub mod shared_agent_consent;
 pub mod shared_agent_service;
+pub(crate) mod shared_agent_transport;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;
 pub mod sse_parser;
@@ -268,6 +271,7 @@ pub mod user_preferences_service;
 pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
+pub mod whatsapp_native;
 pub mod ws_frame_injector;
 
 pub mod catalog_skill_service;
@@ -529,3 +533,5 @@ mod shared_agent_tests;
 
 pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
+
+pub mod monitoring_service;

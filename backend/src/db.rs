@@ -118,6 +118,13 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<bson::Document>(crate::models::channel_whatsapp_native::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"owner_id": 1, "_id": 1})
+                .build(),
+        )
+        .await?;
     ensure_lark_base_write_indexes(db).await?;
     db.collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
         crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
@@ -234,7 +241,29 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
             IndexModel::builder().keys(doc! {"expires_at": 1})
                 .options(IndexOptions::builder().expire_after(Duration::ZERO).build()).build(),
             IndexModel::builder().keys(doc! {"user_id": 1, "conversation_id": 1, "api_key_id": 1, "turn_id": 1, "kind": 1}).build(),
+            IndexModel::builder().keys(doc! {"kind":1,"user_id":1,"agent_id":1,"profile":1}).build(),
+            IndexModel::builder().keys(doc! {"kind":1,"status":1,"until":1}).build(),
         ]).await?;
+    db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"guest_setup_deadline":1})
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>("assistant_conversations")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"guest_model_setup":1,"created_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! {"guest_model_setup":true})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -715,6 +744,10 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     }
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");
+    audit.create_index(IndexModel::builder()
+        .keys(doc! { "event_data.flag_key": 1, "event_data.definition_id": 1, "created_at": -1, "_id": -1 })
+        .options(mongodb::options::IndexOptions::builder().name("flag_history".to_string()).partial_filter_expression(doc! {"event_data.flag_key":{"$exists":true}}).build())
+        .build()).await?;
     audit
         .create_index(
             IndexModel::builder()

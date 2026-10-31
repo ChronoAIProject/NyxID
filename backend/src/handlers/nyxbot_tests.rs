@@ -77,27 +77,79 @@ pub(super) fn relay_callback_completed(channel_id: &str, message_id: &str) {
     }
 }
 
-async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+fn setup<'a>(
+    name: &'a str,
+) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
+    Box::pin(setup_impl(name))
+}
+
+async fn setup_impl(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     setup_with_reply(name, "Here is your answer").await
 }
-async fn setup_with_reply(
+
+fn setup_with_reply<'a>(
+    name: &'a str,
+    reply: &'static str,
+) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
+    Box::pin(setup_with_reply_impl(name, reply))
+}
+
+async fn setup_with_reply_impl(
     name: &str,
     reply: &'static str,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
-    let db = connect_transaction_test_database(name).await;
-    engine::ensure_indexes(&db).await.unwrap();
-    db.collection(USERS)
-        .insert_one(test_user(OWNER, UserType::Person))
-        .await
-        .unwrap();
+    let db = Box::pin(connect_transaction_test_database(name)).await;
+    Box::pin(engine::ensure_indexes(&db)).await.unwrap();
+    Box::pin(async {
+        db.collection(USERS)
+            .insert_one(test_user(OWNER, UserType::Person))
+            .await
+            .unwrap();
+    })
+    .await;
+    let state = test_app_state(db.clone());
+    let callbacks = Router::new()
+        .route(
+            "/api/v1/proxy/s/{slug}/{*path}",
+            axum::routing::any(guest_model_tests::model_callback),
+        )
+        .layer(axum::Extension(
+            crate::handlers::assistant_nyxagent::SERVER_TURN_POLICY,
+        ))
+        .with_state(state.clone());
+    let setup_db = db.clone();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     let upstream = Router::new().route(
         "/v1/responses",
-        post(move |Json(body): Json<Value>| {
+        post(move |headers: HeaderMap, Json(body): Json<Value>| {
             let sink = sink.clone();
+            let callbacks = callbacks.clone();
+            let db = setup_db.clone();
             async move {
-                sink.lock().await.push(body);
+                // General channel tests mock the conversation engine. Visitor
+                // initialization now needs a real, authenticated model admission;
+                // exercise it without counting the hidden turn as user input.
+                use tower::ServiceExt;
+                let hidden = if body["input"] == crate::services::assistant_guest_model_setup::INSTRUCTION {
+                    let raw = headers["authorization"].to_str().unwrap().strip_prefix("Bearer ").unwrap();
+                    let (_, key, _) = key_service::validate_api_key(&db, raw).await.unwrap();
+                    db.collection::<AssistantConversation>(CONVERSATIONS)
+                        .find_one(doc!{"credential_api_key_id":&key.id,"guest_model_setup":true}).await.unwrap().is_some()
+                } else {false};
+                if hidden {
+                    assert_eq!(body["input"], crate::services::assistant_guest_model_setup::INSTRUCTION);
+                    let response = callbacks.oneshot(axum::http::Request::builder().method("POST")
+                        .uri("/api/v1/proxy/s/fixture-model/responses")
+                        .header("authorization", headers["authorization"].clone())
+                        .header("content-type", "application/json").header("accept", "*/*")
+                        .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                    assert_eq!(status, StatusCode::OK, "setup model callback: {}", String::from_utf8_lossy(&bytes));
+                } else {
+                    sink.lock().await.push(body);
+                }
                 let session = format!("conv_{}", Uuid::new_v4().simple());
                 let response = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
                 let stream = async_stream::stream! {
@@ -117,6 +169,10 @@ async fn setup_with_reply(
     let upstream=upstream.route("/v1/capabilities",axum::routing::get(||async {
         Json(json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":10,"max_image_bytes":20971520,"max_total_bytes":20971520,"content_types":["image/png","image/jpeg"]}}))
     }));
+    let upstream = upstream.route(
+        "/fixture-model/responses",
+        post(|| async { Json(json!({"id":"fixture-model-response","output":[]})) }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -132,11 +188,32 @@ async fn setup_with_reply(
     row.forward_access_token = true;
     row.inject_delegation_token = false;
     row.credential_encrypted.clear();
-    db.collection::<DownstreamService>(SERVICES)
-        .insert_one(row)
+    Box::pin(async {
+        db.collection::<DownstreamService>(SERVICES)
+            .insert_one(row)
+            .await
+            .unwrap();
+    })
+    .await;
+    let mut model = crate::models::downstream_service::test_helpers::dummy_service();
+    model.id = Uuid::new_v4().to_string();
+    model.slug = "fixture-model".into();
+    model.base_url = format!("http://{address}/fixture-model");
+    model.service_category = "internal".into();
+    model.auth_method = "bearer".into();
+    model.requires_user_credential = false;
+    model.credential_encrypted = state
+        .encryption_keys
+        .encrypt(b"fixture-model-key")
         .await
         .unwrap();
-    (test_app_state(db), calls, server)
+    model.inference =
+        Some(serde_json::from_value(json!({"wire_protocol":"openai_responses"})).unwrap());
+    db.collection::<DownstreamService>(SERVICES)
+        .insert_one(model)
+        .await
+        .unwrap();
+    (state, calls, server)
 }
 
 async fn key(state: &AppState, name: &str) -> key_service::CreatedApiKey {
@@ -159,6 +236,50 @@ async fn key(state: &AppState, name: &str) -> key_service::CreatedApiKey {
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn guest_setup_2092_closed_private_chat_settings_do_not_start_billed_setup() {
+    let (state, calls, server) = setup("guest_setup_closed_private").await;
+    let (channel, _) = channel(&state, "direct").await;
+    let chat = chats::record_chat(
+        &state,
+        &channel,
+        "private-owner",
+        &chats::ChatFacts {
+            kind: "private",
+            chat_id: "owner-chat".into(),
+            thread_id: None,
+            owner: true,
+            title: Some("Owner".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    chats::update_chat(
+        &state,
+        OWNER,
+        &chat.id,
+        &chats::ChatSettings {
+            allow_posts: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
+            .count_documents(doc! {"kind":crate::services::assistant_guest_model_setup::KIND})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
 }
 
 /// An active channel as `connect` leaves it, without the gateway round trip.

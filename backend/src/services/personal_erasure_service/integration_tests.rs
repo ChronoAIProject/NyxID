@@ -100,6 +100,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             doc! {"_id":"machine-selection","user_id":&owner},
         ),
         (
+            "channel_whatsapp_native",
+            doc! {"_id":"native-wa","owner_id":&owner,"meta_app_id":"123"},
+        ),
+        (
             "channel_delivery_receipts",
             doc! {"_id":"receipt","user_id":&owner,"recipient_id":"personal-recipient"},
         ),
@@ -213,6 +217,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         (
             "channel_conversations",
             doc! {"_id":"org-chat","user_id":&other,"created_by":&owner},
+        ),
+        (
+            "channel_whatsapp_native",
+            doc! {"_id":"org-native-wa","owner_id":&other,"created_by":&owner},
         ),
         (
             "channel_messages",

@@ -446,7 +446,7 @@ export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
 export const guestReadinessSchema = z.object({
-  status: z.enum(["ready", "not_ready"]),
+  status: z.enum(["ready", "setting_up", "not_ready"]),
   reason: z.string().nullish(),
   fix: z.string().nullish(),
 });
@@ -793,6 +793,10 @@ export const assistantGroupMemberSchema = z.object({
   name: z.string(),
   kind: assistantAgentKindSchema,
   destroyed: z.boolean().default(false),
+  unavailable: z.boolean().optional(),
+  shared: z.boolean().optional(),
+  owner_name: z.string().nullable().optional(),
+  conversation_id: z.string().nullable().optional(),
   working: z.boolean().default(false),
 });
 export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;

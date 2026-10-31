@@ -1072,6 +1072,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::admin_feature_flags::patch_feature_flag_metadata),
         )
         .route(
+            "/feature-flags/{flag_key}/history",
+            get(handlers::admin_feature_flags::list_feature_flag_history),
+        )
+        .route(
             "/users",
             get(handlers::admin::list_users).post(handlers::admin::create_user),
         )
@@ -1749,7 +1753,25 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_history::get_history),
         )
         .route("/", post(handlers::keys::create_key))
-        .route("/{key_id}", delete(handlers::keys::delete_key));
+        .route("/{key_id}", delete(handlers::keys::delete_key))
+        .merge(
+            Router::new()
+                .route(
+                    "/{key_id}/monitoring",
+                    get(handlers::monitoring::get)
+                        .put(handlers::monitoring::save)
+                        .delete(handlers::monitoring::clear),
+                )
+                .route(
+                    "/{key_id}/monitoring/validate",
+                    post(handlers::monitoring::validate),
+                )
+                .route(
+                    "/{key_id}/monitoring/probe",
+                    post(handlers::monitoring::probe),
+                )
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        );
 
     let service_preference_reads = Router::new()
         .route(
@@ -2006,6 +2028,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/cancel", post(handlers::cli_pairings::cancel_pairing));
 
     let channel_bot_routes = Router::new()
+        .route(
+            "/{id}/native-whatsapp/relay-verify-token",
+            post(handlers::channel_whatsapp_native::rollback::replace),
+        )
+        .route(
+            "/{id}/native-whatsapp",
+            get(handlers::channel_whatsapp_native::get).put(handlers::channel_whatsapp_native::put),
+        )
         .route(
             "/{id}/activities",
             get(handlers::channel_activities::bot_activities),

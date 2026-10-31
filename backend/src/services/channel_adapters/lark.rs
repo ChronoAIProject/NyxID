@@ -1265,7 +1265,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
             self.base_url
         );
 
-        crate::services::channel_platform::mark_provider_attempt();
+        crate::services::channel_platform::mark_provider_attempt().await?;
         let resp: serde_json::Value = http
             .post(&url)
             .bearer_auth(tenant_token.as_str())

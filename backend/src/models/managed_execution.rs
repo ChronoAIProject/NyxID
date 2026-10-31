@@ -25,6 +25,8 @@ pub enum ManagedExecutionState {
 /// Metadata and validated usage only; request and response content are never stored.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ManagedExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(rename = "_id")]
     pub id: String,
     pub billing_request_id: String,

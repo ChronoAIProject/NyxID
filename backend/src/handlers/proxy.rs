@@ -46,6 +46,9 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
+#[path = "proxy_shared_connect.rs"]
+mod shared_connect;
+
 /// Map an `AppError` surfaced by the proxy handler to the `(status, error_code)`
 /// pair used by `TelemetryEvent::ProxyError`.
 ///
@@ -836,6 +839,12 @@ pub(crate) async fn proxy_request_inner(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    shared_stream_preflight(
+        state,
+        auth_user,
+        request.method() == Method::CONNECT || is_ws_upgrade_request(&request),
+    )
+    .await?;
     validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
     auth_user
@@ -1615,7 +1624,7 @@ async fn proxy_request_through_pool(
         overall_deadline
             .checked_duration_since(std::time::Instant::now())
             .ok_or(AppError::ServicePoolDeadlineExceeded { attempts: vec![] })?,
-        Box::pin(service_pool_service::plan_candidates_with_allowlist(
+        Box::pin(service_pool_service::plan_candidates_with_access(
             &state.db,
             &state.encryption_keys,
             &actor_user_id,
@@ -1628,6 +1637,7 @@ async fn proxy_request_through_pool(
             Some(&body),
             allowed_services.as_ref(),
             allowed_nodes.as_ref(),
+            auth_user.org_agent_access.as_deref(),
         )),
     )
     .await
@@ -1658,6 +1668,13 @@ async fn proxy_request_through_pool(
     {
         plan.candidates
             .retain(|candidate| candidate.member.user_service_id == pinned);
+        plan.max_attempts = 1;
+    }
+    if auth_user
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+    {
         plan.max_attempts = 1;
     }
     if plan.candidates.is_empty() {
@@ -2223,12 +2240,13 @@ async fn proxy_request_by_selected_member(
     let exact = request.extensions().get::<PoolExactMember>().cloned();
     let resolved = if exact.is_some() {
         box_proxy_future(|| {
-            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            proxy_service::read_proxy_authority_snapshot_with_access(
                 &state.db,
                 &state.encryption_keys,
                 &user_id_str,
                 us_id,
                 Some(slug),
+                auth_user.org_agent_access.as_deref(),
             )
         })
         .await?
@@ -2343,6 +2361,12 @@ pub(crate) async fn proxy_request_by_slug_inner(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    shared_stream_preflight(
+        state,
+        auth_user,
+        request.method() == Method::CONNECT || is_ws_upgrade_request(&request),
+    )
+    .await?;
     validate_original_proxy_request_path(&request)?;
     if request.extensions().get::<PoolGatewayIngress>().is_some() {
         auth_user.ensure_llm_proxy_access()?;
@@ -2449,7 +2473,12 @@ pub(crate) async fn proxy_request_by_slug_inner(
         // Reserve legacy balancing exactly once before policy preflight. This
         // request carries the selected identity through every remaining gate.
         let (mut member, mut selection) = box_proxy_future(|| {
-            service_pool_service::resolve_member(&state.db, &pool.user_id, slug)
+            service_pool_service::resolve_member_with_access(
+                &state.db,
+                &pool.user_id,
+                slug,
+                auth_user.org_agent_access.as_deref(),
+            )
         })
         .await?
         .ok_or_else(|| AppError::ServicePoolNoViableMember(slug.into()))?;
@@ -4073,6 +4102,13 @@ async fn execute_resolved_proxy_inner<'a>(
             "Shared calls cannot override HTTP methods".into(),
         ));
     }
+    if crate::services::assistant_service_execution::is_shared_auth(auth_user)
+        && node_route.is_some()
+    {
+        return Err(AppError::Forbidden(
+            "Shared execution requires server transport".into(),
+        ));
+    }
     let operation_target_id = target.service.id.clone();
     let (operation_scope_id, operation_catalog_id) =
         crate::services::agent_operation_scope_service::execution_identity(
@@ -4145,16 +4181,6 @@ async fn execute_resolved_proxy_inner<'a>(
         audit_service::AuditActor::from_auth_user(auth_user),
         &target,
     );
-    if auth_user
-        .org_agent_access
-        .as_ref()
-        .is_some_and(|a| a.shared().is_some())
-        && (is_ws_upgrade_request(&request) || request.method() == Method::CONNECT)
-    {
-        return Err(AppError::Forbidden(
-            "Shared agents require HTTP request execution".into(),
-        ));
-    }
     if is_ws_upgrade_request(&request) {
         crate::services::destination_routing::reject_websocket(&target)?;
     }
@@ -4220,7 +4246,12 @@ async fn execute_resolved_proxy_inner<'a>(
     let nyxagent_admission = request.extensions().get::<NyxAgentAdmission>().is_some()
         && target.service.slug == crate::services::assistant_nyxagent::SERVICE_SLUG;
     let is_ws_candidate = is_ws_upgrade_request(&request);
-    let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
+    let shared_connect = request.method() == Method::CONNECT
+        && auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(crate::services::assistant_service_execution::is_shared_chat);
+    let platform_metric = platform_metric_for_target(&target, is_ws_candidate || shared_connect);
     let node_intent = match &node_route {
         Some(route) if !route.fallback_node_ids.is_empty() => {
             crate::services::billing::NodeIntent::NodeWithFallback
@@ -4374,7 +4405,11 @@ async fn execute_resolved_proxy_inner<'a>(
     let stream_upload = machine_ingress.is_some()
         && !is_ws
         && crate::services::machine_gateway_service::can_stream(&target, &all_headers, machine_git);
-    let (body_bytes, ws_request, mut streaming_body, upload_meter) = if is_ws {
+    let mut request = request;
+    let connect_upgrade = shared_connect.then(|| hyper::upgrade::on(&mut request));
+    let (body_bytes, ws_request, mut streaming_body, upload_meter) = if shared_connect {
+        (bytes::Bytes::new(), None, None, None)
+    } else if is_ws {
         (bytes::Bytes::new(), Some(request), None, None)
     } else if stream_upload {
         let limit = if machine_git {
@@ -4389,6 +4424,18 @@ async fn execute_resolved_proxy_inner<'a>(
         let bytes = read_proxy_request_body(request, state.config.proxy_max_body_size).await?;
         (bytes, None, None, None)
     };
+
+    // Only an authenticated, server-created setup thread gets this projection.
+    // The exact same bounded body reaches admission, billing and provider egress.
+    let body_bytes = crate::services::assistant_guest_model_setup::restrict_callback(
+        &state.db,
+        auth_user.assistant_chat.as_deref(),
+        &target,
+        &method_str,
+        path,
+        body_bytes,
+    )
+    .await?;
 
     // Guest and webhook limits classify by method, so neither may disguise it.
     let effect_limited_chat = auth_user
@@ -4597,6 +4644,18 @@ async fn execute_resolved_proxy_inner<'a>(
         )
         .await?;
     }
+    if is_ws_candidate || shared_connect {
+        let guard = assistant_decision.admission.as_ref().map(|admission| {
+            admission.http_egress(
+                &state.db,
+                &state.encryption_keys,
+                &target,
+                &method_str,
+                path,
+            )
+        });
+        require_shared_stream_guard(auth_user, guard.as_ref())?;
+    }
     // Resolve approval policy with org-cascade. The "service owner" (the
     // user_id that owns the resolved UserService) determines whether an
     // org policy applies. For the legacy DownstreamService fallback path
@@ -4770,12 +4829,13 @@ async fn execute_resolved_proxy_inner<'a>(
         let actor = auth_user.proxy_resolution_user_id();
         let service = &authority.scope.user_service_id;
         let snapshot = box_proxy_future(|| {
-            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            proxy_service::read_proxy_authority_snapshot_with_access(
                 &state.db,
                 &state.encryption_keys,
                 &actor,
                 service,
                 Some(&authority.member_slug),
+                auth_user.org_agent_access.as_deref(),
             )
         })
         .await?
@@ -4853,12 +4913,13 @@ async fn execute_resolved_proxy_inner<'a>(
             target.credential = credential;
         }
         let snapshot = box_proxy_future(|| {
-            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            proxy_service::read_proxy_authority_snapshot_with_access(
                 &state.db,
                 &state.encryption_keys,
                 &actor,
                 service,
                 Some(&authority.member_slug),
+                auth_user.org_agent_access.as_deref(),
             )
         })
         .await?
@@ -5124,7 +5185,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     service_owner_for_approval,
                     auth_user.assistant_chat.as_deref(),
                 ),
-            );
+            )?;
         destination_audit.dispatch();
         let managed = crate::services::telnyx_platform_service::execute(
             &state.db,
@@ -5659,8 +5720,10 @@ async fn execute_resolved_proxy_inner<'a>(
                             method.as_str(),
                             path,
                         )
+                        .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
                         .map(|guard| {
                             guard
+                                .observed(model_request.as_ref())
                                 .projected(&assistant_projection)
                                 .routed(Some(node_route))
                         })
@@ -6358,6 +6421,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 Method::PATCH => reqwest::Method::PATCH,
                 Method::HEAD => reqwest::Method::HEAD,
                 Method::OPTIONS => reqwest::Method::OPTIONS,
+                Method::CONNECT if shared_connect => reqwest::Method::CONNECT,
                 _ => return Err(AppError::BadRequest("Unsupported HTTP method".to_string())),
             };
 
@@ -6508,8 +6572,10 @@ async fn execute_resolved_proxy_inner<'a>(
                         method.as_str(),
                         path,
                     )
-                    .map(|guard| {
+                    .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
+                        .map(|guard| {
                         guard
+                            .observed(model_request.as_ref())
                             .projected(&assistant_projection)
                             .routed(node_route.as_ref())
                     })
@@ -6766,11 +6832,16 @@ async fn execute_resolved_proxy_inner<'a>(
                     method.as_str(),
                     path,
                 )
-                .map(|guard| {
+                .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
+                        .map(|guard| {
                     guard
+                        .observed(model_request.as_ref())
                         .projected(&assistant_projection)
                         .routed(node_route.as_ref())
                 });
+            if shared_connect {
+                require_shared_stream_guard(auth_user, egress_guard.as_ref())?;
+            }
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 box_proxy_future(|| {
@@ -6900,6 +6971,28 @@ async fn execute_resolved_proxy_inner<'a>(
                     return Err(proxy_client_disconnected(service_id));
                 }
             };
+
+            if let Some(upgrade) = connect_upgrade
+                && downstream_response.status().is_success()
+            {
+                let binding = egress_guard
+                    .as_ref()
+                    .map(|guard| guard.shared_stream())
+                    .transpose()?
+                    .flatten()
+                    .ok_or(AppError::AssistantTurnRequired)?;
+                request_audit.response(downstream_response.status().as_u16());
+                destination_audit.complete(downstream_response.status().as_u16());
+                return shared_connect::start(
+                    state,
+                    upgrade,
+                    downstream_response,
+                    binding,
+                    metered,
+                    service_lease,
+                )
+                .await;
+            }
 
             // Convert reqwest Response back to axum Response
             let status = StatusCode::from_u16(downstream_response.status().as_u16())
@@ -7820,6 +7913,7 @@ async fn bridge_websockets(
     ip_address: Option<String>,
     user_agent: Option<String>,
     slot_cancel: tokio_util::sync::CancellationToken,
+    shared: Option<crate::models::assistant_sharing::SharedExecution>,
 ) -> ConnectionUsageStats {
     let start = std::time::Instant::now();
     let mut stats = ConnectionUsageStats::default();
@@ -7839,8 +7933,14 @@ async fn bridge_websockets(
     ));
     tokio::pin!(idle_timeout);
 
+    let mut shared_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    shared_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = shared_tick.tick(), if shared.is_some() => {
+                if let Some(binding) = &shared
+                    && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
+            }
             () = slot_cancel.cancelled() => {
                 tracing::warn!(service_id = %service_id, "WS passthrough capacity slot was lost");
                 break;
@@ -7862,6 +7962,8 @@ async fn bridge_websockets(
             msg = client_stream.next() => {
                 match msg {
                     Some(Ok(axum_msg)) => {
+                        if let Some(binding) = &shared
+                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
                         match &axum_msg {
                             axum::extract::ws::Message::Text(text) => {
                                 stats.frames_in += 1;
@@ -7924,6 +8026,8 @@ async fn bridge_websockets(
                             }
                         }
                         let is_close = matches!(axum_msg, axum::extract::ws::Message::Close(_));
+                        if let Some(binding) = &shared
+                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
                         let _ = downstream_sink.send(axum_msg_to_tungstenite(axum_msg)).await;
                         if is_close {
                             break;
@@ -7939,6 +8043,9 @@ async fn bridge_websockets(
             msg = downstream_stream.next() => {
                 match msg {
                     Some(Ok(tung_msg)) => {
+                        // A downstream auth challenge can trigger an upstream effect.
+                        if let Some(binding) = &shared
+                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
                         match &tung_msg {
                             tokio_tungstenite::tungstenite::Message::Text(text) => {
                                 stats.frames_out += 1;
@@ -8001,6 +8108,8 @@ async fn bridge_websockets(
                             }
                         }
                         let is_close = matches!(tung_msg, tokio_tungstenite::tungstenite::Message::Close(_));
+                        if let Some(binding) = &shared
+                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
                         let _ = client_sink.send(tungstenite_msg_to_axum(tung_msg)).await;
                         if is_close {
                             break;
@@ -8030,6 +8139,45 @@ const WS_PASSTHROUGH_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 /// Maximum time spent establishing the downstream WS connection.
 const WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS: u64 = 10;
 
+/// Shared stream routing may never rely on an absent chat/guard. UUID, slug,
+/// exact member and `_nyxid_via` all converge on the same admitted execution.
+async fn shared_stream_preflight(state: &AppState, auth: &AuthUser, stream: bool) -> AppResult<()> {
+    use crate::services::assistant_service_execution as execution;
+    if execution::is_shared_auth(auth) && stream {
+        execution::require_shared_context(auth)?;
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+    }
+    Ok(())
+}
+
+fn require_shared_stream_guard(
+    auth: &AuthUser,
+    guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
+) -> AppResult<()> {
+    use crate::services::assistant_service_execution as execution;
+    if !execution::is_shared_auth(auth) {
+        return Ok(());
+    }
+    execution::require_shared_context(auth)?;
+    let binding = guard
+        .map(|guard| guard.shared_stream())
+        .transpose()?
+        .flatten()
+        .ok_or_else(|| AppError::Forbidden("Shared stream admission required".into()))?;
+    let chat = auth
+        .assistant_chat
+        .as_deref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    if binding.actor != chat.user_id
+        || binding.key != chat.api_key_id
+        || binding.conversation != chat.conversation_id
+        || Some(binding.turn.as_str()) != chat.turn_id.as_deref()
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    Ok(())
+}
+
 /// Handle a WebSocket passthrough: connect to the downstream service,
 /// upgrade the client connection, and bridge frames bidirectionally.
 #[allow(clippy::too_many_arguments)]
@@ -8051,6 +8199,7 @@ async fn handle_ws_passthrough(
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
     egress_guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> AppResult<Response> {
+    require_shared_stream_guard(auth_user, egress_guard)?;
     crate::services::destination_routing::reject_websocket(target)?;
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
@@ -8099,15 +8248,18 @@ async fn handle_ws_passthrough(
     let req_ip = auth_user.ip_address.clone();
     let req_ua = auth_user.user_agent.clone();
 
+    let shared = egress_guard
+        .map(|guard| guard.shared_stream())
+        .transpose()?
+        .flatten();
+    let mut event = serde_json::json!({"service_id": service_id, "path": path,
+        "acting_client_id": &acting_client_id});
+    crate::services::shared_agent_transport::annotate(&mut event, shared.as_ref());
     audit_service::log_async(
         state.db.clone(),
         Some(user_id_str.clone()),
-        "proxy_ws_upgrade".to_string(),
-        Some(serde_json::json!({
-            "service_id": service_id,
-            "path": path,
-            "acting_client_id": &acting_client_id,
-        })),
+        "proxy_ws_upgrade".into(),
+        Some(event),
         req_ip.clone(),
         req_ua.clone(),
         ak_id.clone(),
@@ -8143,6 +8295,7 @@ async fn handle_ws_passthrough(
                 req_ip.clone(),
                 req_ua.clone(),
                 slot_cancel,
+                shared.clone(),
             )
             .await;
             drop(guard);
@@ -8163,6 +8316,10 @@ async fn handle_ws_passthrough(
                 "duration_secs": stats.duration.as_secs(),
                 "acting_client_id": &acting_client_id,
             });
+            crate::services::shared_agent_transport::annotate(
+                &mut disconnect_event,
+                shared.as_ref(),
+            );
             add_websocket_usage_provenance(&mut disconnect_event, &stats);
             audit_service::log_async(
                 db,
@@ -8202,6 +8359,11 @@ async fn handle_ws_passthrough_via_node(
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
     egress_guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(auth_user) {
+        return Err(AppError::Forbidden(
+            "Shared streams require server transport".into(),
+        ));
+    }
     crate::services::destination_routing::reject_websocket(target)?;
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 
@@ -9692,6 +9854,7 @@ mod tests {
                 None,
                 None,
                 tokio_util::sync::CancellationToken::new(),
+                None,
             )
             .await;
         })

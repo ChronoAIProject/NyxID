@@ -887,6 +887,16 @@ describe("ChatComposer @mentions (group chats)", () => {
     expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", "Message NyxBot");
   });
 
+  it("labels a shared agent and inserts its exact collision-safe handle", async () => {
+    const id = "12345678-1234-4123-8123-1234567890ab";
+    render(<ChatComposer {...baseProps} draftKey="shared-crew" mentions={[{ id, name: id, display_name: "researcher", kind: "specialist", shared: true, owner_name: "Publisher" }]} />);
+    const input = screen.getByRole("combobox") as HTMLTextAreaElement;
+    type(input, "@researcher");
+    expect(screen.getByRole("option")).toHaveTextContent("Shared agent · Publisher");
+    await act(async () => { fireEvent.keyDown(input, { key: "Enter" }); });
+    expect(input).toHaveValue(`@${id} `);
+  });
+
   it("lists matching members after @ and inserts the chosen one with Enter", async () => {
     const input = renderMentions();
     expect(input).toHaveAttribute("aria-expanded", "false");

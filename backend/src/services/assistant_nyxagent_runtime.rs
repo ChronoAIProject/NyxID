@@ -608,8 +608,22 @@ pub(crate) async fn group_note(
         .ok()?;
     let others: Vec<String> = members
         .iter()
-        .filter(|member| member.id != agent.id && member.destroyed_at.is_none())
-        .map(|member| format!("@{}", identifier(&member.name)))
+        .filter(|member| member.id != agent.id && member.available)
+        .map(|member| {
+            if members
+                .iter()
+                .filter(|other| other.name.eq_ignore_ascii_case(&member.name))
+                .count()
+                > 1
+                || members
+                    .iter()
+                    .any(|other| other.id.eq_ignore_ascii_case(&member.name))
+            {
+                format!("@{} ({})", member.id, identifier(&member.name))
+            } else {
+                format!("@{}", identifier(&member.name))
+            }
+        })
         .collect();
     Some(format!(
         "You are {} in the group chat {} with the user and {}. Your reply is posted to the \
@@ -838,7 +852,25 @@ pub(crate) async fn run_owner_turn(
         let mut execution = Box::pin(async {
             let authority = owner_context(&row)
                 .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-            execute_owner_turn(
+            let setup_deadline = super::assistant_guest_model_setup::guest_deadline(&state.db, &row).await
+                .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
+            let setup_generation = if row.guest_turn && let Some(agent)=row.agent_id.as_deref() {
+                super::assistant_guest_model_setup::record(&state.db,&row.user_id,agent,&row.model).await.ok().flatten()
+                    .and_then(|r|r.get_str("claim").ok().map(str::to_owned))
+            } else {None};
+            if row.guest_turn && !row.shared_agent_thread && let Some(agent) = row.agent_id.as_deref()
+                && (row.channel.is_some() || row.active_turn.as_ref().is_some_and(|t| t.channel_event_id.is_some()))
+                && !super::assistant_guest_model_setup::valid_thread_route(&state,&row).await
+                    .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))? {
+                let now = Utc::now();
+                engine::mark_queued(&state.db,&row,&turn_id,now,now+chrono::Duration::seconds(60)).await
+                    .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
+                let ready = Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,false,setup_deadline)).await;
+                engine::mark_dequeued(&state.db,&row,&turn_id).await
+                    .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
+                if !ready.unwrap_or(false) {return Err(super::assistant_guest_model_setup::failure(&state.db,&row).await);}
+            }
+            let outcome = execute_owner_turn(
                 &state,
                 egress.as_ref(),
                 &authority,
@@ -851,7 +883,27 @@ pub(crate) async fn run_owner_turn(
                 &mut partial,
                 &mut instruction_context,
             )
-            .await
+            .await;
+            let failure=match &outcome {Err(error)=>Some(error),Ok(result)=>result.error.as_ref()};
+            let route_failed=if row.guest_turn && !row.shared_agent_thread && let Some(error)=failure {
+                let current=engine::get(&state.db,&row.user_id,&row.id).await.ok();
+                current.as_ref().and_then(|r|r.active_turn.as_ref()).is_some_and(|turn|
+                    super::assistant_model_observer::attribute(error,turn,Utc::now()).code=="guest_model_route_required"
+                    && turn.model_route_diagnostic.as_ref().is_some_and(|d|super::assistant_service_execution::model_diagnostic::Reason::needs_owner_setup(&d.reason)))
+            }else{false};
+            if route_failed && row.guest_turn && !row.shared_agent_thread && let Some(agent)=row.agent_id.as_deref() {
+                let current=super::assistant_guest_model_setup::record(&state.db,&row.user_id,agent,&row.model).await.ok().flatten()
+                    .and_then(|r|r.get_str("claim").ok().map(str::to_owned));
+                // Another request may already have replaced the rejected generation.
+                let force = current==setup_generation;
+                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline)).await.unwrap_or(false) {
+                    partial.clear();
+                    instruction_context = None;
+                    return execute_owner_turn(&state,egress.as_ref(),&authority,&row,&text,&mut credential,policy,&mut events,&block_id,&mut partial,&mut instruction_context).await;
+                }
+                return Err(super::assistant_guest_model_setup::failure(&state.db,&row).await);
+            }
+            outcome
         });
         tokio::select! {
             result = &mut execution => result,
@@ -1481,7 +1533,8 @@ async fn execute_turn_inner(
     );
     // Rollout-gated authoring rules are instructions, so they belong in the
     // stable (fingerprinted) part rather than the per-turn quoted context.
-    let guidance = if !row.guest_turn
+    let guidance = if !row.guest_model_setup
+        && !row.guest_turn
         && crate::services::assistant_skill_authoring::enabled(&state.db, &row.user_id)
             .await
             .unwrap_or(false)
@@ -1495,7 +1548,8 @@ async fn execute_turn_inner(
         ""
     };
     let mut guidance = guidance.to_owned();
-    if let Some(agent) = agent.as_ref()
+    if !row.guest_model_setup
+        && let Some(agent) = agent.as_ref()
         && crate::services::agent_skill_preload::enabled(agent, row.guest_turn)
     {
         let preloaded =
@@ -1648,9 +1702,12 @@ async fn execute_turn_inner(
     let settings = crate::services::assistant_settings_service::get(&state.db, &row.user_id)
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    let mut continuations = crate::services::assistant_continuation::Continuations::new(
-        settings.max_auto_continuations,
-    );
+    let mut continuations =
+        crate::services::assistant_continuation::Continuations::new(if row.guest_model_setup {
+            0
+        } else {
+            settings.max_auto_continuations
+        });
     let mut completed = String::new();
     let mut emitted = String::new();
     let mut input = if text.trim().is_empty() {
@@ -1736,6 +1793,10 @@ async fn execute_turn_inner(
                 continuations.count == 0 || binding.is_none(),
             );
             let mut body = engine::upstream_body(&row.model, &input, binding.as_deref(), &prompt);
+            if row.guest_model_setup {
+                body["input"] = json!(super::assistant_guest_model_setup::INSTRUCTION);
+                body["instructions"] = json!(super::assistant_guest_model_setup::INSTRUCTION);
+            }
             let parts = if !tool_images.parts.is_empty() {
                 &tool_images.parts
             } else if continuations.count == 0 && tool_images.fallback.is_none() {

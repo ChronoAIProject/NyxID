@@ -25,6 +25,7 @@ use crate::{
 /// access; specialist threads carry exactly their agent's grants.
 #[derive(Clone, Debug)]
 pub enum KeyAuthority {
+    ModelSetup(String),
     Orchestrator,
     Shared(
         AgentGrants,
@@ -54,6 +55,11 @@ impl KeyAuthority {
     /// rotated or hand-edited key converges back to its conversation's authority.
     pub fn key_fields(&self) -> bson::Document {
         match self {
+            Self::ModelSetup(owner) => doc! {
+                "assistant_agent_owner_id":owner,"assistant_operation_scopes":bson::Document::new(),
+                "allow_all_services":false,"allow_all_nodes":false,"allow_auto_connected_services":false,
+                "allowed_service_ids":[],"allowed_platform_service_ids":[],"allowed_node_ids":[],"scopes":ASSISTANT_SCOPES,
+            },
             Self::Shared(grants, scopes, owner) => doc! {
                 "assistant_agent_owner_id": owner,
                 "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
@@ -159,6 +165,7 @@ pub(crate) async fn authority_with_access(
             .expect("shared snapshot")
             .check_conversation(conversation)?;
         super::shared_agent_service::fence(db, shared, session).await?;
+        super::assistant_group_service::fence_shared_group(db, conversation, session).await?;
         db.collection::<bson::Document>(CONVERSATIONS)
             .update_one(
                 doc! {"_id": &conversation.id, "user_id": &conversation.user_id},
@@ -211,6 +218,25 @@ pub(crate) async fn authority_with_access(
         || AppError::Conflict("This agent was destroyed; its threads are read-only".into());
     if agent.destroyed_at.is_some() {
         return Err(destroyed());
+    }
+    if conversation.guest_model_setup {
+        if conversation.guest_turn || conversation.shared_agent_thread {
+            return Err(AppError::Forbidden(
+                "Visitor setup authority changed".into(),
+            ));
+        }
+        let mut live = filter.clone();
+        live.insert("destroyed_at", bson::Bson::Null);
+        if agents
+            .update_one(live, doc! {"$inc":{"thread_fence":1_i64}})
+            .session(&mut *session)
+            .await?
+            .matched_count
+            != 1
+        {
+            return Err(destroyed());
+        }
+        return Ok(KeyAuthority::ModelSetup(agent.user_id.clone()));
     }
     if agent.kind == AgentKind::Nyxbot {
         return Ok(KeyAuthority::Orchestrator);

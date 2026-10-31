@@ -54,6 +54,7 @@ mod channel_managed_tests;
 pub mod channel_relay;
 pub mod channel_relay_request;
 pub mod channel_webhooks;
+pub mod channel_whatsapp_native;
 pub mod cli_pairings;
 pub mod codex_connection;
 pub mod connect_links;
@@ -219,3 +220,5 @@ pub mod platform_help;
 pub mod telegram_managers;
 
 pub mod nyxbot_gateway_releases;
+
+pub mod monitoring;

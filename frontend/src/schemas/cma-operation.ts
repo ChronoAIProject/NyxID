@@ -14,6 +14,7 @@ export const cmaOperationSchema = z.object({
   monitor_name: z.string(),
   created_at: z.string(),
   checked_at: z.string().nullable(),
+  cma_url: z.string().nullish(),
 });
 
 export type CmaOperation = z.infer<typeof cmaOperationSchema>;

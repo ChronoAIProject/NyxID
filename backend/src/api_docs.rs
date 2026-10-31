@@ -61,6 +61,11 @@
         crate::handlers::service_preference::release_hidden,
         crate::handlers::keys::get_key,
         crate::handlers::keys::get_key_authorization,
+        crate::handlers::monitoring::get,
+        crate::handlers::monitoring::save,
+        crate::handlers::monitoring::clear,
+        crate::handlers::monitoring::validate,
+        crate::handlers::monitoring::probe,
         crate::handlers::keys::update_key,
         crate::handlers::keys::delete_key,
         // Hosted bot connection requests

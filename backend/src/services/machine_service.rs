@@ -87,7 +87,12 @@ pub async fn settle_watch(
 }
 
 pub fn caller(chat: &ChatAuthority) -> AppResult<()> {
-    if chat.guest {
+    if chat.guest
+        || chat
+            .org_agent_access
+            .as_ref()
+            .is_some_and(|access| access.shared().is_some())
+    {
         return Err(AppError::MachineNotAllowed);
     }
     Ok(())

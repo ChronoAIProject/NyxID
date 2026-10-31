@@ -481,7 +481,7 @@ async fn materialize_and_send(
         ));
         let result = async {
             if Utc::now() >= authority.deadline { return None; }
-            super::channel_platform::mark_provider_attempt();
+            super::channel_platform::mark_provider_attempt().await.ok()?;
             let mut response = state.http_client.post(url.as_str())
                 .json(&serde_json::json!({"content":body.as_str(),"allowed_mentions":{"parse":[]},"flags":4}))
                 .send().await.ok()?;

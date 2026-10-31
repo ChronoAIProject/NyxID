@@ -27,6 +27,7 @@ pub struct ModelRequest {
     turn: String,
     attempt: String,
     completion: Arc<Completion>,
+    setup: bool,
 }
 
 struct Completion {
@@ -90,6 +91,7 @@ impl ModelRequest {
             .filter(|turn| !turn.stop_requested)
             .map(|turn| Self {
                 db: db.clone(),
+                setup: row.as_ref().is_some_and(|r| r.guest_model_setup),
                 conversation: conversation.into(),
                 turn: turn.turn_id.clone(),
                 attempt: Uuid::new_v4().to_string(),
@@ -166,12 +168,25 @@ impl ModelRequest {
     }
 
     pub async fn accepted(&self) -> AppResult<()> {
+        if self.setup {
+            self.db.collection::<bson::Document>(super::assistant_service_execution::COLLECTION).update_one(
+                doc!{"kind":super::assistant_guest_model_setup::KIND,"conversation_id":&self.conversation,"status":"setting_up","until":{"$gt":bson::DateTime::now()}},
+                doc!{"$set":{"model_accepted":true}}).await?;
+        }
         let mut fence = self.fence();
         fence.insert("active_turn.model_refusal", doc! {"$ne": null});
         self.db
             .collection::<bson::Document>(COLLECTION_NAME)
             .update_one(fence, doc! {"$unset": {"active_turn.model_refusal": ""}})
             .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn dispatched(&self) -> AppResult<()> {
+        if self.setup {
+            super::assistant_guest_model_setup::backoff::dispatched(&self.db, &self.conversation)
+                .await?;
+        }
         Ok(())
     }
 
@@ -278,6 +293,12 @@ pub fn failure_reason(
     now: DateTime<Utc>,
 ) -> Option<Box<crate::models::assistant_message::TurnFailureReason>> {
     use crate::models::assistant_message::TurnFailureReason;
+    if error.stage == "guest_setup" && error.code == "guest_model_route_required" {
+        return error
+            .metadata
+            .as_ref()
+            .and_then(|m| m.failure_reason.clone());
+    }
     let model_route = turn
         .model_route_diagnostic
         .as_ref()

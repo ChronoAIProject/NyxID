@@ -281,6 +281,7 @@ async fn serve_with_provider(
         let fresh = resolve(&state,&user,&thread,&call.preferences).await?;
         if fresh.identity != call.credential_identity { return Err(AppError::VoiceProviderUnavailable); }
         state.billing.mark_forwarded(&meter).await?;
+        super::shared::revalidate(&state.db, &call).await?;
         let mut provider = connect(&resolved.key, injected).await?;
         call = session::write(&state.db,&call,doc!{"state":"active"}).await?;
         admitted = Some(call.clone());
@@ -329,6 +330,7 @@ async fn serve_with_provider(
                                 call=session::write(&state.db,&call,doc!{"reserved_until":call.reserved_until+30}).await?;
                                 admitted=Some(call.clone());
                             }
+                            super::shared::revalidate(&state.db, &call).await?;
                             openai::send(&mut provider,json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(&bytes)})).await?;
                             forwarded+=bytes.len(); buffered+=bytes.len();
                         }
@@ -382,6 +384,7 @@ async fn serve_with_provider(
             if orders.len() > 128 { return Err(AppError::VoiceProviderUnavailable); }
             if output.is_closed() { drain.stop(); }
             if !pending && buffered >= BYTES_PER_SECOND/10 && (buffered>=COMMIT_BYTES || drain.stopping()) {
+                super::shared::revalidate(&state.db, &call).await?;
                 openai::send(&mut provider,json!({"type":"input_audio_buffer.commit"})).await?;
                 pending=true; pending_at=tokio::time::Instant::now(); buffered=0;
             }

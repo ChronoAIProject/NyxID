@@ -303,6 +303,22 @@ is not woken by those direct chats.
 
 ### 10a. Group chats
 
+Personal crews also support specialists shared with the sole human owner.
+They are listed and selectable with a Shared agent label, and use the same
+recipient-owned hidden thread, key, billing, human cards, consent, pinned skills
+and private notes as a private shared chat. NyxBot's group presence and handoffs
+do not transfer its authority to a shared member. Live access is rechecked for
+every turn and callback. Revoked/destroyed members remain unavailable in the
+roster, disappear from mention/recipient choices, and addressed attempts post
+“Ask this agent's owner to share it with you.” without a model call or charge.
+Re-sharing restores the stored member without recreating the crew. Recipient
+UUIDs and `@UUID` are exact; ambiguous `@name` text never selects a namesake.
+The picker and agent instructions use UUIDs for collisions. Human ambiguous
+text without explicit recipients is refused; ambiguous handoff tokens are ignored.
+Organization groups, automation and platform/channel threads still reject shared
+agents. Multi-person collaboration remains Phase 2 of
+[the shared-agent design](12-shared-agents-and-groups.md).
+
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
 `assistant_group_messages` holds the shared transcript (`user`, `agent`,
 `notice`). A user message goes to the recipients picked in the composer's pills
@@ -1588,7 +1604,9 @@ need adversarial tests. No owner-specific values belong in audit metadata.
 ### Guest model readiness
 
 Opening `private_chats` or group `members` to everyone changes the audience, not
-model setup or service grants. The dedicated owner-only agent readiness read
+service grants. Saving an open visitor audience starts automatic model setup
+through a hidden owner turn; it does not require an owner chat. The dedicated
+owner-only agent readiness read
 serves the open Grants and channel Chats settings; ordinary lists do no readiness
 work. Audience-setting writes include optional `guest_readiness`. The NyxBot
 channel-list tool memoizes by effective agent and checks only channels open to
@@ -1604,3 +1622,16 @@ and limited to one per 24 hours; metadata receipts expire after 48 hours. No
 model wake-up is needed, no visitor content is included, and no group receives
 the owner's diagnostic. See the engine's guest model route section for the
 closed reasons, runtime fixtures and model-routes.json maintenance contract.
+
+### Automatic visitor model setup
+
+Opening private chats to everyone, enabling group members or relinking an open
+bot starts model setup for the linked agent/profile. NyxBot should report the
+returned `guest_readiness`: `setting_up` means preparation is running, `ready`
+means ready for visitors, and `not_ready` includes the fix for a real failure
+(such as unavailable model credentials or credits). Do not ask owners to send a
+warm-up message. The first admitted visitor waits in a source-bound guest queue,
+then receives its answer automatically. Concurrent visitors share one setup.
+Guests never become owner events, acquire owner tools or choose setup's model.
+See [engine guest model routes](08-nyxagent-engine.md) for admission, retention,
+recovery and mixed-replica details.

@@ -225,6 +225,7 @@ struct Fixture {
     chunks: Arc<AtomicUsize>,
     chunk_delay_ms: Arc<AtomicUsize>,
     fail_turn: Arc<AtomicBool>,
+    fail_setup: Arc<AtomicBool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 impl Drop for Fixture {
@@ -372,7 +373,8 @@ async fn fixture_with_model(
         .unwrap()
         .identity;
     persist_binding(&state, &b).await;
-    if let Some(platform) = platform_model {
+    {
+        let platform = platform_model.unwrap_or(true);
         // Add an actual callback before the FAQ tool, exactly as the channel
         // runtime uses the engine's thread key for model transport.
         let model = connection(
@@ -412,21 +414,38 @@ async fn fixture_with_model(
             .update_one(doc! {"_id":catalog}, doc! {"$set":fields})
             .await
             .unwrap();
-        crate::billing_integration_tests::create_usage_index(&state.db).await;
-        state.billing = Arc::new(crate::billing_integration_tests::billing_service(
+        // The FAQ policy remains the subject of these fixtures. Model setup
+        // uses its own explicit owner policy, including when the test enables
+        // All requests to verify that the FAQ is refused.
+        crate::services::approval_service::set_service_approval_config(
             &state.db,
-            Arc::new(crate::billing_integration_tests::FakeLago::default()),
-            1000,
-        ));
-        for metric in ["platform_requests", "platform_tokens", "platform_bytes"] {
-            state
-                .db
-                .collection("billing_rate_cache")
-                .insert_one(crate::billing_integration_tests::rate(metric, Utc::now()))
-                .await
-                .unwrap();
+            &owner,
+            catalog,
+            "Model",
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        if platform_model.is_some() {
+            crate::billing_integration_tests::create_usage_index(&state.db).await;
+            state.billing = Arc::new(crate::billing_integration_tests::billing_service(
+                &state.db,
+                Arc::new(crate::billing_integration_tests::FakeLago::default()),
+                1000,
+            ));
+            for metric in ["platform_requests", "platform_tokens", "platform_bytes"] {
+                state
+                    .db
+                    .collection("billing_rate_cache")
+                    .insert_one(crate::billing_integration_tests::rate(metric, Utc::now()))
+                    .await
+                    .unwrap();
+            }
+            state.db.collection::<bson::Document>("downstream_services").update_many(doc!{"_id":{"$in":[catalog,&faq_service_id]}},doc!{"$set":{"billing":{"platform_billable":true,"platform_charge_nyxid_credentials_only":false}}}).await.unwrap();
         }
-        state.db.collection::<bson::Document>("downstream_services").update_many(doc!{"_id":{"$in":[catalog,&faq_service_id]}},doc!{"$set":{"billing":{"platform_billable":true,"platform_charge_nyxid_credentials_only":false}}}).await.unwrap();
     }
     let proxy = Router::new()
         .route(
@@ -450,24 +469,32 @@ async fn fixture_with_model(
     let chunks = Arc::new(AtomicUsize::new(1));
     let chunk_delay_ms = Arc::new(AtomicUsize::new(0));
     let fail_turn = Arc::new(AtomicBool::new(false));
+    let fail_setup = Arc::new(AtomicBool::new(false));
+    let setup_failure = fail_setup.clone();
     let stream_chunks = chunks.clone();
     let stream_delay = chunk_delay_ms.clone();
     let stream_fail = fail_turn.clone();
     let upstream_finished = tokio_util::sync::CancellationToken::new();
     let finished = upstream_finished.clone();
-    let upstream=Router::new().route("/v1/capabilities",get(||async{StatusCode::NOT_FOUND})).route("/v1/models",get(||async{Json(json!({"data":[{"id":engine::DEFAULT_MODEL}]}))})).route("/v1/responses",post(move|headers:HeaderMap,Json(body):Json<Value>|{let proxy=proxy.clone();let notion=notion.clone();let captures=captures.clone();let codes=codes.clone();let error_codes=error_codes.clone();let g=g.clone();let chunks=stream_chunks.clone();let delay=stream_delay.clone();let failed=stream_fail.clone();let finished=finished.clone();async move{
-        let _finished = finished.drop_guard();
-        captures.lock().await.push(body);g.acquire().await.unwrap().forget();
+    let upstream=Router::new().route("/v1/capabilities",get(||async{StatusCode::NOT_FOUND})).route("/v1/models",get(||async{Json(json!({"data":[{"id":engine::DEFAULT_MODEL}]}))})).route("/v1/responses",post(move|headers:HeaderMap,Json(body):Json<Value>|{let proxy=proxy.clone();let notion=notion.clone();let captures=captures.clone();let codes=codes.clone();let error_codes=error_codes.clone();let g=g.clone();let chunks=stream_chunks.clone();let delay=stream_delay.clone();let failed=stream_fail.clone();let setup_failure=setup_failure.clone();let finished=finished.clone();async move{
+        let setup=body["input"]==crate::services::assistant_guest_model_setup::INSTRUCTION;
+        let _finished = (!setup).then(|| finished.drop_guard());
+        if setup && setup_failure.load(Ordering::SeqCst) {return StatusCode::SERVICE_UNAVAILABLE.into_response();}
+        if !setup {captures.lock().await.push(body);g.acquire().await.unwrap().forget();}
         let authorization=headers.get("authorization").unwrap().clone();
-        if platform_model.is_some() {
+        if platform_model.is_some() || setup {
             let response=proxy.clone().oneshot(Request::builder().method("POST").uri("/proxy/s/chrono-llm-public/responses").header("authorization",authorization.clone()).header("content-type","application/json").header("accept","*/*")
-                .body(Body::from(json!({"model":"gpt-5.6-sol","store":false,"input":"channel question","client_metadata":{"session_id":"fixture-session","thread_id":"fixture-thread","turn_id":"fixture-turn"}}).to_string())).unwrap()).await.unwrap();
+                .body(Body::from(json!({"model":"gpt-5.6-sol","store":false,"input":if setup {crate::services::assistant_guest_model_setup::INSTRUCTION}else{"channel question"},"client_metadata":{"session_id":"fixture-session","thread_id":"fixture-thread","turn_id":"fixture-turn"}}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
             if !status.is_success() {
                 assert_eq!(status,StatusCode::FORBIDDEN,"{}",String::from_utf8_lossy(&bytes));
                 let failed=json!({"type":"response.failed","sequence_number":0,"response":{"id":"resp_fixture","status":"failed","error":{"code":"turn_failed","message":"never disclose provider detail"}}});
                 return ([("content-type","text/event-stream")],Body::from(format!("data: {failed}\n\n"))).into_response();
             }
+        }
+        if setup {
+            let done=json!({"type":"response.completed","sequence_number":0,"response":{"id":"resp_setup","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}]}});
+            return ([("content-type","text/event-stream")],Body::from(format!("data: {done}\n\n"))).into_response();
         }
         let response=proxy.oneshot(Request::builder().uri(format!("/proxy/s/api-notion/faq?_nyxid_via={notion}")).header("authorization",authorization).body(Body::empty()).unwrap()).await.unwrap();
         let status=response.status();codes.lock().await.push(status.as_u16());let bytes=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
@@ -511,6 +538,7 @@ async fn fixture_with_model(
         chunks,
         chunk_delay_ms,
         fail_turn,
+        fail_setup,
         tasks: vec![notion_task, upstream_task],
     }
 }
@@ -4011,27 +4039,20 @@ async fn guest_model_adapter(profile: Profile, platform: bool, owner_first: bool
     }
     let result = worker.await.unwrap().unwrap();
     assert!(done);
-    if platform || owner_first {
-        assert!(result.error.is_none());
-        assert_eq!(text, "The office opens at nine.");
-        assert_eq!(
-            *f.callback_codes.lock().await,
-            vec![200; if owner_first { 2 } else { 1 }]
-        );
-    } else {
-        assert_eq!(
-            text,
-            "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."
-        );
-        assert_eq!(
-            result.error.as_ref().unwrap().code,
-            "guest_model_route_required"
-        );
-        assert!(
-            f.callback_codes.lock().await.is_empty(),
-            "no tool after model refusal"
-        );
-    }
+    assert!(
+        result.error.is_none(),
+        "{profile:?}/platform={platform}/owner_first={owner_first}: {:?}; {text}",
+        result
+            .error
+            .as_ref()
+            .map(|error| (error.code, error.stage, error.metadata.as_ref()))
+    );
+    assert_eq!(text, "The office opens at nine.");
+    assert_eq!(
+        *f.callback_codes.lock().await,
+        vec![200; if owner_first { 2 } else { 1 }],
+        "setup never calls the owner's FAQ tool"
+    );
     let row = f
         .state
         .db
@@ -4048,10 +4069,8 @@ async fn guest_model_adapter(profile: Profile, platform: bool, owner_first: bool
         doc! {"service_slug":{"$in":["chrono-llm-public","api-notion"]}},
         if owner_first {
             4
-        } else if platform {
-            2
         } else {
-            0
+            3 // Hidden owner model setup plus guest model and FAQ.
         },
     )
     .await;
@@ -4086,6 +4105,7 @@ async fn guest_model_adapter(profile: Profile, platform: bool, owner_first: bool
 #[tokio::test]
 async fn guest_1995_sms_refusal_is_sent_to_the_inbound_sender() {
     let mut f = fixture_with_model(Profile::TwilioSms, false, Some(false)).await;
+    f.fail_setup.store(true, Ordering::SeqCst); // Actual hidden setup failure; no owner warm-up.
     let sent = Arc::new(Mutex::new(Vec::new()));
     let captured = sent.clone();
     let account = f.b.account_id.clone();
@@ -4151,7 +4171,7 @@ async fn guest_1995_sms_refusal_is_sent_to_the_inbound_sender() {
     assert_eq!(replies[0]["From"], f.b.phone_number);
     assert_eq!(
         replies[0]["Body"],
-        "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."
+        "Visitor setup could not finish. The owner has been notified. Please try again later."
     );
     drop(replies);
     // Wait for the sender's settlement before fixture teardown.

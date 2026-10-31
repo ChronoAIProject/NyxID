@@ -3399,6 +3399,21 @@ curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef12
 
 ### Unified Keys (Streamlined Services)
 
+Connected-service health/readiness is exposed through the five fixed
+`/api/v1/keys/{id}/monitoring` routes. See [Service monitoring](SERVICE_MONITORING.md)
+for payloads, caller-token authority, revisions, timeouts and deployment requirements.
+The default-off `services:monitoring` flag resolves for the acting person,
+including live organization overrides. When off, every route returns a generic
+404 `not_found` before any service lookup or chrono-probe call; the frontend
+hides the section without requesting it. When on but `CHRONO_PROBE_URL` is unset
+or invalid, routes return 404 `monitoring_not_configured` (13301) and the UI hides
+the section. A configured upstream failure returns 503 `monitoring_unavailable`
+(13300). Explicit Check now and draft checks use the normal proxy with the
+caller's authority: **All requests** approval settings prompt per check, and a
+priced platform service bills each check to the caller. Status reads do not run
+checks.
+
+
 #### Agent discovery order per service group
 
 `GET /api/v1/service-preferences` returns only `{ "groups": [{ "group":
@@ -5898,17 +5913,57 @@ Update only the supplied metadata fields for a registered feature flag.
 | --- | --- | --- | --- |
 | `description` | string/null | No | Omission preserves; null or trimmed blank clears the custom description and displays the code-declared fallback. |
 | `owner` | string/null | No | Omission preserves; null or trimmed blank clears the owner. |
+| `group` | string/null | No | Up to 80 characters; null or trimmed blank restores namespace grouping. |
+| `tags` | string array | No | Replaces tags; `[]` clears. Up to 12 tags, each 1–40 lowercase letters, digits, hyphens or underscores, starting with a letter or digit. Trimmed, lowercased, sorted and deduplicated. Null is rejected. |
+| `expected_tags` | string array | No | Optional saved tag baseline. A mismatch returns 409, preventing an unseen concurrent tag edit from being overwritten. |
+| `sunset` | boolean | No | Hides the flag in the UI's default Active view. Never changes evaluation, defaults, or overrides. Null is rejected. |
 
 Unknown fields are rejected. An empty object leaves the metadata unchanged.
 An unknown flag key returns a bad-request error.
 
 **Response (200):** The saved metadata descriptor: `key`, effective `description`,
-`code_description`, nullable `custom_description`, nullable `owner`, and nullable
-`metadata_updated_at` / `metadata_updated_by`.
+`code_description`, nullable `custom_description`, nullable `owner`, nullable
+`group`, `tags`, `sunset`, and nullable `metadata_updated_at` / `metadata_updated_by`.
 
 For example, `{"owner":"Identity team"}` changes only the owner. The existing
-`PUT` route at this path keeps its replacement contract: omitted fields are
-cleared. Clients that need sparse updates should use `PATCH`.
+`PUT` route at this path replaces description and owner, preserving group, tags,
+and sunset. Clients that need sparse updates should use `PATCH`.
+
+#### GET /api/v1/admin/feature-flags/{flag_key}/history
+
+Uses the flag list's authorization: platform readers can read all histories;
+feature flag operators can read histories only for flags they created. Does not
+grant access to the general audit log or user directory.
+
+Returns up to 25 recorded changes, newest first. Optional `before` is the opaque
+`next_cursor` from a previous response; cursors use `(created_at, _id)` so new
+writes do not shift older pages. Each entry includes actor ID/name, event
+type, timestamp, and flag-specific details. Emails are available only to platform
+readers with read-all access. Rollout targets include a current display name or
+slug when available and retain the recorded scope and ID. New writes include before/after
+values for rollout and metadata. Unknown fields
+from the audit payload are excluded. `origin` reports the runtime definition's
+authoritative creator and creation timestamp even when its old audit entry is
+missing. Built-in origins are declared in code.
+
+Admin creation, override changes/removals, and metadata edits commit with their
+actor-attributed audit entry in one MongoDB transaction. An audit failure rolls
+back the change. No-op writes leave attribution and timestamps untouched and do
+not append a change event. Sunset flags remain
+in the list API, resolve normally, and retain editable rollout/history.
+
+History respects runtime definition identity. Legacy events lacking that identity
+are inferred using the persisted runtime creation timestamp. For a built-in
+shadowing a runtime key, ambiguous legacy entries are omitted and
+`legacy_ambiguous_omitted` is true. Such historical rows cannot be reconstructed
+when they were never recorded. Code deployments, startup migrations and org
+removal cascades remain outside this per-flag admin history.
+
+Deployment creates the partial `flag_history` audit index for rows containing
+`event_data.flag_key`; startup waits for this index build. Deploy the backend
+on every replica before the new frontend, which writes the additive metadata fields and calls
+the new history route. MongoDB must support transactions, as required by other
+admin policy writes.
 
 ---
 

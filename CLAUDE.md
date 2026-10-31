@@ -62,6 +62,8 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12700 `ToolOperationNotPublished` (HTTP 404): unpublished or unknown operation on a tool offering.
 - 12800-12801: 12800 `ManagedExecutionPending` (HTTP 409), 12801 `ErasurePreparing` (HTTP 409, `erasure_preparing`).
 - 12900 `OAuthAuthorityUnavailable` (HTTP 503, `oauth_authority_unavailable`): a live OAuth authority read could not complete; retry the request without discarding tokens or reauthorizing.
+- 13300 `MonitoringUnavailable` (HTTP 503, `monitoring_unavailable`): configured chrono-probe failed or returned an unusable response.
+- 13301 `MonitoringNotConfigured` (HTTP 404, `monitoring_not_configured`): `CHRONO_PROBE_URL` is unset or invalid; monitoring UI stays hidden.
 - 12500-12501 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503).
 
 ### 4. Frontend Patterns
@@ -421,7 +423,7 @@ Shared agents (Phase 1; backend core validated): `assistant:shared-agents` defau
 
 Only the `shared` lane is caller-paid for model and metered-service usage. `org_member` retains `BillingOwnerResolver::resolve_for_execution` (org BYOK bills the org; platform keys bill the person); owner and guest billing stay unchanged. Owner credentials require an explicit per-service shared policy through the thin `GuestAccess` adapter; absence means withheld. Actor-owned connections for the same catalog service require private consent even in Full access: Once binds one exact operation or a bounded stateless-model turn, Always lasts until revoked or invalidated, and Skip applies to the current turn. Never silently switch accounts. Shared authority never includes owner machine nodes, saved logins, SSH, Oracle, owner-account `nyxid__` tools or owner approval grants; audits distinguish actor, owner and execution mode.
 
-Phase 1 supports private shared chats and foreground HTTP/MCP execution, including model callbacks. Shared pools, detached/managed jobs, async watches, voice, WebSocket/CONNECT and group/channel publication refuse before effects; multi-person groups remain Phase 2. The v0.75.0 #1996 guest-access helpers are integrated through the shared-access adapter. New fields use safe serde defaults, and new enum values must never enter legacy fields. Upgrade and drain all relevant replicas before activation; flag-off preserves private-history access and revocation and is not sufficient for binary rollback. See [the shared-agent design](docs/chat/12-shared-agents-and-groups.md) for contracts and rollout.
+Phase 1 supports private shared chats, shared members of the recipient's own single-person personal crews, HTTP/MCP model and service calls, exact pinned pool members, managed exchanges, async watches, private voice sessions, WebSocket/CONNECT and explicitly allowed recipient-owned channel posts. Crew members retain the recipient's hidden thread/key/cards/consents/billing, pinned skills and private notes; NyxBot involvement never transfers account or decision authority. Revoked/destroyed shares remain unavailable in the roster and addressed attempts post the fixed share-request notice without a model turn. Recipient UUIDs and `@UUID` route exactly; ambiguous bare handles never select a namesake. Transport extensions require `assistant:shared-agent-transports-v1` readiness under the existing sharing flag. Durable bindings retain the recipient payer, exact consent claim and authority/behavior digests; re-read live rights before every effect and on resumed work. Never reuse a stored ACL snapshot or grant idle bearer execution. Once cannot open a second job/stream/session; pool retries cannot switch accounts. Machines, saved logins, SSH, Oracle, account tools, owner approvals, channel links and automation authority remain excluded; organization-group/platform publication refuses shared agents. Multi-person groups remain separate Phase 2 work. The v0.75.0 #1996 guest-access helpers are integrated through the shared-access adapter. New fields use safe serde defaults, and new enum values must never enter legacy fields. Upgrade and drain all relevant replicas before activation; flag-off preserves private-history access and revocation and is not sufficient for binary rollback. See [the shared-agent design](docs/chat/12-shared-agents-and-groups.md) for contracts and rollout.
 
 ## Channel Bot Notes
 
@@ -540,6 +542,9 @@ TELEGRAM_BOT_USERNAME=              # Without @
 APPROVAL_EXPIRY_INTERVAL_SECS=5     # Interval between expiry sweeps
 CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS=60  # Service-link expiry and bot-link recovery sweeps; 0 disables both
 AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS=60    # Revoke expired undelivered Agent Key credentials; 0 disables
+
+# Service monitoring (optional; requires services:monitoring for the acting person)
+CHRONO_PROBE_URL=                   # Trusted internal HTTP(S) origin; unset/invalid hides Monitoring
 
 # OAuth token refresh (optional)
 OAUTH_REFRESH_SWEEP_INTERVAL_SECS=600  # Proactive refresh sweep for expiring multi-connection OAuth

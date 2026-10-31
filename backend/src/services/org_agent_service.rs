@@ -285,11 +285,12 @@ impl RequestAccess {
                 &row.user_id,
                 &self.owner,
                 row.agent_id.as_deref().unwrap_or_default(),
-            ) || row.group_id.is_some()
-                || row.automation_thread
-                || row.platform_thread.is_some())
+            ))
         {
             return Err(super::shared_agent_service::missing());
+        }
+        if self.shared.is_some() {
+            super::assistant_group_service::check_shared_surface(row)?;
         }
         if row.guest_turn || row.channel.is_some() {
             return Err(AppError::Forbidden(

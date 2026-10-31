@@ -105,7 +105,7 @@ async fn admit_audio(
     super::super::assistant_voice::require_enabled(db, user)
         .await
         .map_err(|e| crate::errors::voice_start::Stage::Flag.error(e))?;
-    super::super::assistant_voice::thread(db, user, conversation).await?;
+    let thread = super::super::assistant_voice::thread(db, user, conversation).await?;
     if uuid::Uuid::parse_str(client_request_id).is_err() {
         return Err(AppError::ValidationError(
             "Invalid voice request identity".into(),
@@ -127,7 +127,10 @@ async fn admit_audio(
             return Err(AppError::RateLimited);
         }
     }
+    let shared_execution =
+        super::shared::admit(db, user, &thread, client_request_id, &preferences).await?;
     let row = VoiceSession {
+        shared_execution,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user.into(),
         conversation_id: conversation.into(),
@@ -172,8 +175,10 @@ async fn admit_audio(
     };
     let mut tx = db.client().start_session().await?;
     let db = db.clone();
+    let audit_db = db.clone();
     let saved = row.clone();
-    tx.start_transaction()
+    let admitted = tx
+        .start_transaction()
         .and_run2(async move |tx| {
             let result: AppResult<VoiceSession> = Box::pin(async {
                 if db
@@ -206,7 +211,25 @@ async fn admit_audio(
             super::super::api_key_mutation_service::transaction_result(result)
         })
         .await
-        .map_err(super::super::api_key_mutation_service::map_transaction_error)
+        .map_err(super::super::api_key_mutation_service::map_transaction_error)?;
+    if admitted.shared_execution.is_some() {
+        let mut event = serde_json::json!({"session_id":admitted.id,"conversation_id":admitted.conversation_id});
+        crate::services::shared_agent_transport::annotate(
+            &mut event,
+            admitted.shared_execution.as_ref(),
+        );
+        crate::services::audit_service::log_async(
+            audit_db,
+            Some(user.into()),
+            "assistant_shared_voice_admitted".into(),
+            Some(event),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+    Ok(admitted)
 }
 
 pub fn fence(row: &VoiceSession) -> Document {
@@ -221,6 +244,7 @@ pub async fn write(db: &Database, row: &VoiceSession, set: Document) -> AppResul
         .ok_or_else(|| AppError::Conflict("Voice session ownership changed".into()))
 }
 pub async fn refresh(db: &Database, row: &VoiceSession) -> AppResult<VoiceSession> {
+    super::shared::revalidate(db, row).await?;
     write(db,row,doc!{"lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(LEASE_SECONDS))}).await
 }
 pub async fn get(

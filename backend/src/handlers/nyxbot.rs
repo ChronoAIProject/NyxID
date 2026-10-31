@@ -1053,6 +1053,24 @@ async fn connect_gateway(
         .map_err(|_| "gateway_invalid_response")?;
     crate::services::nyxbot_gateway_source::validate_created(row, &created.body)
         .map_err(|_| "gateway_invalid_response")?;
+    if matches!(
+        row.gateway_source.as_ref(),
+        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+    ) {
+        let Some(webhook_url) = created.body["endpoints"]["whatsapp_webhook_url"].as_str() else {
+            return Err("gateway_invalid_response");
+        };
+        crate::services::whatsapp_native::activate_gateway(
+            &state.db,
+            &state.encryption_keys,
+            bot,
+            &channel_id,
+            webhook_url,
+            &crate::services::channel_bot_service::webhook_url(&state.config.base_url, bot),
+        )
+        .await
+        .map_err(|_| "native_whatsapp_callback_unverified")?;
+    }
     let callback = native_callback(state, row, callback);
     crate::services::nyxbot_gateway_source::record_activation(&state.db, row, &created.body)
         .await
@@ -1457,6 +1475,27 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         .map_err(|_| "storage_unavailable")?;
     if crate::services::nyxbot_gateway_source::validate_created(&next, &created.body).is_err() {
         return Err(discard("gateway_invalid_response").await);
+    }
+    if matches!(
+        next.gateway_source.as_ref(),
+        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+    ) {
+        let Some(webhook_url) = created.body["endpoints"]["whatsapp_webhook_url"].as_str() else {
+            return Err(discard("gateway_invalid_response").await);
+        };
+        if crate::services::whatsapp_native::activate_gateway(
+            &state.db,
+            &state.encryption_keys,
+            &bot,
+            &channel_id,
+            webhook_url,
+            &crate::services::channel_bot_service::webhook_url(&state.config.base_url, &bot),
+        )
+        .await
+        .is_err()
+        {
+            return Err(discard("native_whatsapp_callback_unverified").await);
+        }
     }
     let callback = native_callback(state, &next, callback);
     crate::services::nyxbot_gateway_source::record_activation(&state.db, &next, &created.body)
@@ -2429,6 +2468,19 @@ pub async fn link(
     }
     crate::services::channel_thread_follow_service::relink(&state.db, owner, &row.id, &agent.id)
         .await?;
+    let open_group = state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .find_one(doc! {
+            "channel_id":&row.id,"user_id":owner,"kind":{"$in":["group","channel"]},
+            "$or":[{"members":"everyone"},{"members":null,"owner_seen":true}]
+        })
+        .projection(doc! {"_id":1})
+        .await?
+        .is_some();
+    if row.private_chats.as_deref() == Some("everyone") || open_group {
+        prepare_guest_model(state, owner, Some(&agent.id), None).await?;
+    }
     audit(
         state,
         owner,
@@ -2443,6 +2495,44 @@ pub async fn link(
 
 pub(crate) async fn list_tool(state: &AppState, owner: &str) -> AppResult<Value> {
     channel_listing(state, owner, true).await
+}
+
+pub(super) async fn prepare_guest_model(
+    state: &AppState,
+    owner: &str,
+    agent_id: Option<&str>,
+    conversation: Option<&str>,
+) -> AppResult<()> {
+    let agent = requested_agent(state, owner, agent_id).await?;
+    let profile = if let Some(id) = conversation {
+        engine::get(&state.db, owner, id)
+            .await
+            .ok()
+            .map(|r| r.model)
+    } else {
+        None
+    };
+    let profile = match profile {
+        Some(profile) => profile,
+        None => {
+            crate::services::assistant_profile_routing::model_for(
+                &state.db,
+                crate::services::assistant_profile_routing::RouteRole::Channel,
+                &agent.model,
+            )
+            .await
+        }
+    };
+    crate::services::assistant_guest_model_setup::backoff::reset(
+        &state.db,
+        owner,
+        &agent.id,
+        Some(&profile),
+    )
+    .await?;
+    crate::services::assistant_guest_model_setup::kick(state, owner, &agent.id, &profile, false)
+        .await?;
+    Ok(())
 }
 
 async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) -> AppResult<Value> {
@@ -3237,6 +3327,9 @@ async fn start_chat_turn(
         question: Some(excerpt(text, engine::QUESTION_EXCERPT_CHARS)),
         reply_channel: shared.then(|| origin.clone()),
     };
+    if let Some(outcome) = Box::pin(guest_setup_queue::wait(state, row, &start)).await? {
+        return Ok(outcome);
+    }
     match Box::pin(start_server_turn(
         state,
         &row.user_id,
@@ -4545,7 +4638,7 @@ async fn gateway_inbound(
         }
     }
     let native_evidence = if row.gateway_source.is_some() && row.platform == "discord" {
-        Some(native_discord::evidence(state, row, activity, event_key).await?)
+        Some(Box::pin(native_discord::evidence(state, row, activity, event_key)).await?)
     } else {
         None
     };
@@ -4603,7 +4696,7 @@ async fn gateway_inbound(
         };
         chat
     } else {
-        chats::record_chat_with_relay(
+        Box::pin(chats::record_chat_with_relay(
             state,
             row,
             &chat_partition,
@@ -4617,7 +4710,7 @@ async fn gateway_inbound(
             },
             None,
             relay_message_id.as_deref(),
-        )
+        ))
         .await?
     };
     if human {
@@ -4664,11 +4757,14 @@ async fn gateway_inbound(
         );
     }
     if !metadata.is_empty() {
-        let _ = state
-            .db
-            .collection::<NyxbotThread>(THREADS)
-            .update_one(doc! {"_id": &chat.id}, doc! {"$set": metadata})
-            .await;
+        let _ = Box::pin(async {
+            state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .update_one(doc! {"_id": &chat.id}, doc! {"$set": metadata})
+                .await
+        })
+        .await;
     }
     // Only legacy admission implies addressing. A gateway may already have
     // accepted broader thread admission before its acknowledgement is stored.
@@ -5838,3 +5934,6 @@ fn native_callback(state: &AppState, row: &NyxbotChannel, relay: String) -> Stri
 
 #[path = "guest_model_notices.rs"]
 pub(crate) mod guest_model_notices;
+
+#[path = "nyxbot_guest_setup_queue.rs"]
+pub(crate) mod guest_setup_queue;

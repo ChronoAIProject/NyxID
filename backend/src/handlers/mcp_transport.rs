@@ -734,6 +734,27 @@ struct McpAuthContext {
 }
 
 impl McpAuthContext {
+    /// Only the leased async-watch caller uses this; ordinary MCP authentication
+    /// retains the live-turn requirement for shared keys.
+    fn from_watch_auth(auth: crate::mw::auth::AuthUser) -> Self {
+        let mut context = Self::user(auth.user_id.to_string(), AuthMethod::ApiKey);
+        context.chat = auth.assistant_chat.as_deref().cloned();
+        context.scope = auth.scope;
+        context.is_api_key = true;
+        context.api_key_id = auth.api_key_id;
+        context.api_key_name = auth.api_key_name;
+        context.allow_all_services = auth.allow_all_services;
+        context.allow_all_nodes = auth.allow_all_nodes;
+        context.allowed_service_ids = auth.allowed_service_ids;
+        context.allowed_node_ids = auth.allowed_node_ids;
+        context.assistant_agent_owner_id = auth.assistant_agent_owner_id;
+        context.assistant_operation_scopes = auth.assistant_operation_scopes;
+        context.org_agent_access = auth.org_agent_access;
+        context.rate_limit_per_second = auth.rate_limit_per_second;
+        context.rate_limit_burst = auth.rate_limit_burst;
+        context
+    }
+
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
             oauth_lineage: None,
@@ -2439,6 +2460,25 @@ async fn handle_tools_call(
     client_accepts_sse: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
+    if let Some(chat) = auth.chat.as_ref() {
+        match crate::services::assistant_guest_model_setup::is_setup(
+            &state.db,
+            &chat.conversation_id,
+        )
+        .await
+        {
+            Ok(false) => {}
+            Ok(true) => {
+                return app_error_to_rpc(
+                    request.id.clone(),
+                    &crate::errors::AppError::Forbidden(
+                        "Visitor model setup cannot use tools".into(),
+                    ),
+                );
+            }
+            Err(error) => return app_error_to_rpc(request.id.clone(), &error),
+        }
+    }
     if let Some(chat) = auth.chat.as_ref()
         && !matches!(
             request
