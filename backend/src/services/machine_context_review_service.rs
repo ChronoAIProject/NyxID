@@ -554,12 +554,21 @@ mod tests {
     }
     async fn flag(f: &Fixture, key: &str, on: bool) {
         super::super::security_readiness_service::ready_test_replica(&f.state.db).await;
-        super::super::feature_flag_service::set_platform_override(
+        super::super::feature_flag_admin_service::mutate(
             &f.state.db,
             key,
-            &super::super::feature_flag_service::FlagTarget::User(f.owner.clone()),
-            on,
-            &f.owner,
+            super::super::feature_flag_admin_service::Mutation::Override {
+                kind: crate::models::feature_flag_override::FlagTargetKind::User,
+                target_id: Some(f.owner.clone()),
+                enabled: Some(on),
+            },
+            &super::super::audit_service::AuditActor {
+                user_id: f.owner.clone(),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
+            },
         )
         .await
         .unwrap();
@@ -781,7 +790,14 @@ mod tests {
     }
     #[tokio::test]
     async fn mode_review_rejects_concurrent_policy_flag_profile_expiry_and_owner_loss() {
-        for drift in ["policy", "flag", "profile", "expiry", "owner"] {
+        for drift in [
+            "policy",
+            "flag",
+            "context_flag",
+            "profile",
+            "expiry",
+            "owner",
+        ] {
             let f = orchestrator_fixture("mode_review_drift").await;
             let node = machine(&f).await;
             seed_policy(&f, &node, Capabilities::default()).await;
@@ -808,9 +824,14 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                "flag" => {
-                    flag(&f, access::FLAG, true).await;
-                    flag(&f, access::FLAG, false).await;
+                "flag" | "context_flag" => {
+                    let key = if drift == "flag" {
+                        access::FLAG
+                    } else {
+                        access::CONTEXT_FLAG
+                    };
+                    flag(&f, key, true).await;
+                    flag(&f, key, false).await;
                 }
                 "profile" => {
                     f.state

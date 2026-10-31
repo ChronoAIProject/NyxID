@@ -1258,6 +1258,22 @@ pub async fn search_rollout_targets(
 
 /// Mode reviews contend on this row with both machine feature flags. Mutation
 /// and epoch advance are atomic, including inserts where no override existed.
+pub(crate) async fn advance_machine_review_epoch(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<bson::Document>("platform_settings")
+        .update_one(
+            doc! {"_id":crate::models::machine_access::CONTEXT_REVIEW_FENCE},
+            doc! {"$inc":{"epoch":1_i64}},
+        )
+        .upsert(true)
+        .session(session)
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
 async fn mutate_machine_review_override(
     db: &mongodb::Database,
     flag: &str,
@@ -1289,14 +1305,7 @@ async fn mutate_machine_review_override(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<Option<FeatureFlagOverride>> = async {
-                db.collection::<bson::Document>("platform_settings")
-                    .update_one(
-                        doc! {"_id":crate::models::machine_access::CONTEXT_REVIEW_FENCE},
-                        doc! {"$inc":{"epoch":1_i64}},
-                    )
-                    .upsert(true)
-                    .session(&mut *session)
-                    .await?;
+                advance_machine_review_epoch(&db, session).await?;
                 match &update {
                     Some(update) => Ok(db
                         .collection::<FeatureFlagOverride>(COLLECTION_NAME)

@@ -349,6 +349,12 @@ async fn mutate_in_session(
                 output.override_row = before;
                 return Ok(output);
             }
+            if matches!(
+                key,
+                flags::MACHINE_CAPABILITIES_FLAG_KEY | flags::MACHINE_CONTEXTS_FLAG_KEY
+            ) {
+                flags::advance_machine_review_epoch(db, session).await?;
+            }
             output.override_row = if let Some(enabled) = enabled {
                 let mut insert = filter.clone();
                 insert.insert("_id", Uuid::new_v4().to_string());
@@ -797,6 +803,115 @@ mod tests {
             assert!(row.expect("enabled override").enabled);
         }
     }
+    async fn machine_review_epoch(db: &Database) -> i64 {
+        db.collection::<Document>("platform_settings")
+            .find_one(doc! {"_id":crate::models::machine_access::CONTEXT_REVIEW_FENCE})
+            .await
+            .unwrap()
+            .map(|row| row.get_i64("epoch").unwrap())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn machine_overrides_fence_reviews_for_every_scope_but_noops_do_not() {
+        let (db, actor) = setup("flag_review_scopes").await;
+        let org = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        security_readiness_service::ready_test_replica(&db).await;
+        let mut epoch = 0;
+        for key in [
+            flags::MACHINE_CAPABILITIES_FLAG_KEY,
+            flags::MACHINE_CONTEXTS_FLAG_KEY,
+        ] {
+            for (kind, target_id) in [
+                (FlagTargetKind::Global, None),
+                (FlagTargetKind::User, Some(actor.user_id.clone())),
+                (FlagTargetKind::Org, Some(org.clone())),
+            ] {
+                for (enabled, advance) in [
+                    (None, 0),
+                    (Some(false), 1),
+                    (Some(false), 0),
+                    (Some(true), 1),
+                    (Some(true), 0),
+                    (None, 1),
+                    (None, 0),
+                ] {
+                    mutate(
+                        &db,
+                        key,
+                        Mutation::Override {
+                            kind,
+                            target_id: target_id.clone(),
+                            enabled,
+                        },
+                        &actor,
+                    )
+                    .await
+                    .unwrap();
+                    epoch += advance;
+                    assert_eq!(
+                        machine_review_epoch(&db).await,
+                        epoch,
+                        "{key} {} {enabled:?}",
+                        kind.as_str()
+                    );
+                }
+            }
+        }
+        for (key, mutation) in [
+            (
+                flags::INVITATION_CODE_FLAG_KEY,
+                Mutation::Override {
+                    kind: FlagTargetKind::Global,
+                    target_id: None,
+                    enabled: Some(false),
+                },
+            ),
+            (
+                flags::MACHINE_CONTEXTS_FLAG_KEY,
+                Mutation::Metadata(MetadataPatch {
+                    owner: Some(Some("Machine team".into())),
+                    ..Default::default()
+                }),
+            ),
+        ] {
+            mutate(&db, key, mutation, &actor).await.unwrap();
+            assert_eq!(machine_review_epoch(&db).await, epoch);
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_override_and_review_epoch_roll_back_with_failed_history() {
+        let (db, actor) = setup("flag_review_rollback").await;
+        security_readiness_service::ready_test_replica(&db).await;
+        let key = flags::MACHINE_CAPABILITIES_FLAG_KEY;
+        let change = |enabled| Mutation::Override {
+            kind: FlagTargetKind::Global,
+            target_id: None,
+            enabled,
+        };
+        mutate(&db, key, change(Some(true)), &actor).await.unwrap();
+        assert_eq!(machine_review_epoch(&db).await, 1);
+        db.run_command(doc! {"collMod":AUDIT,"validator":{"event_type":{"$eq":"rejected"}},"validationLevel":"strict"}).await.unwrap();
+        for enabled in [Some(false), None] {
+            assert!(mutate(&db, key, change(enabled), &actor).await.is_err());
+            assert_eq!(machine_review_epoch(&db).await, 1);
+            let row = db
+                .collection::<FeatureFlagOverride>(OVERRIDES)
+                .find_one(doc! {"flag_key":key,"target_kind":"global"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(row.enabled);
+        }
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn tags_detect_unseen_conflicts_and_noop_writes_do_not_add_history() {
         let (db, actor) = setup("flag_tag_conflict").await;
