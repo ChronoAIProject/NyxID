@@ -210,6 +210,41 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
     let live_agent = thread.agent_id.as_deref().or(channel.agent_id.as_deref());
     let agent_matches = payload.origin.thread.is_some()
         || requested_agent(state, owner, live_agent).await?.id == payload.agent;
+    let custom_binding_allowed = if let Some(binding_id) = source.custom_binding_id.as_deref() {
+        let binding = state
+            .db
+            .collection::<crate::models::nyxbot_event_binding::NyxbotEventBinding>(
+                crate::models::nyxbot_event_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": binding_id, "user_id": owner})
+            .await?;
+        if let Some(binding) = binding {
+            let destination = state
+                .db
+                .collection::<crate::models::nyxbot_channel::NyxbotThread>(
+                    crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+                )
+                .find_one(doc! {
+                    "channel_id": &binding.destination_channel_id,
+                    "user_id": owner,
+                    "partition": &binding.destination_partition,
+                    "last_message_id": {"$ne": null},
+                })
+                .await?;
+            binding.destination_channel_id == channel.id
+                && payload.origin.partition.starts_with("custom:")
+                && destination.is_some()
+                && crate::services::nyxbot_event_binding_service::authorize_provider(
+                    state, &binding,
+                )
+                .await
+                .is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     let allowed = channel.status == "active"
         && source.expires_at > Utc::now()
         && source.delivery.as_ref().is_some_and(|d| {
@@ -218,6 +253,7 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
                 && d.source_route_api_key_id.as_deref() == Some(&channel.route_api_key_id)
                 && d.source_route_id == channel.route_id
                 && (d.origin.thread.is_some()
+                    || custom_binding_allowed
                     || crate::services::channel_turn_delivery::guest_source_admitted(
                         &channel, &thread, d,
                     ))

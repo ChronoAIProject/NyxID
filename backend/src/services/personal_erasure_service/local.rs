@@ -238,6 +238,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::nyxbot_event_binding::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
             m::nyxbot_channel::WATCHES_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),

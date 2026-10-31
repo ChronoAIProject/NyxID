@@ -396,7 +396,8 @@ pub struct NyxbotEvent {
     pub resolved_thread_id: Option<String>,
     #[serde(default)]
     pub resolved_conversation_id: Option<String>,
-    /// SHA-256 of `binding_id` and the idempotency key.
+    /// SHA-256 namespace of the custom binding and stable source event ID;
+    /// ordinary relay events retain their platform event identity.
     #[serde(rename = "_id")]
     pub id: String,
     pub channel_id: String,
@@ -407,6 +408,10 @@ pub struct NyxbotEvent {
     /// originated from NyxID's own relay.
     #[serde(default)]
     pub relay_message_id: Option<String>,
+    /// Namespaced source binding for an independent CMA custom event. The
+    /// event still uses the approved destination chat row for delivery.
+    #[serde(default)]
+    pub custom_binding_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
     /// `running`, `queued`, `completed`, `failed`, `refused`, or `interrupted`. Queued work is

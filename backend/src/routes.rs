@@ -2748,6 +2748,19 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
         .route(
+            "/nyxagent/custom-event-bindings",
+            get(handlers::nyxbot_event_bindings::list)
+                .post(handlers::nyxbot_event_bindings::create),
+        )
+        .route(
+            "/nyxagent/custom-event-bindings/{id}",
+            get(handlers::nyxbot_event_bindings::get),
+        )
+        .route(
+            "/nyxagent/custom-event-bindings/{id}/revoke",
+            post(handlers::nyxbot_event_bindings::revoke),
+        )
+        .route(
             "/nyxagent/groups",
             get(handlers::assistant_group::list_groups)
                 .post(handlers::assistant_group::create_group),

@@ -388,6 +388,33 @@ Account deletion purges agents, settings, threads and channel records.
 
 ## 12. Channel bots
 
+### Independent CMA custom-event bindings
+
+An owner may create a custom event binding for an existing NyxBot or specialist
+from the first-party NyxID API. This is an independent CMAEG source, not a
+chat-platform bot and not a reuse of a `NyxbotChannel` provider key. The owner
+chooses the destination channel and partition; NyxID pins every delivery to
+that destination (which must have a verified relay reply anchor). CMA's producer HMAC credential is returned once at creation
+and is unrelated to the provider agent key used by CMA to call NyxID.
+
+The `nyxbot:gateway-custom-event` flag is default-off. Creation is refused
+unless the human caller has live maintain authority for the target agent and
+write authority for the destination partition. NyxID persists a preparing row,
+creates CMA's custom source with `existing_agent { agent_id }` and `per_event`
+partitioning, and marks it ready only after CMA echoes the exact target and
+binding. Revoke deletes that channel and removes both credentials; all provider
+operations recheck current owner/org-admin authority and binding state.
+
+Each stable CMA event produces at most one NyxAgent turn. NyxID creates a
+private, event-derived destination partition, so event turns do not share the
+selected chat's ordinary transcript. Retries use the existing provider
+idempotency and event records. Custom activity input is untrusted webhook data:
+it cannot choose an agent, model, credential, conversation destination, owner
+approval or owner tools. Normal guest grants, confirmation, model access,
+billing and audit rules still apply. Acceptance, completion and downstream
+chat delivery are separate statuses, and no provider secret is exposed in a
+chat receipt or response frame.
+
 Any channel bot can be linked to NyxBot or a personal specialist (`connect_channel_bot`,
 settings, or relinked later); each chat becomes a thread of the linked agent
 (or of the chat's own agent, §12a), with that agent's authority and memory.
