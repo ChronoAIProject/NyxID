@@ -15,6 +15,22 @@ pub async fn pinned_pool_member(
     if !chat.turn_live || chat.turn_stopped {
         return Ok(None);
     }
+    if is_shared_chat(chat) {
+        let mut shared_filter = scope(chat)?;
+        shared_filter.extend(doc! {"kind": "shared_pool_selection", "operation.pool_id": pool});
+        if let Some(pinned) = db
+            .collection::<Document>(COLLECTION)
+            .find_one(shared_filter)
+            .await?
+        {
+            return Ok(Some(
+                pinned
+                    .get_str("connection_id")
+                    .map_err(|_| AppError::AssistantTurnRequired)?
+                    .into(),
+            ));
+        }
+    }
     let mut filter = scope(chat)?;
     filter.extend(doc! {"kind": {"$in": ["selection", "card_binding"]}, "operation.pool_id": pool});
     let rows: Vec<Document> = db
@@ -92,4 +108,46 @@ pub async fn pinned_pool_member(
         ));
     }
     Ok(None)
+}
+
+/// Freeze the first concrete account before prompting; retries and pool health
+/// changes cannot select another person's credential behind the consent card.
+pub(super) async fn pin_shared_pool(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    connection: &str,
+    binding: &str,
+    operation: &Value,
+) -> AppResult<()> {
+    let pool = operation["pool_id"]
+        .as_str()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let id = digest(json!([
+        "shared-pool.v1",
+        chat.user_id,
+        chat.conversation_id,
+        chat.turn_id,
+        pool
+    ]));
+    let mut row = scope(chat)?;
+    row.extend(doc! {"_id": uuid::Uuid::new_v4().to_string(), "shared_pool_scope": &id, "kind": "shared_pool_selection", "connection_id": connection,
+        "binding": binding, "operation": bson::to_bson(operation).map_err(|_| AppError::AssistantTurnRequired)?,
+        "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(2))});
+    let rows = db.collection::<Document>(COLLECTION);
+    if let Err(error) = rows
+        .update_one(doc! {"shared_pool_scope": &id}, doc! {"$setOnInsert": row})
+        .upsert(true)
+        .await
+        && !crate::services::service_pool_service::is_duplicate_key(&error)
+    {
+        return Err(error.into());
+    }
+    if rows
+        .find_one(doc! {"shared_pool_scope": &id, "connection_id": connection, "binding": binding})
+        .await?
+        .is_none()
+    {
+        return Err(AppError::Forbidden("The pool's exact selected connection changed; start a new turn to choose another account".into()));
+    }
+    Ok(())
 }

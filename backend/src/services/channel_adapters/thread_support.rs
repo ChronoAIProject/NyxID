@@ -43,6 +43,7 @@ pub(super) fn chain_root(
 }
 
 pub(super) async fn json(request: reqwest::RequestBuilder) -> AppResult<Value> {
+    crate::services::channel_platform::revalidate_post_effect().await?;
     let response = request.send().await.map_err(|_| threads::unavailable())?;
     let bounded =
         crate::services::channel_media_service::bounded_response(response, HISTORY_RESPONSE_BYTES)

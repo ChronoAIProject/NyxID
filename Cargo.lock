@@ -4335,6 +4335,8 @@ dependencies = [
  "http 1.4.0",
  "http-body-util",
  "httpdate",
+ "hyper 1.8.1",
+ "hyper-util",
  "image",
  "jsonwebtoken 10.3.0",
  "libc",

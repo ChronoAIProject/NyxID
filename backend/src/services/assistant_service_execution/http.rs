@@ -288,6 +288,9 @@ async fn check_http_projected_inner(
     {
         return Err(AppError::AssistantTurnRequired);
     }
+    if is_shared_auth(auth) {
+        require_shared_context(auth)?;
+    }
     let Some(chat) = auth.assistant_chat.as_deref() else {
         return Ok(Decision {
             refusal: None,
@@ -322,6 +325,61 @@ async fn check_http_projected_inner(
         }
     }
     bind_headers(&mut operation, &projection.headers(target, headers));
+    if is_shared_chat(chat)
+        && crate::services::telnyx_platform_service::contract(&target.service).is_some()
+    {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        operation["transport"] = json!("managed");
+    }
+    let stream = method == "CONNECT"
+        || headers
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    if stream && is_shared_chat(chat) {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        operation["transport"] = json!(if method == "CONNECT" {
+            "connect"
+        } else {
+            "websocket"
+        });
+        let access = chat
+            .org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .expect("shared");
+        let connection = id
+            .and_then(|id| access.connections().get(id))
+            .ok_or_else(crate::services::shared_agent_service::missing)?;
+        // A CONNECT rule, like a WebSocket handshake rule, cannot constrain
+        // subsequent opaque traffic to the reviewed HTTP operation.
+        if crate::services::agent_operation_scope_service::is_scoped(
+            &auth.assistant_operation_scopes,
+            &connection.id,
+            connection.catalog_service_id.as_deref(),
+        ) {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Shared streams require unrestricted agent operation authority".into(),
+            ));
+        }
+        crate::services::shared_agent_transport::require_stream_policy(
+            &state.db,
+            &chat.user_id,
+            connection,
+            &target.service,
+        )
+        .await?;
+        if id
+            .and_then(|id| access.connections().get(id))
+            .is_some_and(|s| s.user_id == access.owner())
+            && id.and_then(|id| access.level(id))
+                != Some(crate::models::assistant_agent::GuestAccess::All)
+        {
+            return Err(AppError::Forbidden(
+                "Shared streams require explicit full service access".into(),
+            ));
+        }
+    }
     let stateless = operation["kind"] == "inference";
     let guest_inference = chat.guest && target.service.inference.is_some();
     let shape_failure = if method_override {
@@ -491,7 +549,9 @@ async fn check_http_projected_inner(
             }
         }
     }
-    let read = matches!(method, "GET" | "HEAD" | "OPTIONS") && !method_override;
+    let read = matches!(method, "GET" | "HEAD" | "OPTIONS")
+        && !method_override
+        && !(stream && is_shared_chat(chat));
     let destructive = method == "DELETE" || method_override;
     let summary = if raw_inference {
         format!(

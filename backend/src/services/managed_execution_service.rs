@@ -196,6 +196,7 @@ fn new_record(
         billing,
     ]));
     Ok(ManagedExecution {
+        shared_execution: None,
         id: uuid::Uuid::new_v4().to_string(),
         billing_request_id: ctx.billing_request_id.clone(),
         billing_owner_id: ctx.billing_owner_id.clone(),

@@ -2259,3 +2259,18 @@ old records without retained proof remain excluded platform-wide candidates;
 confirmed assistant records without execution evidence have separate excluded
 costs. See [Billing analytics](../BILLING_ANALYTICS.md#nyxbot-model-usage) for the
 precise population, ranking, and coverage contract.
+
+
+### Shared-agent transport continuations
+
+Private shared-agent turns use the recipient's key and payer through exact pool
+selection, managed execution and async results. A durable watch may resume only
+its declared operations on its original connection with its original consent
+claim; ordinary idle thread keys still refuse execution. Stop cancels watches,
+and share/behavior/credential/approval-policy drift invalidates later effects.
+The new readiness capability, supported transports and rollback inventory are
+specified in [Shared agents §11–12](12-shared-agents-and-groups.md#11-compatibility-flag-and-rollback).
+Private voice tasks stay in recipient-owned hidden child threads without gaining
+automation authority. Channel posting targets only the recipient's explicitly
+allowed destinations and rechecks rights between parts. Guest billing and group
+membership/handoff rules are unchanged.

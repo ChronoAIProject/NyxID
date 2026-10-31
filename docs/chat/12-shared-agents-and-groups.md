@@ -353,8 +353,8 @@ the owner's account. The actor's own action confirmation can further restrict
 an otherwise permitted operation, but cannot widen the shared level. This
 matches the guest machinery's owner-approval ceiling.
 
-For a platform-bound connection, apply the live platform-key ACL to the acting
-person before decryption. The owner's restricted platform grant is not
+For a platform-bound connection, apply the live platform-key ACL to the exact
+connection owner and, separately, the acting person before decryption. The owner's restricted platform grant is not
 transferable through sharing. Reuse the request membership/provider snapshot.
 Exclude Internal account-service exposure and node routes. Never forward an
 owner access token, delegation token or owner machine/login authority. If the
@@ -427,8 +427,10 @@ credential refresh, retries and outages cannot swap between these accounts;
 another pool member needs the same fresh explicit admission. Unknown or
 withheld owner resources are not disclosed through search or fallback hints.
 
-Require a live bound turn unconditionally for new shared keys, independent of
-the older `assistant:live-turn-gate` rollout. Set node authority empty, do not
+Require a live bound turn unconditionally for ordinary shared-key requests, independent of
+the older `assistant:live-turn-gate` rollout. Only server-owned, leased async watches
+and human-started private voice sessions can authenticate an idle key, against
+their exact durable binding; neither creates a synthetic live turn. Set node authority empty, do not
 copy `assistant:account`, and enforce forbidden protocols/meta-tools after
 resolution as well as in discovery. A key allowlist alone is insufficient.
 NyxAgent's bounded model-transport exception remains available as the actor;
@@ -687,6 +689,8 @@ Rollout sequence:
    do not change legacy thread indexes underneath old writers.
 2. Drain old API/auth/proxy/MCP/LLM/worker replicas, including alternate ingress
    and sweepers. Upgrade the full roster and verify the new readiness capability.
+   Transport extensions additionally require `assistant:shared-agent-transports-v1`
+   in the same readiness roster, under the existing shared-agents flag.
    Readiness is an operational assertion plus observations, not proof of a
    hidden old process's absence.
 3. Enable Phase 1 for test publishers and actors. Verify ACL, billing, privacy,
@@ -700,6 +704,17 @@ cancels/drains active collaboration turns and workers, invalidates pending cards
 and revokes their execution bindings, while upgraded readers and financial
 settlement remain online. Restore the flag only after fresh ACL and consent
 validation; do not resurrect a revoked key or one-time consent.
+
+Transport rollback must drain shared voice sessions, stream sockets and managed
+exchanges, cancel or terminally refuse shared watches and stop their continuations
+before replacing workers. Keep upgraded reconciliation online until funded work
+settles or is durably classified uncertain. Existing payer fields remain the
+settlement authority; an old replica must never reconstruct payer from the
+connection owner. Old replicas ignore optional binding fields but continue their
+Phase 1 pre-effect refusals. Do not route a resumed transport to them. Inventory
+`assistant_async_operations.shared_execution`, `managed_executions.shared_execution`
+and `assistant_voice_sessions.shared_execution` plus live stream workers before
+binary rollback; no active/queued shared effects may remain.
 
 Binary rollback requires more: keep all affected read routes on upgraded
 replicas, or securely archive/remove collaboration groups, hidden/private
@@ -715,14 +730,80 @@ binary rollback. Unrelated legacy data stays untouched.
 
 Phase 1 supports private shared conversations, shared members of the recipient's
 own legacy personal crews, and foreground HTTP/MCP service execution, including
-model callbacks. Pools, detached/managed jobs, async-watch continuations, voice
-sessions, WebSocket/CONNECT and organization-group/platform/channel publishing are
-refused for shared keys before effects. These transports require a separate
-extension carrying the same durable payer, consent and revocation fences.
-Consent uses separate human-only inline cards; after choosing, the person
-continues the chat. The Share dialog adds people by verified email and accepts
-existing recipient UUIDs and organizations the publisher belongs to;
-there is no public user-directory enumeration.
+model callbacks, with the following transport extensions:
+
+- **Pools:** select only eligible connections, pin one exact member per turn and
+  pool before consent, and disable automatic account failover for shared calls.
+  A retry cannot silently switch to another member. Priority and legacy balanced
+  pools use the same recipient authority, payer and final egress checks.
+- **Managed exchanges:** retain the exact consent claim and frozen recipient
+  payer on the managed execution record. The vetted Telnyx managed contract is
+  eligible despite using an internal platform credential lane; internal account
+  services remain excluded. Before dispatch, retain the ordinary personal authority
+  check (including the original live turn) and add the durable shared binding
+  check. Owning a guard does not replace personal authority. Already dispatched
+  work uses the durable binding while waiting and preserves settlement after the
+  initiating turn ends. Interrupted dispatched work retains uncertain
+  liability through normal reconciliation; never invent a refund or redispatch.
+- **Async watches:** bind the submitting connection, contract, share revision,
+  behavior and consumed consent to the durable watch. Leased status/result calls
+  use that exact connection and payer after the initiating turn ends. A declared
+  cancel/status cleanup may survive Stop, but never share revocation. No general
+  idle-key authority is created. Result events still enter the original private
+  thread through ordinary coalescing and fresh turn admission.
+- **Voice:** a first-party human may start a private shared-agent voice session.
+  Actor connections require the ordinary private connection consent, including
+  in Full access. Once covers one session with exact settings; Always covers
+  the reviewed settings until any authority changes. Owner-shared voice needs
+  explicit All service access and cannot use owner approval grants. The recipient
+  pays voice windows and task turns. Hidden task threads are private children,
+  never automation authority. Provider commands and relayed audio recheck live
+  authority; the session monitor closes revoked calls, including an existing
+  provider WebRTC session. Cleanup and known-usage settlement remain available.
+- **WebSocket and CONNECT:** an exact connection and one stream consent govern
+  the open and every forwarded frame/buffer. Owner-shared streams require All,
+  because a GET handshake cannot prove the effects of subsequent messages.
+  CONNECT is a reverse-proxy tunnel to the selected service origin, never an
+  arbitrary client-selected host. Idle streams recheck every second. Usage and
+  disconnect records retain the recipient payer; closing never authorizes a
+  reconnect with an already consumed Once grant. Existing protocol exclusions
+  on pooled streams still apply. Opaque streams (including voice) require
+  unrestricted agent operation scopes, service approval and proxy-operation policies for the recipient
+  and credential owner: allowing a handshake cannot authorize later writes.
+  New policy restrictions invalidate the binding and stop the stream. UUID, slug,
+  exact-member and `_nyxid_via` entrances require complete shared chat authority
+  plus proof of the HTTP stream gate. Missing admission fails closed. Readiness
+  and live authority are checked before CONNECT dispatch or WebSocket connect;
+  node-routed streams and native LLM/public stream entrances remain refused.
+  MCP tool requests cannot substitute CONNECT or Upgrade headers for this gate;
+  they are refused before credential resolution and at resolved dispatch.
+- **Channel posts:** only the recipient's personally owned destinations with
+  explicit `allow_posts` are eligible. Org-owned bots remain excluded even when
+  the recipient is an org admin; shared use grants no org posting authority. Live
+  chat, bot ownership, share revision and behavior are checked after credential
+  awaits, between multipart sends and between media upload and message delivery.
+  The generic channel relay cannot accept a shared thread key as a route key. No agent-owner channel, channel-link authority or
+  automation authority is inherited. Discovery exposes only the limited chat
+  listing/posting tools alongside private notes and pinned skill reads.
+
+The durable `shared_execution` payload stores immutable identity, connection,
+consent claim, authority revision and behavior/connection digests, not a reusable
+ACL snapshot. Resume loads live shares, people/org membership, key, connection,
+policy and consent before effects. Node-backed connections, machines, saved
+logins, SSH, Oracle, owner-account tools/approvals and automation remain excluded.
+These changes do not implement group membership, multi-person group delivery or
+channel guest sharing; those remain separate work. Guests remain owner-billed.
+
+Consent uses separate human-only inline cards. After choosing, the person
+continues the chat or retries voice start; no tool can make that decision.
+Pending/unused Once decisions retain the 25-minute decision window. Claiming
+Once for a transport permits only that exact bounded execution, for at most two
+hours; it does not authorize another job or session. Live revocation still wins.
+
+The Share dialog adds people by verified email and accepts existing recipient
+UUIDs and organizations the publisher belongs to; there is no public
+user-directory enumeration. Organization-group, platform and agent-owner
+channel publication still refuse shared agents before effects.
 
 
 **Phase 1 — shared agents.** Land the access/role model, owner publishing and
@@ -763,7 +844,7 @@ implementation phases after the policy is approved.
 | Privacy | Owner/manager cannot list/read/reset/recover/export/delete another person's chat or notes; no private data in prompts, recap, checkpoint, skills/learning, title, cards, search, notifications or live events; no private history/session reused in groups |
 | Invites/groups | Expiry/cancel/single-use concurrent acceptance, full group cap, existing-account requirement, active shared-org quick-add, creator-only management, transfer/leave/last-person delete, agent remove/readd resets guest opt-in; no arbitrary owner joins through agent attachment |
 | Handoffs | Original actor preserved across owner/shared/org/guest targets; per-request and hourly limits survive retries and concurrent agents; revoked pending request drops without switching actor; no personal NyxBot follower leak |
-| Billing | Shared-lane actor wallet charged for supported model, BYOK and platform calls; unsupported pool, detached/managed-job, async-watch and WebSocket calls refuse before effect; org-member BYOK bills org and platform bills person regardless of group type; owner billing unchanged; guest owner charged; insufficient actor balance never uses owner funds; cancellation/partial stream/retry settle exactly once with persisted payer |
+| Billing | Shared-lane actor wallet charged for supported model, BYOK and platform calls; pool, managed-job, async-watch, voice and stream settlement retain the recipient payer; org-member BYOK bills org and platform bills person regardless of group type; owner billing unchanged; guest owner charged; insufficient actor balance never uses owner funds; cancellation/partial stream/retry settle exactly once with persisted payer |
 | API parity | REST UUID/slug proxy, LLM, WebSocket if supported, MCP search/list/direct/call_tool, exact approvals and worker egress agree; conversation-key management denied; human REST/CLI and NyxBot service mutations have identical role fences |
 | Compatibility | Deserialize pre-feature rows; default sharing off/withheld; no unknown variants in legacy fields; old fixture readers tolerate additive output; full-fleet activation/rollback rehearsal including history readers and #1996 downgrade |
 | Performance/UI | Constant batched ACL/consent reads as agent count grows; no new reads on unrelated turn paths; bounded live worker under overflow; dirty selects, keyboard dialogs, account choice, invite acceptance, live removal and both themes |

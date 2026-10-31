@@ -2462,6 +2462,9 @@ async fn shared_agent_actor_connection_dispatch_requires_consumable_private_cons
     f.state.db.drop().await.unwrap();
 }
 
+#[path = "shared_agent_transport_tests.rs"]
+mod transports;
+
 #[tokio::test]
 async fn guest_setup_2092_shared_recipients_never_initialize_owner_routes() {
     let f = Fixture::new("guest_setup_shared").await;

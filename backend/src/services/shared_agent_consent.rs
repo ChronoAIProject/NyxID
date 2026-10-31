@@ -44,7 +44,7 @@ pub async fn authorize(
     binding: &str,
     operation: &Value,
 ) -> AppResult<Result<Permit, Value>> {
-    authorize_inner(db, chat, access, service, binding, operation, true).await
+    authorize_inner(db, chat, access, service, binding, operation, true, false).await
 }
 
 /// Observe/create the connection card before an ordinary action card consumes
@@ -58,12 +58,13 @@ pub async fn prompt(
     operation: &Value,
 ) -> AppResult<Option<Value>> {
     Ok(
-        authorize_inner(db, chat, access, service, binding, operation, false)
+        authorize_inner(db, chat, access, service, binding, operation, false, false)
             .await?
             .err(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authorize_inner(
     db: &Database,
     chat: &ChatAuthority,
@@ -72,8 +73,9 @@ async fn authorize_inner(
     binding: &str,
     operation: &Value,
     consume_once: bool,
+    voice: bool,
 ) -> AppResult<Result<Permit, Value>> {
-    if !chat.turn_live || chat.turn_stopped || chat.turn_id.is_none() {
+    if (!voice && (!chat.turn_live || chat.turn_stopped)) || chat.turn_id.is_none() {
         return Err(AppError::AssistantTurnRequired);
     }
     let matches = access.matches(&chat.user_id, access.owner(), &chat.agent_id);
@@ -82,13 +84,14 @@ async fn authorize_inner(
     let model = matches!(
         operation["kind"].as_str(),
         Some("raw_inference" | "legacy_inference")
-    ) && access.allows_model_connection(service);
+    ) && access.allows_model_connection(service)
+        || voice && access.allows_model_connection(service);
     if !matches || !actor_service || !connection && !model {
         return Err(sharing::missing());
     }
     let behavior = behavior(access);
     let mut consent_scope = operation.clone();
-    let model_scope = operation["kind"] == "raw_inference";
+    let model_scope = operation["kind"] == "raw_inference" && operation["transport"].is_null();
     if model_scope && let Some(scope) = consent_scope.as_object_mut() {
         scope.remove("input_admission");
     }
@@ -134,8 +137,25 @@ async fn authorize_inner(
                     }));
                 }
                 let claim = Uuid::new_v4().to_string();
-                let result = rows.update_one(doc! {"_id": &row.id, "decision": "once"},
-                    doc! {"$set": {"decision": "consumed", "turn_id": &chat.turn_id, "claim_id": &claim, "updated_at": bson::DateTime::now()}}).await?;
+                let mut consumed = doc! {"decision": "consumed", "turn_id": &chat.turn_id, "claim_id": &claim, "updated_at": bson::DateTime::now()};
+                // The decision window stays short. Once claimed, the exact
+                // transport may run to its own bounded deadline, never a second
+                // job/session. Revocation and all authority fences remain live.
+                if voice
+                    || !operation["transport"].is_null()
+                    || !operation["async_contract"].is_null()
+                {
+                    consumed.insert(
+                        "expires_at",
+                        bson::DateTime::from_chrono(Utc::now() + Duration::hours(2)),
+                    );
+                }
+                let result = rows
+                    .update_one(
+                        doc! {"_id": &row.id, "decision": "once"},
+                        doc! {"$set": consumed},
+                    )
+                    .await?;
                 if result.modified_count != 1 {
                     return Err(AppError::Conflict("Consent was already used".into()));
                 }
@@ -190,7 +210,9 @@ async fn authorize_inner(
         operation_digest,
         scope_key,
         stateless_model: model_scope,
-        operation_summary: if model_scope {
+        operation_summary: if voice {
+            "Start one voice session with this exact connection and voice settings".into()
+        } else if model_scope {
             "Stateless model calls for this turn".into()
         } else {
             format!(
@@ -227,6 +249,21 @@ fn card(row: &AgentConsent) -> Value {
 }
 
 impl Permit {
+    pub(crate) fn durable(&self) -> (String, Option<String>) {
+        (self.id.clone(), self.claim.clone())
+    }
+
+    pub(crate) fn from_execution(
+        row: &crate::models::assistant_sharing::SharedExecution,
+    ) -> Option<Self> {
+        Some(Self {
+            id: row.consent_id.clone()?,
+            claim: row.consent_claim.clone(),
+            revision: row.revision,
+            behavior: row.behavior.clone(),
+        })
+    }
+
     pub async fn revalidate(
         &self,
         db: &Database,
@@ -348,4 +385,20 @@ pub async fn decide(
     session.commit_transaction().await?;
     sharing::audit(db, actor, access.agent(), "connection_consent").await;
     Ok(())
+}
+
+/// Voice start is human-only. The exact preferences produce the ordinary private
+/// connection card; Once is claimed for one session, Always for this exact scope.
+pub(crate) async fn authorize_voice(
+    db: &Database,
+    chat: &ChatAuthority,
+    access: &RequestAccess,
+    service: &UserService,
+    binding: &str,
+    operation: &Value,
+) -> AppResult<Permit> {
+    match authorize_inner(db, chat, access, service, binding, operation, true, true).await? {
+        Ok(permit) => Ok(permit),
+        Err(_) => Err(AppError::Conflict("Choose Allow once or Always for this voice connection in your private chat, then start the call again".into())),
+    }
 }

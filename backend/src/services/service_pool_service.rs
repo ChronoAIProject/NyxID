@@ -639,6 +639,15 @@ pub async fn resolve_member(
     owner_id: &str,
     slug: &str,
 ) -> AppResult<Option<(UserService, PoolSelection)>> {
+    resolve_member_with_access(db, owner_id, slug, None).await
+}
+
+pub async fn resolve_member_with_access(
+    db: &mongodb::Database,
+    owner_id: &str,
+    slug: &str,
+    access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<Option<(UserService, PoolSelection)>> {
     let Some(pool) = find_pool_by_slug(db, owner_id, slug).await? else {
         return Ok(None);
     };
@@ -666,6 +675,12 @@ pub async fn resolve_member(
         else {
             continue;
         };
+        if access
+            .and_then(|a| a.shared())
+            .is_some_and(|shared| !shared.allows_connection(&service))
+        {
+            continue;
+        }
         viable_weights.push(member.weight.max(1));
         viable_members.push(member.clone());
         viable_services.push(service);
@@ -789,6 +804,7 @@ pub async fn node_eligibility_reason(
     Ok((!live).then_some("node_offline"))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn plan_candidates_with_allowlist(
     db: &mongodb::Database,
@@ -803,6 +819,40 @@ pub async fn plan_candidates_with_allowlist(
     request_body: Option<&[u8]>,
     allowed_service_ids: Option<&HashSet<String>>,
     allowed_node_ids: Option<&HashSet<String>>,
+) -> AppResult<PoolCandidatePlan> {
+    plan_candidates_with_access(
+        db,
+        encryption_keys,
+        actor_user_id,
+        actor_api_key_id,
+        owner_id,
+        slug,
+        method,
+        operation_path,
+        body_len,
+        request_body,
+        allowed_service_ids,
+        allowed_node_ids,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn plan_candidates_with_access(
+    db: &mongodb::Database,
+    encryption_keys: &crate::crypto::aes::EncryptionKeys,
+    actor_user_id: &str,
+    actor_api_key_id: Option<&str>,
+    owner_id: &str,
+    slug: &str,
+    method: &http::Method,
+    operation_path: Option<&str>,
+    body_len: usize,
+    request_body: Option<&[u8]>,
+    allowed_service_ids: Option<&HashSet<String>>,
+    allowed_node_ids: Option<&HashSet<String>>,
+    access: Option<&super::org_agent_service::RequestAccess>,
 ) -> AppResult<PoolCandidatePlan> {
     let pool = find_pool_by_slug(db, owner_id, slug)
         .await?
@@ -852,12 +902,13 @@ pub async fn plan_candidates_with_allowlist(
             continue;
         }
         let resolution =
-            match crate::services::proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            match crate::services::proxy_service::read_proxy_authority_snapshot_with_access(
                 db,
                 encryption_keys,
                 actor_user_id,
                 &service.id,
                 None,
+                access,
             )
             .await
             {

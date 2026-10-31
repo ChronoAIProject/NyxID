@@ -328,7 +328,7 @@ async fn graph_request(
     request: reqwest::RequestBuilder,
     timeout: std::time::Duration,
 ) -> Result<Value, GraphRequestFailure> {
-    crate::services::channel_platform::mark_provider_attempt();
+    crate::services::channel_platform::mark_provider_attempt().await?;
     let response = request
         .timeout(timeout)
         .send()
