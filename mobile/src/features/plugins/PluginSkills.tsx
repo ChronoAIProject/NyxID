@@ -23,7 +23,11 @@ import type {
   SkillPageParams,
   WorkspaceNavigationProp,
 } from "../../app/navigationTypes";
-import { useWorkspaceBack } from "../../app/WorkspaceHeader";
+import {
+  useOpenWorkspaceChat,
+  useWorkspaceBack,
+} from "../../app/WorkspaceHeader";
+import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { SkillLibrary, type SkillLibraryTab } from "./SkillLibrary";
 import {
   assertSkillRevision,
@@ -259,6 +263,7 @@ function AgentSkillsManager({
   const [searchQuery, setSearchQuery] = useState("");
   const [page, setPage] = useState(1);
   const navigation = useNavigation<WorkspaceNavigationProp>();
+  const openChat = useOpenWorkspaceChat();
   const detail = skillPage
     ? {
         id: skillPage.skillId,
@@ -282,6 +287,7 @@ function AgentSkillsManager({
     enabled: focused,
     retry: false,
   });
+  const currentReady = Boolean(current.data) && !current.isError;
   useEffect(() => {
     const timer = setTimeout(() => {
       setSearchQuery(catalogInput.trim().slice(0, 200));
@@ -375,7 +381,7 @@ function AgentSkillsManager({
   }
   async function change(change: SkillChange) {
     const baseline = current.data;
-    if (!baseline) return;
+    if (!baseline || !currentReady) return;
     await run(async () => {
       const [latest, latestAgent] = await Promise.all([
         api.current(agent.id),
@@ -490,6 +496,24 @@ function AgentSkillsManager({
             </>
           )}
           {notice && <Notice tone="success" message={notice} />}
+          {current.isError && (
+            <>
+              <Notice tone="error" message={failure(current.error)} />
+              {current.data && (
+                <Label muted>
+                  Showing last loaded attached skills. Retry to confirm before
+                  changing versions or removing a skill.
+                </Label>
+              )}
+              <ActionButton
+                label="Retry attached skills"
+                variant="secondary"
+                loading={current.isFetching}
+                disabled={busy || !focused}
+                onPress={() => void current.refetch()}
+              />
+            </>
+          )}
           {view === "detail" && detail && (
             <>
               <View style={styles.detailIdentity}>
@@ -515,10 +539,19 @@ function AgentSkillsManager({
               )}
               <Card>
                 <Label muted style={styles.caption}>
-                  Pinned version
+                  {current.isError && current.data
+                    ? "Last loaded version"
+                    : "Pinned version"}
                 </Label>
                 <View style={styles.versionHeading}>
-                  <Label mono>{pin?.version ?? "Not attached"}</Label>
+                  <Label mono>
+                    {pin?.version ??
+                      (current.isPending
+                        ? "Loading attached version…"
+                        : currentReady
+                          ? "Not attached"
+                          : "Attachment status unavailable")}
+                  </Label>
                   {pinnedLatest && <LatestBadge />}
                 </View>
                 {pin && (
@@ -530,7 +563,22 @@ function AgentSkillsManager({
                   </Label>
                 )}
               </Card>
-              <Label muted>To change this skill, ask NyxBot.</Label>
+              <Card>
+                <Label muted>To change this skill, ask NyxBot.</Label>
+                <ActionButton
+                  label="Ask NyxBot"
+                  variant="secondary"
+                  disabled={busy || !focused}
+                  onPress={() => {
+                    if (
+                      !lock.current &&
+                      focused &&
+                      authEpoch.current === getAuthEpoch()
+                    )
+                      openChat(newAssistantChatParams());
+                  }}
+                />
+              </Card>
               {pin?.disabled && (
                 <Notice message="This skill is disabled. Ask NyxBot to enable it before changing its version." />
               )}
@@ -538,7 +586,7 @@ function AgentSkillsManager({
                 <ActionButton
                   label={`Use latest (v${latestVersion.version})`}
                   variant="secondary"
-                  disabled={busy || !current.data || Boolean(pin?.disabled)}
+                  disabled={busy || !currentReady || Boolean(pin?.disabled)}
                   onPress={() => {
                     openView("versions", latestVersion.version);
                   }}
@@ -547,7 +595,7 @@ function AgentSkillsManager({
               <ActionButton
                 label={pin ? "Choose exact version" : "Attach exact version"}
                 variant="secondary"
-                disabled={busy || !current.data}
+                disabled={busy || !currentReady}
                 onPress={() => {
                   openView("versions");
                   setVersionPage(1);
@@ -624,6 +672,7 @@ function AgentSkillsManager({
                         label="Confirm remove from agent"
                         variant="danger"
                         loading={busy}
+                        disabled={!currentReady}
                         onPress={() =>
                           void change({
                             type: "detach",
@@ -642,7 +691,7 @@ function AgentSkillsManager({
                     <ActionButton
                       label="Remove from agent"
                       variant="danger"
-                      disabled={busy || !current.data}
+                      disabled={busy || !currentReady}
                       onPress={() => setConfirmDetach(true)}
                     />
                   )}
@@ -765,7 +814,7 @@ function AgentSkillsManager({
                 label={pin ? "Update exact version" : "Attach skill"}
                 loading={busy}
                 disabled={
-                  !current.data ||
+                  !currentReady ||
                   Boolean(pin?.disabled) ||
                   !selectedVersion ||
                   !preview.data ||

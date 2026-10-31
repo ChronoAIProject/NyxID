@@ -17,6 +17,7 @@ import { ArrowRight, RefreshCw, Search, X } from "lucide-react-native";
 import type { WorkspaceNavigationProp } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { ServiceIcon } from "../../components/ServiceIcon";
+import { SegmentControl } from "../../components/SegmentControl";
 import {
   ActionButton,
   Card,
@@ -182,43 +183,15 @@ export function PluginsScreen({
 
   return (
     <WorkspacePage title="Plugins" showHeading={false} scroll={false}>
-      <View
-        accessibilityRole="tablist"
-        style={[
-          styles.tabs,
-          { backgroundColor: colors.cardSoft, borderColor: colors.border },
-        ]}
-      >
-        {(["connectors", "skills"] as const).map((value) => (
-          <Pressable
-            key={value}
-            accessibilityRole="tab"
-            accessibilityState={{ selected: tab === value }}
-            onPress={() => {
-              Keyboard.dismiss();
-              setTab(value);
-            }}
-            style={[
-              styles.tab,
-              {
-                backgroundColor:
-                  tab === value ? colors.navActive : "transparent",
-              },
-            ]}
-          >
-            <Text
-              style={[
-                styles.tabLabel,
-                {
-                  color: tab === value ? colors.textPrimary : colors.textMuted,
-                },
-              ]}
-            >
-              {value === "connectors" ? "Connectors" : "Skills"}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
+      <SegmentControl
+        segments={[{ label: "Connectors" }, { label: "Skills" }]}
+        activeIndex={tab === "connectors" ? 0 : 1}
+        onPress={(index) => {
+          Keyboard.dismiss();
+          setTab(index === 0 ? "connectors" : "skills");
+        }}
+        style={styles.tabs}
+      />
       {tab === "skills" ? (
         <ScrollView
           key="skills"
@@ -231,52 +204,26 @@ export function PluginsScreen({
         </ScrollView>
       ) : (
         <View style={styles.connectorBody}>
-          <View
-            accessibilityRole="tablist"
-            style={[styles.scopes, { backgroundColor: colors.cardSoft }]}
-          >
-            {(["added", "discover"] as const).map((value) => {
+          <SegmentControl
+            segments={(["added", "discover"] as const).map((value) => {
               const count =
                 value === "added"
                   ? connections.data && items.added.length
                   : catalogKnown && catalog.data && items.available.length;
               const label = value === "added" ? "Added" : "Discover";
-              return (
-                <Pressable
-                  key={value}
-                  accessibilityRole="tab"
-                  accessibilityLabel={`${label} connectors${typeof count === "number" ? `, ${count}` : ""}`}
-                  accessibilityState={{ selected: connectorTab === value }}
-                  onPress={() => {
-                    Keyboard.dismiss();
-                    setConnectorTab(value);
-                  }}
-                  style={[
-                    styles.tab,
-                    {
-                      backgroundColor:
-                        connectorTab === value ? colors.card : "transparent",
-                    },
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.tabLabel,
-                      {
-                        color:
-                          connectorTab === value
-                            ? colors.textPrimary
-                            : colors.textSecondary,
-                      },
-                    ]}
-                  >
-                    {label}
-                    {typeof count === "number" ? ` · ${count}` : ""}
-                  </Text>
-                </Pressable>
-              );
+              return {
+                id: value,
+                label: `${label}${typeof count === "number" ? ` · ${count}` : ""}`,
+                accessibilityLabel: `${label} connectors${typeof count === "number" ? `, ${count}` : ""}`,
+              };
             })}
-          </View>
+            activeIndex={connectorTab === "added" ? 0 : 1}
+            onPress={(index) => {
+              Keyboard.dismiss();
+              setConnectorTab(index === 0 ? "added" : "discover");
+            }}
+            style={styles.tabs}
+          />
           <View style={styles.row}>
             <PluginSearch
               value={query}
@@ -540,23 +487,7 @@ const styles = StyleSheet.create({
     fontFamily: fonts.bodyRegular,
     fontSize: 13,
   },
-  tabs: {
-    flexDirection: "row",
-    borderWidth: 1,
-    borderRadius: 10,
-    padding: 3,
-    gap: 3,
-  },
-  tab: {
-    flex: 1,
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 7,
-    padding: 8,
-  },
-  tabLabel: { fontFamily: fonts.bodySemi, fontSize: 12 },
-  scopes: { flexDirection: "row", borderRadius: 10, padding: 3, gap: 3 },
+  tabs: { marginBottom: 0 },
   list: { flex: 1, borderWidth: 1, borderRadius: 12, overflow: "hidden" },
   connectorRow: {
     flexDirection: "row",

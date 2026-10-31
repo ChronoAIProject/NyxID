@@ -8,6 +8,7 @@ import {
   View,
 } from "react-native";
 import { BookOpen, Check, ChevronRight, Search, X } from "lucide-react-native";
+import { SegmentControl } from "../../components/SegmentControl";
 import {
   ActionButton,
   Label,
@@ -78,43 +79,26 @@ export function SkillLibrary({
   const list = tab === "added" ? added : catalog;
   return (
     <View style={styles.stack}>
-      <View
-        accessibilityRole="tablist"
-        style={[styles.tabs, { backgroundColor: colors.cardSoft }]}
-      >
-        {(["added", "discover"] as const).map((value) => (
-          <Pressable
-            key={value}
-            accessibilityRole="tab"
-            accessibilityLabel={
-              value === "added" ? "Added skills" : "Discover skills"
-            }
-            accessibilityState={{ selected: tab === value }}
-            onPress={() => {
-              Keyboard.dismiss();
-              onTabChange(value);
-            }}
-            style={[
-              styles.tab,
-              tab === value && { backgroundColor: colors.card },
-            ]}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                {
-                  color:
-                    tab === value ? colors.textPrimary : colors.textSecondary,
-                },
-              ]}
-            >
-              {value === "added"
-                ? `Added${added.known ? ` · ${added.items.length}` : ""}`
-                : "Discover"}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
+      <SegmentControl
+        segments={[
+          {
+            id: "added",
+            label: `Added${added.known ? ` · ${added.items.length}` : ""}`,
+            accessibilityLabel: "Added skills",
+          },
+          {
+            id: "discover",
+            label: "Discover",
+            accessibilityLabel: "Discover skills",
+          },
+        ]}
+        activeIndex={tab === "added" ? 0 : 1}
+        onPress={(index) => {
+          Keyboard.dismiss();
+          onTabChange(index === 0 ? "added" : "discover");
+        }}
+        style={styles.tabs}
+      />
       <View
         style={[
           styles.search,
@@ -379,16 +363,7 @@ function SkillListRow({
 
 const styles = StyleSheet.create({
   stack: { gap: 12 },
-  tabs: { flexDirection: "row", borderRadius: 10, padding: 4, gap: 4 },
-  tab: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 7,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: 10,
-  },
-  tabText: { fontFamily: fonts.bodySemi, fontSize: 13, lineHeight: 19 },
+  tabs: { marginBottom: 0 },
   search: {
     flexDirection: "row",
     alignItems: "center",

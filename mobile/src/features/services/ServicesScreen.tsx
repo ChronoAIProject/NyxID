@@ -32,6 +32,7 @@ import type { WorkspaceNavigationProp } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { fonts } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
+import { SegmentControl } from "../../components/SegmentControl";
 import {
   buildCatalogConnectionInput,
   canEditConnection,
@@ -52,6 +53,7 @@ import {
 import { PluginConnectionHistory } from "../plugins/PluginConnectionHistory";
 
 const ROOT = ["workspace", "services"] as const;
+const MANAGEMENT_TABS = ["overview", "advanced", "history"] as const;
 const messageOf = (cause: unknown) =>
   cause instanceof Error
     ? cause.message
@@ -454,56 +456,23 @@ export function ServicesScreen({
               )}
           </Card>
         )}
-        <View
-          style={[
-            styles.tabs,
-            { backgroundColor: colors.cardSoft, borderColor: colors.border },
-          ]}
-        >
-          {(["overview", "advanced", "history"] as const).map((value) => (
-            <Pressable
-              key={value}
-              accessibilityRole="tab"
-              accessibilityLabel={
-                value.charAt(0).toUpperCase() + value.slice(1)
-              }
-              accessibilityState={{
-                selected: managementTab === value,
-                disabled: busy,
-              }}
-              disabled={busy}
-              onPress={() => {
-                setManagementTab(value);
-                setReplacement("");
-                setCredentialEditorOpen(false);
-                setConfirmRemove(false);
-                setTokenOnlyRemoval(false);
-              }}
-              style={[
-                styles.tab,
-                styles.managementTab,
-                {
-                  backgroundColor:
-                    managementTab === value ? colors.ghostBg : "transparent",
-                },
-              ]}
-            >
-              <Text
-                style={[
-                  styles.tabLabel,
-                  {
-                    color:
-                      managementTab === value
-                        ? colors.textPrimary
-                        : colors.textMuted,
-                  },
-                ]}
-              >
-                {value.charAt(0).toUpperCase() + value.slice(1)}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
+        <SegmentControl
+          segments={MANAGEMENT_TABS.map((value) => ({
+            label: value.charAt(0).toUpperCase() + value.slice(1),
+          }))}
+          activeIndex={MANAGEMENT_TABS.indexOf(managementTab)}
+          disabled={busy}
+          onPress={(index) => {
+            const value = MANAGEMENT_TABS[index];
+            if (!value) return;
+            setManagementTab(value);
+            setReplacement("");
+            setCredentialEditorOpen(false);
+            setConfirmRemove(false);
+            setTokenOnlyRemoval(false);
+          }}
+          style={styles.tabs}
+        />
         {notice && <Notice message={notice} tone="success" />}
         {error && <Notice message={error} tone="error" />}
         {managementTab !== "history" && detail.isPending && (
@@ -970,43 +939,15 @@ export function ServicesScreen({
           ]}
         />
       </View>
-      <View
-        style={[
-          styles.tabs,
-          { backgroundColor: colors.cardSoft, borderColor: colors.border },
-        ]}
-      >
-        {(["connected", "catalog"] as const).map((value) => (
-          <Pressable
-            key={value}
-            onPress={() => {
-              setTab(value);
-              setError(undefined);
-            }}
-            accessibilityRole="tab"
-            hitSlop={{ top: 2, bottom: 2 }}
-            accessibilityState={{ selected: tab === value }}
-            style={[
-              styles.tab,
-              {
-                backgroundColor:
-                  tab === value ? colors.navActive : "transparent",
-              },
-            ]}
-          >
-            <Text
-              style={[
-                styles.tabLabel,
-                {
-                  color: tab === value ? colors.textPrimary : colors.textMuted,
-                },
-              ]}
-            >
-              {value === "connected" ? "Connected" : "Explore catalog"}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
+      <SegmentControl
+        segments={[{ label: "Connected" }, { label: "Explore catalog" }]}
+        activeIndex={tab === "connected" ? 0 : 1}
+        onPress={(index) => {
+          setTab(index === 0 ? "connected" : "catalog");
+          setError(undefined);
+        }}
+        style={styles.tabs}
+      />
       {current.isPending && (
         <ActivityIndicator
           accessibilityLabel="Loading services"
@@ -1458,22 +1399,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 14,
   },
-  tabs: {
-    flexDirection: "row",
-    padding: 3,
-    minHeight: 48,
-    borderRadius: 10,
-    borderWidth: 1,
-  },
-  tab: {
-    flex: 1,
-    minHeight: 40,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 7,
-  },
-  tabLabel: { fontFamily: fonts.bodySemi, fontSize: 12, lineHeight: 18 },
-  managementTab: { minHeight: 44 },
+  tabs: { marginBottom: 0 },
   permissionsCard: { padding: 0, gap: 0 },
   permissionsToggle: {
     minHeight: 48,

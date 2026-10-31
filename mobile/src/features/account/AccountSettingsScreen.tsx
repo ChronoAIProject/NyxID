@@ -12,6 +12,7 @@ import type { WorkspaceScreenProps } from "../../app/navigationTypes";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { ScreenContainer } from "../../components/ScreenContainer";
+import { SegmentControl } from "../../components/SegmentControl";
 import { OfflineBanner } from "../../components/OfflineBanner";
 import { TelegramLinkModal } from "../../components/TelegramLinkModal";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
@@ -700,50 +701,49 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         {/* Appearance card */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Appearance</Text>
-          <View style={styles.themeToggleWrap}>
-            {(() => {
-              const isLight = preference === "light" || (preference === "system" && mode === "light");
-              const isDark = preference === "dark" || (preference === "system" && mode === "dark");
-              const lightColor = isLight ? colors.primary : colors.textMuted;
-              const darkColor = isDark ? colors.primary : colors.textMuted;
-              return (
-                <>
-                  <Pressable
-                    style={[styles.themeToggleHalf, isLight && styles.themeToggleHalfActive]}
-                    onPress={() => {
-                      capture({
-                        name: "ui.mobile_preference_toggled",
-                        props: { name: "theme", value: "light" },
-                      });
-                      setPreference("light");
-                    }}
-                  >
-                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={lightColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                      <Circle cx={12} cy={12} r={5} />
-                      <Path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-                    </Svg>
-                    <Text style={[styles.themeToggleLabel, isLight && styles.themeToggleLabelActive]}>Light</Text>
-                  </Pressable>
-                  <View style={styles.themeToggleDivider} />
-                  <Pressable
-                    style={[styles.themeToggleHalf, isDark && styles.themeToggleHalfActive]}
-                    onPress={() => {
-                      capture({
-                        name: "ui.mobile_preference_toggled",
-                        props: { name: "theme", value: "dark" },
-                      });
-                      setPreference("dark");
-                    }}
-                  >
-                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={darkColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                      <Path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                    </Svg>
-                    <Text style={[styles.themeToggleLabel, isDark && styles.themeToggleLabelActive]}>Dark</Text>
-                  </Pressable>
-                </>
-              );
-            })()}
-          </View>
+          {(() => {
+            const isLight = preference === "light" || (preference === "system" && mode === "light");
+            const isDark = preference === "dark" || (preference === "system" && mode === "dark");
+            const lightColor = isLight ? colors.primary : colors.textMuted;
+            const darkColor = isDark ? colors.primary : colors.textMuted;
+            return (
+              <SegmentControl
+                accessibilityLabel="Appearance"
+                style={styles.themeToggleWrap}
+                stacked={width / fontScale < 340}
+                activeIndex={isLight ? 0 : 1}
+                segments={[
+                  {
+                    label: "Light",
+                    accessibilityLabel: "Light appearance",
+                    icon: (
+                      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={lightColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                        <Circle cx={12} cy={12} r={5} />
+                        <Path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+                      </Svg>
+                    ),
+                  },
+                  {
+                    label: "Dark",
+                    accessibilityLabel: "Dark appearance",
+                    icon: (
+                      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={darkColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                        <Path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                      </Svg>
+                    ),
+                  },
+                ]}
+                onPress={(index) => {
+                  const value = index === 0 ? "light" : "dark";
+                  capture({
+                    name: "ui.mobile_preference_toggled",
+                    props: { name: "theme", value },
+                  });
+                  setPreference(value);
+                }}
+              />
+            );
+          })()}
           <View style={styles.systemRow}>
             <Text style={styles.accountRowLabel}>Use system setting</Text>
             <Switch
@@ -1016,43 +1016,9 @@ const createStyles = (
     color: c.textMuted,
     marginTop: spacing.xs,
   },
-  // Same visual treatment as SegmentControl and BottomNavV2 — one selected-state
-  // language across the app: rounded-lg container, navActive highlight, sentence-case.
   themeToggleWrap: {
-    flexDirection: stacked ? "column" : "row",
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: c.borderSoft,
-    backgroundColor: c.cardSoft,
-    padding: 2,
-    overflow: "hidden",
     marginTop: spacing.sm,
-  },
-  themeToggleHalf: {
-    flex: stacked ? undefined : 1,
-    minWidth: 0,
-    minHeight: 44,
-    paddingHorizontal: spacing.sm,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: spacing.xs + spacing.xxs,
-    paddingVertical: spacing.md,
-    borderRadius: radius.sm,
-  },
-  themeToggleHalfActive: {
-    backgroundColor: c.navActive,
-  },
-  themeToggleDivider: {
-    width: 0,
-  },
-  themeToggleLabel: {
-    flexShrink: 1,
-    ...typeScale.label,
-    color: c.textMuted,
-  },
-  themeToggleLabelActive: {
-    color: c.textPrimary,
+    marginBottom: 0,
   },
   systemRow: {
     flexDirection: stacked ? "column" : "row",
