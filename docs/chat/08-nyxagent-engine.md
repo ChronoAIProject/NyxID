@@ -284,6 +284,13 @@ create) reach active catalog services with `inference` metadata even outside
 its grants (`proxy::assistant_model_call`), whether the owner's own row, an org
 row or the catalog row resolves it. Nothing else widens: the key's allowlist,
 inventory, delegation tokens, consent screens and MCP tools stay its grants.
+Webhook automation threads use that same credential provisioning. Their raw
+HTTP effects gate recognizes the closed stateless inference contract before
+applying webhook confirmation, including when the model catalog has no endpoint
+rows. Stateful/provider-hosted effects, unknown request shapes, method overrides
+and destructive operations retain their checks. No inference grant is needed;
+model selection, input admission, live turn/key fences and owner billing still
+apply.
 For a live guest turn, the exception requires an exact server-established
 model route. A normal owner model admission during the engine's active model
 attempt records `owner_model_route` on the thread and, when its profile matches
@@ -1656,7 +1663,11 @@ defaults. Dedicated/per-run automation threads are excluded from home adoption
 at creation, turn admission and recovery after deletion.
 
 `ActiveTurn.trigger_run_id` connects settlement and confirmations to metadata-only
-run history. Confirmation requests copy this identity and the active turn ID;
+run history. The optional `failure_reason` copies the settled turn's sanitized
+source, stage, code and HTTP/NyxID status metadata into the run in the same
+transaction. Owner run history displays the model-proxy denial instead of only
+`assistant_unavailable`; no request content or provider error prose is exposed.
+Confirmation requests copy this identity and the active turn ID;
 automation settlement keeps the run waiting until cards are decided, scheduling
 its fallback at the earliest card expiry. The decision transaction wakes the
 work item; settlement reads card state transactionally to avoid lost wakeups. The

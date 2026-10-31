@@ -100,7 +100,10 @@ pub(crate) enum Started {
     PoolFull,
 }
 
-async fn acquire(state: &AppState, pool: Pool<'_>) -> AppResult<Option<DirectChatPermit>> {
+pub(crate) async fn acquire(
+    state: &AppState,
+    pool: Pool<'_>,
+) -> AppResult<Option<DirectChatPermit>> {
     match pool {
         Pool::Team { owner, limit } => {
             state
@@ -443,6 +446,10 @@ pub(crate) async fn after_turn(
     let Some(turn) = row.active_turn.as_ref() else {
         return;
     };
+    if row.collaboration.is_some() {
+        super::collaboration_group::settled(state, row, text, error).await;
+        return;
+    }
     if let Some(event_id) = turn.channel_event_id.as_deref() {
         super::nyxbot::late_delivery::settled(state, event_id).await;
     }
@@ -1045,6 +1052,13 @@ fn action_summary(name: &str, args: &Value) -> String {
         "update_schedule" => "Change a scheduled automation",
         "delete_schedule" => "Delete a scheduled automation",
         "run_schedule_now" => "Run a scheduled automation now",
+        "create_collaboration_group" => {
+            "Create a group; invited participants can read its full retained history"
+        }
+        "manage_collaboration_group" => {
+            "Change group membership or settings; new participants can read the full retained history"
+        }
+        "post_to_collaboration_group" => "Post a request for you in a collaboration group",
         "create_group" => "Create a group chat",
         "update_group" => "Change a group chat",
         "delete_group" => "Delete a group chat",
@@ -1128,6 +1142,12 @@ pub(crate) async fn execute_tool(
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
     if chat.guest {
         return (acks::guest_refusal(), true);
+    }
+    if chat.collaboration_thread && !matches!(name, "get_agent_skills" | "skill_read") {
+        return refusal(
+            "collaboration_scope",
+            "Group agents may read their pinned skills, but cannot use private memory or account management tools. Manage memory and permissions outside the group.",
+        );
     }
     if chat
         .org_agent_access
@@ -1262,6 +1282,9 @@ async fn execute_authorized_tool_impl(
         } else {
             None
         };
+        let group_delegation = if name=="manage_collaboration_group" {
+            super::collaboration_group::guest_widening(state,&chat.user_id,args).await?
+        } else {false};
         if !matches!(
             name,
             "set_agent_operations"
@@ -1275,7 +1298,7 @@ async fn execute_authorized_tool_impl(
                 | "request_agent_skills"
         ) {
             let class = acks::classify_owner_action(tool_name, args);
-            let facts = if sharing_preview
+            let facts = if group_delegation || sharing_preview
                 .as_ref()
                 .is_some_and(|preview| preview.widening)
             {
@@ -1289,11 +1312,11 @@ async fn execute_authorized_tool_impl(
                 .as_ref()
                 .filter(|preview| preview.widening)
                 .map(|preview| preview.summary.clone())
-                .unwrap_or_else(|| action_summary(name, args));
+                .unwrap_or_else(|| if group_delegation { format!("Enable guest access for agent {} in group {}. Current and future participants without use rights may use the owner’s guest service policy; the owner pays. Membership revision {}, guest revision {}.",text_arg(&args["change"],"agent_id"),text_arg(args,"group"),args["expected_revision"],args["change"]["guest_revision"]) } else {action_summary(name,args)});
             if let Some(need) = gate.ask() {
-                if sharing_preview
+                if (group_delegation || sharing_preview
                     .as_ref()
-                    .is_some_and(|preview| preview.widening)
+                    .is_some_and(|preview| preview.widening))
                     && let Some(acknowledgement_id) = args["acknowledgement_id"].as_str()
                 {
                     delegation_approved = acks::consume_delegation_action(
@@ -1424,6 +1447,22 @@ fn dispatch<'a>(
         "decide_permission" | "destroy_subagent" => {
             Box::pin(dispatch_permission_decisions(state, chat, name, args))
         }
+        "create_collaboration_group"
+        | "list_collaboration_groups"
+        | "manage_collaboration_group"
+        | "post_to_collaboration_group" => Box::pin(async move {
+            Ok((
+                super::collaboration_group::tool(
+                    state,
+                    &chat.user_id,
+                    name,
+                    args,
+                    delegation_approved,
+                )
+                .await?,
+                false,
+            ))
+        }),
         "create_group" | "list_groups" | "post_to_group" | "update_group" | "delete_group" => {
             Box::pin(dispatch_groups(state, chat, name, args))
         }
@@ -3688,6 +3727,7 @@ pub fn spawn_sweeps(state: AppState) {
                     wake(&state, &row.user_id, &row.id).await;
                 }
             }
+            super::collaboration_group::sweep(&state).await;
             // Group members addressed while busy (or while the pool was full).
             if let Ok(rows) =
                 crate::services::assistant_group_service::with_pending(&state.db).await

@@ -45,7 +45,10 @@ pub async fn read(db: &Database, chat: &ChatAuthority, args: &Value) -> AppResul
     {
         return Err(AppError::AssistantTurnRequired);
     }
-    if current.channel.is_some() || current.group_id.is_some() || current.platform_thread.is_some()
+    if current.collaboration.is_some()
+        || current.channel.is_some()
+        || current.group_id.is_some()
+        || current.platform_thread.is_some()
     {
         return Err(AppError::Forbidden(
             "Task status requires a private owner thread".into(),
@@ -54,7 +57,7 @@ pub async fn read(db: &Database, chat: &ChatAuthority, args: &Value) -> AppResul
     let limit = args["limit"].as_u64().unwrap_or(10).clamp(1, 20) as usize;
     let mut filter = doc! {"user_id": &chat.user_id, "agent_id": &chat.agent_id,
     "_id": {"$ne": &chat.conversation_id}, "guest_turn": {"$ne": true},
-    "channel": bson::Bson::Null, "group_id": bson::Bson::Null, "platform_thread": bson::Bson::Null};
+    "collaboration": bson::Bson::Null, "channel": bson::Bson::Null, "group_id": bson::Bson::Null, "platform_thread": bson::Bson::Null};
     if let Some(id) = args["thread_id"].as_str() {
         filter.insert(
             "$or",

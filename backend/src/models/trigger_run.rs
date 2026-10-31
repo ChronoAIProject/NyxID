@@ -56,6 +56,9 @@ pub struct TriggerRun {
     /// Includes upstream assistant error codes as well as scheduler reasons;
     /// this is deliberately an open diagnostic namespace.
     pub reason: Option<String>,
+    /// Sanitized model callback failure from the latest settled run turn.
+    #[serde(default)]
+    pub failure_reason: Option<Box<super::assistant_message::TurnFailureReason>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

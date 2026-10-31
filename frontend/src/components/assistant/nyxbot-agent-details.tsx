@@ -1,3 +1,4 @@
+import { CollaborationGuestControls } from "./collaboration-guest-controls";
 import { GuestReadiness } from "./guest-readiness";
 import { ShareAgentDialog, SharedAgentMemory, SharedAgentProfile, SharedConsentCards } from "./shared-agent-controls";
 import { AgentSkills } from "./agent-skills";
@@ -750,6 +751,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       {agent.can_maintain !== false ? (
         <>
           <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
+          {agent.owner_kind !== "org" && !agent.share_role ? <CollaborationGuestControls agentId={agent.id} /> : null}
           {agent.owner_kind !== "org" ? <AgentOperationScopes agentId={agent.id} disabled={readOnly} guests /> : null}
           <MachineCapabilities agentId={agent.id} disabled={readOnly} />
         </>

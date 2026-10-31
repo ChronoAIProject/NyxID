@@ -225,7 +225,7 @@ pub struct AccessBatch {
     pub read_queries: usize,
 }
 
-fn flag_enabled(
+pub(crate) fn flag_enabled(
     rows: &[FeatureFlagOverride],
     memberships: &[OrgMembership],
     active: &HashSet<String>,
@@ -1622,7 +1622,7 @@ pub async fn summaries(
     let threads: Vec<AssistantConversation> = db
         .collection(crate::models::assistant_conversation::COLLECTION_NAME)
         .find(
-            doc! {"user_id": actor, "shared_agent_thread": true, "group_id": null, "channel": null,
+            doc! {"user_id": actor, "shared_agent_thread": true, "collaboration": null, "group_id": null, "channel": null,
             "automation_thread": {"$ne": true}, "voice_parent_conversation_id": null},
         )
         .sort(doc! {"created_at": 1})

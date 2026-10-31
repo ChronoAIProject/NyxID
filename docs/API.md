@@ -9379,3 +9379,55 @@ compatibility fence, including same-second revocation. Double submit before
 revocation is harmless. URI
 spelling is preserved exactly: tab/CR/LF anywhere and leading/trailing C0/space
 are rejected rather than normalized into a match.
+
+### Multi-person assistant groups
+
+The existing `/api/v1/assistant/nyxagent/groups` routes dispatch explicit
+collaboration groups separately from legacy personal crews and org groups.
+Create one with `collaboration: true`, `name`, and 1–8 `member_agent_ids` (specialists
+only). Creation and new work require the default-off `assistant:shared-agents`
+flag and full-fleet `assistant:collaboration-groups-v1` readiness. Human
+`GET /api/v1/assistant/nyxagent/collaboration` returns `{ "available": boolean }`.
+Legacy groups are never converted. Non-participants receive a not-found-shaped
+denial, and hidden execution IDs/keys are never returned.
+
+Under that prefix, `POST /groups/{id}/membership` accepts `expected_revision` and
+a tagged `action`: `invite`, `cancel_invite`, `quick_add`, `remove`, `leave`,
+`delete`, `propose_transfer`, `accept_transfer`, `add_agent`, `propose_agent`,
+`accept_agent`, `remove_agent`, `guest_access`, `rename`, or `lead`. Stale
+membership revisions return 409. Transfer proposal/acceptance is human-only.
+Dedicated invite, participant, leave and guest-access aliases are documented in
+[the complete contract](chat/12-shared-agents-and-groups.md#10-rest-nyxbot-tools-and-mcp-parity).
+
+Invites return their seven-day single-use token once. The invite action and
+`POST /groups/{id}/invites` accept optional `intended_user_id` to bind the token
+to an existing person; omit it for a bearer link. Human
+`POST /group-invites/preview` accepts `{ "token": "..." }`; acceptance adds
+`"history_disclosed": true` and requires a signed-in person. New participants
+see all retained history, and quick-add requires the same disclosure. A creator
+must complete an accepted management transfer before leaving, or delete the
+group. No invite message is sent automatically.
+
+Messages accept exact `recipient_agent_ids` and attachment IDs. Every reply and
+handoff runs for the original requester: owner/org/shared authority first, then
+owner-opted-in guests, otherwise a fixed refusal without model work. Shared
+usage bills the requester; org BYOK/platform and owner/guest billing retain their
+existing rules. `POST /groups/{id}/requests/{request_id}/cancel` stops only that
+requester's work. `POST /groups/{id}/decisions/{decision_id}` accepts `kind`
+(`action`/`consent`) and `decision` (`allow`/`deny` or `once`/`always`/`skip`).
+Service approvals use the existing approval decision endpoint. Exact cards and
+account labels are visible only to their requester; other participants see
+waiting status. Group membership changes invalidate those decisions.
+
+A personal specialist owner may read `GET /agents/{id}/group-access` to manage
+that agent's guest settings by group ID and policy/membership revision, even
+without joining. It reveals no group names, participants or transcript. Enabling
+guests covers current and future unauthorized participants and bills the owner;
+NyxBot always requires an owner card, including in Full access.
+
+Native tools and MCP expose `create_collaboration_group`,
+`list_collaboration_groups`, `manage_collaboration_group`, and
+`post_to_collaboration_group` through the same service boundaries. Public REST
+writes remain first-party human only. Flag-off preserves authorized retained
+history, cancellation, departure and deletion; binary rollback requires the
+archive/drain procedure in the design.

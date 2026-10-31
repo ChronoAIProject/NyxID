@@ -357,7 +357,12 @@ run with `target_changed` after the pending decision is resolved.
 
 Run outcomes are `pending`, `started`, `waiting`, `completed`, `failed`, or
 `skipped`. Run records hold identifiers, timing, confirmation IDs, destination
-metadata and outcome only. The complete answer lives in the assistant transcript.
+metadata and outcome only. Additive `failure_reason` retains the latest settled
+turn's closed failure metadata (source, stage, code, HTTP status and NyxID error
+code); the owner history UI displays it when present and falls back to `reason`
+for old runs. It is written with turn settlement, including recovery, and never
+contains prompts, payloads or upstream error prose. The complete answer lives in
+the assistant transcript.
 `deliver_to` is `{"type":"thread"}`, `{"type":"notification"}` (push only), or
 `{"type":"chat","chat_id":"..."}`. Chat access is checked both at configuration
 and delivery, through the existing post-to-chat path. Long replies respect the
@@ -437,6 +442,12 @@ requires an owner action card for every changing call; `destructive` permits
 other changes and requires explicit owner selection with a warning. Service
 classification shares guest access's HTTP method and catalog contract rules,
 including NyxID markers; names and payload instructions never authorize changes.
+Stateless model callbacks use the existing closed inference body contract even
+when the catalog has no endpoint rows; the raw webhook gate recognizes thinking
+before applying its write floor. Ordinary service writes and stateful, hosted or
+unknown model effects still require the existing authority/card path. Fresh
+per-run and dedicated threads use the same conversation-key provisioning and
+model selection as other threads, without widening grants or changing billing.
 Native tools use their closed effect inventory. Policy is snapshotted at run
 admission and persists across confirmation continuations. Scheduled turns retain
 normal owner authority. Full access bypasses webhook confirmation with an auto-allowed receipt. Auto

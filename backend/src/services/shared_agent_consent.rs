@@ -367,6 +367,13 @@ pub async fn decide(
     let mut session = db.client().start_session().await?;
     session.start_transaction().await?;
     sharing::fence(db, &access, &mut session).await?;
+    let thread=db.collection::<crate::models::assistant_conversation::AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.conversation_id,"user_id":actor,"credential_api_key_id":&row.api_key_id}).session(&mut session).await?.ok_or_else(sharing::missing)?;
+    if thread.collaboration.is_some() {
+        super::collaboration_group_service::runtime::queue_decision(db, &thread, &mut session)
+            .await?;
+    }
+
     let expires = if decision == ConsentDecision::Always {
         bson::Bson::Null
     } else {
