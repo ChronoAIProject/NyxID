@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
-import { Check, RotateCcw, TriangleAlert } from "lucide-react";
+import { Check, Monitor, Moon, Palette, PanelLeft, RotateCcw, SlidersHorizontal, Sun, SunMoon, TriangleAlert, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -29,10 +29,10 @@ import {
   type ThemeMode,
 } from "@/stores/theme-store";
 
-const THEME_OPTIONS: readonly { value: ThemeMode; label: string }[] = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
+const THEME_OPTIONS: readonly { value: ThemeMode; label: string; icon: LucideIcon }[] = [
+  { value: "system", label: "System", icon: Monitor },
+  { value: "light", label: "Light", icon: Sun },
+  { value: "dark", label: "Dark", icon: Moon },
 ];
 
 const MOTION_OPTIONS: readonly { value: MotionPreference; label: string }[] = [
@@ -40,10 +40,26 @@ const MOTION_OPTIONS: readonly { value: MotionPreference; label: string }[] = [
   { value: "reduce", label: "Reduce" },
 ];
 
-const COLOR_MODE_OPTIONS: readonly { value: ColorMode; label: string }[] = [
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
+const COLOR_MODE_OPTIONS: readonly { value: ColorMode; label: string; icon: LucideIcon }[] = [
+  { value: "light", label: "Light", icon: Sun },
+  { value: "dark", label: "Dark", icon: Moon },
 ];
+
+function DisplaySectionHeader({ icon: Icon, title, children }: {
+  readonly icon: LucideIcon;
+  readonly title: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <CardHeader className="flex-row items-start gap-[calc(0.75em*var(--assistant-density,1))] space-y-0">
+      <Icon data-ui-icon="" aria-hidden="true" className="mt-[0.125em] shrink-0 text-17 text-text-tertiary" />
+      <div className="min-w-0 space-y-1.5">
+        <CardTitle className="text-17 leading-snug">{title}</CardTitle>
+        <CardDescription className="leading-relaxed">{children}</CardDescription>
+      </div>
+    </CardHeader>
+  );
+}
 
 function SegmentedChoice<T extends string | number>({
   label,
@@ -52,27 +68,41 @@ function SegmentedChoice<T extends string | number>({
   onChange,
 }: {
   readonly label: string;
-  readonly options: readonly { value: T; label: string }[];
+  readonly options: readonly { value: T; label: string; icon?: LucideIcon }[];
   readonly value: T;
   readonly onChange: (value: T) => void;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="flex flex-wrap gap-1 rounded-lg border border-hairline p-0.5">
-      {options.map((option) => (
+    <div role="radiogroup" aria-label={label} className="flex max-w-full flex-wrap gap-1 rounded-lg border border-hairline p-0.5">
+      {options.map(({ icon: Icon, ...option }, index) => (
         <button
           key={option.value}
           type="button"
           role="radio"
           aria-checked={value === option.value}
+          tabIndex={value === option.value ? 0 : -1}
           onClick={() => onChange(option.value)}
+          onKeyDown={(event) => {
+            const direction = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
+              : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+            if (!direction && event.key !== "Home" && event.key !== "End") return;
+            event.preventDefault();
+            const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
+              : (index + direction + options.length) % options.length;
+            const nextOption = options[next];
+            if (!nextOption) return;
+            onChange(nextOption.value);
+            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
+          }}
           className={cn(
-            "min-h-control h-7 rounded-md px-3 text-12 transition-colors",
+            "min-h-control inline-flex max-w-full items-center justify-center gap-2 rounded-md px-3 py-1 text-12 transition-colors",
             value === option.value
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:text-foreground",
           )}
         >
-          {option.label}
+          {Icon ? <Icon aria-hidden="true" /> : null}
+          <span className="min-w-0 [overflow-wrap:anywhere]">{option.label}</span>
         </button>
       ))}
     </div>
@@ -89,10 +119,10 @@ function SettingRow({
   readonly children: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
-      <div className="min-w-0 flex-1">
-        <p className="text-12 font-medium">{title}</p>
-        <p className="text-12 text-muted-foreground">{description}</p>
+    <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+      <div className="min-w-0 flex-1 basis-[18em]">
+        <p className="text-13 font-medium leading-snug">{title}</p>
+        <p className="mt-1 text-12 leading-relaxed text-muted-foreground">{description}</p>
       </div>
       {children}
     </div>
@@ -124,8 +154,9 @@ function HexField({
       aria-invalid={invalid || undefined}
       value={draft}
       maxLength={7}
+      size={7}
       spellCheck={false}
-      className="w-24 font-mono uppercase"
+      className="w-auto min-w-0 max-w-full font-mono uppercase"
       onChange={(e) => {
         const next = e.target.value.trim();
         setDraft(next);
@@ -149,7 +180,7 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
   const width = useThemeStore((s) => s.sidebarWidths[sidebar]);
   const setSidebarWidth = useThemeStore((s) => s.setSidebarWidth);
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
       <input
         type="range"
         aria-label={label}
@@ -158,9 +189,9 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
         step={4}
         value={width}
         onChange={(e) => setSidebarWidth(sidebar, Number(e.target.value))}
-        className="w-40 accent-primary"
+        className="min-w-0 max-w-full flex-1 basis-[10em] accent-primary"
       />
-      <span className="w-12 text-right font-mono text-11 text-muted-foreground">{width}px</span>
+      <span className="min-w-[5ch] text-right font-mono text-11 text-muted-foreground">{width}px</span>
       <Button
         variant="ghost"
         size="icon"
@@ -186,12 +217,10 @@ function ScaleControl({ id, label, scale, onChange }: {
   const dragPointer = useRef<number | null>(null);
   const value = draft ?? scale;
   const multiplier = `${value}×`;
-  const defaultPosition =
-    ((DISPLAY_SCALE_DEFAULT - DISPLAY_SCALE_MIN) / (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN)) * 100;
 
   return (
     <div className="flex w-full max-w-full flex-wrap items-center gap-3 sm:w-auto">
-      <div className="flex w-64 max-w-full flex-1 items-start gap-3">
+      <div className="flex max-w-full flex-1 basis-[16em] items-start gap-3">
         <div className="min-w-0 flex-1 space-y-1">
           <input
             id={id}
@@ -229,11 +258,11 @@ function ScaleControl({ id, label, scale, onChange }: {
             }}
             className="block h-6 w-full cursor-pointer rounded accent-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
           />
-          <div className="relative flex justify-between text-11 text-muted-foreground" aria-hidden="true">
+          <div className="flex flex-wrap justify-between gap-x-2 text-11 text-muted-foreground" aria-hidden="true">
             <span>{DISPLAY_SCALE_MIN}×</span>
-            <span className="absolute -translate-x-1/2" style={{ left: `${defaultPosition}%` }}>{DISPLAY_SCALE_DEFAULT}×</span>
             <span>{DISPLAY_SCALE_MAX}×</span>
           </div>
+          <p className="text-11 text-muted-foreground">Default: {DISPLAY_SCALE_DEFAULT}×</p>
         </div>
         <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-11 text-muted-foreground">
           {multiplier}
@@ -248,12 +277,9 @@ function SidebarSettings() {
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>Sidebar</CardTitle>
-        <CardDescription>
-          Drag a sidebar&apos;s edge to resize it, or set the width here. Double-click the edge to reset.
-        </CardDescription>
-      </CardHeader>
+      <DisplaySectionHeader icon={PanelLeft} title="Sidebar">
+        Choose how navigation opens and how much space it uses. You can also drag a sidebar&apos;s edge to resize it.
+      </DisplaySectionHeader>
       <CardContent className="space-y-5">
         <SettingRow title="Main sidebar" description="Expanded, icons only, or icons that expand on hover.">
           <SegmentedChoice
@@ -288,12 +314,9 @@ function ColorEditor() {
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>Colors</CardTitle>
-        <CardDescription>
-          Customize the colors of each theme. Changes apply immediately and are saved in this browser.
-        </CardDescription>
-      </CardHeader>
+      <DisplaySectionHeader icon={Palette} title="Colors">
+        Make each theme your own. Preview changes below and check that your text stays readable.
+      </DisplaySectionHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <SegmentedChoice
@@ -316,12 +339,12 @@ function ColorEditor() {
         >
           <p className="text-12 font-medium">Chat preview · {editMode}</p>
           <UserMessageBubble
-            className="ml-auto w-fit max-w-[85%]"
+            className="ml-auto w-fit max-w-[85%] text-16"
             style={{ backgroundColor: color("chat-bubble"), color: color("chat-bubble-foreground") }}
           >
             Show me the services I have connected.
           </UserMessageBubble>
-          <p className="text-12 leading-relaxed">You can manage your connected services in Plugins.</p>
+          <p className="text-16 leading-relaxed">You can manage your connected services in Plugins.</p>
         </section>
 
         <ul className="grid gap-x-8 gap-y-2 sm:grid-cols-2" aria-label={`${editMode} theme colors`}>
@@ -329,7 +352,7 @@ function ColorEditor() {
             const value = color(key);
             const customized = key in overrides;
             return (
-              <li key={key} className="flex items-center gap-2">
+              <li key={key} className="flex flex-wrap items-center gap-2">
                 <span className="min-w-0 flex-1 text-12">
                   {label}
                   {customized && <span className="ml-2 text-11 text-text-tertiary">Customized</span>}
@@ -371,9 +394,9 @@ function ColorEditor() {
               return (
                 <li key={check.label} className="flex items-center gap-2 text-12">
                   {ok ? (
-                    <Check className="size-3.5 shrink-0 text-success" aria-hidden />
+                    <Check data-ui-icon="" className="size-3.5 shrink-0 text-success" aria-hidden />
                   ) : (
-                    <TriangleAlert className="size-3.5 shrink-0 text-warning" aria-hidden />
+                    <TriangleAlert data-ui-icon="" className="size-3.5 shrink-0 text-warning" aria-hidden />
                   )}
                   <span className="flex-1 text-muted-foreground">{check.label}</span>
                   <span className={cn("font-mono text-11", ok ? "text-muted-foreground" : "text-warning")}>
@@ -415,24 +438,21 @@ export function DisplaySettings() {
   return (
     <div className="space-y-6">
       <Card>
-        <CardHeader>
-          <CardTitle>Display</CardTitle>
-          <CardDescription>
-            Choose how NyxID looks in this browser. Other devices keep their own settings.
-          </CardDescription>
-        </CardHeader>
+        <DisplaySectionHeader icon={SunMoon} title="Display">
+          Make NyxID comfortable to read. Your choices are saved in this browser.
+        </DisplaySectionHeader>
         <CardContent>
           <div className="space-y-5">
             <SettingRow title="Theme" description="System follows your device's light or dark setting.">
               <SegmentedChoice label="Theme" options={THEME_OPTIONS} value={mode} onChange={setMode} />
             </SettingRow>
-            <SettingRow title="Text size" description="Scales all text in 0.01× steps.">
+            <SettingRow title="Text size" description="Resize text and icons together. Controls adapt to keep them readable.">
               <ScaleControl id="text-size" label="Text size" scale={textScale} onChange={setTextScale} />
             </SettingRow>
-            <SettingRow title="Spacing" description="Adjust space between and inside elements in 0.01× steps.">
+            <SettingRow title="Spacing" description="Choose how much room sits between controls and content.">
               <ScaleControl id="spacing" label="Spacing" scale={density} onChange={setDensity} />
             </SettingRow>
-            <SettingRow title="Motion" description="Reduce turns off animations and transitions.">
+            <SettingRow title="Motion" description="Follow your device preference or use fewer animations.">
               <SegmentedChoice label="Motion" options={MOTION_OPTIONS} value={motion} onChange={setMotion} />
             </SettingRow>
           </div>
@@ -445,17 +465,14 @@ export function DisplaySettings() {
         </CardContent>
       </Card>
       <Card>
-        <CardHeader>
-          <CardTitle>Chat layout</CardTitle>
-          <CardDescription>
-            Applies to all chats in this browser, including NyxBot, specialists, and groups. Dragging a chat&apos;s resize handles updates these settings too.
-          </CardDescription>
-        </CardHeader>
+        <DisplaySectionHeader icon={SlidersHorizontal} title="Chat layout">
+          Set a comfortable reading width and writing area for all your chats.
+        </DisplaySectionHeader>
         <CardContent className="space-y-5">
           <SettingRow title="Chat content width" description="Maximum width for messages and the composer. Smaller screens fit automatically.">
             <ChatWidthControl />
           </SettingRow>
-          <SettingRow title="Maximum composer height" description="How tall the text area can grow before scrolling. Short drafts stay compact. The composer always fits below the header and within the visible screen.">
+          <SettingRow title="Maximum composer height" description="How tall your draft can grow before it scrolls. Short drafts stay compact and always fit the screen.">
             <ComposerHeightControl />
           </SettingRow>
         </CardContent>

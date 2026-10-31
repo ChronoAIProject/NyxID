@@ -32,10 +32,10 @@ export function DirectModeBanner() {
     >
       <Info aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
       <span className="min-w-0 flex-1">{DIRECT_MODE_COPY}</span>
-      <button
+      <button data-icon-button=""
         type="button"
         aria-label="Dismiss direct chat notice"
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary hover:bg-overlay-strong hover:text-foreground focus-visible:outline-none"
+        className="flex shrink-0 items-center justify-center rounded-md text-text-tertiary hover:bg-overlay-strong hover:text-foreground focus-visible:outline-none"
         onClick={() => {
           localStorage.setItem(BANNER_DISMISSED_KEY, "true");
           setDismissed(true);
@@ -142,7 +142,7 @@ export function DirectChatControls({
             ))}
           </SelectContent>
         </Select>
-        <p className="mt-1 text-10 leading-4 text-text-tertiary">
+        <p className="mt-1 text-10 leading-normal text-text-tertiary">
           A skill teaches the model about NyxID; it cannot take actions here.
         </p>
       </div>

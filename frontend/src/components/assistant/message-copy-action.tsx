@@ -16,7 +16,7 @@ export function MessageCopyAction({ text }: { readonly text: string }) {
   const Icon = state === "copied" ? Check : state === "copying" ? LoaderCircle : Copy;
   return (
     <span className="inline-flex flex-wrap items-center gap-1 text-11">
-      <button type="button" aria-label={label} title={label} disabled={state === "copying"}
+      <button type="button" aria-label={label} title={label} disabled={state === "copying"} data-icon-button={state === "copied" ? undefined : ""}
         className="inline-flex min-h-8 min-w-8 items-center justify-center gap-1 rounded px-2 text-text-tertiary hover:bg-overlay focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-50"
         onClick={() => {
           const current = ++attempt.current;

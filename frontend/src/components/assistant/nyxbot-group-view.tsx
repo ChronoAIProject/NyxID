@@ -171,7 +171,7 @@ export function GroupMessageRow({
   if (message.role === "user") {
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
-        <UserMessageBubble className="max-w-[78%]">
+        <UserMessageBubble className="max-w-[90%] text-16 [overflow-wrap:anywhere] sm:max-w-[78%]">
           {message.author ? <p className="mb-1 text-11 font-medium">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
             <p className="mb-1 text-11">
@@ -194,7 +194,7 @@ export function GroupMessageRow({
             />
           ))}
         </UserMessageBubble>
-        <div className="flex items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
+        <div className="flex max-w-full flex-wrap items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
   }
@@ -252,7 +252,7 @@ export function GroupMessageRow({
             />
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
-          <div className="mt-2 flex items-center gap-1">
+          <div className="mt-2 flex max-w-full flex-wrap items-center gap-1">
             <MessageCopyAction text={sanitizeAssistantMessageContent(message.text)} />
             <ReplyFeedbackVotes feedback={feedback} />
           </div>
@@ -509,9 +509,8 @@ function GroupHeader({
           ) : null}
           {group ? <HeaderItem className="ml-auto">
             <Button
-              size="sm"
+              size={compact ? "icon" : "sm"}
               variant="ghost"
-              className={compact ? "h-7 w-7 px-0" : undefined}
               aria-label="Group settings"
               title="Group settings"
               onClick={onOpenSettings}

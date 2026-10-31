@@ -23,7 +23,7 @@ export function MessageTime({
       dateTime={time.iso}
       title={time.label}
       className={cn(
-        "whitespace-nowrap text-11 text-text-tertiary",
+        "max-w-full whitespace-normal text-11 text-text-tertiary [overflow-wrap:anywhere]",
         reveal &&
           "opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:none)]:opacity-100",
         className,
