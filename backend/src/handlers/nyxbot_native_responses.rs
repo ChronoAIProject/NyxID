@@ -166,6 +166,7 @@ async fn accept(
         partition: partition.into(),
         event_id: event_id.into(),
         relay_message_id: None,
+        custom_binding_id: None,
         event_context_ciphertext: Some(
             state
                 .encryption_keys

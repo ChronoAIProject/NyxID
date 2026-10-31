@@ -156,6 +156,7 @@ pub mod channel_platforms;
 #[cfg(test)]
 mod curation_tests;
 pub mod nyxbot;
+pub mod nyxbot_event_bindings;
 pub mod options;
 pub(crate) mod org_group;
 

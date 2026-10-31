@@ -557,6 +557,55 @@ channel and route key. A busy bot answers first and retries in ten minutes.
 Returning releases the gateway channel and deletes its agent key and old route
 key. Telegram always uses the gateway and is excluded from flag-off returns.
 
+### Independent custom-event channels
+
+When `nyxbot:gateway-custom-event` is enabled for a person, the first-party
+human API can create an independent CMAEG custom source without creating a chat
+bot. The binding is always attached to one existing NyxBot or specialist and to
+one owner-selected chat destination:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/nyxagent/custom-event-bindings` | List the owner's bindings (metadata only). |
+| POST | `/api/v1/nyxagent/custom-event-bindings` | Create a binding with `agent_id`, `destination_channel_id` and `destination_partition`. The response reveals the CMA producer `key_id` and HMAC `secret` once. |
+| GET | `/api/v1/nyxagent/custom-event-bindings/{id}` | Read one binding's status and CMA endpoint. |
+| POST | `/api/v1/nyxagent/custom-event-bindings/{id}/revoke` | Revoke the exact CMA channel, provider key and producer authority; repeated revocation is safe. |
+
+Creation is owner-only and requires live maintain authority for the selected
+agent, write access to the selected chat partition, and a live relay reply
+anchor in that partition. NyxID asks CMA for
+`sources:[{type:"custom",auth:{type:"hmac",key_id}}]`,
+`partition:{version:1,key:"per_event"}`, a synchronous sink, and the provider
+target `{type:"existing_agent",agent_id}`. The returned `custom_event_url`
+is the producer endpoint. A producer's CMA HMAC secret is separate from the
+NyxID provider agent key; NyxID never returns, logs, or accepts the producer
+secret at a provider endpoint, and the CMA URL cannot select another binding.
+
+Each event is admitted once using the binding and CMA event identity. NyxID
+creates a private destination thread partition derived from that event, so
+independent events never share a chat transcript. The destination is read from
+the binding row only; event data cannot redirect delivery. Ingress acceptance,
+agent completion and chat delivery remain separate statuses in the existing
+NyxBot event/turn records. Provider retries with the same event context replay
+the original result and never start another turn.
+
+Every provider operation rechecks the binding's current key, selected target,
+owner/org-admin authority, destination and feature flag. Revoked, transferred,
+destroyed or otherwise unauthorized agents fail closed. A binding is persisted
+as `preparing` before CMA creation and becomes `ready` only after CMA echoes
+the channel, binding, target and version; failed preparation is retained for
+operator-visible recovery. It is deliberately separate from `NyxbotChannel`,
+so a custom source cannot inherit a chat bot's route key or relay identity.
+
+The provider accepts only CMA's verified custom activity shape (`source.type`
+`custom`, system actor, custom conversation and event kind) and requires the
+same channel and conversation identity in the request and encrypted event
+context. It treats event data as untrusted input and runs the ordinary guest /
+webhook confirmation, grants, model and billing gates. CMA native media,
+cards/forms, reactions and platform replies are not silently emulated by this
+binding; unsupported capabilities receive the provider's normal explicit
+refusal until a corresponding NyxID destination bridge exists.
+
 ### Native source foundation and provider recovery
 
 Native enrollment is opt-in through the existing personal

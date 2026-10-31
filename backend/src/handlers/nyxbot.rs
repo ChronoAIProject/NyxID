@@ -45,6 +45,7 @@ use crate::{
             NyxbotChannel, NyxbotEvent, NyxbotThread, NyxbotWatch,
             THREADS_COLLECTION_NAME as THREADS, WATCHES_COLLECTION_NAME as WATCHES,
         },
+        nyxbot_event_binding::{COLLECTION_NAME as EVENT_BINDINGS, NyxbotEventBinding},
     },
     services::{
         assistant_nyxagent::{self as engine, TurnStart, excerpt, identifier},
@@ -2606,7 +2607,7 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
     Ok(json!({"channel_agents": channel_agents}))
 }
 
-async fn audit(state: &AppState, owner: &str, event: &str, data: Value) {
+pub(crate) async fn audit(state: &AppState, owner: &str, event: &str, data: Value) {
     let _ = crate::services::audit_service::log_actor_event(
         state.db.clone(),
         &crate::services::audit_service::AuditActor {
@@ -3658,6 +3659,175 @@ async fn provider_channel(
     Ok((row, raw))
 }
 
+/// Authenticate a CMA custom-event provider binding. This resolver is kept
+/// separate from `provider_channel`: custom sources have no platform bot and
+/// must never match a chat channel's key.
+#[allow(clippy::result_large_err)]
+async fn provider_event_binding_with_authority(
+    state: &AppState,
+    headers: &HeaderMap,
+    require_authority: bool,
+    require_flag: bool,
+) -> Result<Option<(NyxbotEventBinding, Zeroizing<String>)>, Response> {
+    let Some(raw_value) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return Ok(None);
+    };
+    let raw = Zeroizing::new(raw_value.trim().to_owned());
+    let (owner, key, _) = key_service::validate_api_key(&state.db, &raw)
+        .await
+        .map_err(|_| problem(StatusCode::UNAUTHORIZED, "not_authenticated"))?;
+    let Some(row) = state
+        .db
+        .collection::<NyxbotEventBinding>(EVENT_BINDINGS)
+        .find_one(doc! {"user_id": &owner, "provider_api_key_id": &key.id})
+        .await
+        .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?
+    else {
+        return Ok(None);
+    };
+    if require_flag
+        && !feature_flag_service::personal_flag_enabled(
+            &state.db,
+            &row.user_id,
+            feature_flag_service::NYXBOT_CUSTOM_EVENT_GATEWAY_FLAG_KEY,
+        )
+        .await
+        .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?
+    {
+        return Err(problem(StatusCode::FORBIDDEN, "gateway_feature_disabled"));
+    }
+    if require_authority {
+        crate::services::nyxbot_event_binding_service::authorize_provider(state, &row)
+            .await
+            .map_err(|error| error.into_response())?;
+    }
+    Ok(Some((row, raw)))
+}
+
+#[allow(clippy::result_large_err)]
+async fn provider_event_binding(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<(NyxbotEventBinding, Zeroizing<String>)>, Response> {
+    provider_event_binding_with_authority(state, headers, true, true).await
+}
+
+#[allow(clippy::result_large_err)]
+async fn provider_event_binding_for_delete(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<(NyxbotEventBinding, Zeroizing<String>)>, Response> {
+    // Teardown must remain possible after the target agent or its owner has
+    // been removed. The authenticated binding key still proves which local
+    // provider row may be retired; no execution is admitted by this path.
+    provider_event_binding_with_authority(state, headers, false, false).await
+}
+
+fn custom_binding_id_valid(value: &str) -> bool {
+    value.len() <= 128
+        && !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn custom_event_key(binding_id: &str, event_id: &str) -> String {
+    sha256_hex(format!("custom-event:v1\0{binding_id}\0{event_id}"))
+}
+
+fn custom_event_partition(event_key: &str) -> String {
+    format!("custom:{event_key}")
+}
+
+fn custom_provider_context(row: &NyxbotEventBinding, context: &Value) -> bool {
+    let activity = &context["activity"];
+    let conversation = &activity["conversation"];
+    let event_kind = &activity["kind"];
+    context["schema_version"] == 1
+        && context["channel_id"].as_str() == row.gateway_channel_id.as_deref()
+        && context["conversation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 256)
+        && activity["schema_version"] == 1
+        && activity["source"]["type"] == "custom"
+        && activity["actor"]["kind"] == "system"
+        && activity["actor"]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 4096)
+        && conversation["kind"] == "custom"
+        // CMA's activity partition identity (for example the CloudEvent
+        // subject) is distinct from its sealed provider conversation alias.
+        && conversation["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 256)
+        && conversation["thread_id"].is_null()
+        && event_kind["type"] == "event"
+        && event_kind["ce"].is_object()
+        && activity["event_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 256)
+        && event_kind["ce"]["id"].as_str() == activity["event_id"].as_str()
+        && event_kind["ce"]["source"].as_str() == activity["actor"]["id"].as_str()
+        && context["event_ref"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id.len() <= 4096)
+}
+
+async fn custom_put_binding(
+    state: &AppState,
+    row: NyxbotEventBinding,
+    raw: Zeroizing<String>,
+    binding_id: &str,
+    body: &Value,
+) -> Response {
+    let presented = body["agent_key"].as_str().unwrap_or_default();
+    let key_matches: bool = presented.as_bytes().ct_eq(raw.as_bytes()).into();
+    let owner_matches = body["profile"]["metadata"]["owner"]["subject"] == json!(row.user_id)
+        && body["profile"]["metadata"]["provider"] == json!(PROVIDER_SLUG)
+        && body["profile"]["permission"]["action_mode"] == json!("guarded");
+    // CMA forwards the channel's provider target at the top level of the
+    // binding request. Keep this closed: accepting a target nested in an
+    // unrelated profile would allow an old/misbehaving gateway to select a
+    // different agent with this provider key.
+    let target_matches = body["target"]["type"] == "existing_agent"
+        && body["target"]["agent_id"] == json!(row.agent_id);
+    if !key_matches || !owner_matches || !target_matches || !custom_binding_id_valid(binding_id) {
+        return problem(StatusCode::FORBIDDEN, "forbidden");
+    }
+    if row
+        .provider_binding_id
+        .as_deref()
+        .is_some_and(|bound| bound != binding_id)
+    {
+        return problem(StatusCode::CONFLICT, "binding_conflict");
+    }
+    match state
+        .db
+        .collection::<NyxbotEventBinding>(EVENT_BINDINGS)
+        .update_one(
+            doc! {"_id": &row.id, "status": "ready", "$or": [
+                {"provider_binding_id": bson::Bson::Null}, {"provider_binding_id": binding_id}
+            ]},
+            doc! {"$set": {"provider_binding_id": binding_id, "updated_at": bson::DateTime::now()}},
+        )
+        .await
+    {
+        Ok(updated) if updated.matched_count == 1 => Json(json!({
+            "binding_id": binding_id,
+            "level": "l1",
+            "honoured": ["metadata", "provider.target", "permission.action_mode"],
+            "refused": [{"field": "model", "reason": "NyxBot uses the existing agent profile"}],
+        }))
+        .into_response(),
+        Ok(_) => problem(StatusCode::CONFLICT, "binding_conflict"),
+        Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+    }
+}
+
 pub async fn agent_card() -> Json<Value> {
     Json(json!({
         "name": "NyxBot",
@@ -3689,6 +3859,13 @@ pub async fn put_binding(
         }
         Ok(None) => {}
         Err(error) => return error.into_response(),
+    }
+    match provider_event_binding(&state, &headers).await {
+        Ok(Some((row, raw))) => {
+            return custom_put_binding(&state, row, raw, &binding_id, &body).await;
+        }
+        Ok(None) => {}
+        Err(response) => return response,
     }
     let (row, raw) = match provider_channel(&state, &headers).await {
         Ok(found) => found,
@@ -3798,6 +3975,23 @@ pub async fn delete_binding(
         Ok(None) => {}
         Err(error) => return error.into_response(),
     }
+    match provider_event_binding_for_delete(&state, &headers).await {
+        Ok(Some((row, _))) => {
+            if row.provider_binding_id.as_deref() != Some(binding_id.as_str()) {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            return match crate::services::nyxbot_event_binding_service::unbind_provider(
+                &state, &row,
+            )
+            .await
+            {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => error.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(response) => return response,
+    }
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(found) => found,
         Err(response) => return response,
@@ -3851,6 +4045,22 @@ pub async fn put_conversation(
         Ok(None) => {}
         Err(error) => return error.into_response(),
     }
+    match provider_event_binding(&state, &headers).await {
+        Ok(Some((row, _))) => {
+            if row.provider_binding_id.as_deref() != Some(binding_id.as_str())
+                || row.partition_policy != "per_event"
+                || conversation_id.len() > 256
+            {
+                return problem(StatusCode::NOT_FOUND, "binding_not_found");
+            }
+            // Per-event conversations are created atomically when the event
+            // arrives. CMA's conversation PUT is an idempotent capability
+            // probe; accepting it here avoids creating a shared transcript.
+            return Json(json!({})).into_response();
+        }
+        Ok(None) => {}
+        Err(response) => return response,
+    }
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(found) => found,
         Err(response) => return response,
@@ -3897,6 +4107,16 @@ pub async fn delete_conversation(
         }
         Ok(None) => {}
         Err(error) => return error.into_response(),
+    }
+    match provider_event_binding_for_delete(&state, &headers).await {
+        Ok(Some((row, _))) => {
+            if row.provider_binding_id.as_deref() != Some(binding_id.as_str()) {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        Ok(None) => {}
+        Err(response) => return response,
     }
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(found) => found,
@@ -3968,6 +4188,47 @@ pub async fn get_event_context(
         Ok(None) => {}
         Err(error) => return error.into_response(),
     }
+    match provider_event_binding(&state, &headers).await {
+        Ok(Some((row, _))) => {
+            if row.provider_binding_id.as_deref() != Some(binding_id.as_str()) {
+                return problem(StatusCode::NOT_FOUND, "event_not_found");
+            }
+            let event = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .find_one(doc! {"custom_binding_id": &row.id, "event_id": &event_id})
+                .await;
+            let Ok(Some(event)) = event else {
+                return problem(StatusCode::NOT_FOUND, "event_not_found");
+            };
+            let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
+                return problem(StatusCode::NOT_FOUND, "event_not_found");
+            };
+            return match state.encryption_keys.decrypt(ciphertext).await {
+                Ok(bytes) => {
+                    let valid = serde_json::from_slice::<Value>(&bytes).is_ok_and(|context| {
+                        context["channel_id"].as_str() == row.gateway_channel_id.as_deref()
+                            && context["conversation_id"].as_str() == Some(conversation_id.as_str())
+                            && context["activity"]["event_id"].as_str() == Some(event_id.as_str())
+                    });
+                    if !valid {
+                        return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+                    }
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .header("cache-control", "no-store")
+                        .body(Body::from(bytes))
+                        .unwrap_or_else(|_| {
+                            problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
+                        })
+                }
+                Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+            };
+        }
+        Ok(None) => {}
+        Err(response) => return response,
+    }
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(found) => found,
         Err(response) => return response,
@@ -4017,6 +4278,17 @@ fn sse(frames: impl futures::Stream<Item = Value> + Send + 'static) -> Response 
     response
         .headers_mut()
         .insert("x-accel-buffering", "no".parse().expect("static header"));
+    response
+}
+
+fn response_sse(
+    frames: impl futures::Stream<Item = Value> + Send + 'static,
+    response_id: &str,
+) -> Response {
+    let mut response = sse(frames);
+    if let Ok(value) = response_id.parse() {
+        response.headers_mut().insert("x-cma-response-id", value);
+    }
     response
 }
 
@@ -4110,6 +4382,298 @@ async fn media_admission(
     Ok((presence, media))
 }
 
+async fn custom_event_thread(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    partition: &str,
+    destination: &NyxbotThread,
+) -> AppResult<NyxbotThread> {
+    let now = bson::DateTime::now();
+    let upsert = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
+            doc! {"channel_id": &channel.id, "user_id": &channel.user_id, "partition": partition},
+            doc! {
+                "$setOnInsert": {"_id": Uuid::new_v4().to_string(), "created_at": now,
+                    "channel_id": &channel.id, "user_id": &channel.user_id,
+                    "partition": partition, "kind": "private", "title": "Custom event",
+                    "owner_chat": false, "agent_id": &channel.agent_id,
+                    "relay_partition": &destination.relay_partition,
+                    "platform_chat_id": &destination.platform_chat_id,
+                    "platform_thread_id": &destination.platform_thread_id,
+                    "telegram_topic": bson::to_bson(&destination.telegram_topic).unwrap_or(bson::Bson::Null),
+                    "last_message_id": &destination.last_message_id,
+                    "last_relay_message_id": &destination.last_relay_message_id},
+                "$set": {"updated_at": now}
+            },
+        )
+        .upsert(true)
+        .await;
+    upsert?;
+    let result = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(
+            doc! {"channel_id": &channel.id, "user_id": &channel.user_id, "partition": partition},
+        )
+        .await;
+    result?.ok_or_else(|| AppError::Internal("custom event thread unavailable".into()))
+}
+
+async fn custom_responses(
+    state: AppState,
+    binding: NyxbotEventBinding,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(_idempotency) = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+    else {
+        return problem(StatusCode::BAD_REQUEST, "invalid_request");
+    };
+    let Ok(request) = serde_json::from_slice::<Value>(&body) else {
+        return problem(StatusCode::BAD_REQUEST, "invalid_request");
+    };
+    let context = &request["event_context"];
+    if !custom_provider_context(&binding, context)
+        || request["conversation"]
+            .as_str()
+            .is_none_or(|v| v.is_empty() || Some(v) != context["conversation_id"].as_str())
+    {
+        return problem(StatusCode::BAD_REQUEST, "invalid_request");
+    }
+    let event_id = context["activity"]["event_id"].as_str().unwrap_or_default();
+    let event_key = custom_event_key(&binding.id, event_id);
+    let request_hash = sha256_hex(request.to_string());
+    // The response identity follows the authenticated event, rather than the
+    // caller's retry token. A producer retry with a new HTTP idempotency key
+    // still observes the same accepted response and can never create a second
+    // response record for the event.
+    let response_id = format!("resp_{}", &event_key[..32]);
+    let destination = match state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {"_id": &binding.destination_channel_id, "user_id": &binding.user_id, "status": "active"})
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return problem(StatusCode::FORBIDDEN, "destination_not_authorized"),
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+    };
+    let Ok(agent) =
+        crate::services::nyxbot_event_binding_service::authorize_provider(&state, &binding).await
+    else {
+        return problem(StatusCode::FORBIDDEN, "agent_target_unavailable");
+    };
+    let destination_targets_agent = destination.agent_id.as_deref() == Some(agent.id.as_str())
+        || (destination.agent_id.is_none()
+            && agent.is_nyxbot()
+            && agent.user_id == destination.user_id);
+    if !destination_targets_agent {
+        return problem(StatusCode::FORBIDDEN, "destination_target_changed");
+    }
+    if crate::services::platform_bot_authority::require_personal_routes(
+        &state.db,
+        &destination.channel_bot_id,
+    )
+    .await
+    .is_err()
+    {
+        return problem(StatusCode::FORBIDDEN, "destination_requires_native_receipt");
+    }
+    match org_access_holds(&state, &destination).await {
+        Ok(true) => {}
+        Ok(false) => return problem(StatusCode::FORBIDDEN, "destination_org_access_lost"),
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+    }
+    if destination.gateway_source.is_some() || destination.transport != "direct" {
+        return problem(StatusCode::FORBIDDEN, "destination_relay_required");
+    }
+    let Some(destination_thread) = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {
+            "channel_id": &destination.id,
+            "user_id": &binding.user_id,
+            "partition": &binding.destination_partition,
+        })
+        .await
+        .ok()
+        .flatten()
+    else {
+        return problem(StatusCode::FORBIDDEN, "destination_not_authorized");
+    };
+    if destination_thread.last_message_id.is_none() {
+        return problem(StatusCode::FORBIDDEN, "destination_reply_anchor_required");
+    }
+    let partition = custom_event_partition(&event_key);
+    let thread =
+        match custom_event_thread(&state, &destination, &partition, &destination_thread).await {
+            Ok(thread) => thread,
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        };
+    let text = request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter(|part| part["type"] == "input_text")
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        return problem(StatusCode::BAD_REQUEST, "invalid_request");
+    }
+    let ciphertext = match serde_json::to_vec(context) {
+        Ok(bytes) => match state.encryption_keys.encrypt(&bytes).await {
+            Ok(ciphertext) => ciphertext,
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        },
+        Err(_) => return problem(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    let now = Utc::now();
+    let event = NyxbotEvent {
+        source_media_declared: None,
+        media: None,
+        native_bot_budget_claimed: false,
+        retry_request_sha256: Some(request_hash.clone()),
+        delivery: None,
+        resolved_thread_id: None,
+        resolved_conversation_id: None,
+        id: event_key.clone(),
+        channel_id: destination.id.clone(),
+        user_id: binding.user_id.clone(),
+        partition: partition.clone(),
+        event_id: event_id.to_owned(),
+        relay_message_id: None,
+        custom_binding_id: Some(binding.id.clone()),
+        event_context_ciphertext: Some(ciphertext),
+        status: "running".into(),
+        conversation_id: request["conversation"].as_str().map(str::to_owned),
+        turn_id: None,
+        created_at: now,
+        expires_at: now + ChronoDuration::hours(EVENT_RETENTION_HOURS),
+    };
+    if let Err(error) = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_one(&event)
+        .await
+    {
+        if is_duplicate(&error) {
+            let existing = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .find_one(doc! {"_id": &event_key, "custom_binding_id": &binding.id})
+                .await
+                .ok()
+                .flatten();
+            if existing.and_then(|event| event.retry_request_sha256) != Some(request_hash) {
+                return problem(StatusCode::CONFLICT, "event_conflict");
+            }
+            return custom_replay(&state, &event_key, &response_id).await;
+        }
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+    }
+    let sender = Sender {
+        original_message: true,
+        media: Vec::new(),
+        kind: crate::models::channel_thread::ThreadSenderKind::Human,
+        owner_eligible: false,
+        id: "custom-event",
+        display_name: None,
+    };
+    let result = Box::pin(start_chat_turn(
+        &state,
+        &destination,
+        &thread,
+        &sender,
+        &text,
+        true,
+        true,
+        None,
+        &event_key,
+    ))
+    .await;
+    let created = json!({"type": "response.created", "response": {"id": &response_id, "status": "in_progress"}});
+    match result {
+        Ok(Inbound::Turn(receiver)) => {
+            let mut response = late_delivery::provider_stream_direct(
+                state,
+                event_key,
+                response_id.clone(),
+                created,
+                receiver,
+                now,
+            );
+            if let Ok(value) = response_id.parse() {
+                response.headers_mut().insert("x-cma-response-id", value);
+            }
+            response
+        }
+        Ok(Inbound::Reply(reply)) => {
+            let _ = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .update_one(
+                    doc! {"_id": &event_key},
+                    doc! {"$set": {"status": "refused"}, "$unset": {"event_context_ciphertext": ""}},
+                )
+                .await;
+            response_sse(
+                futures::stream::iter(
+                    std::iter::once(created).chain(message_frames(&response_id, Some(&reply))),
+                ),
+                &response_id,
+            )
+        }
+        Ok(Inbound::Silent) => {
+            let _ = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .update_one(
+                    doc! {"_id": &event_key},
+                    doc! {"$set": {"status": "refused"}, "$unset": {"event_context_ciphertext": ""}},
+                )
+                .await;
+            response_sse(
+                futures::stream::iter(
+                    std::iter::once(created).chain(message_frames(&response_id, None)),
+                ),
+                &response_id,
+            )
+        }
+        Ok(Inbound::Queued) => {
+            late_delivery::process(&state, &event_key).await;
+            response_sse(
+                futures::stream::iter(
+                    std::iter::once(created).chain(message_frames(&response_id, None)),
+                ),
+                &response_id,
+            )
+        }
+        Ok(Inbound::Busy) => {
+            let _ = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .delete_one(doc! {"_id": &event_key, "turn_id": bson::Bson::Null})
+                .await;
+            let mut response = problem(StatusCode::CONFLICT, "conversation_in_progress");
+            response
+                .headers_mut()
+                .insert("retry-after", "5".parse().expect("static header"));
+            response
+        }
+        Err(_) => {
+            discard_failed_provider_event(&state.db, &event_key).await;
+            problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
+        }
+    }
+}
+
 async fn responses_with_producers_impl(
     state: AppState,
     producers: Option<
@@ -4149,6 +4713,11 @@ async fn responses_with_producers_impl(
         }
         Ok(None) => {}
         Err(error) => return error.into_response(),
+    }
+    match provider_event_binding(&state, &headers).await {
+        Ok(Some((binding, _))) => return custom_responses(state, binding, headers, body).await,
+        Ok(None) => {}
+        Err(response) => return response,
     }
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(found) => found,
@@ -4330,6 +4899,7 @@ async fn responses_with_producers_impl(
         event_id: event_id.clone(),
         relay_message_id: (activity["source"]["type"] == json!("nyxid_relay"))
             .then(|| event_id.clone()),
+        custom_binding_id: None,
         event_context_ciphertext: Some(ciphertext),
         status: "running".into(),
         conversation_id: None,
@@ -4839,6 +5409,57 @@ async fn replay(
     }
 }
 
+/// Replay a custom source's terminal result without admitting another turn.
+/// Custom events use the ordinary assistant history as their bounded result
+/// store, so this path never persists or returns the producer credential or
+/// the original event payload.
+async fn custom_replay(state: &AppState, event_key: &str, response_id: &str) -> Response {
+    let event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id": event_key, "custom_binding_id": {"$exists": true}})
+        .await
+        .ok()
+        .flatten();
+    let created = json!({"type": "response.created",
+        "response": {"id": response_id, "status": "in_progress"}});
+    let Some(event) = event else {
+        return problem(StatusCode::NOT_FOUND, "event_not_found");
+    };
+    if matches!(event.status.as_str(), "running" | "resuming" | "queued") {
+        let mut response = problem(StatusCode::CONFLICT, "conversation_in_progress");
+        response
+            .headers_mut()
+            .insert("retry-after", "5".parse().expect("static header"));
+        return response;
+    }
+    let text = match (&event.conversation_id, &event.turn_id) {
+        (Some(conversation_id), Some(turn_id)) => state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {
+                "user_id": &event.user_id,
+                "conversation_id": conversation_id,
+                "turn_id": turn_id,
+                "role": "assistant",
+            })
+            .await
+            .ok()
+            .flatten()
+            .filter(|message| message.status == "completed")
+            .map(|message| message.text),
+        _ => None,
+    };
+    response_sse(
+        futures::stream::iter(
+            std::iter::once(created).chain(message_frames(response_id, text.as_deref())),
+        ),
+        response_id,
+    )
+}
+
 /// Deliver an asynchronous NyxBot reply (an event turn, e.g. a subagent
 /// report) to the chat that owns the conversation. Gateway channels reply to
 /// the newest unexpired event reference; direct channels reply to the newest
@@ -5230,6 +5851,7 @@ pub async fn relay_callback(
         partition: partition.clone(),
         event_id: claims.message_id.clone(),
         relay_message_id: Some(claims.message_id.clone()),
+        custom_binding_id: None,
         event_context_ciphertext: None,
         status: "running".into(),
         conversation_id: None,
@@ -5888,6 +6510,86 @@ mod future_size_tests {
             composition < 1024,
             "Responses composition future grew to {composition} bytes"
         );
+    }
+}
+
+#[cfg(test)]
+mod custom_event_contract_tests {
+    use super::{
+        custom_binding_id_valid, custom_event_key, custom_event_partition, custom_provider_context,
+    };
+    use crate::models::nyxbot_event_binding::NyxbotEventBinding;
+    use chrono::Utc;
+    use serde_json::json;
+
+    fn binding() -> NyxbotEventBinding {
+        NyxbotEventBinding {
+            id: "binding-a".into(),
+            user_id: "owner".into(),
+            agent_id: "agent".into(),
+            agent_owner_id: "owner".into(),
+            destination_channel_id: "destination".into(),
+            destination_partition: "conv_0123456789abcdef0123456789abcdef".into(),
+            partition_policy: "per_event".into(),
+            provider_binding_id: Some("provider-a".into()),
+            provider_api_key_id: Some("key".into()),
+            provider_key_ciphertext: None,
+            producer_secret_ciphertext: None,
+            producer_key_id: "producer".into(),
+            gateway_channel_id: Some("cmaeg1".into()),
+            custom_event_url: None,
+            gateway_record_id: None,
+            gateway_version: Some(1),
+            status: "ready".into(),
+            last_error: None,
+            revoked_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn event_identity_is_stable_and_namespaced_per_binding() {
+        let first = custom_event_key("binding-a", "event-1");
+        assert_eq!(first, custom_event_key("binding-a", "event-1"));
+        assert_ne!(first, custom_event_key("binding-a", "event-2"));
+        assert_ne!(first, custom_event_key("binding-b", "event-1"));
+        assert_eq!(custom_event_partition(&first), format!("custom:{first}"));
+        assert!(custom_event_partition(&first).len() <= 256);
+    }
+
+    #[test]
+    fn binding_ids_are_closed_and_bounded() {
+        assert!(custom_binding_id_valid("bnd_01-a"));
+        assert!(!custom_binding_id_valid(""));
+        assert!(!custom_binding_id_valid("bnd/01"));
+        assert!(!custom_binding_id_valid(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn custom_context_requires_the_bound_channel_and_provider_binding() {
+        let row = binding();
+        let context = json!({
+            "schema_version": 1,
+            "channel_id": "cmaeg1",
+            "conversation_id": "event-conversation",
+            "event_ref": "event-ref",
+            "activity": {
+                "schema_version": 1,
+                "event_id": "event-1",
+                "source": {"type": "custom"},
+                "actor": {"id": "business.example", "kind": "system"},
+                "conversation": {"id": "event-subject", "kind": "custom", "thread_id": null},
+                "kind": {"type": "event", "ce": {"id": "event-1", "source": "business.example"}}
+            }
+        });
+        assert!(custom_provider_context(&row, &context));
+        let mut wrong = context.clone();
+        wrong["channel_id"] = json!("other-channel");
+        assert!(!custom_provider_context(&row, &wrong));
+        let mut threaded = context;
+        threaded["activity"]["conversation"]["thread_id"] = json!("unexpected");
+        assert!(!custom_provider_context(&row, &threaded));
     }
 }
 

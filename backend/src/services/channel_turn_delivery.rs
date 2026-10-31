@@ -62,10 +62,46 @@ pub(crate) async fn validate_guest_setup_in_session(
     let (channel, thread) = target_in_session(db, row, &delivery.origin, session, true)
         .await?
         .ok_or_else(refused)?;
+    let custom_binding_allowed = if let Some(binding_id) = event.custom_binding_id.as_deref() {
+        let binding = db
+            .collection::<crate::models::nyxbot_event_binding::NyxbotEventBinding>(
+                crate::models::nyxbot_event_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": binding_id, "user_id": &event.user_id})
+            .session(&mut *session)
+            .await?;
+        let destination = if let Some(binding) = binding.as_ref() {
+            db.collection::<NyxbotThread>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
+                .find_one(doc! {
+                    "channel_id": &channel.id,
+                    "user_id": &event.user_id,
+                    "partition": &binding.destination_partition,
+                    "last_message_id": {"$ne": bson::Bson::Null},
+                })
+                .session(&mut *session)
+                .await?
+        } else {
+            None
+        };
+        binding.as_ref().is_some_and(|binding| {
+            binding.active()
+                && binding.destination_channel_id == channel.id
+                && delivery.origin.partition.starts_with("custom:")
+                && destination.as_ref().is_some_and(|configured| {
+                    configured.platform_chat_id == thread.platform_chat_id
+                        && configured.platform_thread_id == thread.platform_thread_id
+                        && configured.relay_partition == thread.relay_partition
+                })
+        })
+    } else {
+        false
+    };
     if channel.transport != delivery.transport
         || channel.route_id != delivery.source_route_id
         || delivery.source_route_api_key_id.as_deref() != Some(channel.route_api_key_id.as_str())
-        || (delivery.origin.thread.is_none() && !guest_source_admitted(&channel, &thread, delivery))
+        || (delivery.origin.thread.is_none()
+            && !custom_binding_allowed
+            && !guest_source_admitted(&channel, &thread, delivery))
     {
         return Err(refused());
     }

@@ -25,6 +25,8 @@ mod release_tests;
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
 
+#[path = "nyxbot_custom_event_tests.rs"]
+mod custom_event_tests;
 #[path = "nyxbot_guest_model_tests.rs"]
 mod guest_model_tests;
 
@@ -1543,6 +1545,7 @@ fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
         partition: PARTITION.into(),
         event_id: event_id.into(),
         relay_message_id: None,
+        custom_binding_id: None,
         event_context_ciphertext: None,
         status: "completed".into(),
         conversation_id: None,
@@ -1694,6 +1697,7 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
         partition: PARTITION.into(),
         event_id: arrived.clone(),
         relay_message_id: None,
+        custom_binding_id: None,
         event_context_ciphertext: None,
         status: "completed".into(),
         conversation_id: None,

@@ -108,6 +108,49 @@ pub(super) fn provider_stream(
     receiver: broadcast::Receiver<Value>,
     admitted_at: chrono::DateTime<Utc>,
 ) -> Response {
+    provider_stream_inner(
+        state,
+        event_key,
+        response_id,
+        created,
+        receiver,
+        admitted_at,
+        false,
+    )
+}
+
+/// Stream a custom-event response while retaining the direct relay delivery
+/// barrier. Custom CMA channels use an existing direct chat as their approved
+/// sink: the provider stream must expose the completion and the durable
+/// worker must still send the same completion to that chat.
+pub(super) fn provider_stream_direct(
+    state: AppState,
+    event_key: String,
+    response_id: String,
+    created: Value,
+    receiver: broadcast::Receiver<Value>,
+    admitted_at: chrono::DateTime<Utc>,
+) -> Response {
+    provider_stream_inner(
+        state,
+        event_key,
+        response_id,
+        created,
+        receiver,
+        admitted_at,
+        true,
+    )
+}
+
+fn provider_stream_inner(
+    state: AppState,
+    event_key: String,
+    response_id: String,
+    created: Value,
+    receiver: broadcast::Receiver<Value>,
+    admitted_at: chrono::DateTime<Utc>,
+    direct_delivery: bool,
+) -> Response {
     // Construct outside the generator so an unpolled/dropped body detaches too.
     let mut guard = StreamGuard {
         state: state.clone(),
@@ -129,6 +172,37 @@ pub(super) fn provider_stream(
                 {
                     guard.disarm();
                     for frame in message_frames(&response_id, None) { yield frame; }
+                } else if direct_delivery {
+                    // Direct custom destinations remain `pending`, so the
+                    // durable worker owns the chat send. Do not claim the
+                    // normal gateway stream barrier here: claiming it would
+                    // prevent that worker from dispatching the approved relay
+                    // receipt while still leaving the provider without a
+                    // completion frame.
+                    guard.disarm();
+                    match outcome {
+                        Ok(text) => {
+                            let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
+                            let wake_state = state.clone();
+                            let wake_event = event_key.clone();
+                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
+                        },
+                        Err(error) if error.code == "guest_model_route_required" => {
+                            let wake_state = state.clone();
+                            let wake_event = event_key.clone();
+                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
+                        },
+                        Err(error) => {
+                            let wake_state = state.clone();
+                            let wake_event = event_key.clone();
+                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            yield json!({"type": "response.failed", "response": {
+                                "id": &response_id, "status": "failed",
+                                "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}});
+                        }
+                    }
                 } else if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
                     guard.disarm();
                     match outcome {
@@ -536,6 +610,46 @@ pub(super) async fn eligible(
     {
         return Ok(None);
     }
+    let custom_binding = if let Some(binding_id) = event.custom_binding_id.as_deref() {
+        let Some(binding) = state
+            .db
+            .collection::<crate::models::nyxbot_event_binding::NyxbotEventBinding>(
+                crate::models::nyxbot_event_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": binding_id, "user_id": &event.user_id})
+            .await?
+        else {
+            return Ok(None);
+        };
+        let configured_destination = state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {
+                "channel_id": &binding.destination_channel_id,
+                "user_id": &binding.user_id,
+                "partition": &binding.destination_partition,
+            })
+            .await?;
+        let destination_matches = configured_destination.as_ref().is_some_and(|configured| {
+            configured.last_message_id.is_some()
+                && configured.platform_chat_id == thread.platform_chat_id
+                && configured.platform_thread_id == thread.platform_thread_id
+                && configured.relay_partition == thread.relay_partition
+        });
+        if binding.destination_channel_id != channel.id
+            || event.partition != thread.partition
+            || !event.partition.starts_with("custom:")
+            || !destination_matches
+            || crate::services::nyxbot_event_binding_service::authorize_provider(state, &binding)
+                .await
+                .is_err()
+        {
+            return Ok(None);
+        }
+        true
+    } else {
+        false
+    };
     let admitted = if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
         // Followed children inherit live consent from their settings chat,
         // checked by validate_delivery above. Their own default member fields
@@ -543,6 +657,11 @@ pub(super) async fn eligible(
         if !d.guest
             || (d.origin.thread.is_none() && !chats::bot_guest_allowed(&thread, Some(d.addressed)))
         {
+            return Ok(None);
+        }
+        chats::Admission::Guest
+    } else if custom_binding {
+        if !d.guest || !d.addressed {
             return Ok(None);
         }
         chats::Admission::Guest
