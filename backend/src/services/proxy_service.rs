@@ -3143,13 +3143,23 @@ async fn finish_resolution(
         } else {
             box_resolution_future(|| super::platform_key_service::effective_auth(db, &catalog_service)).await?
         };
-        // Sharing a connection never transfers the owner's platform audience
-        // grant. Both credential lanes authorize and rate-limit the recipient.
+        // Catalog material belongs to the exact connection owner. Sharing adds
+        // the recipient's audience ceiling; neither principal can lend the
+        // other eligibility. Usage/rate limits still belong to the recipient.
         let platform_actor = credential_resolution
             .shared_access
             .map_or(effective_owner_id, |a| a.actor());
-        let credential_actor = platform_actor;
+        let credential_actor = effective_owner_id;
         let actor = EffectiveActor::from_user_id(credential_actor);
+        if credential_resolution.shared_access.is_some() && platform_actor != credential_actor {
+            if no_auth {
+                box_resolution_future(|| super::platform_key_service::require(db, &catalog_service, platform_actor)).await?;
+            } else {
+                let recipient = EffectiveActor::from_user_id(platform_actor);
+                box_resolution_future(|| authorize_master_credential(db, &catalog_service,
+                    &recipient)).await?;
+            }
+        }
         let authorized = if no_auth {
             box_resolution_future(|| {
                 super::platform_key_service::require(db, &catalog_service, credential_actor)

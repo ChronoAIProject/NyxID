@@ -288,6 +288,9 @@ async fn check_http_projected_inner(
     {
         return Err(AppError::AssistantTurnRequired);
     }
+    if is_shared_auth(auth) {
+        require_shared_context(auth)?;
+    }
     let Some(chat) = auth.assistant_chat.as_deref() else {
         return Ok(Decision {
             refusal: None,

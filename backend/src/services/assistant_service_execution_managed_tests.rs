@@ -764,8 +764,8 @@ async fn shared_transports_managed_actor_funding_once_consent_and_pre_dispatch_r
         assistant_team_service as team, feature_flag_service as flags,
         shared_agent_consent as consent, shared_agent_service as sharing,
     };
-    for outcome in ["success", "pre_dispatch", "in_flight"] {
-        let revoke = outcome == "pre_dispatch";
+    for outcome in ["success", "pre_dispatch", "turn_replaced", "in_flight"] {
+        let revoke = matches!(outcome, "pre_dispatch" | "turn_replaced");
         let (mut f, id, _catalog) = fixture(false).await;
         crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
         sharing::ensure_indexes(&f.state.db).await.unwrap();
@@ -904,20 +904,32 @@ async fn shared_transports_managed_actor_funding_once_consent_and_pre_dispatch_r
         tokio::pin!(pending);
         if revoke {
             tokio::select! {result=&mut pending=>panic!("ended before funding fence: {result:?}"),()=gate.entered.notified()=>{}}
-            sharing::update(
-                &f.state.db,
-                &publisher,
-                &agent.id,
-                sharing::SharingUpdate {
-                    expected_version: 1,
-                    enabled: false,
-                    audience: vec![],
-                    shared_access: Default::default(),
-                },
-                true,
-            )
-            .await
-            .unwrap();
+            if outcome == "turn_replaced" {
+                f.state
+                    .db
+                    .collection::<Document>("assistant_conversations")
+                    .update_one(
+                        doc! {"_id":&f.row.id},
+                        doc! {"$set":{"active_turn.turn_id":Uuid::new_v4().to_string()}},
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                sharing::update(
+                    &f.state.db,
+                    &publisher,
+                    &agent.id,
+                    sharing::SharingUpdate {
+                        expected_version: 1,
+                        enabled: false,
+                        audience: vec![],
+                        shared_access: Default::default(),
+                    },
+                    true,
+                )
+                .await
+                .unwrap();
+            }
             gate.resume.notify_one();
             assert!(pending.await.is_err());
             assert_eq!(execution(&f).await.state, ManagedExecutionState::Released);

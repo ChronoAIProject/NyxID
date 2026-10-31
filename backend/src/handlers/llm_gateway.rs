@@ -352,6 +352,14 @@ pub async fn llm_proxy_request(
     Path((provider_slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(&auth_user)
+        && (request.method() == Method::CONNECT
+            || request.headers().contains_key(axum::http::header::UPGRADE))
+    {
+        return Err(AppError::Forbidden(
+            "Shared streams must use the service proxy".into(),
+        ));
+    }
     llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
     auth_user
@@ -1125,6 +1133,13 @@ async fn gateway_provider_request(
     is_streaming: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(&auth_user)
+        && (method == Method::CONNECT || headers.contains_key(axum::http::header::UPGRADE))
+    {
+        return Err(AppError::Forbidden(
+            "Shared streams must use the service proxy".into(),
+        ));
+    }
     let user_id_str = auth_user.user_id.to_string();
     // Resolve provider slug from model name
     let primary_slug =

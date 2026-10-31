@@ -71,6 +71,42 @@ use selection::scope;
 pub use selection::{bind_owner_selection, live_authority};
 pub(crate) use selection::{personal_authority, require_catalog_only_selection};
 
+/// Either projection marks a shared request; losing the other never downgrades it.
+pub(crate) fn is_shared_auth(auth: &crate::mw::auth::AuthUser) -> bool {
+    auth.org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        || auth.assistant_chat.as_deref().is_some_and(is_shared_chat)
+}
+
+pub(crate) fn require_shared_context(auth: &crate::mw::auth::AuthUser) -> AppResult<()> {
+    let denied = || AppError::Forbidden("Complete shared turn authority required".into());
+    let access = auth
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .ok_or_else(denied)?;
+    let chat = auth.assistant_chat.as_deref().ok_or_else(denied)?;
+    let snapshot = chat
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .ok_or_else(denied)?;
+    if !access.matches(&auth.user_id.to_string(), snapshot.owner(), &chat.agent_id)
+        || !snapshot.matches(&chat.user_id, access.owner(), &chat.agent_id)
+        || access.revision() != snapshot.revision()
+        || crate::services::shared_agent_consent::behavior(access)
+            != crate::services::shared_agent_consent::behavior(snapshot)
+        || auth.api_key_id.as_deref() != Some(chat.api_key_id.as_str())
+        || !chat.turn_live
+        || chat.turn_stopped
+        || chat.guest
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 pub const COLLECTION: &str = "assistant_service_execution";
 pub const ACK_HEADER: &str = "x-nyxid-acknowledgement-id";
 const MAX_EVIDENCE: usize = 32;

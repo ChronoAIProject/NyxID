@@ -1599,6 +1599,8 @@ pub(crate) async fn post_turn_is_live(
             && current.turn_id == chat.turn_id
             && current.report_to == chat.report_to
             && current.with_nyxbot == chat.with_nyxbot
+            && crate::services::assistant_service_execution::is_shared_chat(&current)
+                == crate::services::assistant_service_execution::is_shared_chat(chat)
     }))
 }
 
@@ -1773,6 +1775,7 @@ pub(crate) async fn post_automation(
     .await
 }
 
+#[derive(Clone)]
 pub(crate) struct PostTarget {
     pub agent_id: Option<String>,
     pub channel: NyxbotChannel,
@@ -2131,12 +2134,11 @@ fn send_post_one<'a>(
     Box::pin(send_post_one_impl(state, target, outbound, fence))
 }
 
-async fn send_post_one_impl(
+async fn revalidate_post_target(
     state: &AppState,
     target: &PostTarget,
-    mut outbound: crate::services::channel_platform::OutboundReply,
     fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
-) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+) -> AppResult<()> {
     validate_post(
         state,
         &target.channel.user_id,
@@ -2158,39 +2160,78 @@ async fn send_post_one_impl(
         return Err(AppError::Conflict("Post target changed".into()));
     }
     let bot = channel_bot_service::get_bot(&state.db, &target.bot.id).await?;
+    if bot.user_id != target.bot.user_id
+        || bot.platform != target.bot.platform
+        || bot.platform_bot_id != target.bot.platform_bot_id
+    {
+        return Err(AppError::Conflict("Post bot changed".into()));
+    }
     if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".into(),
         ));
     }
-    target.adapter.reply_context(
-        crate::services::channel_image_audience::chat_thread(&target.thread),
-        target.thread.created_at,
-        &mut outbound.metadata,
-    );
     if let Some(chat) = fence
         && crate::services::assistant_service_execution::is_shared_chat(chat)
-        && (bot.user_id != chat.user_id || target.channel.user_id != chat.user_id)
     {
-        return Err(AppError::Forbidden(
-            "Shared agents can post only to your own destinations".into(),
-        ));
+        if bot.user_id != chat.user_id || target.channel.user_id != chat.user_id {
+            return Err(AppError::Forbidden(
+                "Shared agents can post only to your own destinations".into(),
+            ));
+        }
+        // The internal route key is plumbing for this exact recipient-owned
+        // destination, never authority donated by the shared agent's owner.
+        super::route_key_auth(state, &channel).await?;
     }
     if let Some(chat) = fence
         && !post_turn_is_live(state, chat).await?
     {
         return Err(AppError::AssistantTurnRequired);
     }
-    crate::handlers::channel_relay::deliver_prepared_initiated_message(
+    Ok(())
+}
+
+async fn send_post_one_impl(
+    state: &AppState,
+    target: &PostTarget,
+    mut outbound: crate::services::channel_platform::OutboundReply,
+    fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
+) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+    revalidate_post_target(state, target, fence).await?;
+    target.adapter.reply_context(
+        crate::services::channel_image_audience::chat_thread(&target.thread),
+        target.thread.created_at,
+        &mut outbound.metadata,
+    );
+    let effect_guard: Option<crate::services::channel_platform::PostEffectGuard> = fence
+        .filter(|chat| crate::services::assistant_service_execution::is_shared_chat(chat))
+        .map(|chat| {
+            let state = state.clone();
+            let target = target.clone();
+            let chat = chat.clone();
+            std::sync::Arc::new(move || {
+                let state = state.clone();
+                let target = target.clone();
+                let chat = chat.clone();
+                Box::pin(async move { revalidate_post_target(&state, &target, Some(&chat)).await })
+                    as futures::future::BoxFuture<'static, AppResult<()>>
+            }) as crate::services::channel_platform::PostEffectGuard
+        });
+    let headers = HeaderMap::new();
+    let send = crate::handlers::channel_relay::deliver_prepared_initiated_message(
         state,
-        &HeaderMap::new(),
+        &headers,
         &target.auth,
         &target.conversation,
         &target.bot,
         outbound,
         target.adapter.as_ref(),
-    )
-    .await
+    );
+    if let Some(guard) = effect_guard {
+        crate::services::channel_platform::with_post_effect_guard(guard, send).await
+    } else {
+        send.await
+    }
 }
 
 async fn post_inner(

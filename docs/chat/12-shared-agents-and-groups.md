@@ -353,8 +353,8 @@ the owner's account. The actor's own action confirmation can further restrict
 an otherwise permitted operation, but cannot widen the shared level. This
 matches the guest machinery's owner-approval ceiling.
 
-For a platform-bound connection, apply the live platform-key ACL to the acting
-person before decryption. The owner's restricted platform grant is not
+For a platform-bound connection, apply the live platform-key ACL to the exact
+connection owner and, separately, the acting person before decryption. The owner's restricted platform grant is not
 transferable through sharing. Reuse the request membership/provider snapshot.
 Exclude Internal account-service exposure and node routes. Never forward an
 owner access token, delegation token or owner machine/login authority. If the
@@ -739,8 +739,11 @@ model callbacks, with the following transport extensions:
 - **Managed exchanges:** retain the exact consent claim and frozen recipient
   payer on the managed execution record. The vetted Telnyx managed contract is
   eligible despite using an internal platform credential lane; internal account
-  services remain excluded. Before dispatch and while waiting for the provider,
-  revalidate the live binding. Interrupted dispatched work retains uncertain
+  services remain excluded. Before dispatch, retain the ordinary personal authority
+  check (including the original live turn) and add the durable shared binding
+  check. Owning a guard does not replace personal authority. Already dispatched
+  work uses the durable binding while waiting and preserves settlement after the
+  initiating turn ends. Interrupted dispatched work retains uncertain
   liability through normal reconciliation; never invent a refund or redispatch.
 - **Async watches:** bind the submitting connection, contract, share revision,
   behavior and consumed consent to the durable watch. Leased status/result calls
@@ -767,10 +770,19 @@ model callbacks, with the following transport extensions:
   on pooled streams still apply. Opaque streams (including voice) require
   unrestricted agent operation scopes, service approval and proxy-operation policies for the recipient
   and credential owner: allowing a handshake cannot authorize later writes.
-  New policy restrictions invalidate the binding and stop the stream.
-- **Channel posts:** only the recipient's owned destinations with explicit
-  `allow_posts` are eligible. Live chat and share authority are checked again
-  between multipart sends. No agent-owner channel, channel-link authority or
+  New policy restrictions invalidate the binding and stop the stream. UUID, slug,
+  exact-member and `_nyxid_via` entrances require complete shared chat authority
+  plus proof of the HTTP stream gate. Missing admission fails closed. Readiness
+  and live authority are checked before CONNECT dispatch or WebSocket connect;
+  node-routed streams and native LLM/public stream entrances remain refused.
+  MCP tool requests cannot substitute CONNECT or Upgrade headers for this gate;
+  they are refused before credential resolution and at resolved dispatch.
+- **Channel posts:** only the recipient's personally owned destinations with
+  explicit `allow_posts` are eligible. Org-owned bots remain excluded even when
+  the recipient is an org admin; shared use grants no org posting authority. Live
+  chat, bot ownership, share revision and behavior are checked after credential
+  awaits, between multipart sends and between media upload and message delivery.
+  The generic channel relay cannot accept a shared thread key as a route key. No agent-owner channel, channel-link authority or
   automation authority is inherited. Discovery exposes only the limited chat
   listing/posting tools alongside private notes and pinned skill reads.
 

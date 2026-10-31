@@ -897,6 +897,14 @@ async fn shared_transports_voice_once_is_one_session_and_revocation_stops_refres
 }
 
 async fn proxy_server(f: &TransportFixture) -> (String, tokio::task::JoinHandle<()>) {
+    proxy_server_context(f, "valid", false).await
+}
+
+async fn proxy_server_context(
+    f: &TransportFixture,
+    context: &'static str,
+    by_id: bool,
+) -> (String, tokio::task::JoinHandle<()>) {
     use crate::services::billing::route_inventory::{BillingIngress, BillingRoutePolicy};
     use axum::{
         Router,
@@ -907,15 +915,37 @@ async fn proxy_server(f: &TransportFixture) -> (String, tokio::task::JoinHandle<
     };
     let state = f.f.state.clone();
     let key = f.f.key(&f.row).await;
+    let connection = f.owner_connection.clone();
+    let catalog = f.catalog.clone();
     let router = Router::new().fallback(any(move |mut request: Request<Body>| {
         let state = state.clone();
         let key = key.clone();
+        let connection = connection.clone();
+        let catalog = catalog.clone();
         async move {
-            let auth =
+            let mut auth =
                 crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None).await?;
+            if context == "missing" {
+                auth.assistant_chat = None;
+            }
+            if context == "unmarked" {
+                let chat = std::sync::Arc::make_mut(auth.assistant_chat.as_mut().unwrap());
+                chat.org_agent_access = None;
+            }
             request
                 .extensions_mut()
                 .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
+            if by_id {
+                *request.uri_mut() = format!("/socket?_nyxid_via={connection}").parse().unwrap();
+                return Box::pin(crate::handlers::proxy::proxy_request(
+                    State(state),
+                    auth,
+                    Default::default(),
+                    Path((catalog, "socket".into())),
+                    request,
+                ))
+                .await;
+            }
             Box::pin(crate::handlers::proxy::proxy_request_by_slug(
                 State(state),
                 auth,
@@ -1257,6 +1287,24 @@ async fn shared_transports_platform_grants_are_recipient_scoped_and_live() {
         .await
         .unwrap();
     assert!(resolve().await.unwrap().is_some());
+    catalogs
+        .update_one(
+            doc! {"_id":&f.catalog},
+            doc! {"$set":{"platform_key.allowed_owner_ids":[&f.f.outsider]}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        resolve().await.is_err(),
+        "the recipient's platform ACL cannot lend eligibility to the owner's connection"
+    );
+    catalogs
+        .update_one(
+            doc! {"_id":&f.catalog},
+            doc! {"$set":{"platform_key.allowed_owner_ids":[&f.f.admin,&f.f.outsider]}},
+        )
+        .await
+        .unwrap();
     let binding = f.binding(false, "GET", true).await;
     transport::revalidate(&f.f.state.db, &binding)
         .await
@@ -1463,5 +1511,286 @@ async fn shared_transports_opaque_streams_cannot_bypass_operation_policies() {
     );
     assert!(upstream.received_requests().await.unwrap().is_empty());
     server.abort();
+    f.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_transports_security_streams_require_complete_shared_context() {
+    use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
+    use std::sync::{Arc, atomic::AtomicUsize};
+    let effects = Arc::new(AtomicUsize::new(0));
+    let seen = effects.clone();
+    let upstream = Router::new().route(
+        "/socket",
+        get(move |ws: WebSocketUpgrade| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { ws.on_upgrade(|_| async {}) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let f = TransportFixture::new("shared_stream_missing_context", &upstream_url).await;
+    for context in ["missing", "unmarked"] {
+        for by_id in [false, true] {
+            let (url, server) = proxy_server_context(&f, context, by_id).await;
+            let response =
+                tokio_tungstenite::connect_async(format!("{}/socket", url.replace("http:", "ws:")))
+                    .await;
+            assert!(
+                response.is_err(),
+                "{context}, by_id={by_id}: shared stream without admission was opened"
+            );
+            assert_eq!(effects.load(Ordering::SeqCst), 0);
+            server.abort();
+        }
+    }
+    task.abort();
+    f.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_transports_security_stream_readiness_rechecked_at_egress() {
+    let f = TransportFixture::new("stream_egress_ready", "https://example.invalid").await;
+    let auth = f.auth().await;
+    let target = proxy_service::resolve_proxy_target_by_user_service_id(
+        &f.f.state.db,
+        &f.f.state.encryption_keys,
+        &f.f.outsider,
+        &f.owner_connection,
+        None,
+        None,
+        proxy_service::ProxyExecutionContext::new(None, f.f.state.platform_user_rate_limit)
+            .with_assistant_access(auth.org_agent_access.as_deref()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    for (method, ws) in [("CONNECT", false), ("GET", true)] {
+        crate::services::security_readiness_service::ready_test_replica(&f.f.state.db).await;
+        let decision = f.decision(false, method, "/work", ws).await;
+        let guard = decision
+            .admission
+            .as_ref()
+            .unwrap()
+            .http_egress(
+                &f.f.state.db,
+                &f.f.state.encryption_keys,
+                &target.target,
+                method,
+                "/work",
+            )
+            .routed(None);
+        guard.revalidate().await.unwrap();
+        f.f.state
+            .db
+            .collection::<Document>("security_replicas")
+            .update_many(
+                doc! {},
+                doc! {"$pull":{"capabilities":transport::READINESS}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            guard.revalidate().await.is_err(),
+            "{method}: no dispatch after transport readiness lost"
+        );
+    }
+    f.f.state.db.drop().await.unwrap();
+}
+#[tokio::test]
+async fn shared_transports_security_native_llm_streams_refuse_before_resolution() {
+    use axum::{
+        body::Body,
+        extract::{Path, State},
+        http::{Method, Request},
+    };
+    let f = TransportFixture::new("shared_native_streams", "https://example.invalid").await;
+    for method in [Method::GET, Method::CONNECT] {
+        let mut request = Request::builder().method(method.clone()).uri("/socket");
+        if method == Method::GET {
+            request = request.header("upgrade", "websocket");
+        }
+        let result = crate::handlers::llm_gateway::llm_proxy_request(
+            State(f.f.state.clone()),
+            f.auth().await,
+            Path(("not-a-provider".into(), "socket".into())),
+            request.body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(crate::errors::AppError::Forbidden(_))),
+            "native LLM streams must fail before provider resolution"
+        );
+    }
+    f.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_transports_security_valid_uuid_stream_and_node_refusal() {
+    use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
+    use std::sync::{Arc, atomic::AtomicUsize};
+    let effects = Arc::new(AtomicUsize::new(0));
+    let seen = effects.clone();
+    let upstream = Router::new().route(
+        "/socket",
+        get(move |ws: WebSocketUpgrade| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { ws.on_upgrade(|_| async {}) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let f = TransportFixture::new("shared_uuid_stream", &upstream_url).await;
+    let (url, server) = proxy_server_context(&f, "valid", true).await;
+    let response =
+        tokio_tungstenite::connect_async(format!("{}/socket", url.replace("http:", "ws:"))).await;
+    assert!(
+        response.is_ok(),
+        "valid UUID/_nyxid_via stream must reach the same gate: {}",
+        response.err().map(|e| e.to_string()).unwrap_or_default()
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    f.f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(
+            doc! {"_id":&f.owner_connection},
+            doc! {"$set":{"node_id":Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio_tungstenite::connect_async(format!("{}/socket", url.replace("http:", "ws:")))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "node route never reaches upstream"
+    );
+    server.abort();
+    task.abort();
+    f.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_transports_security_master_acl_is_bound_to_exact_connection_owner() {
+    let f = TransportFixture::new("shared_exact_master_acl", "https://example.invalid").await;
+    let encrypted =
+        f.f.state
+            .encryption_keys
+            .encrypt(b"test-master")
+            .await
+            .unwrap();
+    let catalogs = f.f.state.db.collection::<Document>("downstream_services");
+    catalogs.update_one(doc! {"_id":&f.catalog},doc! {"$set":{
+        "auth_method":"bearer", "credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
+        "platform_key":{"enabled":true,"audience":"restricted","allowed_owner_ids":[&f.f.admin,&f.f.outsider]}
+    }}).await.unwrap();
+    f.f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&f.owner_connection,&f.actor_connection]}},
+            doc! {"$set":{"credential_binding":"platform"}},
+        )
+        .await
+        .unwrap();
+    let auth = f.auth().await;
+    for (owners, owner_allowed, actor_allowed) in [
+        (vec![&f.f.admin], false, false),
+        (vec![&f.f.outsider], false, true),
+        (vec![&f.f.admin, &f.f.outsider], true, true),
+    ] {
+        catalogs
+            .update_one(
+                doc! {"_id":&f.catalog},
+                doc! {"$set":{"platform_key.allowed_owner_ids":owners}},
+            )
+            .await
+            .unwrap();
+        for (connection, allowed) in [
+            (&f.owner_connection, owner_allowed),
+            (&f.actor_connection, actor_allowed),
+        ] {
+            let resolved = proxy_service::resolve_proxy_target_by_user_service_id(
+                &f.f.state.db,
+                &f.f.state.encryption_keys,
+                &f.f.outsider,
+                connection,
+                None,
+                None,
+                proxy_service::ProxyExecutionContext::new(None, f.f.state.platform_user_rate_limit)
+                    .with_assistant_access(auth.org_agent_access.as_deref()),
+            )
+            .await;
+            assert_eq!(
+                resolved.is_ok_and(|r| r.is_some()),
+                allowed,
+                "master ACL may not be borrowed from the other credential lane"
+            );
+        }
+    }
+    f.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_transports_security_mcp_cannot_upgrade_without_http_stream_admission() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let upstream = MockServer::start().await;
+    Mock::given(path("/socket"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+    let f = TransportFixture::new("shared_mcp_stream_gate", &upstream.uri()).await;
+    let mut endpoint =
+        crate::test_utils::test_service_endpoint(&f.catalog, "socket_upgrade", "GET", "/socket");
+    endpoint.parameters =
+        Some(json!([{"name":"Upgrade","in":"header","required":true,"schema":{"type":"string"}}]));
+    f.f.state
+        .db
+        .collection("service_endpoints")
+        .insert_one(endpoint)
+        .await
+        .unwrap();
+    let credential = crate::services::assistant_agent_credential_service::load_for_conversation(
+        &f.f.state.db,
+        &f.f.state.encryption_keys,
+        &f.f.outsider,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let listed = mcp(&f.f.state, &credential.raw_key, "tools/list", json!({})).await;
+    let name = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| {
+            t["shared_connection"]["connection_id"] == f.owner_connection
+                && t["name"]
+                    .as_str()
+                    .is_some_and(|n| n.ends_with("__socket_upgrade"))
+        })
+        .expect("catalog upgrade operation")["name"]
+        .clone();
+    let result = mcp(
+        &f.f.state,
+        &credential.raw_key,
+        "tools/call",
+        json!({"name":name,"arguments":{"Upgrade":"websocket"}}),
+    )
+    .await;
+    assert_eq!(result["result"]["isError"], true);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
     f.f.state.db.drop().await.unwrap();
 }

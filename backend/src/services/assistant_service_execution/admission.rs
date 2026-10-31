@@ -60,6 +60,27 @@ impl Admission {
         }))
     }
 
+    /// Evidence from the shared HTTP stream gate, never caller-supplied metadata.
+    pub(crate) fn shared_stream(
+        &self,
+        method: &str,
+    ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {
+        if !is_shared_chat(&self.chat) {
+            return Ok(None);
+        }
+        let transport = if method == "CONNECT" {
+            "connect"
+        } else {
+            "websocket"
+        };
+        if self.operation_identity["transport"] != transport {
+            return Err(AppError::Forbidden(
+                "Shared stream admission required".into(),
+            ));
+        }
+        self.shared_execution()
+    }
+
     pub fn bind_ssh(
         &mut self,
         connection: &UserService,
@@ -138,8 +159,6 @@ impl Admission {
         }
         if let Some(watch) = &self.async_continuation {
             watch.revalidate(db, &self.chat).await?;
-        } else if let Some(binding) = &self.shared_detached {
-            crate::services::shared_agent_transport::revalidate(db, binding).await?;
         } else if self.job_id.is_none() {
             personal_authority(
                 db,
@@ -152,6 +171,13 @@ impl Admission {
                 ),
             )
             .await?;
+        }
+        // Owning the guard changes its lifetime, never its personal authority.
+        // Managed dispatch still requires the original live turn; dispatched work
+        // can settle later using its durable binding. Watches have their separate
+        // leased, exact-operation authority above.
+        if let Some(binding) = &self.shared_detached {
+            crate::services::shared_agent_transport::revalidate(db, binding).await?;
         }
         let service =
             crate::services::user_service_service::find_user_service_by_id(db, connection)

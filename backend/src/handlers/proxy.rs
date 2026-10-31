@@ -839,6 +839,12 @@ pub(crate) async fn proxy_request_inner(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    shared_stream_preflight(
+        state,
+        auth_user,
+        request.method() == Method::CONNECT || is_ws_upgrade_request(&request),
+    )
+    .await?;
     validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
     auth_user
@@ -2355,6 +2361,12 @@ pub(crate) async fn proxy_request_by_slug_inner(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    shared_stream_preflight(
+        state,
+        auth_user,
+        request.method() == Method::CONNECT || is_ws_upgrade_request(&request),
+    )
+    .await?;
     validate_original_proxy_request_path(&request)?;
     if request.extensions().get::<PoolGatewayIngress>().is_some() {
         auth_user.ensure_llm_proxy_access()?;
@@ -4090,6 +4102,13 @@ async fn execute_resolved_proxy_inner<'a>(
             "Shared calls cannot override HTTP methods".into(),
         ));
     }
+    if crate::services::assistant_service_execution::is_shared_auth(auth_user)
+        && node_route.is_some()
+    {
+        return Err(AppError::Forbidden(
+            "Shared execution requires server transport".into(),
+        ));
+    }
     let operation_target_id = target.service.id.clone();
     let (operation_scope_id, operation_catalog_id) =
         crate::services::agent_operation_scope_service::execution_identity(
@@ -4612,6 +4631,18 @@ async fn execute_resolved_proxy_inner<'a>(
             &target,
         )
         .await?;
+    }
+    if is_ws_candidate || shared_connect {
+        let guard = assistant_decision.admission.as_ref().map(|admission| {
+            admission.http_egress(
+                &state.db,
+                &state.encryption_keys,
+                &target,
+                &method_str,
+                path,
+            )
+        });
+        require_shared_stream_guard(auth_user, guard.as_ref())?;
     }
     // Resolve approval policy with org-cascade. The "service owner" (the
     // user_id that owns the resolved UserService) determines whether an
@@ -6790,6 +6821,9 @@ async fn execute_resolved_proxy_inner<'a>(
                         .projected(&assistant_projection)
                         .routed(node_route.as_ref())
                 });
+            if shared_connect {
+                require_shared_stream_guard(auth_user, egress_guard.as_ref())?;
+            }
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 box_proxy_future(|| {
@@ -8087,6 +8121,45 @@ const WS_PASSTHROUGH_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 /// Maximum time spent establishing the downstream WS connection.
 const WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS: u64 = 10;
 
+/// Shared stream routing may never rely on an absent chat/guard. UUID, slug,
+/// exact member and `_nyxid_via` all converge on the same admitted execution.
+async fn shared_stream_preflight(state: &AppState, auth: &AuthUser, stream: bool) -> AppResult<()> {
+    use crate::services::assistant_service_execution as execution;
+    if execution::is_shared_auth(auth) && stream {
+        execution::require_shared_context(auth)?;
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+    }
+    Ok(())
+}
+
+fn require_shared_stream_guard(
+    auth: &AuthUser,
+    guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
+) -> AppResult<()> {
+    use crate::services::assistant_service_execution as execution;
+    if !execution::is_shared_auth(auth) {
+        return Ok(());
+    }
+    execution::require_shared_context(auth)?;
+    let binding = guard
+        .map(|guard| guard.shared_stream())
+        .transpose()?
+        .flatten()
+        .ok_or_else(|| AppError::Forbidden("Shared stream admission required".into()))?;
+    let chat = auth
+        .assistant_chat
+        .as_deref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    if binding.actor != chat.user_id
+        || binding.key != chat.api_key_id
+        || binding.conversation != chat.conversation_id
+        || Some(binding.turn.as_str()) != chat.turn_id.as_deref()
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    Ok(())
+}
+
 /// Handle a WebSocket passthrough: connect to the downstream service,
 /// upgrade the client connection, and bridge frames bidirectionally.
 #[allow(clippy::too_many_arguments)]
@@ -8108,6 +8181,7 @@ async fn handle_ws_passthrough(
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
     egress_guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> AppResult<Response> {
+    require_shared_stream_guard(auth_user, egress_guard)?;
     crate::services::destination_routing::reject_websocket(target)?;
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
@@ -8267,6 +8341,11 @@ async fn handle_ws_passthrough_via_node(
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
     egress_guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(auth_user) {
+        return Err(AppError::Forbidden(
+            "Shared streams require server transport".into(),
+        ));
+    }
     crate::services::destination_routing::reject_websocket(target)?;
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 

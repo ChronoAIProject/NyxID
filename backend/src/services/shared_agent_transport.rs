@@ -93,12 +93,14 @@ async fn revalidate_inner(db: &Database, row: &SharedExecution, cleanup: bool) -
         .find_one(doc! {"_id": &row.key, "user_id": &row.actor, "is_active": true})
         .await?
         .ok_or_else(sharing::missing)?;
+    super::key_service::require_ordinary_purpose(key.purpose)?;
     if key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
         return Err(sharing::missing());
     }
     let access = super::org_agent_service::resolve_credential_access(db, &key)
         .await?
         .ok_or_else(sharing::missing)?;
+    super::org_group_service::validate_key(db, &key, Some(&access)).await?;
     let shared = access.shared().ok_or_else(sharing::missing)?;
     if !shared.matches(&row.actor, &row.owner, &row.agent)
         || shared.revision() != row.revision
@@ -151,7 +153,10 @@ async fn revalidate_inner(db: &Database, row: &SharedExecution, cleanup: bool) -
             .await?
             .ok_or_else(sharing::missing)?;
         if super::platform_key_service::has_platform_key(&catalog) {
-            super::platform_key_service::require(db, &catalog, &row.actor).await?;
+            super::platform_key_service::require(db, &catalog, &service.user_id).await?;
+            if service.user_id != row.actor {
+                super::platform_key_service::require(db, &catalog, &row.actor).await?;
+            }
         }
     }
     if service.user_id == row.actor {

@@ -57,7 +57,27 @@ pub fn platform_name(platform: &str) -> String {
     }
 }
 
+/// Server-scoped callback retained through adapter credential, upload and retry
+/// awaits. No header or tool argument can install it. Unrelated sends do no I/O.
+pub(crate) type PostEffectGuard =
+    std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, AppResult<()>> + Send + Sync>;
+
+pub(crate) async fn with_post_effect_guard<F: std::future::Future>(
+    guard: PostEffectGuard,
+    send: F,
+) -> F::Output {
+    POST_EFFECT_GUARD.scope(guard, send).await
+}
+
+pub(crate) async fn revalidate_post_effect() -> AppResult<()> {
+    if let Ok(guard) = POST_EFFECT_GUARD.try_with(Clone::clone) {
+        guard().await?;
+    }
+    Ok(())
+}
+
 tokio::task_local! {
+    static POST_EFFECT_GUARD: PostEffectGuard;
     static PROVIDER_ATTEMPT: std::sync::Arc<std::sync::atomic::AtomicBool>;
 }
 
@@ -70,10 +90,12 @@ pub(crate) async fn track_provider_attempt<F: std::future::Future>(
 
 /// Called immediately before provider I/O; the enclosing image attempt keeps
 /// this evidence even if its send future is cancelled or times out.
-pub(crate) fn mark_provider_attempt() {
+pub(crate) async fn mark_provider_attempt() -> AppResult<()> {
+    revalidate_post_effect().await?;
     let _ = PROVIDER_ATTEMPT.try_with(|progress| {
         progress.store(true, std::sync::atomic::Ordering::Relaxed);
     });
+    Ok(())
 }
 
 /// Adapter send evidence. WhatsApp returns `Err` only when no message could
