@@ -556,6 +556,9 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "if-range",
     "if-none-match",
     "if-modified-since",
+    // Write preconditions must survive both direct and node-routed HTTP.
+    "if-match",
+    "if-unmodified-since",
     // OpenRouter app-attribution headers. `HTTP-Referer` is OpenRouter's
     // nonstandard spelling (the standard `Referer` a browser auto-sends
     // stays blocked); `X-Title` is the legacy attribution name. A caller
