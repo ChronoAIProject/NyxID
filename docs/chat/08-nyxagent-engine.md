@@ -388,9 +388,19 @@ sweep appends fixed text to the owner's agent home and attempts verified private
 chats on bots linked to that agent. Guest callbacks themselves do not notify.
 The visitor receives “Visitor setup could not finish. The owner has been
 notified. Please try again later.” only for an actual setup failure. Other
-refusals retain the generic message. Setup retries after a short cooldown;
-credential/profile changes are revalidated on the next guest turn. Hidden setup
-never appears as an ordinary user/assistant exchange or wakes another agent.
+refusals retain the generic message. Failed attempts that reached model dispatch
+back off per acting owner/agent/profile: 60 seconds, 2, 4, 8, 16, 32 minutes,
+then at most once an hour. The counter and deadline are durable and shared by
+completion, timeout and crash recovery. Pre-dispatch failures (including credits,
+capacity and readiness) keep the 60-second retry without increasing or clearing
+that counter. Success resets it. Explicit owner setup/settings actions reset it;
+model/connection/credential changes reset it on the next guest turn. Routine
+credential refresh and guest retries do not reset it. A settings save during an
+active attempt preserves its lease and resets its eventual retry, so it cannot
+start an overlapping paid turn. Old replicas retain their previous short-retry
+behavior; the increasing delay is enforced once setup workers are upgraded.
+Hidden setup never appears as an ordinary user/assistant exchange or wakes
+another agent.
 
 New channel threads inherit their linked agent's configured profile. Existing
 threads retain their model, including legacy channels created with the global

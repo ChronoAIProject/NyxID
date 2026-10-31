@@ -4,6 +4,7 @@ use super::*;
 /// Credential preparation can await external services; it does not admit egress.
 pub(crate) struct HttpEgressGuard<'a> {
     attachment: Option<AttachmentEgress<'a>>,
+    model_request: Option<&'a crate::services::assistant_model_observer::ModelRequest>,
     authority: EgressAuthority<'a>,
 }
 
@@ -21,6 +22,7 @@ enum EgressAuthority<'a> {
         phase: crate::models::lark_base_write::WriteState,
     },
     AttachmentOnly,
+    ModelObservationOnly,
     Managed(
         &'a OwnedHttpEgressGuard,
         &'a crate::services::proxy_service::ProxyTarget,
@@ -120,6 +122,7 @@ impl OwnedHttpEgressGuard {
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
             attachment: None,
+            model_request: None,
             authority: EgressAuthority::Managed(self, target),
         }
     }
@@ -212,6 +215,7 @@ impl OwnedHttpEgressGuard {
                 Some(OwnedEgressAuthority::ExternalJob { job, declared }) => {
                     Some(HttpEgressGuard {
                         attachment: None,
+                        model_request: None,
                         authority: EgressAuthority::ExternalJob {
                             db: &self.db,
                             job,
@@ -222,6 +226,7 @@ impl OwnedHttpEgressGuard {
                 Some(OwnedEgressAuthority::AssistantCatalogJob { job, catalog }) => {
                     Some(HttpEgressGuard {
                         attachment: None,
+                        model_request: None,
                         authority: EgressAuthority::AssistantCatalogJob {
                             db: &self.db,
                             job,
@@ -249,6 +254,7 @@ impl Admission {
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
             attachment: None,
+            model_request: None,
             authority: EgressAuthority::Assistant(AssistantEgressGuard {
                 admission: self,
                 db,
@@ -270,6 +276,7 @@ impl<'a> HttpEgressGuard<'a> {
     ) -> Self {
         Self {
             attachment: None,
+            model_request: None,
             authority: EgressAuthority::Lark { guard, row, phase },
         }
     }
@@ -284,6 +291,7 @@ impl<'a> HttpEgressGuard<'a> {
         let mut guard = base.unwrap_or(Self {
             authority: EgressAuthority::AttachmentOnly,
             attachment: None,
+            model_request: None,
         });
         guard.attachment = Some(AttachmentEgress {
             db,
@@ -310,6 +318,7 @@ impl<'a> HttpEgressGuard<'a> {
         if let Some(job) = ingress.assistant_job_id() {
             return Some(Self {
                 attachment: None,
+                model_request: None,
                 authority: EgressAuthority::AssistantCatalogJob {
                     db,
                     job,
@@ -319,12 +328,35 @@ impl<'a> HttpEgressGuard<'a> {
         }
         Some(Self {
             attachment: None,
+            model_request: None,
             authority: EgressAuthority::ExternalJob {
                 db,
                 job: ingress.external_job_id()?,
                 declared: &ingress.declared_id,
             },
         })
+    }
+
+    /// Catalog model routes can have no saved connection/admission guard.
+    /// Their existing authority checks still run in the proxy; retain the
+    /// dispatch observation at the actual send for these routes too.
+    pub(crate) fn model_observation_only(
+        request: Option<&'a crate::services::assistant_model_observer::ModelRequest>,
+    ) -> Option<Self> {
+        Some(Self {
+            attachment: None,
+            model_request: Some(request?),
+            authority: EgressAuthority::ModelObservationOnly,
+        })
+    }
+
+    /// Attach only at final model dispatch, after funding admission.
+    pub(crate) fn observed(
+        mut self,
+        request: Option<&'a crate::services::assistant_model_observer::ModelRequest>,
+    ) -> Self {
+        self.model_request = request;
+        self
     }
 
     pub(crate) fn projected(mut self, projection: &'a HttpProjection) -> Self {
@@ -348,7 +380,7 @@ impl<'a> HttpEgressGuard<'a> {
                 EgressAuthority::Lark { guard, row, phase } => {
                     guard.revalidate_effect(row, *phase).await
                 }
-                EgressAuthority::AttachmentOnly => Ok(()),
+                EgressAuthority::AttachmentOnly | EgressAuthority::ModelObservationOnly => Ok(()),
                 EgressAuthority::Managed(guard, target) => guard.revalidate(target).await,
                 EgressAuthority::Assistant(guard) => guard.revalidate_inner().await,
                 EgressAuthority::ExternalJob { db, job, declared } => {
@@ -370,6 +402,9 @@ impl<'a> HttpEgressGuard<'a> {
                     attachment.binding,
                 )
                 .await?;
+            }
+            if let Some(request) = self.model_request {
+                request.dispatched().await?;
             }
             Ok(())
         })

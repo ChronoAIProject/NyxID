@@ -751,6 +751,20 @@ async fn channel_model_turns_for(
         .await
         .unwrap();
     if matches!(scenario, Scenario::EnabledVisitors) {
+        // An explicit owner enable must prepare immediately even after repeated
+        // paid failures. Ordinary guest traffic cannot clear this cooldown.
+        state
+            .db
+            .collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
+            .insert_one(
+                doc! {"_id":Uuid::new_v4().to_string(),"kind":"guest_model_setup",
+                "user_id":OWNER,"agent_id":&specialist.id,"profile":profile,"claim":"previous",
+                "status":"failed","model_failures":7_i64,"model_dispatched":true,
+                "until":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::hours(1)),
+                "expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::days(7))},
+            )
+            .await
+            .unwrap();
         let result = if group {
             let chat = state
                 .db
@@ -1122,6 +1136,21 @@ async fn channel_model_turns_for(
         readiness.status
     );
     if matches!(scenario, Scenario::FailedSetup) {
+        let setup = crate::services::assistant_guest_model_setup::record(
+            &state.db,
+            OWNER,
+            &specialist.id,
+            profile,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_ne!(
+            setup.get_bool("model_dispatched"),
+            Ok(true),
+            "runtime readiness failure never dispatched a model"
+        );
+        assert_eq!(setup.get_i64("model_failures"), Ok(0));
         let notices = state
             .db
             .collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
@@ -1297,6 +1326,29 @@ async fn channel_model_turns_for(
         "{seen:?}"
     );
     if !scenario.owner_first() && !matches!(scenario, Scenario::FailedSetup) {
+        let setup = crate::services::assistant_guest_model_setup::record(
+            &state.db,
+            OWNER,
+            &specialist.id,
+            if matches!(scenario, Scenario::ProfileChange) {
+                "nyxagent/chat"
+            } else {
+                profile
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            setup.get_bool("model_dispatched"),
+            Ok(true),
+            "real model egress persists dispatch before send"
+        );
+        assert_eq!(
+            setup.get_i64("model_failures"),
+            Ok(0),
+            "success clears the durable count"
+        );
         assert_eq!(
             seen.iter().filter(|r| r["setup"] == true).count(),
             if matches!(
