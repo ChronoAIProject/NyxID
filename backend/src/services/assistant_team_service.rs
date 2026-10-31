@@ -96,7 +96,7 @@ pub async fn in_progress(
         .collection::<bson::Document>(CONVERSATIONS)
         .find(
             doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},
-            "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
+            "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
         )
         .projection(doc! {"title": 1, "active_turn.turn_id": 1, "active_turn.question": 1, "active_turn.question_key": 1})
         .limit(5)
@@ -572,12 +572,12 @@ pub async fn agent_for_conversation(
 /// the agent's, and never listed as threads.
 pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
-        doc! {"user_id": actor, "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null,
+        doc! {"user_id": actor, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
             "voice_parent_conversation_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
-        doc! {"user_id": actor, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null,
+        doc! {"user_id": actor, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
         "voice_parent_conversation_id": bson::Bson::Null}
     }
 }
@@ -707,7 +707,16 @@ pub(crate) async fn create_voice_task_thread(
     parent_conversation_id: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    let mut row = create_automation_thread(db, keys, actor, agent, title, session).await?;
+    let access = super::org_agent_service::resolve_agent_access(db, actor, agent).await?;
+    // A shared voice task is a private child, never automation authority. The
+    // parent marker hides it from ordinary lists; no group admission is changed.
+    let mut row = if access.as_ref().is_some_and(|a| a.shared().is_some()) {
+        super::shared_agent_transport::require_ready(db).await?;
+        create_thread_for_with_access(db, keys, actor, agent, title, session, access.as_ref())
+            .await?
+    } else {
+        create_automation_thread(db, keys, actor, agent, title, session).await?
+    };
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &row.id, "user_id": actor},
@@ -771,6 +780,7 @@ async fn create_thread_with_kind(
         agent_id: Some(agent.id.clone()),
         automation_thread,
         voice_parent_conversation_id: None,
+        guest_model_setup: false,
         shared_agent_thread: false,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
@@ -1561,6 +1571,7 @@ pub async fn update_agent(
             .ok_or_else(not_found)?
     };
     if !shared_manager {
+        super::assistant_guest_model_setup::backoff::reset(db, actor, id, None).await?;
         super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
     }
     Ok(updated)
@@ -1662,6 +1673,7 @@ pub async fn set_agent_policy(
         updated.access_mode_override,
     )
     .await;
+    super::assistant_guest_model_setup::backoff::reset(db, &actor.user_id, id, None).await?;
     super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
     if current.access_mode_override != updated.access_mode_override {
         super::assistant_acknowledgement_service::retire_full_access_confirmations(
@@ -1820,7 +1832,9 @@ pub(crate) async fn sync_thread_authority(
 ) -> AppResult<()> {
     let policy = super::shared_agent_service::policy(db, agent).await?;
     for row in rows {
-        let authority = if row.shared_agent_thread {
+        let authority = if row.guest_model_setup {
+            KeyAuthority::ModelSetup(agent.user_id.clone())
+        } else if row.shared_agent_thread {
             let grants = crate::models::assistant_agent::AgentGrants {
                 service_ids: agent
                     .grants
@@ -2214,14 +2228,17 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     // Remove membership from every person's private groups without reading their transcripts.
     let group_owners = db
         .collection::<bson::Document>(crate::models::assistant_group::COLLECTION_NAME)
-        .distinct("user_id", doc! {"member_agent_ids": &agent.id})
+        .distinct(
+            "user_id",
+            doc! {"member_agent_ids": &agent.id, "collaboration":null},
+        )
         .await?;
     for person in group_owners.iter().filter_map(bson::Bson::as_str) {
         super::assistant_group_service::remove_agent(db, person, &agent.id).await?;
     }
     let rows: Vec<AssistantConversation> = db
         .collection(CONVERSATIONS)
-        .find(doc! {"agent_id": &agent.id, "shared_agent_thread": {"$ne": true}})
+        .find(doc! {"agent_id": &agent.id, "shared_agent_thread": {"$ne": true}, "collaboration":null})
         .await?
         .try_collect()
         .await?;

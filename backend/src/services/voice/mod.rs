@@ -56,3 +56,5 @@ pub fn selected_voice(
         .map(str::to_owned)
         .ok_or(crate::errors::AppError::VoiceProviderUnavailable)
 }
+
+pub(crate) mod shared;

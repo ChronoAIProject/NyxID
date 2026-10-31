@@ -2474,6 +2474,30 @@ pub async fn read_proxy_authority_snapshot_by_user_service_id(
     .await
 }
 
+/// Metadata-only exact shared resolution for pool planning and voice discovery.
+pub(crate) async fn read_proxy_authority_snapshot_with_access(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    actor: &str,
+    connection: &str,
+    expected_slug: Option<&str>,
+    access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_by_user_service_id_with_mode(
+        db,
+        Some(encryption_keys),
+        actor,
+        connection,
+        expected_slug,
+        None,
+        ProxyCredentialResolution {
+            shared_access: access.and_then(|a| a.shared()),
+            ..ProxyCredentialResolution::read_only_snapshot()
+        },
+    )
+    .await
+}
+
 async fn resolve_proxy_target_by_user_service_id_with_mode(
     db: &mongodb::Database,
     encryption_keys: Option<&EncryptionKeys>,
@@ -3119,18 +3143,23 @@ async fn finish_resolution(
         } else {
             box_resolution_future(|| super::platform_key_service::effective_auth(db, &catalog_service)).await?
         };
-        // Shared owner connections use the owner's platform grant for
-        // credential authorization, while rate limiting remains attributed to
-        // the acting person. Actor-owned same-catalog alternatives authorize
-        // against the actor's own grant.
+        // Catalog material belongs to the exact connection owner. Sharing adds
+        // the recipient's audience ceiling; neither principal can lend the
+        // other eligibility. Usage/rate limits still belong to the recipient.
         let platform_actor = credential_resolution
             .shared_access
             .map_or(effective_owner_id, |a| a.actor());
-        let credential_actor = credential_resolution
-            .shared_access
-            .filter(|access| user_service.user_id == access.owner())
-            .map_or(platform_actor, |_| effective_owner_id);
+        let credential_actor = effective_owner_id;
         let actor = EffectiveActor::from_user_id(credential_actor);
+        if credential_resolution.shared_access.is_some() && platform_actor != credential_actor {
+            if no_auth {
+                box_resolution_future(|| super::platform_key_service::require(db, &catalog_service, platform_actor)).await?;
+            } else {
+                let recipient = EffectiveActor::from_user_id(platform_actor);
+                box_resolution_future(|| authorize_master_credential(db, &catalog_service,
+                    &recipient)).await?;
+            }
+        }
         let authorized = if no_auth {
             box_resolution_future(|| {
                 super::platform_key_service::require(db, &catalog_service, credential_actor)

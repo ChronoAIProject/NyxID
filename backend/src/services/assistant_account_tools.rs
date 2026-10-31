@@ -275,6 +275,20 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
     service
         .endpoints
         .extend(super::assistant_team_tools::agent_endpoints());
+    if super::assistant_service_execution::is_shared_chat(chat) {
+        service.endpoints.retain(|e| {
+            matches!(
+                e.name.as_str(),
+                "remember" | "forget" | "get_agent_skills" | "skill_read" | "post_to_chat"
+            )
+        });
+        service.endpoints.extend(
+            super::assistant_team_tools::endpoints()
+                .into_iter()
+                .filter(|e| e.name == "list_channel_chats"),
+        );
+        service.description = Some("Use your private notes and explicitly allowed chats. Shared agents cannot manage either person's account.".into());
+    }
     // Gated authoring is appended only by the actor-aware discovery helper.
     service.endpoints.retain(|e| {
         e.name != super::assistant_skill_authoring::TOOL_NAME
@@ -299,6 +313,7 @@ pub async fn virtual_service_for(
     // preserving the existing tools for every caller.
     if !chat.guest
         && !chat.collaboration_thread
+        && !super::assistant_service_execution::is_shared_chat(chat)
         && super::assistant_skill_authoring::enabled(db, &chat.user_id)
             .await
             .unwrap_or(false)

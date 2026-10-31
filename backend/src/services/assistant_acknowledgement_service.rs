@@ -437,6 +437,11 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
     Some(if team::read_only(name) {
         Read
     } else if team::destructive(name)
+        || (name == "manage_collaboration_group"
+            && matches!(
+                args["change"]["action"].as_str(),
+                Some("delete" | "leave" | "remove")
+            ))
         || (name == "update_group"
             && (args["leave"].as_bool() == Some(true)
                 || args.get("participant_user_ids").is_some()))
@@ -444,7 +449,8 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
         Destructive
     } else if matches!(
         name,
-        "set_agent_sharing"
+        "manage_collaboration_group"
+            | "set_agent_sharing"
             | "grant_subagent"
             | "set_guest_access"
             | "set_agent_operations"
@@ -879,6 +885,21 @@ mod access_mode_tests {
             ),
             ("nyxid__update_group", json!({"name": "x"}), Change),
             ("nyxid__update_group", json!({"leave": true}), Destructive),
+            (
+                "nyxid__manage_collaboration_group",
+                json!({"change":{"action":"delete"}}),
+                Destructive,
+            ),
+            (
+                "nyxid__manage_collaboration_group",
+                json!({"change":{"action":"remove"}}),
+                Destructive,
+            ),
+            (
+                "nyxid__manage_collaboration_group",
+                json!({"change":{"action":"invite"}}),
+                Sensitive,
+            ),
             ("nyxid__delete_schedule", none.clone(), Destructive),
             ("nyxid__message_subagent", none.clone(), Change),
             ("nyxid__list_schedules", none.clone(), Read),
@@ -1615,9 +1636,33 @@ pub(crate) async fn fence(
     if key.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
         return Err(not_found());
     }
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::fence_decision(
+            db,
+            &row,
+            &chat.user_id,
+            session,
+        )
+        .await?;
+    }
     // Cards are execution authority. Human decisions and internal NyxBot paths
     // must enforce the same live org/group ACL as a new tool request.
-    let access = if let Some(owner) = row.agent_owner_id.as_deref() {
+    let access = if row.collaboration.is_some() {
+        // Human decisions have no inherited request snapshot. Resolve from the
+        // concrete thread key so a foreign personal owner selects the shared
+        // lane instead of the legacy organization-only owner-marker path.
+        if chat.org_agent_access.is_some() {
+            super::org_agent_service::key_access_with_snapshot(
+                db,
+                &row.user_id,
+                row.agent_owner_id.as_deref(),
+                chat.org_agent_access.as_ref(),
+            )
+            .await?
+        } else {
+            super::org_agent_service::resolve_credential_access(db, &key).await?
+        }
+    } else if let Some(owner) = row.agent_owner_id.as_deref() {
         let access = super::org_agent_service::key_access_with_snapshot(
             db,
             &row.user_id,
@@ -3105,7 +3150,15 @@ pub(crate) async fn decide_in_session(
     if allow && row.kind == "action" {
         row.expires_at = now + Duration::seconds(ACTION_SECONDS);
     }
-    row.continuation_receipt_id = if row.invocation_id.is_some() {
+    if target.collaboration.is_some() {
+        if row.kind != "action" {
+            return Err(not_found());
+        }
+        super::collaboration_group_service::runtime::queue_decision(db, &target, session).await?;
+    }
+    row.continuation_receipt_id = if target.collaboration.is_some() {
+        None
+    } else if row.invocation_id.is_some() {
         Box::pin(super::assistant_invocation_service::decision_in_session(
             db, session, &row,
         ))

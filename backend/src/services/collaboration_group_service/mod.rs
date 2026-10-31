@@ -1,14 +1,14 @@
-//! Phase 2 reader-first foundation. Mutation/admission entry points are deliberately
-//! unmounted until runtime, consent audiences and live delivery can land together.
-//! The separate readiness capability is NOT advertised by this foundation build.
-#![allow(dead_code)]
+//! Multi-person groups with explicit markers and requester-bound authority.
+//! All new writers require the shared-agents flag and full-fleet Phase 2 readiness.
 
+pub mod cleanup;
 pub mod identity;
 pub mod membership;
 pub mod requests;
 pub mod runtime;
 #[cfg(test)]
 mod tests;
+pub mod uploads;
 
 use identity::AgentIdentity;
 
@@ -43,7 +43,7 @@ fn invalid(message: &str) -> AppError {
 }
 
 /// All new writers require a full-fleet Phase 2 capability, not merely the
-/// already-enabled Phase 1 flag. Never change CAPABILITIES until runtime is ready.
+/// already-enabled Phase 1 flag. Old replicas never admit a new marker.
 async fn require_rollout(db: &Database) -> AppResult<()> {
     if !super::security_readiness_service::report(db, READINESS)
         .await?
@@ -111,6 +111,7 @@ async fn person(db: &Database, id: &str, session: &mut ClientSession) -> AppResu
 }
 
 async fn fence_person(db: &Database, id: &str, session: &mut ClientSession) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, id, session).await?;
     person(db, id, session).await?;
     if db
         .collection::<User>(USERS)
@@ -214,6 +215,26 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (model::AGENT_ACCESS, doc! {"group_id":1,"agent_id":1}, true),
         (
+            model::PROPOSALS,
+            doc! {"group_id":1,"membership_revision":1},
+            false,
+        ),
+        (
+            crate::models::assistant_group::REQUESTS_COLLECTION_NAME,
+            doc! {"collaboration.version":1,"actor_user_id":1,"created_at":1},
+            false,
+        ),
+        (
+            crate::models::assistant_conversation::COLLECTION_NAME,
+            doc! {"collaboration.version":1,"collaboration_checked_at":1},
+            false,
+        ),
+        (
+            crate::models::assistant_conversation::COLLECTION_NAME,
+            doc! {"collaboration.group_id":1},
+            false,
+        ),
+        (
             model::SLOTS,
             doc! {"group_id":1,"agent_id":1,"original_requester_id":1,"lane":1},
             true,
@@ -238,7 +259,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             )
             .await?;
     }
-    for collection in [model::INVITES, model::TRANSFERS] {
+    for collection in [model::INVITES, model::TRANSFERS, model::PROPOSALS] {
         db.collection::<bson::Document>(collection)
             .create_index(
                 IndexModel::builder()
@@ -320,11 +341,13 @@ async fn invalidate(db: &Database, group: &str, session: &mut ClientSession) -> 
         .await?;
     db.collection::<bson::Document>(acks::COLLECTION_NAME)
         .update_many(
-            doc! {"conversation_id":{"$in":&ids},"status":"pending"},
+            doc! {"conversation_id":{"$in":&ids},"status":{"$in":["pending","allowed"]}},
             doc! {"$set":{"status":"expired"}},
         )
         .session(&mut *session)
         .await?;
+    db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+        .update_many(doc! {"assistant_group.conversation_id":{"$in":&ids},"status":{"$in":["pending","approved"]}},doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
     db.collection::<bson::Document>(shares::CONSENTS_COLLECTION_NAME)
         .update_many(
             doc! {"conversation_id":{"$in":&ids}},
@@ -349,4 +372,96 @@ async fn audit(db: &Database, actor: &str, group: &str, change: &str) {
         Some(serde_json::json!({"actor_id":actor,"group_id":group,"change":change})),
     )
     .await;
+}
+
+/// Select only marked rows. No access or private metadata is returned by the
+/// dispatch hint; the selected service must still authorize the participant.
+pub async fn marked(db: &Database, id: &str) -> AppResult<bool> {
+    Ok(db
+        .collection::<bson::Document>(GROUPS)
+        .find_one(doc! {"_id":id,"collaboration":{"$ne":null}})
+        .projection(doc! {"_id":1})
+        .await?
+        .is_some())
+}
+
+pub async fn require_available(db: &Database, actor: &str) -> AppResult<()> {
+    if !super::feature_flag_service::personal_flag_enabled(
+        db,
+        actor,
+        super::shared_agent_service::FLAG,
+    )
+    .await?
+    {
+        return Err(missing());
+    }
+    require_rollout(db).await
+}
+
+pub async fn list(db: &Database, actor: &str) -> AppResult<Vec<AssistantGroup>> {
+    // Retained groups remain discoverable for history, leave and deletion
+    // during a flag/readiness rollback. New writers gate independently.
+    Ok(db
+        .collection::<AssistantGroup>(GROUPS)
+        .find(doc! {"participant_user_ids":actor,"collaboration.version":1})
+        .sort(doc! {"updated_at":-1})
+        .limit(100)
+        .await?
+        .try_collect()
+        .await?)
+}
+
+/// Safe roster projection is performed by the handler. Never serialize these
+/// agent models: they include private fields even for participant-owned agents.
+pub async fn roster(
+    db: &Database,
+    actor: &str,
+    id: &str,
+) -> AppResult<Vec<crate::models::assistant_agent::AssistantAgent>> {
+    let group = get(db, actor, id).await?;
+    Ok(db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find(doc! {"_id":{"$in":group.member_agent_ids}})
+        .limit(8)
+        .await?
+        .try_collect()
+        .await?)
+}
+
+pub async fn participants(
+    db: &Database,
+    group: &AssistantGroup,
+) -> AppResult<Vec<super::org_group_service::Participant>> {
+    let users: Vec<User> = db
+        .collection(USERS)
+        .find(doc! {"_id":{"$in":&group.participant_user_ids}})
+        .limit(16)
+        .await?
+        .try_collect()
+        .await?;
+    Ok(group
+        .participant_user_ids
+        .iter()
+        .map(|id| super::org_group_service::Participant {
+            id: id.clone(),
+            display_name: users
+                .iter()
+                .find(|u| u.id == *id)
+                .and_then(|u| u.display_name.clone())
+                .unwrap_or_else(|| "Member".into()),
+        })
+        .collect())
+}
+
+pub async fn threads(
+    db: &Database,
+    group: &str,
+) -> AppResult<Vec<crate::models::assistant_conversation::AssistantConversation>> {
+    Ok(db
+        .collection(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find(doc! {"collaboration.group_id":group,"collaboration.version":1})
+        .limit(1024)
+        .await?
+        .try_collect()
+        .await?)
 }

@@ -344,6 +344,18 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             m::assistant_group::MESSAGES_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
+        (
+            m::assistant_group_collaboration::INVITES,
+            doc! {"$or":[{"issuer_user_id":owner},{"accepted_by_user_id":owner},{"intended_user_id":owner}]},
+        ),
+        (
+            m::assistant_group_collaboration::PROPOSALS,
+            doc! {"proposed_by":owner},
+        ),
+        (
+            m::assistant_group_collaboration::SLOTS,
+            doc! {"original_requester_id":owner,"conversation_id":null},
+        ),
         (m::assistant_group::COLLECTION_NAME, doc! {"user_id":owner}),
         (
             m::assistant_conversation::COLLECTION_NAME,
@@ -630,6 +642,19 @@ async fn retain_settled_evidence(db: &Database, job: &PersonalErasureJob) -> App
 /// avoiding offset skips when an earlier held writer resumes during cleanup.
 pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> AppResult<bool> {
     let db = super::super::transaction_service::durable_database(&state.db);
+    if super::super::collaboration_group_service::cleanup::erase_person(&db, &job.user_id).await? {
+        return Ok(false);
+    }
+    super::super::collaboration_group_service::cleanup::sweep(&db).await?;
+    if db
+        .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"collaboration.original_requester_id":&job.user_id})
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
     if !super::learning::clear(&db, &job.user_id).await? {
         return Err(AppError::Conflict(
             "Interrupted skill publication requires reconciliation before local erasure".into(),

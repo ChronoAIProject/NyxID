@@ -94,6 +94,7 @@ pub async fn serve(
             &call.user_id,
         )
         .await?;
+        super::shared::before_start(&state, &call).await?;
         let (socket, started) = grok::connect(
             &resolved.key,
             &call.preferences.model,

@@ -495,6 +495,9 @@ pub enum TitleSource {
 pub struct AssistantConversation {
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
+    /// Server-created, tool-free visitor model initialization. Never client input.
+    #[serde(default)]
+    pub guest_model_setup: bool,
     /// Invocation conversations always enforce live execution independently of the legacy rollout.
     #[serde(default)]
     pub invocation_controlled: bool,

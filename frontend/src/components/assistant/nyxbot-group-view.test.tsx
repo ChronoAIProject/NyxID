@@ -467,3 +467,9 @@ describe("shared crew members", () => {
     expect(post).toHaveBeenCalledWith({ text: `@${NYXBOT} and @researcher hello`, attachmentIds: [] });
   });
 });
+
+it("attributes collaboration guest replies to the requester and owner-paid lane", () => {
+  const message: AssistantGroupMessage = { id: "reply", seq: 2, role: "agent", agent: { id: RESEARCHER, name: "Researcher", kind: "specialist" }, text: "Hello Bob", created_at: "2026-10-31T00:00:00Z", requester_user_id: "bob", execution_mode: "guest" };
+  render(<GroupMessageRow groupId="collaboration" message={message} names={[]} participants={[{ id: "bob", display_name: "Bob" }]} onOpenAgent={() => undefined} />);
+  expect(screen.getByText("For Bob · Guest reply (owner pays)")).toBeVisible();
+});

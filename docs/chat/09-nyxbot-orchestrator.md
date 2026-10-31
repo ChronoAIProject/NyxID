@@ -45,10 +45,10 @@ groups, routines/scheduled triggers and cross-user agents. Groups, handoffs and
 automations are documented below; cross-user sharing and multi-person groups are
 specified in [Shared agents and multi-person groups](12-shared-agents-and-groups.md).
 Phase 1 shared-agent support is implemented behind the default-off
-`assistant:shared-agents` flag; multi-person groups remain Phase 2. The Phase 2
-reader-first foundation adds an explicit `collaboration` marker and fences those
-rows off from legacy personal/org dispatch. Its writers are not yet mounted;
-the staged rollout and remaining runtime/UI work are tracked in that design.
+`assistant:shared-agents` flag. Phase 2 multi-person groups are implemented with
+an explicit `collaboration` marker and separate all-replica readiness gate;
+legacy personal/org dispatch retains its contract. Participant invitations,
+requester-bound execution, actor decisions and the UI are specified there.
 
 ## 3. What exists today and constrains the design
 
@@ -319,7 +319,7 @@ UUIDs and `@UUID` are exact; ambiguous `@name` text never selects a namesake.
 The picker and agent instructions use UUIDs for collisions. Human ambiguous
 text without explicit recipients is refused; ambiguous handoff tokens are ignored.
 Organization groups, automation and platform/channel threads still reject shared
-agents. Multi-person collaboration remains Phase 2 of
+agents. Multi-person collaboration uses the explicit Phase 2 surface in
 [the shared-agent design](12-shared-agents-and-groups.md).
 
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
@@ -1607,7 +1607,9 @@ need adversarial tests. No owner-specific values belong in audit metadata.
 ### Guest model readiness
 
 Opening `private_chats` or group `members` to everyone changes the audience, not
-model setup or service grants. The dedicated owner-only agent readiness read
+service grants. Saving an open visitor audience starts automatic model setup
+through a hidden owner turn; it does not require an owner chat. The dedicated
+owner-only agent readiness read
 serves the open Grants and channel Chats settings; ordinary lists do no readiness
 work. Audience-setting writes include optional `guest_readiness`. The NyxBot
 channel-list tool memoizes by effective agent and checks only channels open to
@@ -1623,3 +1625,16 @@ and limited to one per 24 hours; metadata receipts expire after 48 hours. No
 model wake-up is needed, no visitor content is included, and no group receives
 the owner's diagnostic. See the engine's guest model route section for the
 closed reasons, runtime fixtures and model-routes.json maintenance contract.
+
+### Automatic visitor model setup
+
+Opening private chats to everyone, enabling group members or relinking an open
+bot starts model setup for the linked agent/profile. NyxBot should report the
+returned `guest_readiness`: `setting_up` means preparation is running, `ready`
+means ready for visitors, and `not_ready` includes the fix for a real failure
+(such as unavailable model credentials or credits). Do not ask owners to send a
+warm-up message. The first admitted visitor waits in a source-bound guest queue,
+then receives its answer automatically. Concurrent visitors share one setup.
+Guests never become owner events, acquire owner tools or choose setup's model.
+See [engine guest model routes](08-nyxagent-engine.md) for admission, retention,
+recovery and mixed-replica details.

@@ -48,10 +48,10 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         }
         .url(&state.config.frontend_url);
         let text = format!(
-            "{} could not answer a visitor because its model setup needs attention. {}\n\nOpen assistant settings: {link}",
+            "{} could not finish model setup for visitors. {}\n\nOpen assistant settings: {link}",
             crate::services::assistant_nyxagent::identifier(&agent.name),
             notice.get_str("fix").unwrap_or(
-                "Send one message to this assistant yourself, then ask the visitor to try again."
+                "Check the model connection and available credits. Visitor setup retries automatically."
             )
         );
         readiness_notice::in_app(&state.db, &notice, &home.id, &text).await?;

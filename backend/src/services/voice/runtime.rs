@@ -155,6 +155,7 @@ pub(super) async fn start_with_provider(
             .mark_forwarded(&meter)
             .await
             .map_err(|e| Stage::BillingReservation.error(e))?;
+        super::shared::before_start(state, &call).await?;
         provider_attempted = true;
         let created = provider
             .create(
@@ -181,6 +182,7 @@ pub(super) async fn start_with_provider(
             "deadline":bson::DateTime::from_chrono(call.deadline.min(expires))},
         )
         .await?;
+        super::shared::before_start(state, &call).await?;
         let socket = provider
             .attach(&created.provider_id)
             .await
@@ -258,7 +260,26 @@ pub(super) async fn initial_context(
         .find_one(doc! {"_id":&call.conversation_id,"user_id":&call.user_id})
         .await?
         .ok_or_else(|| AppError::NotFound("Voice conversation unavailable".into()))?;
-    let agent = if let Some(agent_id) = &conversation.agent_id {
+    let agent = if conversation.shared_agent_thread {
+        super::shared::revalidate(db, call).await?;
+        let id = conversation
+            .agent_id
+            .as_ref()
+            .ok_or_else(crate::services::shared_agent_service::missing)?;
+        Some(
+            crate::services::shared_agent_service::load(
+                db,
+                &call.user_id,
+                Some(std::slice::from_ref(id)),
+            )
+            .await?
+            .agents
+            .remove(id)
+            .ok_or_else(crate::services::shared_agent_service::missing)?
+            .agent()
+            .clone(),
+        )
+    } else if let Some(agent_id) = &conversation.agent_id {
         db.collection::<crate::models::assistant_agent::AssistantAgent>(
             crate::models::assistant_agent::COLLECTION_NAME,
         )
@@ -368,6 +389,15 @@ pub(super) async fn run(
     billing: crate::services::billing::BillingRouteContext,
     concurrency: Option<crate::services::service_concurrency_service::Lease>,
 ) {
+    if let Some(binding) = call.shared_execution.clone()
+        && matches!(socket, Transport::Openai(_))
+    {
+        socket = Transport::Shared {
+            inner: Box::new(socket),
+            db: state.db.clone(),
+            binding: Box::new(binding),
+        };
+    }
     let mut coordinator = Coordinator::new();
     let actor = call.user_id.clone();
     let lease = call.clone();
@@ -459,6 +489,7 @@ async fn active(
             event=async {if let Some(event)=queued {Ok(Some(event))} else {socket.receive().await}}=>{
                 if had_queued { c.deferred.pop_front(); }
                 let Some(event)=event? else {return Ok("sideband_lost")};
+                super::shared::revalidate(&state.db, call).await?;
                 match event["type"].as_str() {
                     Some("session.input_transcript.delta"|"session.output_transcript.delta"|"nyx.transcript")=>{
                         for segment in c.transcripts.ingest(&event,elapsed(call))? {
@@ -1276,6 +1307,7 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
                 &call.user_id,
             )
             .await?;
+            super::shared::before_start(state, &call).await?;
             let socket = provider.attach(&id).await?;
             let call = session::write(&state.db, &call, doc! {"state":"active"}).await?;
             Ok::<_, AppError>((provider, socket, call, resolved.billing, concurrency))

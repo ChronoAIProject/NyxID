@@ -1279,15 +1279,32 @@ pub(crate) async fn approval_binding(
         .collection::<crate::models::assistant_conversation::AssistantConversation>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
-        .find_one(doc! {"user_id":actor,"group_id":group_id,"credential_api_key_id":key})
+        .find_one(doc! {"user_id":actor,"credential_api_key_id":key,"$or":[{"group_id":group_id},{"collaboration.group_id":group_id}]})
         .await?
+        .ok_or_else(missing)?;
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::validate(db, &row).await?;
+        if row.guest_turn
+            || row
+                .collaboration
+                .as_ref()
+                .is_none_or(|b| b.original_requester_id != actor)
+        {
+            return Err(missing());
+        }
+    }
+    let request_id = row
+        .collaboration
+        .as_ref()
+        .map(|b| b.request_id.clone())
+        .or(row.group_request_id.clone())
         .ok_or_else(missing)?;
     Ok(Some(
         crate::models::approval_request::GroupApprovalBinding {
             group_id: group_id.into(),
             conversation_id: row.id,
             actor_user_id: actor.into(),
-            request_id: row.group_request_id.ok_or_else(missing)?,
+            request_id,
         },
     ))
 }
@@ -1303,6 +1320,52 @@ pub(crate) async fn authorize_approval(
     };
     if actor != binding.actor_user_id {
         return Err(missing());
+    }
+    if super::collaboration_group_service::marked(db, &binding.group_id).await? {
+        let thread = super::collaboration_group_service::runtime::actor_thread(
+            db,
+            actor,
+            &binding.group_id,
+            &binding.conversation_id,
+        )
+        .await?;
+        if thread
+            .collaboration
+            .as_ref()
+            .is_none_or(|b| b.request_id != binding.request_id)
+        {
+            return Err(missing());
+        }
+        let access = if snapshot.is_some() {
+            org::key_access_with_snapshot(db, actor, thread.agent_owner_id.as_deref(), snapshot)
+                .await?
+        } else {
+            // A collaboration member can use a shared personal specialist.
+            // Bind fresh approval authority to its exact execution credential.
+            let key = db
+                .collection::<crate::models::api_key::ApiKey>(
+                    crate::models::api_key::COLLECTION_NAME,
+                )
+                .find_one(
+                    doc! {"_id":&thread.credential_api_key_id,"user_id":actor,"is_active":true},
+                )
+                .await?
+                .ok_or_else(missing)?;
+            org::resolve_credential_access(db, &key).await?
+        };
+        if request.from_org_policy {
+            let access = access.as_ref().ok_or_else(missing)?;
+            let services:Vec<crate::models::user_service::UserService>=db.collection(crate::models::user_service::COLLECTION_NAME)
+                .find(doc! {"user_id":&request.user_id,"$or":[{"_id":&request.service_id},{"catalog_service_id":&request.service_id}]}).await?.try_collect().await?;
+            if !access
+                .approval_admin_permits(&services.into_iter().map(|s| s.id).collect::<Vec<_>>())
+            {
+                return Err(AppError::Forbidden(
+                    "The triggering participant must be an eligible organization approver".into(),
+                ));
+            }
+        }
+        return Ok(access);
     }
     let access = get(db, actor, &binding.group_id, snapshot).await?;
     let snapshot = access.org.ok_or_else(missing)?;

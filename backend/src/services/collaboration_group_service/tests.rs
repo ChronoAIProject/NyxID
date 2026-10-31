@@ -155,6 +155,12 @@ async fn collaboration_reader_first_classification_and_readiness_preserve_legacy
             .unwrap()
             .is_empty()
     );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME)
+        .update_many(doc! {}, doc! {"$pull":{"capabilities":READINESS}})
+        .await
+        .unwrap();
     assert!(matches!(
         create(
             &f.state.db,
@@ -165,6 +171,7 @@ async fn collaboration_reader_first_classification_and_readiness_preserve_legacy
         .await,
         Err(AppError::SecurityReadinessUnavailable)
     ));
+    svc::security_readiness_service::ready_test_replica(&f.state.db).await;
     let legacy = svc::assistant_group_service::create(
         &f.state.db,
         &f.admin,
@@ -1460,7 +1467,7 @@ async fn collaboration_runtime_handoff_keeps_requester_and_reads_published_reply
     // A busy group may move the original trigger outside the recent context
     // window. Other people's messages must not become this chain's request.
     for i in 0..64 {
-        requests::enqueue_ready(
+        let unrelated = requests::enqueue_ready(
             &f.state.db,
             &f.admin,
             &group.id,
@@ -1472,6 +1479,10 @@ async fn collaboration_runtime_handoff_keeps_requester_and_reads_published_reply
         )
         .await
         .unwrap();
+        // Keep the published context while respecting the bounded work queue.
+        requests::cancel(&f.state.db, &f.admin, &group.id, &unrelated.id)
+            .await
+            .unwrap();
     }
     svc::assistant_nyxagent::finish_turn(
         &f.state.db,
@@ -1771,6 +1782,8 @@ async fn collaboration_runtime_native_tools_cannot_write_private_memory_but_keep
             "draft_agent_skill",
             "set_agent_skills",
             "request_agent_access",
+            "list_channel_chats",
+            "post_to_chat",
         ] {
             let (result, error) = crate::handlers::assistant_team::execute_tool(
                 &f.state,
@@ -1807,6 +1820,47 @@ async fn collaboration_runtime_native_tools_cannot_write_private_memory_but_keep
             .memory
             .is_empty()
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_private_transport_binding_cannot_escape_the_request_chain() {
+    let (f, agent, group) = setup("collaboration_transport_boundary").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let row = &claim.conversation;
+    let key = runtime_key(&f, row).await;
+    let access = svc::org_agent_service::resolve_credential_access(&f.state.db, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    let shared = access.shared().unwrap();
+    // The private transport receipt has no original-requester/audience binding.
+    // Even a valid shared key cannot borrow it for a collaboration slot.
+    let mut receipt = crate::models::assistant_sharing::SharedExecution {
+        voice: false,
+        model: false,
+        actor: f.member.clone(),
+        owner: agent.user_id.clone(),
+        agent: agent.id.clone(),
+        conversation: row.id.clone(),
+        key: key.id,
+        turn: row.active_turn.as_ref().unwrap().turn_id.clone(),
+        connection: "must-not-resolve-a-connection".into(),
+        revision: shared.revision(),
+        behavior: svc::shared_agent_consent::behavior(shared),
+        binding: "unused".into(),
+        consent_id: None,
+        consent_claim: None,
+    };
+    for voice in [false, true] {
+        receipt.voice = voice;
+        assert!(matches!(
+            svc::shared_agent_transport::revalidate(&f.state.db, &receipt).await,
+            Err(AppError::Forbidden(message)) if message.contains("collaboration request binding")
+        ));
+    }
     f.state.db.drop().await.unwrap();
 }
 
@@ -2020,5 +2074,1267 @@ async fn collaboration_requests_are_invisible_to_legacy_queue_mutations() {
             .len(),
         1
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_http_projection_hides_threads_cards_and_other_request_ids() {
+    let (f, agent, group) = setup("collaboration_http_privacy").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let thread = &claim.conversation;
+    let public = crate::handlers::collaboration_group::response(&f.state, &f.admin, group.clone())
+        .await
+        .unwrap();
+    let public = serde_json::to_value(public).unwrap();
+    assert!(!public.to_string().contains(&thread.id));
+    assert!(!public.to_string().contains(&thread.credential_api_key_id));
+    assert_eq!(
+        public["collaboration"]["your_request_ids"],
+        serde_json::json!([])
+    );
+    assert_eq!(public["participants"].as_array().unwrap().len(), 2);
+    assert!(
+        crate::handlers::collaboration_group::response(&f.state, &f.outsider, group.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        runtime::actor_thread(&f.state.db, &f.admin, &group.id, &thread.id)
+            .await
+            .is_err()
+    );
+    let binding = thread.collaboration.as_ref().unwrap();
+    assert!(
+        requests::cancel(&f.state.db, &f.admin, &group.id, &binding.request_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        svc::assistant_nyxagent::get(&f.state.db, &f.member, &thread.id)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_participant_proposals_bind_proposer_and_creator_acceptance() {
+    let (f, _agent, group) = setup("collaboration_proposals").await;
+    let group = join(&f, &group, &f.member).await;
+    let specialist = specialist(&f, &f.member, "member-specialist").await;
+    change(
+        &f,
+        &f.member,
+        &group,
+        Change::ProposeAgent {
+            agent_id: specialist.id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(
+        get(&f.state.db, &f.admin, &group.id)
+            .await
+            .unwrap()
+            .member_agent_ids
+            .len(),
+        1
+    );
+    let proposal = f
+        .state
+        .db
+        .collection::<model::AgentProposal>(model::PROPOSALS)
+        .find_one(doc! {"group_id":&group.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(proposal.proposed_by, f.member);
+    assert!(
+        membership::apply_ready(
+            &f.state.db,
+            &f.member,
+            &group.id,
+            2,
+            Change::AcceptAgent {
+                proposal_id: proposal.id.clone()
+            },
+            true
+        )
+        .await
+        .is_err()
+    );
+    let result = change(
+        &f,
+        &f.admin,
+        &group,
+        Change::AcceptAgent {
+            proposal_id: proposal.id,
+        },
+    )
+    .await
+    .group
+    .unwrap();
+    assert!(result.member_agent_ids.contains(&specialist.id));
+    let policy = f
+        .state
+        .db
+        .collection::<model::AgentAccess>(model::AGENT_ACCESS)
+        .find_one(doc! {"group_id":&group.id,"agent_id":&specialist.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(policy.added_by_user_id, f.member);
+    assert!(!policy.guest_enabled);
+    assert!(
+        load(&f.state.db, &f.admin, &group.id, None)
+            .await
+            .unwrap()
+            .agent(&specialist.id)
+            .unwrap()
+            .authority()
+            .is_none()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_http_writes_reject_non_human_before_reading_groups() {
+    use crate::handlers::collaboration_group as http;
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    let state = crate::test_utils::test_app_state_no_db().await;
+    for kind in ["key", "oauth", "delegated"] {
+        let mut auth = crate::test_utils::test_auth_user("12345678-1234-4123-8123-123456789012");
+        match kind {
+            "key" => auth.api_key_id = Some("key".into()),
+            "oauth" => auth.oauth_client_id = Some("client".into()),
+            _ => auth.acting_client_id = Some("client".into()),
+        }
+        assert!(
+            http::membership(
+                State(state.clone()),
+                auth.clone(),
+                Path("unknown".into()),
+                Json(http::MembershipInput {
+                    expected_revision: 1,
+                    operation: http::Operation::Invite {
+                        intended_user_id: None
+                    }
+                })
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            http::accept_invite(
+                State(state.clone()),
+                auth.clone(),
+                Json(http::InviteInput {
+                    token: "secret".into(),
+                    history_disclosed: true
+                })
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            http::cancel(
+                State(state.clone()),
+                auth.clone(),
+                Path(("unknown".into(), "request".into()))
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            crate::handlers::assistant_feedback::put_group(
+                State(state.clone()),
+                auth.clone(),
+                Path(("unknown".into(), "message".into())),
+                Json(crate::handlers::assistant_feedback::FeedbackInput {
+                    vote: "up".into(),
+                    comment: None
+                })
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            crate::handlers::assistant_feedback::delete_group(
+                State(state.clone()),
+                auth,
+                Path(("unknown".into(), "message".into()))
+            )
+            .await
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn collaboration_cleanup_waits_for_settlement_then_removes_requester_artifacts() {
+    let (f, agent, group) = setup("collaboration_cleanup").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    cleanup::sweep(&f.state.db).await.unwrap();
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&claim.conversation.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.active_turn.as_ref().unwrap().stop_requested);
+    svc::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        &row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &svc::assistant_nyxagent::TurnResult {
+            text: "Late private reply".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    cleanup::sweep(&f.state.db).await.unwrap();
+    for (collection, filter) in [
+        (
+            crate::models::assistant_conversation::COLLECTION_NAME,
+            doc! {"_id":&row.id},
+        ),
+        (
+            crate::models::assistant_agent_credential::COLLECTION_NAME,
+            doc! {"conversation_id":&row.id},
+        ),
+        (
+            crate::models::assistant_message::COLLECTION_NAME,
+            doc! {"conversation_id":&row.id},
+        ),
+    ] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(filter)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    let history = messages(&f.state.db, &f.admin, &group.id, None)
+        .await
+        .unwrap();
+    assert!(!history.iter().any(|m| m.text == "Late private reply"));
+    assert!(history.iter().any(|m| m.role == "user"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_live_notifications_are_identifiers_for_current_people_only() {
+    let (f, _agent, group) = setup("collaboration_live_delivery").await;
+    let group = join(&f, &group, &f.member).await;
+    let hub = svc::assistant_live::AssistantLive::new();
+    let mut owner = hub.subscribe_owner(&f.admin).unwrap();
+    let mut member = hub.subscribe_owner(&f.member).unwrap();
+    let mut stranger = hub.subscribe_owner(&f.outsider).unwrap();
+    hub.publish_resolved(
+        &f.state.db,
+        svc::assistant_live::LiveEvent::OrgGroup {
+            id: group.id.clone(),
+            user_id: String::new(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(owner.events.try_recv().unwrap(),svc::assistant_live::LiveEvent::OrgGroup{id,..} if id==group.id)
+    );
+    assert!(
+        matches!(member.events.try_recv().unwrap(),svc::assistant_live::LiveEvent::OrgGroup{id,..} if id==group.id)
+    );
+    assert!(stranger.events.try_recv().is_err());
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    hub.publish_resolved(
+        &f.state.db,
+        svc::assistant_live::LiveEvent::OrgGroup {
+            id: group.id.clone(),
+            user_id: String::new(),
+        },
+    )
+    .await;
+    assert!(member.events.try_recv().is_err());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_actor_cards_are_private_live_fenced_and_resume_exact_request() {
+    use svc::assistant_acknowledgement_service as acks;
+    let (f, agent, group) = setup("collaboration_cards").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let row = &claim.conversation;
+    let chat = acks::for_key(&f.state.db, &f.member, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let args = serde_json::json!({"method":"POST","path":"/private-account-operation"});
+    let ack = acks::request(
+        &f.state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyx__call_tool"),
+            arguments: Some(&args),
+            summary: "Private exact account action",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let owner = crate::handlers::collaboration_group::messages(&f.state, &f.admin, &group.id, None)
+        .await
+        .unwrap();
+    assert!(!owner.to_string().contains("Private exact account action"));
+    assert!(!owner.to_string().contains(&ack.id));
+    assert!(!owner.to_string().contains(&row.id));
+    assert_eq!(owner["collaboration_decisions"][0]["can_decide"], false);
+    let own = crate::handlers::collaboration_group::messages(&f.state, &f.member, &group.id, None)
+        .await
+        .unwrap();
+    assert_eq!(own["collaboration_decisions"][0]["id"], ack.id);
+    assert!(!own.to_string().contains(&row.id));
+    assert!(
+        acks::decide(&f.state.db, &f.admin, &row.id, &ack.id, true)
+            .await
+            .is_err()
+    );
+    acks::decide(&f.state.db, &f.member, &row.id, &ack.id, true)
+        .await
+        .unwrap();
+    let queued = requests::pending(&f.state.db, Some(&group.id))
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].id, row.collaboration.as_ref().unwrap().request_id);
+    assert_eq!(queued[0].actor_user_id, f.member);
+    assert_eq!(queued[0].pending_agent_ids, vec![agent.id.clone()]);
+    svc::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &svc::assistant_nyxagent::TurnResult {
+            text: "Waiting for your decision".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let resumed = runtime::begin_ready(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &group.id,
+        &queued[0].id,
+        &agent.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.claim.conversation.id, row.id);
+    let chat = acks::for_key(
+        &f.state.db,
+        &f.member,
+        Some(&resumed.claim.conversation.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        acks::consume_action(&f.state.db, &chat, &ack.id, "nyx__call_tool", &args)
+            .await
+            .unwrap()
+    );
+    let args = serde_json::json!({"method":"POST","path":"/another-private-operation"});
+    let ack = acks::request(
+        &f.state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyx__call_tool"),
+            arguments: Some(&args),
+            summary: "Another private action",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    acks::decide(&f.state.db, &f.member, &row.id, &ack.id, true)
+        .await
+        .unwrap();
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    assert!(
+        !acks::consume_action(&f.state.db, &chat, &ack.id, "nyx__call_tool", &args)
+            .await
+            .unwrap_or(false)
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_uploads_are_published_to_participants_but_model_reads_bind_request() {
+    let (f, agent, group) = setup("collaboration_upload_scope").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let upload = svc::assistant_upload_service::upload(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &group.id,
+        "report.txt",
+        b"Group report".to_vec(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        svc::assistant_upload_service::owner_read(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.admin,
+            &group.id,
+            &upload.id
+        )
+        .await
+        .is_err()
+    );
+    let request = requests::enqueue_with_uploads_ready(
+        &f.state.db,
+        &f.member,
+        &group.id,
+        "Read report",
+        Some(std::slice::from_ref(&agent.id)),
+        std::slice::from_ref(&upload.id),
+    )
+    .await
+    .unwrap();
+    assert!(
+        svc::assistant_upload_service::owner_read(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.admin,
+            &group.id,
+            &upload.id
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        svc::assistant_upload_service::owner_read(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.outsider,
+            &group.id,
+            &upload.id
+        )
+        .await
+        .is_err()
+    );
+    let started = runtime::begin_ready(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &group.id,
+        &request.id,
+        &agent.id,
+    )
+    .await
+    .unwrap();
+    let row = &started.claim.conversation;
+    let chat = svc::assistant_acknowledgement_service::for_key(
+        &f.state.db,
+        &f.member,
+        Some(&row.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        svc::assistant_upload_service::for_chat(&f.state.db, &chat, &upload.id)
+            .await
+            .is_ok()
+    );
+    let listing = svc::assistant_upload_service::list_for_chat(&f.state.db, &chat, None, 50)
+        .await
+        .unwrap();
+    assert_eq!(listing["attachments"][0]["id"], upload.id);
+    let other = runtime_start(&f, &f.admin, &group, &agent).await;
+    let other_chat = svc::assistant_acknowledgement_service::for_key(
+        &f.state.db,
+        &f.admin,
+        Some(&other.conversation.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        svc::assistant_upload_service::for_chat(&f.state.db, &other_chat, &upload.id)
+            .await
+            .is_err()
+    );
+    let listing = svc::assistant_upload_service::list_for_chat(&f.state.db, &other_chat, None, 50)
+        .await
+        .unwrap();
+    assert_eq!(listing["attachments"], serde_json::json!([]));
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    assert!(
+        svc::assistant_upload_service::for_chat(&f.state.db, &chat, &upload.id)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_public_rest_gates_writes_and_hides_nonparticipant_groups() {
+    use crate::handlers::{assistant_group as http, collaboration_group as api};
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    let (f, agent, group) = setup("collaboration_rest_guards").await;
+    let auth = crate::test_utils::test_auth_user(&f.admin);
+    let body=serde_json::from_value(serde_json::json!({"collaboration":true,"name":"Public route","member_agent_ids":[agent.id]})).unwrap();
+    let (_, Json(created)) = http::create_group(State(f.state.clone()), auth.clone(), Json(body))
+        .await
+        .unwrap();
+    assert!(created.collaboration.is_some());
+    let Json(issued) = api::invite(
+        State(f.state.clone()),
+        auth.clone(),
+        Path(group.id.clone()),
+        Json(api::IssueInviteInput {
+            expected_revision: marker(&group).unwrap().membership_revision,
+            intended_user_id: Some(f.member.clone()),
+        }),
+    )
+    .await
+    .unwrap();
+    let token = issued["invite"]["token"].as_str().unwrap();
+    assert!(
+        membership::preview_invite(&f.state.db, &f.member, token)
+            .await
+            .is_ok()
+    );
+    assert!(
+        membership::preview_invite(&f.state.db, &f.outsider, token)
+            .await
+            .is_err()
+    );
+    let stranger = crate::test_utils::test_auth_user(&f.outsider);
+    assert!(matches!(
+        http::get_group(
+            State(f.state.clone()),
+            stranger.clone(),
+            Path(group.id.clone())
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    let update = serde_json::from_value(serde_json::json!({"name":"No access"})).unwrap();
+    assert!(matches!(
+        http::update_group(
+            State(f.state.clone()),
+            stranger.clone(),
+            Path(group.id.clone()),
+            Json(update)
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    let guest = api::GuestInput {
+        expected_revision: 999,
+        guest_revision: 999,
+        enabled: true,
+    };
+    assert!(matches!(
+        api::guest_access(
+            State(f.state.clone()),
+            stranger,
+            Path((group.id.clone(), agent.id.clone())),
+            Json(guest)
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    svc::feature_flag_service::set_platform_override(
+        &f.state.db,
+        svc::shared_agent_service::FLAG,
+        &svc::feature_flag_service::FlagTarget::User(f.admin.clone()),
+        false,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    let body = serde_json::from_value(
+        serde_json::json!({"collaboration":true,"name":"Disabled","member_agent_ids":[agent.id]}),
+    )
+    .unwrap();
+    assert!(
+        http::create_group(State(f.state.clone()), auth.clone(), Json(body))
+            .await
+            .is_err()
+    );
+    // Rollback keeps retained history and deletion reachable.
+    assert!(
+        http::get_group(State(f.state.clone()), auth.clone(), Path(group.id.clone()))
+            .await
+            .is_ok()
+    );
+    http::delete_group(State(f.state.clone()), auth, Path(group.id))
+        .await
+        .unwrap();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_cancel_expires_cards_and_approvals_only_for_the_requester() {
+    let (f, agent, group) = setup("collaboration_cancel_decisions").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let own = runtime_start(&f, &f.admin, &group, &agent).await;
+    let other = runtime_start(&f, &f.member, &group, &agent).await;
+    let approvals = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME);
+    for row in [&own.conversation, &other.conversation] {
+        approvals.insert_one(doc! {"_id":&row.id,"status":"approved","assistant_group":{"group_id":&group.id,"conversation_id":&row.id}}).await.unwrap();
+    }
+    runtime::refresh(&f.state.db, &own.conversation)
+        .await
+        .unwrap();
+    requests::cancel(
+        &f.state.db,
+        &f.admin,
+        &group.id,
+        &own.conversation.collaboration.as_ref().unwrap().request_id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        runtime::refresh(&f.state.db, &own.conversation)
+            .await
+            .is_err()
+    );
+    runtime::refresh(&f.state.db, &other.conversation)
+        .await
+        .unwrap();
+    assert_eq!(
+        approvals
+            .find_one(doc! {"_id":&own.conversation.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("status")
+            .unwrap(),
+        "expired"
+    );
+    assert_eq!(
+        approvals
+            .find_one(doc! {"_id":&other.conversation.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("status")
+            .unwrap(),
+        "approved"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_pending_action_blocks_a_different_request_from_reusing_the_thread() {
+    use svc::assistant_acknowledgement_service as acks;
+    let (f, agent, group) = setup("collaboration_card_chain").await;
+    let first = runtime_start(&f, &f.admin, &group, &agent).await;
+    let row = &first.conversation;
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let args = serde_json::json!({"value":"exact"});
+    let card = acks::request(
+        &f.state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("operation"),
+            arguments: Some(&args),
+            summary: "Choose",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    svc::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &svc::assistant_nyxagent::TurnResult {
+            text: "Waiting".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let next = requests::enqueue_ready(&f.state.db, &f.admin, &group.id, "Different request", None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        runtime::begin_ready(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.admin,
+            &group.id,
+            &next.id,
+            &agent.id
+        )
+        .await,
+        Err(AppError::AssistantTurnActive)
+    ));
+    acks::decide(&f.state.db, &f.admin, &row.id, &card.id, true)
+        .await
+        .unwrap();
+    let resumed = runtime::begin_ready(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.admin,
+        &group.id,
+        &row.collaboration.as_ref().unwrap().request_id,
+        &agent.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.claim.conversation.id, row.id);
+    assert!(resumed.input.contains(&card.id));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
+    use crate::models::{assistant_attachment as image, assistant_conversation::TurnAttachment};
+    let (f, agent, group) = setup("collaboration_published_images").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let row = &claim.conversation;
+    let turn = row.active_turn.as_ref().unwrap();
+    let mut items = Vec::new();
+    for delivery in [true, false] {
+        let mut image = image::AssistantAttachment {
+            id: uuid::Uuid::new_v4().to_string(),
+            origin: "tool".into(),
+            user_id: f.member.clone(),
+            conversation_id: row.id.clone(),
+            turn_id: turn.turn_id.clone(),
+            content_type: "image/png".into(),
+            size: 4,
+            secret_context_versions: BTreeMap::new(),
+            data_encrypted: vec![],
+            created_at: Utc::now(),
+        };
+        image.data_encrypted = f.state.encryption_keys.encrypt(b"png!").await.unwrap();
+        f.state
+            .db
+            .collection::<image::AssistantAttachment>(image::COLLECTION_NAME)
+            .insert_one(&image)
+            .await
+            .unwrap();
+        items.push(TurnAttachment {
+            id: image.id,
+            origin: "tool".into(),
+            content_type: "image/png".into(),
+            size: 4,
+            label: "Generated image".into(),
+            chat_delivery: Some(delivery),
+            image_input: None,
+            image_inspection: Some(false),
+            pages: None,
+        });
+    }
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"active_turn.attachments":bson::to_bson(&items).unwrap()}},
+        )
+        .await
+        .unwrap();
+    svc::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &svc::assistant_nyxagent::TurnResult {
+            text: "Published image".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let history = messages(&f.state.db, &f.admin, &group.id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .last()
+            .unwrap()
+            .attachments
+            .iter()
+            .map(|a| &a.id)
+            .collect::<Vec<_>>(),
+        vec![&items[0].id]
+    );
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    cleanup::sweep(&f.state.db).await.unwrap();
+    assert!(
+        svc::assistant_nyxagent::read_group_tool_attachment(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.admin,
+            &group.id,
+            &items[0].id
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        svc::assistant_nyxagent::read_group_tool_attachment(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.member,
+            &group.id,
+            &items[0].id
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        svc::assistant_nyxagent::read_group_tool_attachment(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.admin,
+            &group.id,
+            &items[1].id
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(image::COLLECTION_NAME)
+            .count_documents(doc! {"_id":&items[1].id})
+            .await
+            .unwrap(),
+        0
+    );
+    let group = get(&f.state.db, &f.admin, &group.id).await.unwrap();
+    change(&f, &f.admin, &group, Change::Delete).await;
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(image::COLLECTION_NAME)
+            .count_documents(doc! {"_id":&items[0].id})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_service_approval_resumes_its_request_and_cannot_outlive_departure() {
+    use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME};
+    let (f, agent, group) = setup("collaboration_service_approvals").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let row = &claim.conversation;
+    let binding = svc::org_group_service::approval_binding(
+        &f.state.db,
+        Some(&group.id),
+        &f.member,
+        Some(&row.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    f.state.db.collection::<bson::Document>(COLLECTION_NAME).insert_one(doc! {
+        "_id":&id,"user_id":&f.member,"service_id":"test-service","service_name":"Private account","service_slug":"private-account",
+        "requester_type":"user","requester_id":&f.member,"operation_summary":"Exact operation","status":"pending","approval_mode":"per_request",
+        "idempotency_key":&id,"created_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(5)),
+        "assistant_group":bson::to_bson(&binding).unwrap()
+    }).await.unwrap();
+    let approval = f
+        .state
+        .db
+        .collection::<ApprovalRequest>(COLLECTION_NAME)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        svc::org_group_service::authorize_approval(&f.state.db, &approval, &f.admin, None)
+            .await
+            .is_err()
+    );
+    svc::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &svc::assistant_nyxagent::TurnResult {
+            text: "Waiting for approval".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let response =
+        crate::handlers::collaboration_group::response(&f.state, &f.member, group.clone())
+            .await
+            .unwrap();
+    assert_eq!(
+        response.collaboration.unwrap()["your_request_ids"],
+        serde_json::json!([binding.request_id])
+    );
+    let updated = svc::approval_service::process_decision(
+        &f.state.db,
+        &f.state.config,
+        &f.state.http_client,
+        None,
+        None,
+        &id,
+        true,
+        None,
+        None,
+        "web",
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.status, "approved");
+    let pending = requests::pending(&f.state.db, Some(&group.id))
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, binding.request_id);
+    let resumed = runtime::begin_ready(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &group.id,
+        &binding.request_id,
+        &agent.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.claim.conversation.id, row.id);
+    assert_eq!(resumed.admission.requester(), f.member);
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    assert!(
+        svc::approval_service::process_decision(
+            &f.state.db,
+            &f.state.config,
+            &f.state.http_client,
+            None,
+            None,
+            &id,
+            true,
+            None,
+            None,
+            "web"
+        )
+        .await
+        .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[test]
+fn collaboration_native_tools_and_mcp_share_the_same_schemas() {
+    use svc::assistant_team_tools as tools;
+    for (name, args) in [
+        (
+            "create_collaboration_group",
+            serde_json::json!({"name":"Research","member_agent_ids":["agent"]}),
+        ),
+        ("list_collaboration_groups", serde_json::json!({})),
+        (
+            "manage_collaboration_group",
+            serde_json::json!({"group":"group","expected_revision":2,"change":{"action":"invite","intended_user_id":"person"}}),
+        ),
+        (
+            "post_to_collaboration_group",
+            serde_json::json!({"group":"group","text":"Hello","recipient_agent_ids":["agent"]}),
+        ),
+        (
+            "manage_collaboration_group",
+            serde_json::json!({"group":"group","expected_revision":2,"change":{"action":"guest_access","agent_id":"agent","enabled":true,"guest_revision":1}}),
+        ),
+    ] {
+        assert!(tools::is_team_tool(&format!("nyxid__{name}")));
+        tools::validate(name, &args).unwrap();
+        assert!(tools::endpoints().iter().any(|e| e.name == name));
+    }
+    assert!(tools::validate("manage_collaboration_group",&serde_json::json!({"group":"group","expected_revision":2,"change":{"action":"accept_transfer"}})).is_err());
+}
+
+struct GroupEgress {
+    actor: String,
+    key: String,
+    calls: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl svc::platform_manager_contract::NyxAgentEgress for GroupEgress {
+    async fn request(
+        &self,
+        context: &svc::platform_manager_contract::NyxAgentExecutionContext,
+        key: &svc::platform_manager_contract::RuntimeCredential,
+        request: svc::platform_manager_contract::NyxAgentRequest,
+    ) -> AppResult<axum::response::Response> {
+        use axum::response::IntoResponse;
+        assert!(
+            matches!(context,svc::platform_manager_contract::NyxAgentExecutionContext::Owner {user_id,platform_origin:None,..} if user_id==&self.actor)
+        );
+        assert_eq!(key.api_key_id, self.key);
+        if request.relative_path == "v1/models" {
+            return Ok(axum::Json(serde_json::json!({"data":[]})).into_response());
+        }
+        assert_eq!(request.relative_path, "v1/responses");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let frame = serde_json::json!({"type":"response.completed","sequence_number":0,"response":{"id":"resp_1234567890abcdef1234567890abcdef_1234567890abcdef1234567890abcdef","conversation":{"id":"conv_1234567890abcdef1234567890abcdef"},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Group answer"}]}]}});
+        Ok((
+            [("content-type", "text/event-stream")],
+            format!("data: {frame}\n\n"),
+        )
+            .into_response())
+    }
+}
+#[tokio::test]
+async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revocation() {
+    use svc::assistant_nyxagent_runtime as worker;
+    let (f, agent, group) = setup("collaboration_real_runtime").await;
+    share(&f, &agent, &[&f.member]).await;
+    let group = join(&f, &group, &f.member).await;
+    let request = requests::enqueue_ready(
+        &f.state.db,
+        &f.member,
+        &group.id,
+        "Reply to the group",
+        None,
+    )
+    .await
+    .unwrap();
+    let mut started = runtime::begin_ready(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &group.id,
+        &request.id,
+        &agent.id,
+    )
+    .await
+    .unwrap();
+    let row = &started.claim.conversation;
+    let egress = GroupEgress {
+        actor: f.member.clone(),
+        key: row.credential_api_key_id.clone(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    assert!(!row.guest_model_setup);
+    let mut setup_row = row.clone();
+    setup_row.guest_model_setup = true;
+    assert!(runtime::validate(&f.state.db, &setup_row).await.is_err());
+    let context = worker::owner_context(row).unwrap();
+    let (sender, _) = tokio::sync::broadcast::channel(256);
+    let mut events = worker::Events {
+        checkpoint: None,
+        sender,
+        cursor: 0,
+        reset_notified: false,
+    };
+    let result = worker::execute_owner_turn(
+        &f.state,
+        &egress,
+        &context,
+        row,
+        &started.input,
+        &mut started.claim.credential,
+        None,
+        &mut events,
+        "block",
+        &mut String::new(),
+        &mut None,
+    )
+    .await
+    .unwrap();
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert_eq!(result.text, "Group answer");
+    assert_eq!(egress.calls.load(Ordering::SeqCst), 1);
+    // The private reader remains closed despite internal runtime access.
+    assert!(
+        svc::assistant_nyxagent::messages(&f.state.db, &f.member, &row.id, 20, None)
+            .await
+            .is_err()
+    );
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    assert!(
+        worker::execute_owner_turn(
+            &f.state,
+            &egress,
+            &context,
+            row,
+            &started.input,
+            &mut started.claim.credential,
+            None,
+            &mut events,
+            "block",
+            &mut String::new(),
+            &mut None
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(egress.calls.load(Ordering::SeqCst), 1);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn collaboration_card_snapshot_batches_threads_without_per_agent_reads() {
+    let (f, _, reads) = Fixture::observed("collaboration_card_queries").await;
+    enable(&f).await;
+    let mut agents = Vec::new();
+    for i in 0..8 {
+        agents.push(specialist(&f, &f.admin, &format!("card-{i}")).await);
+    }
+    let one = membership::create_ready(
+        &f.state.db,
+        &f.admin,
+        "One",
+        std::slice::from_ref(&agents[0].id),
+    )
+    .await
+    .unwrap();
+    let eight = membership::create_ready(
+        &f.state.db,
+        &f.admin,
+        "Eight",
+        &agents.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
+    runtime_start(&f, &f.admin, &one, &agents[0]).await;
+    for agent in &agents {
+        runtime_start(&f, &f.admin, &eight, agent).await;
+    }
+    reads.store(0, Ordering::SeqCst);
+    assert_eq!(
+        runtime::decision_threads(&f.state.db, &f.admin, &one.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let single = reads.load(Ordering::SeqCst);
+    reads.store(0, Ordering::SeqCst);
+    assert_eq!(
+        runtime::decision_threads(&f.state.db, &f.admin, &eight.id)
+            .await
+            .unwrap()
+            .len(),
+        8
+    );
+    assert_eq!(single, reads.load(Ordering::SeqCst));
     f.state.db.drop().await.unwrap();
 }

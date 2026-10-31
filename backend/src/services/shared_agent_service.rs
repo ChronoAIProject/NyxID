@@ -386,15 +386,44 @@ pub async fn load(
     let catalog_rows: Vec<bson::Document> = db
         .collection("downstream_services")
         .find(doc! {"is_active": true, "$or": [{"_id": {"$in": catalogs.iter().collect::<Vec<_>>()}}, {"inference": {"$ne": null}}]})
-        .projection(doc! {"_id": 1, "inference": 1, "service_category": 1, "service_type": 1})
+        .projection(doc! {"_id": 1, "inference": 1, "service_category": 1, "service_type": 1, "billing.managed_execution": 1})
         .await?
         .try_collect()
         .await?;
     reads += 1;
+    // A vetted managed provider is an external execution contract despite its
+    // internal credential lane. This never exposes internal account services.
+    let managed_ids: Vec<_> = catalog_rows
+        .iter()
+        .filter(|d| {
+            d.get_document("billing")
+                .is_ok_and(|b| b.get_document("managed_execution").is_ok())
+        })
+        .filter_map(|d| d.get_str("_id").ok())
+        .collect();
+    let managed: HashSet<String> = if managed_ids.is_empty() {
+        HashSet::new()
+    } else {
+        let rows: Vec<crate::models::downstream_service::DownstreamService> = db
+            .collection("downstream_services")
+            .find(doc! {"_id":{"$in":managed_ids},"is_active":true})
+            .await?
+            .try_collect()
+            .await?;
+        reads += 1;
+        rows.into_iter()
+            .filter(|s| {
+                super::telnyx_platform_service::contract(s).is_some()
+                    && super::telnyx_platform_service::validate_catalog(s).is_ok()
+            })
+            .map(|s| s.id)
+            .collect()
+    };
     let callable_catalogs: HashSet<String> = catalog_rows
         .iter()
         .filter(|d| {
-            d.get_str("service_category") != Ok("internal")
+            (d.get_str("service_category") != Ok("internal")
+                || d.get_str("_id").is_ok_and(|id| managed.contains(id)))
                 && d.get_str("service_type").unwrap_or("http") == "http"
         })
         .filter_map(|d| d.get_str("_id").ok().map(str::to_owned))
@@ -1784,6 +1813,19 @@ pub async fn update_memory(
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
+    db.collection::<bson::Document>(super::assistant_service_execution::COLLECTION)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"shared_pool_scope":1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {"shared_pool_scope":{"$type":"string"}})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     db.collection::<bson::Document>(model::CONSENTS_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()

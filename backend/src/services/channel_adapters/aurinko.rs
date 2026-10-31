@@ -190,6 +190,7 @@ impl AurinkoAdapter {
         if let Some(body) = body {
             request = request.json(body);
         }
+        crate::services::channel_platform::revalidate_post_effect().await?;
         let mut response = request.send().await.map_err(|_| upstream())?;
         let status = response.status();
         // Provider error bodies can contain addresses, message bodies or tokens.

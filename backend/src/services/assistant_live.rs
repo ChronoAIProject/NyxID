@@ -279,6 +279,28 @@ impl AssistantLive {
             else {
                 return Ok(());
             };
+            if group.collaboration.is_some() {
+                if super::assistant_group_kind::classify(&group)
+                    != super::assistant_group_kind::GroupKind::Collaboration
+                {
+                    return Ok(());
+                }
+                use futures::TryStreamExt;
+                let people: Vec<crate::models::user::User> = db
+                    .collection(crate::models::user::COLLECTION_NAME)
+                    .find(doc! {"_id":{"$in":&group.participant_user_ids},"is_active":true})
+                    .limit(16)
+                    .await?
+                    .try_collect()
+                    .await?;
+                for person in people.into_iter().filter(|u| u.user_type.is_person()) {
+                    self.publish(LiveEvent::OrgGroup {
+                        id: id.clone(),
+                        user_id: person.id,
+                    });
+                }
+                return Ok(());
+            }
             if !super::org_group_service::is_org(&group) {
                 return Ok(());
             }

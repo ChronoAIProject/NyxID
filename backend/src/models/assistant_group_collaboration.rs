@@ -139,3 +139,18 @@ pub struct ExecutionBinding {
     pub membership_revision: i64,
     pub authority: Authority,
 }
+
+/// A participant may propose only an agent they can use. The creator accepts
+/// this persisted principal, never an arbitrary proposer supplied by a model.
+pub const PROPOSALS: &str = "assistant_group_agent_proposals";
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentProposal {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub group_id: String,
+    pub agent_id: String,
+    pub proposed_by: String,
+    pub membership_revision: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}

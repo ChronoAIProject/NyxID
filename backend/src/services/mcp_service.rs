@@ -4710,6 +4710,33 @@ fn scoped_execution(exec_ctx: &McpExecContext<'_>, service: &McpToolService) -> 
         })
 }
 
+// MCP has no opaque-stream admission/relay. Check before credential resolution
+// and again for callers that supply an already-resolved exact target.
+fn require_tool_transport(
+    exec_ctx: &McpExecContext<'_>,
+    prepared: &PreparedProxyCall,
+) -> AppResult<bool> {
+    let shared = exec_ctx
+        .org_agent_access
+        .is_some_and(|a| a.shared().is_some())
+        || exec_ctx
+            .assistant_chat
+            .is_some_and(super::assistant_service_execution::is_shared_chat);
+    if shared
+        && (prepared.method == reqwest::Method::CONNECT
+            || prepared
+                .parameter_headers
+                .iter()
+                .chain(&prepared.server_owned_headers)
+                .any(|(name, _)| name.eq_ignore_ascii_case("upgrade")))
+    {
+        return Err(AppError::Forbidden(
+            "Shared streams require admitted server HTTP proxy execution".into(),
+        ));
+    }
+    Ok(shared)
+}
+
 // Resolve before polling dispatch so credential/node resolution's debug poll frame
 // is no longer on the stack while the final admission performs database reads.
 struct ToolResolutionContext<'a> {
@@ -4750,6 +4777,7 @@ fn resolve_tool_target(
             connection_expiry_notifier,
             exec_ctx,
         } = context;
+        require_tool_transport(exec_ctx, prepared)?;
         let resolved = match &service.source {
             McpToolSource::Internal => {
                 return Err(AppError::Forbidden(
@@ -5337,6 +5365,19 @@ pub fn execute_tool_resolved<'a>(
     attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(async move {
+        let shared = require_tool_transport(exec_ctx, &prepared)?;
+        if shared
+            && (node_route.is_some()
+                || target
+                    .catalog_default_headers
+                    .iter()
+                    .chain(&target.user_service_default_headers)
+                    .any(|header| header.name.eq_ignore_ascii_case("upgrade")))
+        {
+            return Err(AppError::Forbidden(
+                "Shared streams require admitted server HTTP proxy execution".into(),
+            ));
+        }
         let resource_source = super::resource_adapter::source(
             service,
             endpoint,
@@ -6026,7 +6067,7 @@ async fn execute_tool_resolved_inner(
                 &target,
                 (method.as_str(), &path),
                 (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
-            );
+            )?;
             destination_audit.dispatch();
             let managed = match box_mcp_forwarding(|| super::telnyx_platform_service::execute(
                 db,

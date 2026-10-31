@@ -1,3 +1,4 @@
+import { collaborationGroupSchema, collaborationDecisionSchema } from "./collaboration-group";
 import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
@@ -446,7 +447,7 @@ export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
 export const guestReadinessSchema = z.object({
-  status: z.enum(["ready", "not_ready"]),
+  status: z.enum(["ready", "setting_up", "not_ready"]),
   reason: z.string().nullish(),
   fix: z.string().nullish(),
 });
@@ -796,6 +797,7 @@ export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
 export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string() });
 
 export const assistantGroupSchema = z.object({
+  collaboration: collaborationGroupSchema.optional(),
   owner: z.object({ type: z.enum(["personal", "org"]), id: z.string(), name: z.string() }).optional(),
   participants: z.array(groupPersonSchema).optional(),
   your_role: z.enum(["creator", "admin", "participant"]).optional(),
@@ -815,6 +817,8 @@ export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
 export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
 
 export const assistantGroupMessageSchema = z.object({
+  requester_user_id: z.string().optional(),
+  execution_mode: z.enum(["owner", "org_member", "shared", "guest"]).optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullable().optional(), updated_at: z.string().optional() }).nullable().optional(),
   activities: z.array(nyxAgentTurnActivitySchema).optional(),
   author: groupPersonSchema.optional(),
@@ -852,6 +856,7 @@ export const assistantGroupPendingActionSchema = z.object({
 export type AssistantGroupPendingAction = z.infer<typeof assistantGroupPendingActionSchema>;
 
 export const assistantGroupMessagesSchema = z.object({
+  collaboration_decisions: z.array(collaborationDecisionSchema).optional(),
   group: assistantGroupSchema,
   pending_actions: z.array(assistantGroupPendingActionSchema).default([]),
   /** Ascending by `seq`. */
@@ -869,6 +874,7 @@ export type AssistantGroupPosted = z.infer<typeof assistantGroupPostedSchema>;
 
 /** "New group" and group settings: a name and its agents. */
 export const assistantGroupFormSchema = z.object({
+  collaboration: z.boolean().optional(),
   org: z.string().optional(),
   participant_user_ids: z.array(z.string()).max(16).optional(),
   lead_agent_id: z.string().optional(),

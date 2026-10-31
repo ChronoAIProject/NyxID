@@ -670,6 +670,7 @@ impl PlatformAdapter for DiscordAdapter {
                 .map(|id| Some(id.to_string()))
                 .ok_or_else(media::upload_failed);
         }
+        crate::services::channel_platform::revalidate_post_effect().await?;
         let resp: serde_json::Value = request
             .send()
             .await
@@ -716,6 +717,7 @@ impl PlatformAdapter for DiscordAdapter {
     ) -> AppResult<()> {
         let (url, body) =
             build_edit_message_request(&self.base_url, conversation_id, platform_message_id, edit);
+        crate::services::channel_platform::revalidate_post_effect().await?;
         let resp: serde_json::Value = http
             .patch(&url)
             .header("Authorization", format!("Bot {}", credentials.token))
@@ -767,6 +769,7 @@ impl PlatformAdapter for DiscordAdapter {
     ) -> AppResult<BotIdentity> {
         let bot_token = credentials.token;
         let url = format!("{}/users/@me", self.base_url);
+        crate::services::channel_platform::revalidate_post_effect().await?;
         let resp: serde_json::Value = http
             .get(&url)
             .header("Authorization", format!("Bot {bot_token}"))

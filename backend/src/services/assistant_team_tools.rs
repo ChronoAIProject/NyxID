@@ -37,6 +37,10 @@ pub const TOOL_NAMES: &[&str] = &[
     "decide_permission",
     "destroy_subagent",
     "update_subagent",
+    "create_collaboration_group",
+    "list_collaboration_groups",
+    "manage_collaboration_group",
+    "post_to_collaboration_group",
     "create_group",
     "list_groups",
     "post_to_group",
@@ -181,6 +185,7 @@ pub fn read_only(name: &str) -> bool {
             | "preview_agent_skill"
             | "learning_status"
             | "learning_list_proposals"
+            | "list_collaboration_groups"
             | "list_groups"
             | "channel_setup_guide"
             | "list_channel_agents"
@@ -464,7 +469,7 @@ pub fn schema(name: &str) -> Value {
                 "members": {"type": "string", "enum": ["everyone", "owner", "default"],
                     "description": "Groups and channels: whether members other than the \
                     user may talk to the agent, as guests; default lets them once the user \
-                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone does not complete model setup"},
+                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
                 "allow_posts": {"type": "boolean",
                     "description": "Let the chat's agent post there without being asked"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
@@ -478,8 +483,23 @@ pub fn schema(name: &str) -> Value {
                 "private_chats": {"type": "string", "enum": ["owner", "everyone"],
                     "description": "Who may talk to the agent in private chats with the bot: \
                     only the user (owner), or anyone (everyone, each as a guest in their own \
-                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone does not complete model setup"}}),
+                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"}}),
             vec!["channel_agent_id", "private_chats"],
+        ),
+        "create_collaboration_group" => (
+            json!({"name":string(60),"member_agent_ids":{"type":"array","minItems":1,"maxItems":8,"items":string(64)}}),
+            vec!["name", "member_agent_ids"],
+        ),
+        "list_collaboration_groups" => (json!({}), vec![]),
+        "post_to_collaboration_group" => (
+            json!({"group":string(64),"text":string(32768),"recipient_agent_ids":{"type":"array","minItems":1,"maxItems":8,"items":string(64)}}),
+            vec!["group", "text"],
+        ),
+        "manage_collaboration_group" => (
+            json!({"group":string(64),"expected_revision":{"type":"integer","minimum":1},"change":{"type":"object","additionalProperties":false,"properties":{
+            "action":{"type":"string","enum":["invite","cancel_invite","quick_add","remove","leave","delete","add_agent","propose_agent","accept_agent","remove_agent","guest_access","rename","lead"]},
+            "agent_id":string(64),"person_id":string(36),"intended_user_id":string(36),"proposal_id":string(200),"invite_id":string(64),"history_disclosed":{"type":"boolean"},"enabled":{"type":"boolean"},"guest_revision":{"type":"integer","minimum":1},"name":string(60)},"required":["action"]}}),
+            vec!["group", "expected_revision", "change"],
         ),
         "create_group" => (
             json!({"org":string(128),"participant_user_ids":{"type":"array","maxItems":16,"items":string(36)},"name": string(60), "members": json!({"type": "array", "minItems": 1, "maxItems": 8,
@@ -740,6 +760,18 @@ pub(crate) fn description(name: &str) -> &'static str {
             wants: description is role/scope, persona is tone/style, Ornn skills hold repeatable procedures, checklists, references, templates and workflows. Search and preview existing skills, then propose attaching with set_agent_skills. Never package or publish skills through Ornn Playground, sandboxes, machines or raw Ornn upload APIs. With subagent \"nyxbot\" it sets your own display name; only the user \
             changes your persona. Setting model changes which NyxAgent model the agent's new threads use; \
             the user's access mode may require their confirmation card first."
+        }
+        "create_collaboration_group" => {
+            "Create a multi-person group with 1–8 specialists you can use. NyxBot cannot join. Invite people separately; everyone can read the retained history."
+        }
+        "list_collaboration_groups" => {
+            "List the acting person's collaboration groups and safe member/status metadata; no hidden threads or other participants' cards."
+        }
+        "post_to_collaboration_group" => {
+            "Post a request for the acting person in a collaboration group, retaining their identity and billing for every handoff. No private NyxBot context or automatic follower is attached."
+        }
+        "manage_collaboration_group" => {
+            "Manage a collaboration group at its exact membership revision. The creator manages people and accepts agent proposals; anyone may leave. Invites may bind intended_user_id to an existing person; omit it for a bearer link. They are single-use, expire after seven days and are returned once; never send an invitation automatically. Quick-add must first disclose full retained history. Guest enablement always asks the agent owner, even in Full access: future unauthorized participants use the owner's guest policy and bill the owner. Transfer and invite acceptance require the human UI."
         }
         "create_group" => {
             "Create a group chat of the user and several agents (you and/or specialists). In a \

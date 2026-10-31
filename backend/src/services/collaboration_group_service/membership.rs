@@ -31,6 +31,12 @@ pub enum Change {
         /// creator for a direct add. Never accept this principal from tool args.
         proposed_by: String,
     },
+    ProposeAgent {
+        agent_id: String,
+    },
+    AcceptAgent {
+        proposal_id: String,
+    },
     RemoveAgent {
         agent_id: String,
     },
@@ -125,29 +131,36 @@ pub(super) async fn create_ready(
     let group = session
         .start_transaction()
         .read_concern(mongodb::options::ReadConcern::snapshot())
-        .and_run2(async |session| {
-            let result: AppResult<AssistantGroup> = async {
-                fence_person(db, actor, session).await?;
-                let access = identity::for_group(db, actor, group.clone(), session).await?;
-                for id in agents {
-                    let target = access
-                        .agent(id)
-                        .and_then(AgentIdentity::authority)
-                        .ok_or_else(|| invalid("Choose specialists you can use"))?;
-                    if target.lane == model::Lane::Guest {
-                        return Err(invalid("Choose specialists you can use"));
+        .and_run(
+            (db.clone(), actor.to_owned(), group, agents.to_vec()),
+            |session, context| {
+                let (db, actor, group, agents) = &*context;
+                let actor = actor.as_str();
+                Box::pin(async move {
+                    let result: AppResult<AssistantGroup> = async {
+                        fence_person(db, actor, session).await?;
+                        let access = identity::for_group(db, actor, group.clone(), session).await?;
+                        for id in agents {
+                            let target = access
+                                .agent(id)
+                                .and_then(AgentIdentity::authority)
+                                .ok_or_else(|| invalid("Choose specialists you can use"))?;
+                            if target.lane == model::Lane::Guest {
+                                return Err(invalid("Choose specialists you can use"));
+                            }
+                            insert_agent(db, group, id, &target.owner_id, actor, session).await?;
+                        }
+                        db.collection::<AssistantGroup>(GROUPS)
+                            .insert_one(group)
+                            .session(session)
+                            .await?;
+                        Ok(group.clone())
                     }
-                    insert_agent(db, &group, id, &target.owner_id, actor, session).await?;
-                }
-                db.collection::<AssistantGroup>(GROUPS)
-                    .insert_one(&group)
-                    .session(session)
-                    .await?;
-                Ok(group.clone())
-            }
-            .await;
-            transactions::transaction_result(result)
-        })
+                    .await;
+                    transactions::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(transactions::map_transaction_error)?;
     audit(db, actor, &group.id, "created").await;
@@ -239,19 +252,23 @@ pub(super) async fn apply_ready(
     let raw_token = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
     let hash = token_hash(&raw_token)?;
     let mut session = db.client().start_session().await?;
-    let (group, invite) = session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run2(async |session| {
+    let (group, invite) = session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), actor.to_owned(), id.to_owned(), expected_revision, change, delegation_approved, hash.clone()), |session, context| {let (db, actor, id, expected_revision, change, delegation_approved, hash)=&*context;let actor=actor.as_str();let id=id.as_str();let expected_revision=*expected_revision;let delegation_approved=*delegation_approved;Box::pin(async move {
         let result: AppResult<(Option<AssistantGroup>, Option<model::Invite>)> = async {
             // Owners may opt in an attached agent without acquiring transcript access.
             let mut group = if matches!(change, Change::GuestAccess {..}) {
                 let g = db.collection::<AssistantGroup>(GROUPS).find_one(doc! {"_id":id,"collaboration.version":1}).session(&mut *session).await?.ok_or_else(missing)?;
                 marker(&g)?;
+                if g.user_id!=actor {
+                    let Change::GuestAccess {agent_id,..}=&change else {return Err(missing());};
+                    if db.collection::<model::AgentAccess>(model::AGENT_ACCESS).find_one(doc! {"group_id":id,"agent_id":agent_id,"owner_id":actor}).session(&mut *session).await?.is_none() {return Err(missing());}
+                }
                 g
             } else { read_group(db,actor,id,session).await? };
             if marker(&group)?.membership_revision != expected_revision { return Err(stale()); }
             fence_person(db,actor,session).await?;
             fence_group(db,&group,session).await?;
             let creator = group.user_id == actor;
-            if !creator && !matches!(change,Change::Leave | Change::AcceptTransfer | Change::GuestAccess {..}) { return Err(missing()); }
+            if !creator && !matches!(change,Change::Leave | Change::AcceptTransfer | Change::ProposeAgent {..} | Change::GuestAccess {..}) { return Err(missing()); }
             if !matches!(change,Change::Leave | Change::Delete | Change::Remove {..} | Change::RemoveAgent {..} | Change::CancelInvite {..} | Change::GuestAccess {enabled:false,..}) {
                 // Uses the same batched live flag/participant snapshot as admission.
                 identity::for_group(db,&group.user_id,group.clone(),session).await?;
@@ -330,6 +347,31 @@ pub(super) async fn apply_ready(
                         changed = true;
                     }
                 }
+                Change::ProposeAgent {agent_id} => {
+                    if group.member_agent_ids.contains(agent_id) {return Err(invalid("Agent is already a member"));}
+                    let mut proposed = group.clone();
+                    // Identity lookup is bounded to eight members; replace the roster
+                    // for proposal validation rather than expanding a full group.
+                    proposed.member_agent_ids=vec![agent_id.clone()];proposed.lead_agent_id=agent_id.clone();
+                    let access=identity::for_group(db,actor,proposed,session).await?;
+                    let authority=access.agent(agent_id).and_then(AgentIdentity::authority).filter(|a|a.lane!=model::Lane::Guest).ok_or_else(missing)?;
+                    let _ = authority;
+                    identity::fence(db,&access,agent_id,session).await?;
+                    let proposal=model::AgentProposal {id:format!("{id}:{actor}:{agent_id}"),group_id:id.into(),agent_id:agent_id.clone(),proposed_by:actor.into(),membership_revision:expected_revision,expires_at:Utc::now()+Duration::days(7)};
+                    db.collection::<model::AgentProposal>(model::PROPOSALS).replace_one(doc! {"_id":&proposal.id},&proposal).upsert(true).session(&mut *session).await?;
+                }
+                Change::AcceptAgent {proposal_id} => {
+                    let proposal=db.collection::<model::AgentProposal>(model::PROPOSALS).find_one(doc! {"_id":proposal_id,"group_id":id,"membership_revision":expected_revision,"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.ok_or_else(missing)?;
+                    if group.member_agent_ids.len()>=8 {return Err(invalid("A group can have at most 8 specialists"));}
+                    if !group.participant_user_ids.contains(&proposal.proposed_by) || group.member_agent_ids.contains(&proposal.agent_id) {return Err(stale());}
+                    group.member_agent_ids.push(proposal.agent_id.clone());
+                    let access=identity::for_group(db,&proposal.proposed_by,group.clone(),session).await?;
+                    let authority=access.agent(&proposal.agent_id).and_then(AgentIdentity::authority).filter(|a|a.lane!=model::Lane::Guest).ok_or_else(missing)?;
+                    identity::fence(db,&access,&proposal.agent_id,session).await?;
+                    insert_agent(db,&group,&proposal.agent_id,&authority.owner_id,&proposal.proposed_by,session).await?;
+                    if db.collection::<model::AgentProposal>(model::PROPOSALS).delete_one(doc! {"_id":proposal_id,"membership_revision":expected_revision}).session(&mut *session).await?.deleted_count!=1 {return Err(stale());}
+                    changed=true;
+                }
                 Change::RemoveAgent {agent_id} => {
                     if group.member_agent_ids.contains(agent_id) {
                         if group.member_agent_ids.len() == 1 { return Err(invalid("Keep at least one specialist, or delete the group")); }
@@ -356,7 +398,7 @@ pub(super) async fn apply_ready(
                         if *enabled && !delegation_approved {
                             return Err(AppError::Forbidden("Enabling guest access requires the agent owner's approval".into()));
                         }
-                        db.collection::<model::AgentAccess>(model::AGENT_ACCESS).update_one(doc! {"_id":previous.id,"revision":guest_revision},doc! {"$set":{"guest_enabled":enabled,"consenting_owner_id":if *enabled {bson::Bson::String(actor.into())} else {bson::Bson::Null},"updated_at":bson::DateTime::now()},"$inc":{"revision":1}}).session(&mut *session).await?;
+                        if db.collection::<model::AgentAccess>(model::AGENT_ACCESS).update_one(doc! {"_id":previous.id,"revision":guest_revision},doc! {"$set":{"guest_enabled":enabled,"consenting_owner_id":if *enabled {bson::Bson::String(actor.into())} else {bson::Bson::Null},"updated_at":bson::DateTime::now()},"$inc":{"revision":1}}).session(&mut *session).await?.matched_count != 1 { return Err(stale()); }
                         invalidate(db,id,session).await?;
                     }
                 }
@@ -373,15 +415,15 @@ pub(super) async fn apply_ready(
             }
             marker(&group)?;
             group.updated_at = Utc::now();
-            db.collection::<AssistantGroup>(GROUPS).update_one(doc! {"_id":id,"collaboration.membership_revision":expected_revision},doc! {"$set":{
+            if db.collection::<AssistantGroup>(GROUPS).update_one(doc! {"_id":id,"collaboration.membership_revision":expected_revision},doc! {"$set":{
                 "user_id":&group.user_id,"collaboration":bson::to_bson(&group.collaboration).map_err(|e| AppError::Internal(e.to_string()))?,
                 "participant_user_ids":&group.participant_user_ids,"member_agent_ids":&group.member_agent_ids,"lead_agent_id":&group.lead_agent_id,
                 "last_recipient_ids_by_actor":bson::to_bson(&group.last_recipient_ids_by_actor).map_err(|e| AppError::Internal(e.to_string()))?,"name":&group.name,"updated_at":bson::DateTime::from_chrono(group.updated_at)
-            }}).session(session).await?;
+            }}).session(session).await?.matched_count != 1 { return Err(stale()); }
             Ok((Some(group),None))
         }.await;
         transactions::transaction_result(result)
-    }).await.map_err(transactions::map_transaction_error)?;
+    })}).await.map_err(transactions::map_transaction_error)?;
     audit(db, actor, id, "membership_updated").await;
     Ok(Mutation {
         group,
@@ -448,6 +490,8 @@ async fn common_org(
 }
 
 pub struct InvitePreview {
+    pub creator_name: String,
+    pub participants: Vec<crate::services::org_group_service::Participant>,
     pub group_id: String,
     pub group_name: String,
     pub history_disclosure: &'static str,
@@ -477,6 +521,8 @@ pub async fn preview_invite(db: &Database, actor: &str, token: &str) -> AppResul
     let (invite, group) = invite_in_session(db, actor, &hash, &mut session).await?;
     session.commit_transaction().await?;
     Ok(InvitePreview {
+        creator_name: svc::org_group_service::display_name(db, &group.user_id).await?,
+        participants: super::participants(db, &group).await?,
         group_id: group.id,
         group_name: group.name,
         expires_at: invite.expires_at,
@@ -506,9 +552,9 @@ pub(super) async fn accept_ready(
     }
     let hash = token_hash(token)?;
     let mut session = db.client().start_session().await?;
-    let group = session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run2(async |session| {
+    let group = session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), actor.to_owned(), hash), |session, context| {let (db, actor, hash)=&*context;let actor=actor.as_str();Box::pin(async move {
         let result: AppResult<AssistantGroup> = async {
-            let (invite, mut group) = invite_in_session(db,actor,&hash,session).await?;
+            let (invite, mut group) = invite_in_session(db,actor,hash,session).await?;
             fence_person(db,actor,session).await?;
             fence_person(db,&group.user_id,session).await?;
             fence_group(db,&group,session).await?;
@@ -518,18 +564,18 @@ pub(super) async fn accept_ready(
             group.participant_user_ids.push(actor.into());
             identity::for_group(db,actor,group.clone(),session).await?;
             group.collaboration.as_mut().expect("validated").membership_revision += 1;
-            db.collection::<model::Invite>(model::INVITES).update_one(doc! {"_id":invite.id,"accepted_at":null,"cancelled_at":null},doc! {"$set":{"accepted_at":bson::DateTime::now(),"accepted_by_user_id":actor}}).session(&mut *session).await?;
-            db.collection::<AssistantGroup>(GROUPS).update_one(doc! {"_id":&group.id,"collaboration.membership_revision":previous_revision},doc! {"$set":{"participant_user_ids":&group.participant_user_ids,"updated_at":bson::DateTime::now()},"$inc":{"collaboration.membership_revision":1}}).session(&mut *session).await?;
+            if db.collection::<model::Invite>(model::INVITES).update_one(doc! {"_id":invite.id,"accepted_at":null,"cancelled_at":null},doc! {"$set":{"accepted_at":bson::DateTime::now(),"accepted_by_user_id":actor}}).session(&mut *session).await?.matched_count != 1 { return Err(stale()); }
+            if db.collection::<AssistantGroup>(GROUPS).update_one(doc! {"_id":&group.id,"collaboration.membership_revision":previous_revision},doc! {"$set":{"participant_user_ids":&group.participant_user_ids,"updated_at":bson::DateTime::now()},"$inc":{"collaboration.membership_revision":1}}).session(&mut *session).await?.matched_count != 1 { return Err(stale()); }
             invalidate(db,&group.id,session).await?;
             Ok(group)
         }.await;
         transactions::transaction_result(result)
-    }).await.map_err(transactions::map_transaction_error)?;
+    })}).await.map_err(transactions::map_transaction_error)?;
     audit(db, actor, &group.id, "invite_accepted").await;
     Ok(group)
 }
 
-async fn delete(
+pub(super) async fn delete(
     db: &Database,
     group: &AssistantGroup,
     session: &mut ClientSession,
@@ -539,8 +585,10 @@ async fn delete(
         model::INVITES,
         model::AGENT_ACCESS,
         model::TRANSFERS,
+        model::PROPOSALS,
         crate::models::assistant_group::REQUESTS_COLLECTION_NAME,
         crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
+        crate::models::assistant_message_feedback::COLLECTION_NAME,
     ] {
         db.collection::<bson::Document>(collection)
             .delete_many(if collection == model::TRANSFERS {
@@ -551,6 +599,18 @@ async fn delete(
             .session(&mut *session)
             .await?;
     }
+    db.collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
+        .delete_many(doc! {"group_id":&group.id})
+        .session(&mut *session)
+        .await?;
+    db.collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .delete_many(doc! {"collaboration_group_id":&group.id})
+        .session(&mut *session)
+        .await?;
+    db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
+        .delete_many(doc! {"$or":[{"group_id":&group.id},{"collaboration_group_id":&group.id}]})
+        .session(&mut *session)
+        .await?;
     // Revoked slots are retained until cancellation/settlement and artifact cleanup.
     db.collection::<AssistantGroup>(GROUPS)
         .delete_one(doc! {"_id":&group.id})

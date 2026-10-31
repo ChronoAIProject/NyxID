@@ -22,15 +22,6 @@ impl AgentIdentity {
     pub fn authority(&self) -> Option<&model::Authority> {
         self.authority.as_ref()
     }
-    pub fn execution_user<'a>(&'a self, actor: &'a str) -> Option<&'a str> {
-        self.authority.as_ref().map(|a| {
-            if a.lane == model::Lane::Guest {
-                a.owner_id.as_str()
-            } else {
-                actor
-            }
-        })
-    }
 }
 
 /// One actor, group and optional immutable request chain. Fields are private;

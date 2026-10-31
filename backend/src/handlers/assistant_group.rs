@@ -29,35 +29,37 @@ use super::assistant_team::{Pool, Started, start_server_turn, team_pool_limit};
 
 #[derive(Serialize)]
 pub struct GroupMemberResponse {
-    id: String,
-    name: String,
-    display_name: Option<String>,
-    kind: AgentKind,
-    destroyed: bool,
-    unavailable: bool,
-    shared: bool,
-    owner_name: Option<String>,
-    conversation_id: Option<String>,
-    working: bool,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) display_name: Option<String>,
+    pub(crate) kind: AgentKind,
+    pub(crate) destroyed: bool,
+    pub(crate) unavailable: bool,
+    pub(crate) shared: bool,
+    pub(crate) owner_name: Option<String>,
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) working: bool,
 }
 
 #[derive(Serialize)]
 pub struct GroupResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
-    owner: Option<Value>,
+    pub(crate) collaboration: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    participants: Option<Vec<crate::services::org_group_service::Participant>>,
+    pub(crate) owner: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    your_role: Option<String>,
-    id: String,
-    name: String,
-    members: Vec<GroupMemberResponse>,
-    lead_agent_id: String,
-    default_recipient_ids: Vec<String>,
-    working_agent_ids: Vec<String>,
-    message_count: i64,
-    last_message_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
+    pub(crate) participants: Option<Vec<crate::services::org_group_service::Participant>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) your_role: Option<String>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) members: Vec<GroupMemberResponse>,
+    pub(crate) lead_agent_id: String,
+    pub(crate) default_recipient_ids: Vec<String>,
+    pub(crate) working_agent_ids: Vec<String>,
+    pub(crate) message_count: i64,
+    pub(crate) last_message_at: Option<DateTime<Utc>>,
+    pub(crate) created_at: DateTime<Utc>,
 }
 
 #[derive(Serialize)]
@@ -70,12 +72,16 @@ pub struct GroupAgentRef {
 
 #[derive(Serialize)]
 pub struct GroupMessageResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requester_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_mode: Option<crate::models::assistant_group_collaboration::Lane>,
     pub feedback: Option<super::assistant_feedback::FeedbackResponse>,
     activities: Vec<super::assistant_nyxagent::ActivityResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<Value>,
     attachments: Vec<super::assistant_nyxagent::AttachmentResponse>,
-    id: String,
+    pub(crate) id: String,
     seq: i64,
     role: String,
     agent: Option<GroupAgentRef>,
@@ -84,7 +90,10 @@ pub struct GroupMessageResponse {
     created_at: DateTime<Utc>,
 }
 
-fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessageResponse {
+pub(crate) fn message_response(
+    row: GroupMessage,
+    agents: &[AssistantAgent],
+) -> GroupMessageResponse {
     let agent = row.agent_id.as_deref().map(|id| {
         let known = agents.iter().find(|agent| agent.id == id);
         GroupAgentRef {
@@ -98,6 +107,8 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         }
     });
     GroupMessageResponse {
+        requester_user_id:row.collaboration.as_ref().and_then(|b|b.original_requester_id.clone()),
+        execution_mode:row.collaboration.as_ref().and_then(|b|b.execution.as_ref().map(|a|a.lane)),
         feedback: None,
         activities: row.activities.into_iter().map(Into::into).collect(),
         author: row.author_user_id.map(|id| json!({"id": id,"display_name":row.author_display_name.unwrap_or_else(||"Member".into())})),
@@ -126,6 +137,7 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
     let working = groups::working(&state.db, &owner, &group.id).await?;
     let threads = groups::member_threads(&state.db, &owner, &group.id).await?;
     Ok(GroupResponse {
+        collaboration: None,
         owner: None,
         participants: None,
         your_role: None,
@@ -942,12 +954,17 @@ pub async fn list_groups(State(state): State<AppState>, auth: AuthUser) -> AppRe
     for access in crate::services::org_group_service::list(&state.db, &owner).await? {
         rows.push(group_response_for(&state, access).await?);
     }
+    for group in crate::services::collaboration_group_service::list(&state.db, &owner).await? {
+        rows.push(super::collaboration_group::response(&state, &owner, group).await?);
+    }
     Ok(Json(json!({"groups": rows})))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateGroupRequest {
+    #[serde(default)]
+    collaboration: bool,
     #[serde(default)]
     org: Option<String>,
     #[serde(default)]
@@ -964,6 +981,24 @@ pub async fn create_group(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if body.collaboration {
+        if body.org.is_some() || !body.participant_user_ids.is_empty() {
+            return Err(AppError::ValidationError(
+                "Invite participants after creating a collaboration group".into(),
+            ));
+        }
+        let group = crate::services::collaboration_group_service::membership::create(
+            &state.db,
+            &owner,
+            &body.name,
+            &body.member_agent_ids,
+        )
+        .await?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(super::collaboration_group::response(&state, &owner, group).await?),
+        ));
+    }
     if let Some(org) = body.org.as_deref() {
         let access = crate::services::org_group_service::create(
             &state.db,
@@ -1007,6 +1042,16 @@ pub async fn get_group(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        return Ok(Json(
+            super::collaboration_group::response(
+                &state,
+                &owner,
+                crate::services::collaboration_group_service::get(&state.db, &owner, &id).await?,
+            )
+            .await?,
+        ));
+    }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
     Ok(Json(group_response_for(&state, access).await?))
 }
@@ -1035,6 +1080,12 @@ pub async fn update_group(
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        crate::services::collaboration_group_service::get(&state.db, &owner, &id).await?;
+        return Err(AppError::ValidationError(
+            "Use the revision-fenced collaboration membership endpoint".into(),
+        ));
+    }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
     if access.org.is_some() {
         let access = crate::services::org_group_service::update(
@@ -1073,6 +1124,24 @@ pub async fn delete_group(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        let group =
+            crate::services::collaboration_group_service::get(&state.db, &owner, &id).await?;
+        crate::services::collaboration_group_service::membership::apply(
+            &state.db,
+            &owner,
+            &id,
+            group
+                .collaboration
+                .as_ref()
+                .expect("validated")
+                .membership_revision,
+            crate::services::collaboration_group_service::membership::Change::Delete,
+            true,
+        )
+        .await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
     stop_group_threads(&state, &access).await?;
     if access.org.is_some() {
@@ -1123,6 +1192,11 @@ pub async fn list_messages(
     let limit = query.limit.unwrap_or(50);
     if !(1..=200).contains(&limit) || query.before_seq.is_some_and(|seq| seq <= 0) {
         return Err(AppError::BadRequest("Invalid page".into()));
+    }
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        return super::collaboration_group::messages(&state, &owner, &id, query.before_seq)
+            .await
+            .map(Json);
     }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
     let group_owner = access.group.user_id.clone();
@@ -1211,6 +1285,23 @@ pub async fn post_message(
     engine::require_enabled(&state.db, &owner).await?;
     if !body.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
+    }
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        super::login_client_context::require_first_party_human(&auth)?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(
+                super::collaboration_group::post(
+                    &state,
+                    &owner,
+                    &id,
+                    &body.text,
+                    body.recipient_agent_ids.as_deref(),
+                    &body.attachment_ids,
+                )
+                .await?,
+            ),
+        ));
     }
     let (message, addressed) = post_with_uploads(
         &state,

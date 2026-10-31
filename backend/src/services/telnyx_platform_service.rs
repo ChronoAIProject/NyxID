@@ -435,6 +435,31 @@ pub(crate) fn execute<'a>(
         )
         .await?;
         let execution_id = handle.execution_id().to_owned();
+        if let Some(shared) = guard.shared_execution() {
+            if let Err(error) = super::shared_agent_transport::revalidate(db, shared).await {
+                super::managed_execution_service::reject_before_send(db, &handle).await?;
+                return Err(error.into());
+            }
+            let bound = db.collection::<mongodb::bson::Document>(crate::models::managed_execution::COLLECTION_NAME)
+                .update_one(mongodb::bson::doc! {"_id": &execution_id, "billing_owner_id": &shared.actor, "actor_user_id": &shared.actor},
+                    mongodb::bson::doc! {"$set": {"shared_execution": mongodb::bson::to_bson(shared).map_err(|_| invalid("Invalid shared execution binding"))?}}).await;
+            if !bound.as_ref().is_ok_and(|result| result.matched_count == 1) {
+                super::managed_execution_service::reject_before_send(db, &handle).await?;
+                return Err(invalid("Shared execution payer or binding changed").into());
+            }
+            let mut event = serde_json::json!({"execution_id":execution_id});
+            super::shared_agent_transport::annotate(&mut event, Some(shared));
+            super::audit_service::log_async(
+                db.clone(),
+                Some(shared.actor.clone()),
+                "assistant_shared_managed_admitted".into(),
+                Some(event),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
         let worker = tokio::spawn(worker::run(worker::Exchange {
             db: db.clone(),
             billing,

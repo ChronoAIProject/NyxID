@@ -1,5 +1,5 @@
 //! Request-chain primitives. Runtime must call admission in the same transaction
-//! as key/thread/turn creation; the public writer remains unmounted in step one.
+//! as key/thread/turn creation; queued work retains its original requester.
 use super::*;
 use crate::{
     models::assistant_group::{
@@ -11,6 +11,7 @@ use crate::{
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct Admission {
     slot: model::ExecutionSlot,
     actor: String,
@@ -76,17 +77,7 @@ async fn append(
     Ok(message)
 }
 
-pub async fn enqueue(
-    db: &Database,
-    actor: &str,
-    group_id: &str,
-    text: &str,
-    recipients: Option<&[String]>,
-) -> AppResult<GroupRequest> {
-    require_rollout(db).await?;
-    enqueue_ready(db, actor, group_id, text, recipients).await
-}
-
+#[cfg(test)]
 pub(super) async fn enqueue_ready(
     db: &Database,
     actor: &str,
@@ -94,8 +85,34 @@ pub(super) async fn enqueue_ready(
     text: &str,
     recipients: Option<&[String]>,
 ) -> AppResult<GroupRequest> {
+    enqueue_with_uploads_ready(db, actor, group_id, text, recipients, &[]).await
+}
+
+pub async fn enqueue_with_uploads(
+    db: &Database,
+    actor: &str,
+    group_id: &str,
+    text: &str,
+    recipients: Option<&[String]>,
+    uploads: &[String],
+) -> AppResult<GroupRequest> {
+    require_rollout(db).await?;
+    enqueue_with_uploads_ready(db, actor, group_id, text, recipients, uploads).await
+}
+
+pub(super) async fn enqueue_with_uploads_ready(
+    db: &Database,
+    actor: &str,
+    group_id: &str,
+    text: &str,
+    recipients: Option<&[String]>,
+    uploads: &[String],
+) -> AppResult<GroupRequest> {
+    svc::assistant_upload_service::validate_ids(uploads)?;
     let text = text.trim();
-    if text.is_empty() || text.chars().count() > svc::assistant_nyxagent::MAX_MESSAGE_CHARS {
+    if (text.is_empty() && uploads.is_empty())
+        || text.chars().count() > svc::assistant_nyxagent::MAX_MESSAGE_CHARS
+    {
         return Err(invalid(
             "A message must be nonempty and within the message limit",
         ));
@@ -105,12 +122,15 @@ pub(super) async fn enqueue_ready(
     session
         .start_transaction()
         .read_concern(mongodb::options::ReadConcern::snapshot())
-        .and_run2(async |session| {
+        .and_run((db.clone(), actor.to_owned(), group_id.to_owned(), text.to_owned(), recipients.map(<[String]>::to_vec), uploads.to_vec(), settings), |session, context| {let (db, actor, group_id, text, recipients, uploads, settings)=&*context;let actor=actor.as_str();let group_id=group_id.as_str();let text=text.as_str();let recipients=recipients.as_deref();Box::pin(async move {
             let result: AppResult<GroupRequest> = async {
                 let group = read_group(db, actor, group_id, session).await?;
                 let access = identity::for_group(db, actor, group, session).await?;
                 fence_person(db, actor, session).await?;
                 fence_group(db, &access.group, session).await?;
+                if db.collection::<GroupRequest>(REQUESTS).count_documents(doc! {"actor_user_id":actor,"collaboration.version":1,"dropped":{"$ne":true},"pending_agent_ids.0":{"$exists":true}}).session(&mut *session).await? >= 16 {
+                    return Err(AppError::Conflict("Your group queue is full; wait or stop a pending request".into()));
+                }
                 let roster: Vec<_> = access.agents.values().map(|a| a.agent.clone()).collect();
                 let selected = if let Some(ids) = recipients {
                     // Stored IDs are accepted even when their current ACL is unavailable:
@@ -148,7 +168,7 @@ pub(super) async fn enqueue_ready(
                     }
                 };
                 let id = Uuid::new_v4().to_string();
-                let message = append(
+                let mut message = append(
                     db,
                     &access.group,
                     actor,
@@ -159,6 +179,8 @@ pub(super) async fn enqueue_ready(
                     session,
                 )
                 .await?;
+                message.attachments=svc::assistant_upload_service::bind(db,actor,group_id,&message.id,uploads,session).await?;
+                db.collection::<GroupMessage>(MESSAGES).update_one(doc! {"_id":&message.id},doc! {"$set":{"attachments":bson::to_bson(&message.attachments).map_err(|e|AppError::Internal(e.to_string()))?}}).session(&mut *session).await?;
                 let mut authorities = BTreeMap::new();
                 for agent in &selected {
                     if let Some(authority) = access.agent(agent).and_then(AgentIdentity::authority)
@@ -197,7 +219,7 @@ pub(super) async fn enqueue_ready(
                     user_id: access.group.user_id.clone(),
                     actor_user_id: actor.into(),
                     message_seq: message.seq,
-                    attachment_ids: vec![],
+                    attachment_ids: uploads.to_vec(),
                     pending_agent_ids: selected
                         .iter()
                         .filter(|id| authorities.contains_key(*id))
@@ -221,28 +243,7 @@ pub(super) async fn enqueue_ready(
             }
             .await;
             transactions::transaction_result(result)
-        })
-        .await
-        .map_err(transactions::map_transaction_error)
-}
-
-pub async fn admit(
-    db: &Database,
-    actor: &str,
-    group_id: &str,
-    request_id: &str,
-    agent_id: &str,
-) -> AppResult<Admission> {
-    require_rollout(db).await?;
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .read_concern(mongodb::options::ReadConcern::snapshot())
-        .and_run2(async |session| {
-            transactions::transaction_result(
-                admit_in_session(db, actor, group_id, request_id, agent_id, session).await,
-            )
-        })
+        })})
         .await
         .map_err(transactions::map_transaction_error)
 }
@@ -328,8 +329,8 @@ pub(super) async fn admit_in_session(
             slot
         }
     };
-    db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":request_id,"pending_agent_ids":agent_id},
-        doc! {"$pull":{"pending_agent_ids":agent_id},"$addToSet":{"collaboration.admitted_agent_ids":agent_id}}).session(session).await?;
+    if db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":request_id,"pending_agent_ids":agent_id},
+        doc! {"$pull":{"pending_agent_ids":agent_id},"$addToSet":{"collaboration.admitted_agent_ids":agent_id}}).session(session).await?.matched_count != 1 {return Err(stale());}
     Ok(Admission {
         slot,
         actor: actor.into(),
@@ -354,7 +355,7 @@ pub(super) async fn handoff_ready(
         return Ok(false);
     }
     let mut session = db.client().start_session().await?;
-    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run2(async |session| {
+    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), source.clone(), target.to_owned(), settings), |session, context| {let (db, source, target, settings)=&*context;let target=target.as_str();Box::pin(async move {
         let result: AppResult<bool> = async {
             let group = read_group(db,&source.actor,&source.slot.group_id,session).await?;
             let access = identity::for_group(db,&source.actor,group,session).await?;
@@ -377,20 +378,20 @@ pub(super) async fn handoff_ready(
             };
             identity::fence(db,&access,target,session).await?;
             if !svc::coordination_service::RateWindowStore::admit_in_session(db,"assistant_group_handoffs",&source.actor,settings.max_group_handoffs_per_hour as u64,std::time::Duration::from_secs(3600),session).await? {return Ok(false);}
-            db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":&source.request_id,"hops_remaining":{"$gt":0}},doc! {
+            if db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":&source.request_id,"hops_remaining":{"$gt":0}},doc! {
                 "$inc":{"hops_remaining":-1},"$addToSet":{"pending_agent_ids":target},"$set":{format!("collaboration.authorities.{target}"):bson::to_bson(authority).map_err(|e| AppError::Internal(e.to_string()))?}
-            }).session(session).await?;
+            }).session(session).await?.matched_count != 1 {return Err(stale());}
             Ok(true)
         }.await;
         transactions::transaction_result(result)
-    }).await.map_err(transactions::map_transaction_error)
+    })}).await.map_err(transactions::map_transaction_error)
 }
 
 /// Cancellation belongs to the original requester and remains available during
 /// rollout disablement. It cannot stop another participant's chain or threads.
 pub async fn cancel(db: &Database, actor: &str, group: &str, request: &str) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
-    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run2(async |session| {
+    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), actor.to_owned(), group.to_owned(), request.to_owned()), |session, context| {let (db, actor, group, request)=&*context;let actor=actor.as_str();let group=group.as_str();let request=request.as_str();Box::pin(async move {
         let result: AppResult<()> = async {
             let current = read_group(db, actor, group, session).await?;
             fence_group(db, &current, session).await?;
@@ -414,5 +415,87 @@ pub async fn cancel(db: &Database, actor: &str, group: &str, request: &str) -> A
             Ok(())
         }.await;
         transactions::transaction_result(result)
-    }).await.map_err(transactions::map_transaction_error)
+    })}).await.map_err(transactions::map_transaction_error)
+}
+
+/// Restore only a server-persisted receipt for a settled turn. The handoff
+/// transaction rechecks the source, request and live authority before use.
+pub(crate) async fn settled_admission(
+    db: &Database,
+    b: &model::ExecutionBinding,
+) -> AppResult<Admission> {
+    let slot = db
+        .collection::<model::ExecutionSlot>(model::SLOTS)
+        .find_one(
+            doc! {"_id":&b.slot_id,"group_id":&b.group_id,"agent_id":&b.agent_id,
+            "original_requester_id":&b.original_requester_id,"revoked":false},
+        )
+        .await?
+        .ok_or_else(missing)?;
+    if slot.authority != b.authority || slot.membership_revision != b.membership_revision {
+        return Err(stale());
+    }
+    Ok(Admission {
+        slot,
+        actor: b.original_requester_id.clone(),
+        request_id: b.request_id.clone(),
+        membership_revision: b.membership_revision,
+    })
+}
+
+pub async fn pending(db: &Database, group: Option<&str>) -> AppResult<Vec<GroupRequest>> {
+    let mut filter = doc! {"collaboration.version":1,"dropped":{"$ne":true},"pending_agent_ids.0":{"$exists":true}};
+    if let Some(id) = group {
+        filter.insert("group_id", id);
+    }
+    Ok(db
+        .collection::<GroupRequest>(REQUESTS)
+        .find(filter)
+        .sort(doc! {"created_at":1})
+        .limit(100)
+        .await?
+        .try_collect()
+        .await?)
+}
+
+/// Terminal queue failures cannot retry as a different principal or guest lane.
+pub(crate) async fn refuse_queued(
+    db: &Database,
+    request: &GroupRequest,
+    agent: &str,
+) -> AppResult<()> {
+    finish_queued(db, request, agent, REFUSAL).await
+}
+pub(crate) async fn busy_queued(
+    db: &Database,
+    request: &GroupRequest,
+    agent: &str,
+) -> AppResult<()> {
+    finish_queued(
+        db,
+        request,
+        agent,
+        "This agent is busy. Please try again shortly.",
+    )
+    .await
+}
+async fn finish_queued(
+    db: &Database,
+    request: &GroupRequest,
+    agent: &str,
+    notice: &str,
+) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), request.clone(), agent.to_owned(), notice.to_owned()), |session, context| {let (db, request, agent, notice)=&*context;let agent=agent.as_str();let notice=notice.as_str();Box::pin(async move {
+        let result: AppResult<()> = async {
+            let removed = db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":&request.id,"pending_agent_ids":agent,"collaboration.version":1},
+                doc! {"$pull":{"pending_agent_ids":agent}}).session(&mut *session).await?;
+            if removed.modified_count != 1 {return Ok(());}
+            if let Ok(group) = read_group(db,&request.actor_user_id,&request.group_id,session).await {
+                append(db,&group,&request.actor_user_id,notice,&request.id,Some(agent),&[],session).await?;
+            }
+            Ok(())
+        }.await;
+        transactions::transaction_result(result)
+    })}).await.map_err(transactions::map_transaction_error)
 }

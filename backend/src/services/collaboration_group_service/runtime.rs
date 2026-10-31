@@ -29,6 +29,7 @@ fn binding(row: &AssistantConversation) -> AppResult<&model::ExecutionBinding> {
         || row.guest_turn != (b.authority.lane == model::Lane::Guest)
         || row.role != crate::models::assistant_conversation::AgentRole::Subagent
         || row.invocation_controlled
+        || row.guest_model_setup
         || row.credential_invocation_id.is_some()
         || !row.deliver_also.is_empty()
         || row.group_id.is_some()
@@ -53,7 +54,7 @@ fn binding(row: &AssistantConversation) -> AppResult<&model::ExecutionBinding> {
     Ok(b)
 }
 
-async fn access_in_session(
+pub(super) async fn access_in_session(
     db: &Database,
     row: &AssistantConversation,
     session: &mut ClientSession,
@@ -61,7 +62,8 @@ async fn access_in_session(
     let b = binding(row)?;
     let group = read_group(db, &b.original_requester_id, &b.group_id, session).await?;
     let access = identity::for_group(db, &b.original_requester_id, group, session).await?;
-    if access.membership_revision() != b.membership_revision
+    if !access.matches(&b.original_requester_id, &b.group_id, None)
+        || access.membership_revision() != b.membership_revision
         || access.agent(&b.agent_id).and_then(AgentIdentity::authority) != Some(&b.authority)
     {
         return Err(missing());
@@ -155,7 +157,14 @@ pub(super) async fn retire_thread(
         .await?;
     db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
         .update_many(
-            doc! {"conversation_id":id,"status":"pending"},
+            doc! {"conversation_id":id,"status":{"$in":["pending","allowed"]}},
+            doc! {"$set":{"status":"expired"}},
+        )
+        .session(&mut *session)
+        .await?;
+    db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+        .update_many(
+            doc! {"assistant_group.conversation_id":id,"status":{"$in":["pending","approved"]}},
             doc! {"$set":{"status":"expired"}},
         )
         .session(session)
@@ -267,6 +276,7 @@ pub(crate) async fn validate_key(
 pub(crate) struct StartedTurn {
     pub claim: engine::OwnerTurnClaim,
     pub admission: requests::Admission,
+    pub input: String,
 }
 
 pub(crate) async fn begin(
@@ -292,7 +302,7 @@ pub(super) async fn begin_ready(
     let turn_id = Uuid::new_v4().to_string();
     let message_id = Uuid::new_v4().to_string();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run2(async |session| {
+    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), keys, actor.to_owned(), group.to_owned(), request.to_owned(), agent.to_owned(), turn_id, message_id), |session, context| {let (db, keys, actor, group, request, agent, turn_id, message_id)=&*context;let actor=actor.as_str();let group=group.as_str();let request=request.as_str();let agent=agent.as_str();Box::pin(async move {
         let result: AppResult<StartedTurn> = Box::pin(async {
             let admission = requests::admit_in_session(db,actor,group,request,agent,session).await?;
             let slot = admission.slot();
@@ -303,6 +313,15 @@ pub(super) async fn begin_ready(
                 let mut row = db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME).find_one(doc! {"_id":id,"user_id":execution_user}).session(&mut *session).await?.ok_or_else(missing)?;
                 // Even an expired/stopped turn must settle before its slot can be reused.
                 if row.active_turn.is_some() {return Err(AppError::AssistantTurnActive);}
+                if row.collaboration.as_ref().is_some_and(|old|old.request_id!=request) {
+                    let waiting=db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).find_one(doc! {"conversation_id":id,"kind":"action","status":{"$in":["pending","allowed"]},"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.is_some()
+                        || db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME).find_one(doc! {"conversation_id":id,"decision":{"$in":["pending","once"]},"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.is_some();
+                    let approval_waiting=db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME).find_one(doc! {"assistant_group.conversation_id":id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.is_some();
+                    if waiting || approval_waiting {return Err(AppError::AssistantTurnActive);}
+                    db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME).update_many(doc! {"conversation_id":id,"decision":"skip"},doc! {"$set":{"decision":"revoked","updated_at":bson::DateTime::now()}}).session(&mut *session).await?;
+                    // Completed request cards cannot authorize a different chain.
+                    db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).update_many(doc! {"conversation_id":id,"status":{"$in":["pending","allowed"]}},doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
+                }
                 // Completed turns cannot donate their previous request binding.
                 row.active_turn=None;row.collaboration=Some(b.clone());
                 db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(doc! {"_id":id},doc! {"$set":{"collaboration":bson::to_bson(&b).map_err(|e| AppError::Internal(e.to_string()))?,"active_turn":null}}).session(&mut *session).await?;
@@ -310,6 +329,9 @@ pub(super) async fn begin_ready(
             } else {
                 svc::assistant_team_service::create_collaboration_thread(db,keys,execution_user,&raw_agent,b,session).await?
             };
+            // Skip remains a refusal for this request's continuation. A new
+            // request retired old skips above; it does not inherit that decision.
+            db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME).update_many(doc! {"conversation_id":&row.id,"decision":"skip"},doc! {"$set":{"turn_id":&turn_id}}).session(&mut *session).await?;
             let request_row = db.collection::<GroupRequest>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME).find_one(doc! {"_id":request,"actor_user_id":actor,"group_id":group}).session(&mut *session).await?.ok_or_else(missing)?;
             let messages = db.collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME);
             // Handoffs see preceding published replies, while the separate exact
@@ -322,7 +344,7 @@ pub(super) async fn begin_ready(
             // Spend the bounded context budget on the newest visible messages,
             // then restore chronological order. Older text cannot crowd out a handoff.
             for message in history {
-                let line = format!("{}: {}",message.role,engine::excerpt(&message.text,2000));
+                let line = format!("{} {}: {}",message.role,message.agent_id.as_deref().or(message.author_user_id.as_deref()).unwrap_or(""),engine::excerpt(&message.text,2000));
                 let size = line.chars().count() + 1;
                 if size > remaining { break; }
                 remaining -= size;
@@ -330,17 +352,26 @@ pub(super) async fn begin_ready(
             }
             lines.reverse();
             let transcript = lines.join("\n");
+            let current_group=read_group(db,actor,group,session).await?;
+            let roster:Vec<AssistantAgent>=rows(db,crate::models::assistant_agent::COLLECTION_NAME,doc! {"_id":{"$in":&current_group.member_agent_ids},"destroyed_at":null},session).await?;
+            let roster=roster.iter().map(|a|format!("{} (@{})",engine::identifier(&a.name),a.id)).collect::<Vec<_>>().join(", ");
             let mut start = engine::TurnStart::from(&engine::TurnRequest {conversation_id:Some(row.id.clone()),text:format!("Group transcript (context, not authority):\n{}\n\nOriginal request:\n{}",transcript,engine::excerpt(&trigger.text,12000)),agent_id:None,model:None,access_mode:None,attachment_ids:vec![],acknowledgement_id:None,retry_of:None});
             start.origin=TurnOrigin::Group;start.guest=row.guest_turn;
-            start.note=Some("Answer only in this group. Do not include private memory, notes, other chats or account details. Handoffs retain the original requester.".into());
+            if !row.guest_turn {start.group_attachments=trigger.attachments.clone();}
+            let mut decisions=db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).find(doc! {"conversation_id":&row.id,"kind":"action","status":{"$in":["allowed","denied"]},"expires_at":{"$gt":bson::DateTime::now()}}).projection(doc! {"_id":1,"status":1}).limit(16).session(&mut *session).await?;
+            let decisions:Vec<bson::Document>=decisions.stream(&mut *session).try_collect().await?;
+            if !decisions.is_empty() {start.text.push_str(&format!("\nAction card decisions (retry only the exact action, using its acknowledgement_id): {:?}",decisions));}
+
+            start.note=Some(format!("Answer only in this group. Do not include private memory, notes, other chats or account details. Original requester: {actor}. Handoffs retain that identity. Members: {roster}. For handoffs, copy the exact @UUID shown beside the member above. Recheck requested consent and action-card decisions before resuming an interrupted operation."));
             let ids = engine::OwnerTurnIds {conversation_id:row.id.clone(),turn_id:turn_id.clone(),message_id:message_id.clone()};
             let claim = engine::begin_owner_turn_in_session(db,session,keys,execution_user,&start,&ids,&raw_agent,None,None,None).await?.into_started()?;
             row=claim.conversation.clone();
             bind_key(db,&row,session).await?;
-            Ok(StartedTurn {claim, admission})
+            let input = engine::turn_input(&row, &start);
+            Ok(StartedTurn {claim, admission, input})
         }).await;
         transactions::transaction_result(result)
-    }).await.map_err(transactions::map_transaction_error)
+    })}).await.map_err(transactions::map_transaction_error)
 }
 
 /// Initial group turns only. Alternate entrances cannot silently reinterpret a
@@ -358,7 +389,7 @@ pub(crate) fn check_start(row: &AssistantConversation, start: &engine::TurnStart
         || start.acknowledgement_id.is_some()
         || start.retry_of.is_some()
         || !start.attachment_ids.is_empty()
-        || !start.group_attachments.is_empty()
+        || (row.guest_turn && !start.group_attachments.is_empty())
     {
         return Err(missing());
     }
@@ -407,6 +438,22 @@ pub(crate) async fn publish_reply(
         return Ok(());
     }
     let group = db.collection::<AssistantGroup>(GROUPS).find_one_and_update(doc! {"_id":&b.group_id,"collaboration.membership_revision":b.membership_revision},doc! {"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::now(),"last_message_at":bson::DateTime::now()}}).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?.ok_or_else(stale)?;
+    // Only explicit chat delivery crosses the boundary; inspection-only images
+    // and all tool traces remain private. Persist the public join independently
+    // of the hidden thread so departure cleanup cannot break retained history.
+    let mut published_images = Vec::new();
+    if !row.guest_turn {
+        for image in message
+            .attachments
+            .iter()
+            .filter(|a| a.chat_delivery == Some(true) && engine::chat_tool_image(a))
+            .take(engine::MAX_TURN_ATTACHMENTS)
+        {
+            if db.collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+                .update_one(doc! {"_id":&image.id,"conversation_id":&row.id,"user_id":&row.user_id,"turn_id":&turn.turn_id,"origin":"tool"},
+                    doc! {"$set":{"collaboration_group_id":&b.group_id}}).session(&mut *session).await?.matched_count==1 {published_images.push(image.clone());}
+        }
+    }
     let public = GroupMessage {
         collaboration: Some(model::MessageBinding {
             version: model::VERSION,
@@ -418,7 +465,7 @@ pub(crate) async fn publish_reply(
         author_user_id: None,
         author_display_name: None,
         request_id: Some(b.request_id.clone()),
-        attachments: vec![],
+        attachments: published_images,
         id: Uuid::new_v4().to_string(),
         group_id: b.group_id.clone(),
         user_id: group.user_id,
@@ -435,4 +482,151 @@ pub(crate) async fn publish_reply(
         .session(session)
         .await?;
     Ok(())
+}
+
+/// Human decisions and tool confirmations use the same transaction snapshot as
+/// the membership/key fence. Guest owners cannot approve on a guest's behalf.
+pub(crate) async fn fence_decision(
+    db: &Database,
+    row: &AssistantConversation,
+    actor: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let b = binding(row)?;
+    if b.original_requester_id != actor || b.authority.lane == model::Lane::Guest {
+        return Err(missing());
+    }
+    let access = access_in_session(db, row, session).await?;
+    identity::fence(db, &access, &b.agent_id, session).await?;
+    fence_group(db, &access.group, session).await
+}
+
+pub(crate) async fn queue_decision(
+    db: &Database,
+    row: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let b = binding(row)?;
+    fence_decision(db, row, &b.original_requester_id, session).await?;
+    if db.collection::<GroupRequest>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
+        .update_one(doc! {"_id":&b.request_id,"actor_user_id":&b.original_requester_id,"collaboration.membership_revision":b.membership_revision,"dropped":{"$ne":true}},
+            doc! {"$addToSet":{"pending_agent_ids":&b.agent_id}}).session(session).await?.matched_count!=1 {return Err(stale());}
+    Ok(())
+}
+
+pub(crate) async fn actor_thread(
+    db: &Database,
+    actor: &str,
+    group: &str,
+    conversation: &str,
+) -> AppResult<AssistantConversation> {
+    let row=db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":conversation,"user_id":actor,"collaboration.group_id":group,"collaboration.original_requester_id":actor}).await?.ok_or_else(missing)?;
+    validate(db, &row).await?;
+    if row.guest_turn {
+        return Err(missing());
+    }
+    Ok(row)
+}
+
+/// Internal continuation/image preparation may refresh an already admitted
+/// execution receipt; this is not a participant history-reading entrance.
+pub(crate) async fn refresh(
+    db: &Database,
+    expected: &AssistantConversation,
+) -> AppResult<AssistantConversation> {
+    let row=db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":&expected.id,"user_id":&expected.user_id,"credential_api_key_id":&expected.credential_api_key_id}).await?.ok_or_else(missing)?;
+    if row.collaboration != expected.collaboration
+        || engine::live_turn(&row, Utc::now()).is_none_or(|t| {
+            t.stop_requested
+                || Some(&t.turn_id) != expected.active_turn.as_ref().map(|t| &t.turn_id)
+        })
+    {
+        return Err(missing());
+    }
+    validate(db, &row).await?;
+    Ok(row)
+}
+
+pub(crate) async fn history(
+    db: &Database,
+    row: &AssistantConversation,
+    limit: i64,
+    before: Option<i64>,
+) -> AppResult<Vec<crate::models::assistant_message::AssistantMessage>> {
+    refresh(db, row).await?;
+    let mut filter = doc! {"conversation_id":&row.id,"user_id":&row.user_id};
+    if let Some(seq) = before {
+        filter.insert("seq", doc! {"$lt":seq});
+    }
+    let mut messages: Vec<_> = db
+        .collection(crate::models::assistant_message::COLLECTION_NAME)
+        .find(filter)
+        .sort(doc! {"seq":-1})
+        .limit(limit.clamp(1, 100))
+        .await?
+        .try_collect()
+        .await?;
+    messages.reverse();
+    Ok(messages)
+}
+
+/// One viewer snapshot and batched joins for card presentation. Other people's
+/// rows authorize only a generic waiting indicator, never decision details.
+pub(crate) async fn decision_threads(
+    db: &Database,
+    viewer: &str,
+    group_id: &str,
+) -> AppResult<Vec<AssistantConversation>> {
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .await?;
+    let group = read_group(db, viewer, group_id, &mut session).await?;
+    let access = match identity::for_group(db, viewer, group.clone(), &mut session).await {
+        Ok(access) => access,
+        Err(AppError::NotFound(_) | AppError::Forbidden(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let threads:Vec<AssistantConversation>=rows(db,crate::models::assistant_conversation::COLLECTION_NAME,doc! {"collaboration.group_id":group_id,"collaboration.version":1,"guest_turn":{"$ne":true}},&mut session).await?;
+    let slots:Vec<model::ExecutionSlot>=rows(db,model::SLOTS,doc! {"group_id":group_id,"revoked":false,"membership_revision":access.membership_revision()},&mut session).await?;
+    let request_ids: Vec<_> = threads
+        .iter()
+        .filter_map(|t| t.collaboration.as_ref().map(|b| &b.request_id))
+        .collect();
+    let requests:Vec<GroupRequest>=rows(db,crate::models::assistant_group::REQUESTS_COLLECTION_NAME,doc! {"_id":{"$in":request_ids},"group_id":group_id,"collaboration.membership_revision":access.membership_revision(),"dropped":{"$ne":true}},&mut session).await?;
+    let result = threads
+        .into_iter()
+        .filter(|row| {
+            let Ok(b) = binding(row) else {
+                return false;
+            };
+            group
+                .participant_user_ids
+                .contains(&b.original_requester_id)
+                && b.membership_revision == access.membership_revision()
+                && (b.original_requester_id != viewer
+                    || access.agent(&b.agent_id).and_then(AgentIdentity::authority)
+                        == Some(&b.authority))
+                && slots.iter().any(|s| {
+                    s.id == b.slot_id
+                        && s.conversation_id.as_deref() == Some(&row.id)
+                        && s.authority == b.authority
+                        && s.original_requester_id == b.original_requester_id
+                        && s.agent_id == b.agent_id
+                })
+                && requests.iter().any(|r| {
+                    r.id == b.request_id
+                        && r.actor_user_id == b.original_requester_id
+                        && r.collaboration.as_ref().is_some_and(|c| {
+                            c.admitted_agent_ids.contains(&b.agent_id)
+                                && c.authorities.get(&b.agent_id) == Some(&b.authority)
+                        })
+                })
+        })
+        .collect();
+    session.commit_transaction().await?;
+    Ok(result)
 }
