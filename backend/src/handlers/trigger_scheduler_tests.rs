@@ -1,4 +1,6 @@
 use super::*;
+#[path = "trigger_model_scope_tests.rs"]
+mod model_scope_tests;
 use crate::models::trigger_run::RunOutcome;
 use crate::services::assistant_engine_policy as engine_policy;
 use crate::{

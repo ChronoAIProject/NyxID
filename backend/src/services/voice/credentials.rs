@@ -535,6 +535,7 @@ async fn authorize_operation(
             super::super::agent_operation_scope_service::GuestHttpContext {
                 query: None,
                 websocket: true,
+                ..Default::default()
             },
         ),
     )
