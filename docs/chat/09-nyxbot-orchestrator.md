@@ -45,7 +45,10 @@ groups, routines/scheduled triggers and cross-user agents. Groups, handoffs and
 automations are documented below; cross-user sharing and multi-person groups are
 specified in [Shared agents and multi-person groups](12-shared-agents-and-groups.md).
 Phase 1 shared-agent support is implemented behind the default-off
-`assistant:shared-agents` flag; multi-person groups remain Phase 2.
+`assistant:shared-agents` flag. Phase 2 multi-person groups are implemented with
+an explicit `collaboration` marker and separate all-replica readiness gate;
+legacy personal/org dispatch retains its contract. Participant invitations,
+requester-bound execution, actor decisions and the UI are specified there.
 
 ## 3. What exists today and constrains the design
 
@@ -316,7 +319,7 @@ UUIDs and `@UUID` are exact; ambiguous `@name` text never selects a namesake.
 The picker and agent instructions use UUIDs for collisions. Human ambiguous
 text without explicit recipients is refused; ambiguous handoff tokens are ignored.
 Organization groups, automation and platform/channel threads still reject shared
-agents. Multi-person collaboration remains Phase 2 of
+agents. Multi-person collaboration uses the explicit Phase 2 surface in
 [the shared-agent design](12-shared-agents-and-groups.md).
 
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;

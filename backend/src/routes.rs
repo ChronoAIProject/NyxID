@@ -2777,6 +2777,55 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::assistant_group::post_message),
         )
         .route(
+            "/nyxagent/agents/{id}/group-access",
+            get(handlers::collaboration_group::owned_guest_groups),
+        )
+        .route(
+            "/nyxagent/collaboration",
+            get(handlers::collaboration_group::availability),
+        )
+        .route(
+            "/nyxagent/groups/{id}/invites",
+            post(handlers::collaboration_group::invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/invites/{invite}",
+            delete(handlers::collaboration_group::cancel_invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/participants/{person}",
+            post(handlers::collaboration_group::quick_add)
+                .delete(handlers::collaboration_group::remove_participant),
+        )
+        .route(
+            "/nyxagent/groups/{id}/leave",
+            post(handlers::collaboration_group::leave),
+        )
+        .route(
+            "/nyxagent/groups/{id}/agents/{agent}/guest-access",
+            put(handlers::collaboration_group::guest_access),
+        )
+        .route(
+            "/nyxagent/groups/{id}/membership",
+            post(handlers::collaboration_group::membership),
+        )
+        .route(
+            "/nyxagent/group-invites/preview",
+            post(handlers::collaboration_group::preview_invite),
+        )
+        .route(
+            "/nyxagent/group-invites/accept",
+            post(handlers::collaboration_group::accept_invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/requests/{request}/cancel",
+            post(handlers::collaboration_group::cancel),
+        )
+        .route(
+            "/nyxagent/groups/{id}/decisions/{decision}",
+            post(handlers::collaboration_group::decide),
+        )
+        .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )

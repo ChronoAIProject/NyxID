@@ -1,3 +1,5 @@
+import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
+import { collaborationApi } from "@/hooks/use-collaboration-groups";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
@@ -131,12 +133,14 @@ export function GroupMessageRow({
   message,
   names,
   members = [],
+  participants = [],
   onOpenAgent,
 }: {
   readonly groupId: string;
   readonly message: AssistantGroupMessage;
   readonly names: readonly string[];
   readonly members?: readonly AssistantGroupMember[];
+  readonly participants?: readonly { id: string; display_name: string }[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
   const feedback = useReplyFeedback({
@@ -225,6 +229,7 @@ export function GroupMessageRow({
             <span className="text-10 text-text-tertiary">Personal agent</span>
           ) : null}
           <MessageTime value={message.created_at} />
+          {message.requester_user_id ? <span className="text-11 text-text-tertiary">For {participants.find((p) => p.id === message.requester_user_id)?.display_name ?? "participant"}{message.execution_mode === "guest" ? " · Guest reply (owner pays)" : ""}</span> : null}
         </div>
         <div className="px-px text-foreground">
           {message.activities
@@ -388,6 +393,7 @@ function GroupTranscript({
               groupId={group.id}
               names={names}
               members={group.members}
+              participants={group.participants}
               onOpenAgent={onOpenAgent}
             />
           ))}
@@ -830,7 +836,7 @@ export function NyxAgentGroupPage({
                 bottomInset={composerHeight}
               />
             </AssistantLinkModalHost>
-            {settingsOpen ? (
+            {settingsOpen && group.collaboration ? <CollaborationSettings group={group} agents={agents.data?.agents ?? []} onClose={() => setSettingsOpen(false)} onLeft={() => {setSettingsOpen(false); goTo();}} /> : settingsOpen ? (
               <GroupSettingsDialog
                 group={group}
                 agents={agents.data?.agents ?? []}
@@ -867,6 +873,11 @@ export function NyxAgentGroupPage({
           {(group?.members ?? []).filter((member) => member.shared && !member.unavailable && member.conversation_id).map((member) => (
             <SharedConsentCards key={member.id} agentId={member.id} conversationId={member.conversation_id!} />
           ))}
+          {group?.collaboration ? <CollaborationCards group={group} decisions={transcript.data?.collaboration_decisions ?? []} /> : null}
+          {group?.collaboration?.your_request_ids.length ? <div className="mx-auto flex max-w-3xl justify-end px-4"><Button size="sm" onClick={async () => {
+            try {for (const request of group.collaboration!.your_request_ids) await collaborationApi.cancel(group.id, request); await transcript.refetch();}
+            catch (cause) {reportError(cause,"Could not stop your group work.");}
+          }}>Stop my work</Button></div> : null}
           <GroupPendingActions
             actions={
               transcript.error ? [] : (transcript.data?.pending_actions ?? [])

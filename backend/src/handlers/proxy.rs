@@ -4498,6 +4498,20 @@ async fn execute_resolved_proxy_inner<'a>(
             crate::services::agent_operation_scope_service::GuestHttpContext {
                 query: query.as_deref(),
                 websocket: is_ws_candidate,
+                // The webhook floor runs before assistant selection/consent.
+                // Give it the same closed inference classification; a bare POST
+                // without a catalog endpoint row is otherwise treated as a write.
+                // This changes only that floor, never grants or guest authority.
+                stateless_model: auth_user.assistant_chat.as_deref().is_some_and(|chat| {
+                    chat.confirmation_policy.is_some() && !chat.guest && chat.turn_live
+                }) && !is_ws_candidate
+                    && method == Method::POST
+                    && target.service.inference.is_some()
+                    && serde_json::from_slice(&body_bytes).is_ok_and(|body| {
+                        crate::services::assistant_service_execution::stateless_inference(
+                            path, &body,
+                        )
+                    }),
             },
         )
     })
@@ -11500,6 +11514,7 @@ mod tests {
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
     include!("proxy_concurrency_tests.rs");
+    include!("proxy_precondition_tests.rs");
     use super::{
         enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,

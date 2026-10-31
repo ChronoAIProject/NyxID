@@ -673,13 +673,25 @@ pub async fn get_request_status(
         if binding.actor_user_id != auth_user.user_id.to_string() {
             return Err(crate::services::org_group_service::missing());
         }
-        crate::services::org_group_service::get(
-            &state.db,
-            &binding.actor_user_id,
-            &binding.group_id,
-            auth_user.org_agent_access.as_ref(),
-        )
-        .await?;
+        if crate::services::collaboration_group_service::marked(&state.db, &binding.group_id)
+            .await?
+        {
+            crate::services::collaboration_group_service::runtime::actor_thread(
+                &state.db,
+                &binding.actor_user_id,
+                &binding.group_id,
+                &binding.conversation_id,
+            )
+            .await?;
+        } else {
+            crate::services::org_group_service::get(
+                &state.db,
+                &binding.actor_user_id,
+                &binding.group_id,
+                auth_user.org_agent_access.as_ref(),
+            )
+            .await?;
+        }
     } else if request.user_id != owner_user_id {
         let access = crate::services::org_service::resolve_owner_access(
             &state.db,

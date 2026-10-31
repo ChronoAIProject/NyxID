@@ -38,7 +38,7 @@ pub async fn persist_actor_recipients(
 ) -> AppResult<()> {
     db.collection::<AssistantGroup>(GROUPS)
         .update_one(
-            doc! {"_id":group_id},
+            doc! {"_id":group_id,"collaboration":null},
             doc! {"$set": {format!("last_recipient_ids_by_actor.{actor}"): ids}},
         )
         .await?;
@@ -52,7 +52,9 @@ pub async fn pending_requests(
     use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
     Ok(db
         .collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
-        .find(doc! {"group_id":group_id,"pending_agent_ids.0":{"$exists":true}})
+        .find(
+            doc! {"group_id":group_id,"collaboration":null,"pending_agent_ids.0":{"$exists":true}},
+        )
         .sort(doc! {"created_at":1})
         .limit(100)
         .await?
@@ -68,7 +70,7 @@ pub async fn remove_pending_agent(
     use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
     db.collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
         .update_one(
-            doc! {"_id":request_id},
+            doc! {"_id":request_id,"collaboration":null},
             doc! {"$pull":{"pending_agent_ids":agent_id}},
         )
         .await?;
@@ -83,21 +85,22 @@ pub async fn request_trigger(
     actor: &str,
 ) -> AppResult<crate::models::assistant_group::GroupMessage> {
     use crate::models::assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME};
-    db.collection::<GroupMessage>(MESSAGES_COLLECTION_NAME).find_one(doc! {"group_id":group_id,"request_id":request_id,"seq":seq,"role":"user","author_user_id":actor}).await?.ok_or_else(missing)
+    db.collection::<GroupMessage>(MESSAGES_COLLECTION_NAME).find_one(doc! {"group_id":group_id,"request_id":request_id,"seq":seq,"role":"user","author_user_id":actor,"collaboration":null}).await?.ok_or_else(missing)
 }
 
 pub async fn queue_handoff(db: &Database, request_id: &str, target: &str) -> AppResult<()> {
     use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
     db.collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
         .update_one(
-            doc! {"_id":request_id,"hops_remaining":{"$gt":0}},
+            doc! {"_id":request_id,"collaboration":null,"hops_remaining":{"$gt":0}},
             doc! {"$inc":{"hops_remaining":-1},"$addToSet":{"pending_agent_ids":target}},
         )
         .await?;
     Ok(())
 }
 pub fn is_org(group: &AssistantGroup) -> bool {
-    group.created_by_user_id.is_some()
+    super::assistant_group_kind::classify(group)
+        == super::assistant_group_kind::GroupKind::Organization
 }
 
 /// Bound to one actor, owner and request; never stored on a group or reused
@@ -118,6 +121,7 @@ impl Access {
         }
     }
     pub fn require_manage(&self) -> AppResult<()> {
+        super::assistant_group_kind::require_legacy(&self.group)?;
         if self.role() == "participant" {
             return Err(missing());
         }
@@ -131,6 +135,7 @@ pub async fn authorize(
     group: AssistantGroup,
     snapshot: Option<&Arc<org::RequestAccess>>,
 ) -> AppResult<Access> {
+    super::assistant_group_kind::require_legacy(&group)?;
     if !is_org(&group) {
         if group.user_id != actor {
             return Err(missing());
@@ -203,6 +208,9 @@ pub async fn list(db: &Database, actor: &str) -> AppResult<Vec<Access>> {
     let mut snapshots: HashMap<String, Option<Arc<org::RequestAccess>>> = HashMap::new();
     let mut result = Vec::new();
     for row in rows {
+        if super::assistant_group_kind::require_legacy(&row).is_err() {
+            continue;
+        }
         if is_org(&row) && !snapshots.contains_key(&row.user_id) {
             let access = match org::resolve_key_access(db, actor, Some(&row.user_id)).await {
                 Ok(access) => access,
@@ -403,6 +411,7 @@ pub async fn create(
         actor: actor.into(),
         org: Some(snapshot),
         group: AssistantGroup {
+            collaboration: None,
             id: format!("nyxg-{}", Uuid::new_v4().simple()),
             user_id: owner,
             name: name.into(),
@@ -608,8 +617,9 @@ pub async fn fence(
     access: &Access,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
+    super::assistant_group_kind::require_legacy(&access.group)?;
     let result=db.collection::<AssistantGroup>(GROUPS).update_one(
-        doc! {"_id":&access.group.id,"user_id":&access.group.user_id,"participant_user_ids":&access.actor},
+        doc! {"_id":&access.group.id,"user_id":&access.group.user_id,"participant_user_ids":&access.actor,"collaboration":null},
         doc! {"$inc":{"admission_generation":1}}).session(session).await?;
     if result.matched_count != 1 {
         return Err(missing());
@@ -894,6 +904,7 @@ pub(crate) async fn append_with_hook(
                 .await?;
                 attachments.extend(extra_attachments.clone());
                 let message = GroupMessage {
+                    collaboration: None,
                     activities: Vec::new(),
                     org_group: true,
                     id,
@@ -972,6 +983,7 @@ async fn dropped_notice(
         doc! {"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::now(),"last_message_at":bson::DateTime::now()}})
         .return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await? else { return Ok(()); };
     let message = GroupMessage {
+        collaboration: None,
         activities: Vec::new(),
         org_group: true,
         id: Uuid::new_v4().to_string(),
@@ -1002,12 +1014,13 @@ pub async fn drop_request(
     id: &str,
     actor: &str,
 ) -> AppResult<()> {
+    super::assistant_group_kind::require_legacy(group)?;
     let mut session = db.client().start_session().await?;
     session.start_transaction().await?;
     let result = db
         .collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
         .update_one(
-            doc! {"_id":id,"group_id":&group.id,"pending_agent_ids.0":{"$exists":true}},
+            doc! {"_id":id,"group_id":&group.id,"collaboration":null,"pending_agent_ids.0":{"$exists":true}},
             doc! {"$set":{"pending_agent_ids":[],"dropped":true}},
         )
         .session(&mut session)
@@ -1226,7 +1239,18 @@ pub(crate) async fn validate_key(
     let Some(id) = key.assistant_group_id.as_deref() else {
         return Ok(());
     };
-    let access = get(db, &key.user_id, id, snapshot).await?;
+    let group = db
+        .collection::<AssistantGroup>(GROUPS)
+        .find_one(doc! {"_id":id})
+        .await?
+        .ok_or_else(missing)?;
+    if group.collaboration.is_some() {
+        return Box::pin(super::collaboration_group_service::runtime::validate_key(
+            db, key,
+        ))
+        .await;
+    }
+    let access = authorize(db, &key.user_id, group, snapshot).await?;
     if access.org.is_none() {
         return Err(missing());
     }
@@ -1255,15 +1279,32 @@ pub(crate) async fn approval_binding(
         .collection::<crate::models::assistant_conversation::AssistantConversation>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
-        .find_one(doc! {"user_id":actor,"group_id":group_id,"credential_api_key_id":key})
+        .find_one(doc! {"user_id":actor,"credential_api_key_id":key,"$or":[{"group_id":group_id},{"collaboration.group_id":group_id}]})
         .await?
+        .ok_or_else(missing)?;
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::validate(db, &row).await?;
+        if row.guest_turn
+            || row
+                .collaboration
+                .as_ref()
+                .is_none_or(|b| b.original_requester_id != actor)
+        {
+            return Err(missing());
+        }
+    }
+    let request_id = row
+        .collaboration
+        .as_ref()
+        .map(|b| b.request_id.clone())
+        .or(row.group_request_id.clone())
         .ok_or_else(missing)?;
     Ok(Some(
         crate::models::approval_request::GroupApprovalBinding {
             group_id: group_id.into(),
             conversation_id: row.id,
             actor_user_id: actor.into(),
-            request_id: row.group_request_id.ok_or_else(missing)?,
+            request_id,
         },
     ))
 }
@@ -1279,6 +1320,52 @@ pub(crate) async fn authorize_approval(
     };
     if actor != binding.actor_user_id {
         return Err(missing());
+    }
+    if super::collaboration_group_service::marked(db, &binding.group_id).await? {
+        let thread = super::collaboration_group_service::runtime::actor_thread(
+            db,
+            actor,
+            &binding.group_id,
+            &binding.conversation_id,
+        )
+        .await?;
+        if thread
+            .collaboration
+            .as_ref()
+            .is_none_or(|b| b.request_id != binding.request_id)
+        {
+            return Err(missing());
+        }
+        let access = if snapshot.is_some() {
+            org::key_access_with_snapshot(db, actor, thread.agent_owner_id.as_deref(), snapshot)
+                .await?
+        } else {
+            // A collaboration member can use a shared personal specialist.
+            // Bind fresh approval authority to its exact execution credential.
+            let key = db
+                .collection::<crate::models::api_key::ApiKey>(
+                    crate::models::api_key::COLLECTION_NAME,
+                )
+                .find_one(
+                    doc! {"_id":&thread.credential_api_key_id,"user_id":actor,"is_active":true},
+                )
+                .await?
+                .ok_or_else(missing)?;
+            org::resolve_credential_access(db, &key).await?
+        };
+        if request.from_org_policy {
+            let access = access.as_ref().ok_or_else(missing)?;
+            let services:Vec<crate::models::user_service::UserService>=db.collection(crate::models::user_service::COLLECTION_NAME)
+                .find(doc! {"user_id":&request.user_id,"$or":[{"_id":&request.service_id},{"catalog_service_id":&request.service_id}]}).await?.try_collect().await?;
+            if !access
+                .approval_admin_permits(&services.into_iter().map(|s| s.id).collect::<Vec<_>>())
+            {
+                return Err(AppError::Forbidden(
+                    "The triggering participant must be an eligible organization approver".into(),
+                ));
+            }
+        }
+        return Ok(access);
     }
     let access = get(db, actor, &binding.group_id, snapshot).await?;
     let snapshot = access.org.ok_or_else(missing)?;

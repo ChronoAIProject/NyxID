@@ -681,9 +681,13 @@ async fn channel_model_turns_for(
     let mapping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let source_mapping = mapping.clone();
     let sink = seen.clone();
+    // Hold accepted setup replies during mapping drift. The setup worker must
+    // finish from model acceptance even when NyxAgent never completes its reply.
+    let (release_setup_responses, setup_responses_released) = tokio::sync::watch::channel(false);
     let db = state.db.clone();
     let upstream=Router::new().route("/v1/responses",post(move |headers:HeaderMap,Json(body):Json<Value>| {
         let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();let mapping=source_mapping.clone();
+        let mut setup_responses_released=setup_responses_released.clone();
         async move {
             if matches!(scenario,Scenario::FailedSetup) {
                 return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":{"code":"model_unavailable","message":"private provider detail"}}))).into_response();
@@ -717,17 +721,33 @@ async fn channel_model_turns_for(
             let generation=json!({"model":selected_model,"store":false,"stream":false,"input":body["input"],"instructions":body["instructions"],"tools":[{"type":"web_search"}],
                 "client_metadata":{"root_turn_id":Uuid::new_v4().to_string(),"session_id":Uuid::new_v4().to_string(),"thread_id":Uuid::new_v4().to_string(),
                     "turn_id":Uuid::new_v4().to_string(),"x-codex-installation-id":"test-installation","x-codex-turn-metadata":"{\"sandbox_mode\":\"read-only\"}","x-codex-window-id":Uuid::new_v4().to_string()}});
+            // Observe the request before awaiting its callback. Hidden setup is
+            // intentionally stopped after model acceptance; a completion-only
+            // recorder can lose genuine requests when that stop cancels this reply.
+            let seen_index={
+                let mut calls=sink.lock().await;
+                let index=calls.len();
+                calls.push(json!({"status":null,"body":null,"guest":row.guest_turn,"setup":row.guest_model_setup,"conversation":row.id,"key":key.id,"model":selected_model}));
+                index
+            };
             let response=callbacks.clone().oneshot(Request::builder().method("POST").uri(format!("/api/v1/proxy/s/{slug}/responses"))
                 .header("authorization",headers["authorization"].clone()).header("content-type","application/json").header("accept","*/*")
                 .body(Body::from(generation.to_string())).unwrap()).await.unwrap();
             let status=response.status().as_u16();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+            if row.guest_model_setup && matches!(scenario,Scenario::MappingChange) {
+                drop(setup_responses_released.wait_for(|released| *released).await.unwrap());
+            }
             if row.guest_turn && status==200 && !matches!(scenario,Scenario::Merchant) {
                 let response=callbacks.clone().oneshot(Request::builder().method("GET").uri("/api/v1/proxy/s/guest-service/status")
                     .header("authorization",headers["authorization"].clone()).body(Body::empty()).unwrap()).await.unwrap();
                 let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
                 assert_eq!(status,StatusCode::OK,"guest service: {}",String::from_utf8_lossy(&bytes));
             }
-            sink.lock().await.push(json!({"status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap(),"guest":row.guest_turn,"setup":row.guest_model_setup,"conversation":row.id,"key":key.id}));
+            {
+                let mut calls=sink.lock().await;
+                calls[seen_index]["status"]=json!(status);
+                calls[seen_index]["body"]=serde_json::from_slice::<Value>(&bytes).unwrap();
+            }
             let failed=status!=200; let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":if failed {"response.failed"}else{"response.completed"},"sequence_number":0,
                 "response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),"conversation":{"id":session},"status":if failed{"failed"}else{"completed"},
@@ -1306,7 +1326,7 @@ async fn channel_model_turns_for(
             assert!(!note["text"].as_str().unwrap().contains("@helper_bot hello"));
         }
     }
-    let seen = seen.lock().await;
+    let seen = seen.lock().await.clone();
     assert_eq!(
         seen.len(),
         if matches!(scenario, Scenario::FailedSetup) {
@@ -1325,6 +1345,43 @@ async fn channel_model_turns_for(
         },
         "{seen:?}"
     );
+    if matches!(scenario, Scenario::MappingChange) {
+        let setups: Vec<_> = seen.iter().filter(|call| call["setup"] == true).collect();
+        assert_eq!(
+            setups
+                .iter()
+                .map(|call| call["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [model, "model-after-policy-change"],
+            "mapping drift must perform a second owner setup for the new model"
+        );
+        assert!(
+            setups.iter().all(|call| call["status"].is_null()),
+            "setup must finish while both hidden response completions are held"
+        );
+        let guests: Vec<_> = seen.iter().filter(|call| call["guest"] == true).collect();
+        assert_eq!(
+            guests
+                .iter()
+                .map(|call| call["status"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [200, 403, 200],
+            "the changed mapping is refused before setup and succeeds only on retry"
+        );
+        assert_eq!(guests[1]["body"]["error"], "guest_model_route_required");
+        assert_eq!(
+            guests
+                .iter()
+                .map(|call| call["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                model,
+                "model-after-policy-change",
+                "model-after-policy-change"
+            ]
+        );
+    }
+    release_setup_responses.send(true).unwrap();
     if !scenario.owner_first() && !matches!(scenario, Scenario::FailedSetup) {
         let setup = crate::services::assistant_guest_model_setup::record(
             &state.db,
@@ -1406,6 +1463,16 @@ async fn channel_model_turns_for(
         restricted.len(),
         seen.iter().filter(|r| r["setup"] == true).count()
     );
+    if matches!(scenario, Scenario::MappingChange) {
+        assert_eq!(
+            restricted
+                .iter()
+                .map(|body| body["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [model, "model-after-policy-change"],
+            "both owner setups must reach the real model provider"
+        );
+    }
     for body in restricted {
         assert_eq!(body["tools"], json!([]));
         assert_eq!(body["tool_choice"], "none");

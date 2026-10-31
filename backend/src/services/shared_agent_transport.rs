@@ -109,7 +109,7 @@ async fn revalidate_inner(db: &Database, row: &SharedExecution, cleanup: bool) -
         return Err(sharing::missing());
     }
     // Deletion, rotation, and moving a key to another conversation revoke resume.
-    if db
+    let thread = db
         .collection::<mongodb::bson::Document>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
@@ -117,9 +117,17 @@ async fn revalidate_inner(db: &Database, row: &SharedExecution, cleanup: bool) -
         "agent_id": &row.agent, "credential_api_key_id": &row.key,
         "shared_agent_thread": true})
         .await?
-        .is_none()
+        .ok_or_else(sharing::missing)?;
+    // These durable records bind a private turn, not a collaboration request
+    // and its audience. Reusing a slot for another request must never donate
+    // authority to an old job/watch/stream. Group queues use their own binding.
+    if thread
+        .get("collaboration")
+        .is_some_and(|value| value != &mongodb::bson::Bson::Null)
     {
-        return Err(sharing::missing());
+        return Err(AppError::Forbidden(
+            "This transport requires a private shared chat; collaboration request binding is unavailable".into(),
+        ));
     }
     if !row.voice && !cleanup {
         let stopped = db.collection::<mongodb::bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)

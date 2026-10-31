@@ -1,7 +1,6 @@
 # Shared agents and multi-person groups
 
-Status: approved with corrections; Phase 1 implementation complete. Baseline: `origin/main` at `38bae2f78`
-(NyxID 0.75.0, including #1996 guest-access helpers and #1995 guest model routing). Phase 2 remains planned.
+Status: Phase 1 and Phase 2 implemented; rollout remains default off and requires fleet readiness. Phase 2 retains the crews fix merged in #2114. See §11 for activation and rollback and §13 for verification.
 
 This extends [NyxBot groups and guests](09-nyxbot-orchestrator.md) and the
 [organization-agent contract](../ORG_AGENTS.md). The existing
@@ -10,7 +9,7 @@ This extends [NyxBot groups and guests](09-nyxbot-orchestrator.md) and the
 and [service execution](../NYXBOT_SERVICE_EXECUTION.md) remain the foundations.
 Where this proposal changes behavior, it applies only to explicitly shared
 specialists, including in a recipient's own single-person personal groups
-(crews), and the planned multi-person group surface. Organization groups and
+(crews), and the explicit multi-person group surface. Organization groups and
 channel guests retain their contracts.
 
 ## 1. Outcome and fixed boundaries
@@ -127,8 +126,8 @@ New model collections have `COLLECTION_NAME`, UUID-v4 string `_id` values,
 redacted Debug implementations where needed, and BSON datetime helpers. Optional
 dates use `bson_datetime::optional`. Model fields must serialize to MongoDB;
 there is no `skip_serializing`. API responses are dedicated, role-filtered DTOs.
-The Phase 1 storage and API names below track this implementation. Group models
-remain Phase 2 proposals and are not present in 0.73.1.
+The storage names below track Phase 1 and the Phase 2 backend foundation. New
+collaboration-group writers remain unmounted until the later review steps in §12.
 
 ### Agent sharing and memory
 
@@ -176,14 +175,19 @@ consent.
 | --- | --- |
 | `AssistantGroup` | Defaulted optional `collaboration` object containing `version: 1`, creator ID and membership revision. For new groups `user_id` remains the personal creator; reuse `participant_user_ids` (1–16 active people), `member_agent_ids` (1–8 specialists), per-actor sticky recipients and lead. |
 | `assistant_group_invites` | Group, creator/issuer, SHA-256 token hash, optional intended person, expiry, acceptance/cancellation timestamps and accepting person. Unique token hash; group/state lookup and expiry cleanup indexes. Raw random 256-bit token is returned once and never logged. |
-| `assistant_group_agent_access` | Unique `(group_id, agent_id)`, authoritative agent owner, adding participant, membership generation, `guest_enabled: false`, consenting owner representative, revision/timestamps. Only the live owner/authorized org Admin can enable; the creator can disable or remove the agent. Removing/readding the agent resets opt-in to off. |
+| `assistant_group_agent_access` | Unique `(group_id, agent_id)`, authoritative agent owner, adding participant, membership generation, `guest_enabled: false`, consenting owner, revision/timestamps. Only the live personal specialist owner can enable; the creator can disable or remove the agent. Organization-owned specialists cannot opt into guests. Removing/readding the agent resets opt-in to off. |
 | `GroupRequest` | Reuse immutable original `actor_user_id`, request ID, trigger sequence, pending recipients, attachments and handoff budget; add defaulted collaboration marker and membership generation. Client input cannot set requester identity. |
 | `GroupMessage` | Add a defaulted collaboration routing marker independent of author, plus optional execution attribution and original requester. Keep role strings `user`/`agent`/`notice`; do not add persisted variants to old role enums. |
+| `assistant_group_transfers` | One expiring proposal per group, bound to the current creator, accepting participant and membership revision. Acceptance changes group management only, invalidates outstanding invitations and fences existing execution; it never transfers an agent or its credentials. |
+| `assistant_group_execution_slots` | Unique `(group_id, agent_id, original_requester_id, lane)`; lane partitions `authenticated` and `guest`. The slot captures the concrete owner/org-member/shared/guest authority, membership revision, conversation ID and revocation state. Changed authority retires the old thread/key before attaching a new one. |
+| `AssistantConversation` / `ActiveTurn` | Defaulted optional `collaboration: ExecutionBinding` with version, group/slot/agent/request IDs, immutable original requester, membership revision and authority. Initial admission writes the thread, encrypted credential and turn in one transaction. Legacy `group_id`/`group_request_id` stay null on these threads so legacy indexes and workers cannot reinterpret them. |
+| `AssistantAgentCredential` | Defaulted `collaboration: false` dispatch hint. A true value selects the exact conversation binding; it confers no authority by itself. Keys retain the existing `assistant_group_id` and owner markers, and authentication validates them against the live slot, requester, request and turn. |
 
-`org_group_service::is_org` currently tests `created_by_user_id.is_some()`.
-Do not set that field on new personal multi-person groups. Centralize group
-classification: explicit collaboration marker first, otherwise the existing
-org discriminator, otherwise legacy personal. All group handlers, sweepers,
+
+`assistant_group_kind::classify` centralizes group classification: explicit
+collaboration marker first, otherwise `created_by_user_id.is_some()` for an org
+group, otherwise legacy personal. `org_group_service::is_org` delegates to it.
+Do not set `created_by_user_id` on new personal multi-person groups. All group handlers, sweepers,
 purges, upload readers and live routing must use that classifier. Unknown
 collaboration versions fail closed. No lazy conversion of a legacy group occurs
 when someone reads it; these phases create new groups to avoid exposing old
@@ -586,7 +590,7 @@ All assistant management, invitation acceptance and consent decisions remain
 first-party human surfaces under `/api/v1/assistant/nyxagent`; conversation keys,
 generic API keys, OAuth-client, delegated, service-account and relay credentials
 cannot call them. Use the shared human guard and engine flag, not only a handler
-ownership comparison. Phase 1 additions and Phase 2 proposed group surfaces:
+ownership comparison. Phase 1 and Phase 2 surfaces:
 
 | Surface | Contract |
 | --- | --- |
@@ -596,8 +600,13 @@ ownership comparison. Phase 1 additions and Phase 2 proposed group surfaces:
 | `GET/PUT /agents/{id}/shared-memory` | Authorized read, owner/manager revision-fenced edit |
 | `GET /agents/{id}/consents` | Actor-only consent inventory, bounded to 100 current cards/grants |
 | `POST /shared-consents/{consent_id}` | Actor-only `once` / `always` / `skip` / `revoked`; exact binding checked transactionally; separate from legacy action-card enums |
-| Existing group CRUD/messages/attachments/live routes | Dispatch by explicit group classifier; current participant ACL |
-| `POST /groups/{id}/invites`, `DELETE /groups/{id}/invites/{invite_id}` | Creator issues/cancels; raw token returned once |
+| `GET /collaboration` | Human capability read; `available` requires the shared-agents flag and Phase 2 fleet readiness |
+| Existing group CRUD/messages/attachments/live routes | Create with `collaboration: true`, 1–8 specialist IDs and no initial people; current participant ACL; legacy groups are never converted |
+| `POST /groups/{id}/membership` | Tagged `action` plus `expected_revision`; rename/lead, participant/proposal/agent/transfer/guest mutations use the same transactional service |
+| `POST /groups/{id}/requests/{request_id}/cancel` | Original requester only; cancel queued and live work, expire decisions and revoke keys |
+| `POST /groups/{id}/decisions/{decision_id}` | Original requester only; action `allow`/`deny`, consent `once`/`always`/`skip`; resume the original chain |
+| `GET /agents/{id}/group-access` | Personal specialist owner sees only group IDs and guest/membership revisions; never group names, people or transcript |
+| `POST /groups/{id}/invites`, `DELETE /groups/{id}/invites/{invite_id}` | Creator issues/cancels; optional `intended_user_id` binds acceptance to that person, otherwise a bearer link; raw token returned once |
 | `POST /group-invites/preview`, `POST /group-invites/accept` | Body token, human account, non-mutating preview and single-use accept |
 | `POST/DELETE /groups/{id}/participants/{user_id}`, `POST /groups/{id}/leave` | Creator quick-add/remove and self-leave; membership generation fence |
 | `PUT /groups/{id}/agents/{agent_id}/guest-access` | Owner enable/disable, creator disable; revision-fenced |
@@ -634,7 +643,12 @@ labels. In Full access,
 NyxBot may apply a widening only after the owner approves that card; this remains
 an owner-scoped policy mutation and does not grant new services. Extend group management
 tools with invite/quick-add/remove/leave and per-agent guest settings, calling
-the same services as REST. Personal NyxBot cannot join/follow new multi-person
+the same services as REST. Enabling a group's agent guest opt-in also delegates
+owner authority and always requires an owner card, including in Full access.
+The membership transaction requires explicit delegation approval for a false-to-true
+write; the native caller must consume a card bound to the exact group, agent and
+both membership/guest-policy revisions. Human REST writes supply that approval;
+disabling and no-op writes retain the normal gate. Personal NyxBot cannot join/follow new multi-person
 groups or receive their transcript as an unsolicited follower. Invite acceptance,
 manager-role acceptance if added, and personal-credential consent remain human
 decisions. No tool sends an invitation message automatically.
@@ -791,8 +805,13 @@ consent claim, authority revision and behavior/connection digests, not a reusabl
 ACL snapshot. Resume loads live shares, people/org membership, key, connection,
 policy and consent before effects. Node-backed connections, machines, saved
 logins, SSH, Oracle, owner-account tools/approvals and automation remain excluded.
-These changes do not implement group membership, multi-person group delivery or
-channel guest sharing; those remain separate work. Guests remain owner-billed.
+These transport extensions apply to private shared chats and legacy personal
+crews. Collaboration groups use the separate request chain below. A private
+`shared_execution` receipt cannot authorize a collaboration job, watch, voice
+session or opaque stream: it lacks the original request and audience binding,
+so revalidation refuses it before effects. Foreground HTTP/MCP and pinned pool
+members still use the group's live turn authority. Collaboration native tools
+also exclude channel discovery/posting. Guests remain owner-billed.
 
 Consent uses separate human-only inline cards. After choosing, the person
 continues the chat or retries voice start; no tool can make that decision.
@@ -821,6 +840,51 @@ machinery with the same identity evaluator, retaining legacy entry points.
 Implement actor cards, consent audiences, uploads, live delivery, handoffs,
 queued work and cancellation, then participant/invite/guest-toggle UI and tools.
 Validate mixed owners and concurrent requesters before widening rollout.
+
+Phase 2 was implemented in three ordered steps:
+
+1. **Backend foundation.** Explicit classifier and side collections/indexes;
+   snapshot transactions for invitations, membership, transfer and guest opt-in;
+   batched identity snapshots; requester-bound requests and isolated hidden
+   thread/key/turn admission. Invite consumption and revision-fenced group writes
+   must each match one row or abort the transaction.
+2. **Public surfaces and scheduling.** The REST routes above and native/MCP tools
+   `create_collaboration_group`, `list_collaboration_groups`,
+   `manage_collaboration_group`, `post_to_collaboration_group` share the same
+   services. The runtime uses the requester's team pool for authenticated lanes
+   and the owner's existing channel pool for guests. Guest busy responses ask for
+   a retry; authenticated work queues up to 16 pending requests per requester.
+   Cards and service approvals bind their original request, and a thread with an
+   unresolved decision cannot be reused by a different chain. Cancellation and
+   membership changes expire approvals and consents before artifact cleanup.
+3. **UI and delivery.** The group creator can invite/quick-add people, accept
+   participant agent proposals, manage guests, propose/accept transfer, leave or
+   delete. Invite links carry their token in a fragment and require preview plus
+   acknowledgement of full retained history. Requester-only cards show the reply
+   audience; everyone else receives waiting status. Polling and identifier-only
+   live fan-out use current participation. Private hidden IDs are not exposed.
+
+`assistant:collaboration-groups-v1` is now advertised by complete replicas. Both
+that full-fleet readiness capability and the existing `assistant:shared-agents`
+flag are required for new collaboration work. Disabling stops admissions and
+continuations; retained history, cancellation, departure and deletion remain
+available to their authorized humans. None of these routes converts legacy
+personal crews or org groups.
+
+Only successful final text and explicitly chat-deliverable tool images are
+published. Guest images, inspection-only images, tool traces and exact cards
+remain private. Published image joins survive hidden-thread cleanup and follow
+group deletion and upload retention. Uploads stay private while drafts; published
+uploads require current participation, and model reads additionally bind the
+original request. Hidden-thread keys, cards, consents, resources and checkpoints
+are removed only after cancellation settles. Participant departure preserves
+public history while immediately removing server access.
+
+Native collaboration turns cannot invoke private memory/account management;
+authenticated lanes retain pinned-skill reads. Personal NyxBot can initiate work
+for its human through the tools, but cannot join, follow or become the requester
+of another participant's chain. Transfer acceptance and invite acceptance remain
+human-only. No invite is sent automatically.
 
 Expected code touchpoints are `models/assistant_{agent,group,conversation}.rs`,
 `models/api_key.rs`, new share/consent/memory/binding models and services,
@@ -889,7 +953,8 @@ Approved by the coordinating reviewer:
 - Caller-pays is exclusive to `shared`; owner/org-member/guest billing stays as
   specified in section 7.
 
-Phase 1 is implemented without a commit in this worktree. The implementation uses a thin
+Phase 1 and single-person shared crews are implemented. The implementation uses a thin
 `shared_access` adapter over the v0.75.0 #1996 helpers; absent shared policy is
-withheld and no new enum values are written to legacy fields. Phase 2 is not
-implemented here.
+withheld and no new enum values are written to legacy fields. Phase 2 includes
+the public surfaces and UI described above; new work remains default off until
+the shared-agents flag and full-fleet collaboration readiness gate allow it.

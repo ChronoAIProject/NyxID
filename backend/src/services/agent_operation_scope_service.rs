@@ -1065,9 +1065,19 @@ async fn check_non_mcp_chat_context(
             ));
         }
     }
+    // Thinking is not a webhook-authored service change. Only the proxy's
+    // closed stateless model contract qualifies, on a live owner turn. Explicit
+    // destructive contracts, guest/shared access and operation scopes retain
+    // their gates. Selection, input admission and billing still run afterward.
+    let model_read = request.stateless_model
+        && chat.turn_live
+        && !chat.turn_stopped
+        && !chat.guest
+        && shared.is_none()
+        && !destructive;
     if super::assistant_acknowledgement_service::webhook_confirmation_required(
         chat,
-        reads,
+        reads || model_read,
         destructive,
     ) {
         return Err(AppError::ApiKeyScopeForbidden(
@@ -1864,4 +1874,8 @@ pub fn guest_level_allows(
 pub struct GuestHttpContext<'a> {
     pub query: Option<&'a str>,
     pub websocket: bool,
+    /// Server-computed closed inference contract on the actual outbound body.
+    /// Only relaxes the webhook confirmation floor; never guest or share ACLs.
+    /// Callers must reject method overrides before supplying this evidence.
+    pub stateless_model: bool,
 }

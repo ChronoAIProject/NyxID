@@ -182,6 +182,7 @@ async fn sticky_recipients_persist_after_a_multi_mention() {
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateGroupRequest {
+            collaboration: false,
             org: None,
             participant_user_ids: Vec::new(),
             name: "sticky".into(),
@@ -225,6 +226,7 @@ async fn explicit_recipient_ids_override_mentions_in_text() {
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateGroupRequest {
+            collaboration: false,
             org: None,
             participant_user_ids: Vec::new(),
             name: "explicit".into(),
@@ -254,6 +256,7 @@ async fn group_of(state: &AppState, name: &str, members: &[&AssistantAgent]) -> 
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateGroupRequest {
+            collaboration: false,
             org: None,
             participant_user_ids: Vec::new(),
             name: name.into(),
@@ -433,6 +436,7 @@ async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recip
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateGroupRequest {
+            collaboration: false,
             org: None,
             participant_user_ids: Vec::new(),
             name: "confirm".into(),
@@ -591,6 +595,7 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateGroupRequest {
+            collaboration: false,
             org: None,
             participant_user_ids: Vec::new(),
             name: "Launch team".into(),

@@ -1045,23 +1045,53 @@ pub(crate) async fn process_decision_with_access(
         update_set.insert("decision_idempotency_key", key);
     }
 
-    // Atomic update: only process if status is still "pending"
-    let updated = collection
-        .find_one_and_update(
-            doc! {
-                "_id": request_id,
-                "status": "pending",
-            },
-            doc! {
-                "$set": update_set
-            },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?;
+    // Collaboration decisions serialize with departure/cancellation and keep
+    // their continuation bound to the same request. Unrelated approvals keep
+    // their existing single-write path with no collaboration reads.
+    let collaboration = if let Some(binding) = &current.assistant_group {
+        super::collaboration_group_service::marked(db, &binding.group_id).await?
+    } else {
+        false
+    };
+    let updated = if collaboration {
+        let binding = current
+            .assistant_group
+            .as_ref()
+            .expect("checked group binding");
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), binding.clone(), collection.clone(), request_id.to_owned(), update_set), |session, context| {let (db,binding,collection,request_id,update_set)=&*context;let request_id=request_id.as_str();Box::pin(async move {
+            let result:AppResult<Option<ApprovalRequest>>=async {
+                let row=db.collection::<crate::models::assistant_conversation::AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&binding.conversation_id,"collaboration.request_id":&binding.request_id}).session(&mut *session).await?
+                    .ok_or_else(||AppError::NotFound("Approval request not found".into()))?;
+                super::collaboration_group_service::runtime::fence_decision(db,&row,&binding.actor_user_id,session).await?;
+                let updated=collection.find_one_and_update(doc! {"_id":request_id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":update_set.clone()})
+                    .return_document(ReturnDocument::After).session(&mut *session).await?;
+                if updated.is_some() && row.active_turn.is_none() {
+                    super::collaboration_group_service::runtime::queue_decision(db,&row,session).await?;
+                }
+                Ok(updated)
+            }.await;
+            super::api_key_mutation_service::transaction_result(result)
+        })}).await.map_err(super::api_key_mutation_service::map_transaction_error)?
+    } else {
+        collection
+            .find_one_and_update(
+                doc! {
+                    "_id": request_id,
+                    "status": "pending",
+                },
+                doc! {
+                    "$set": update_set
+                },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .await?
+    };
 
     let updated = match updated {
         Some(updated) => updated,

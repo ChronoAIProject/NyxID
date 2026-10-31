@@ -941,6 +941,7 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
     };
     let guest = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            collaboration_thread: false,
             invocation_controlled: false,
             invocation_id: None,
             report_to: None,
@@ -984,6 +985,7 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
 
     let webhook = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            collaboration_thread: false,
             invocation_controlled: false,
             invocation_id: None,
             report_to: None,
@@ -1001,6 +1003,48 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
     ordinary.assistant_chat = None;
     ordinary.assistant_agent_owner_id = None;
     assert!(!check(&ordinary, "DELETE", "/items/1").await.unwrap());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn automation_model_2099_read_contract_preserves_other_turn_gates() {
+    use crate::models::trigger_schedule::ConfirmationPolicy;
+    use crate::services::assistant_authority_tests::fixture;
+    let f = fixture("automation_model_2099_gates").await;
+    for (guest, live, stopped, method, expected) in [
+        (false, true, false, "POST", true),
+        (false, false, false, "POST", false),
+        (false, true, true, "POST", false),
+        (true, true, false, "POST", false),
+        (false, true, false, "DELETE", false),
+    ] {
+        let mut chat = f.chat.clone();
+        chat.guest = guest;
+        chat.turn_live = live;
+        chat.turn_stopped = stopped;
+        chat.confirmation_policy = Some(ConfirmationPolicy::Changes);
+        let mut auth = f.auth.clone();
+        auth.assistant_chat = Some(std::sync::Arc::new(chat));
+        let result = check_non_mcp_context(
+            &f.state.db,
+            &auth,
+            false,
+            "unscoped-model",
+            None,
+            method,
+            Some(&CanonicalPath::from_mcp_literal("/responses").unwrap()),
+            GuestHttpContext {
+                stateless_model: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            result.is_ok(),
+            expected,
+            "guest={guest} live={live} stopped={stopped} method={method}"
+        );
+    }
     f.state.db.drop().await.unwrap();
 }
 

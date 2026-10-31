@@ -69,7 +69,10 @@ pub struct AnswerRouting {
 
 pub fn answer_routing(row: &AssistantConversation, turn: &ActiveTurn) -> AnswerRouting {
     answer_routing_parts(
-        row.group_id.as_deref(),
+        row.collaboration
+            .as_ref()
+            .map(|b| b.group_id.as_str())
+            .or(row.group_id.as_deref()),
         row.channel.as_ref(),
         row.reply_channel.as_ref(),
         turn,
@@ -82,6 +85,12 @@ fn answer_routing_parts(
     reply_channel: Option<&ChannelOrigin>,
     turn: &ActiveTurn,
 ) -> AnswerRouting {
+    // Active-turn attribution also covers partial projections used by image delivery.
+    let group_id = turn
+        .collaboration
+        .as_ref()
+        .map(|b| b.group_id.as_str())
+        .or(group_id);
     let primary = if let Some(group_id) = group_id {
         PrimaryDestination::Group {
             group_id: group_id.to_owned(),
@@ -433,7 +442,9 @@ pub fn base_prompt(
         prompt.push_str(guest_note(row.is_subagent()));
     } else {
         if let Some(agent) = agent {
-            if agent.user_id != row.user_id {
+            if row.collaboration.is_some() {
+                prompt.push_str("\n\nThis is a multi-person collaboration group. Use only the group transcript and explicitly published team memory. Private notes, private chats and owner memory are unavailable. Every handoff retains the original requester and their authority. Do not write group content into private or team memory.");
+            } else if agent.user_id != row.user_id {
                 if row.shared_agent_thread {
                     prompt.push_str("\n\nThis is a private chat with a shared personal specialist. You act for the person chatting, who pays for NyxID usage. Your context includes explicitly published team memory and this person's private notes only. Remember/forget edits only their private notes; never publish private content to team memory. The agent owner's memory, other chats, roster, machines, saved logins and approvals are unavailable. Use only explicitly shared services or the person's own same-service connection after their consent; never silently switch accounts.");
                 } else if row.group_request_id.is_some() {
@@ -1125,6 +1136,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::collaboration_group_service::ensure_indexes(db).await?;
     super::channel_media_events::ensure_indexes(db).await?;
     super::assistant_channel_media::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
@@ -1539,6 +1551,9 @@ pub(crate) async fn authorize_thread_read(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<Option<std::sync::Arc<super::org_agent_service::RequestAccess>>> {
+    if row.collaboration.is_some() {
+        return Err(not_found());
+    }
     if row.shared_agent_thread {
         if let Some(id) = &row.group_id {
             let group = super::assistant_group_service::get(db, &row.user_id, id).await?;
@@ -1594,6 +1609,7 @@ pub async fn list(
         None => doc! {"user_id": user_id, "group_id": bson::Bson::Null,
         "voice_parent_conversation_id": bson::Bson::Null},
     };
+    filter.insert("collaboration", bson::Bson::Null);
     filter.insert("guest_model_setup", doc! {"$ne":true});
     if let Some(cursor) = cursor {
         let (ms, id) = cursor
@@ -1653,7 +1669,7 @@ pub async fn list_shared_history(
         return Err(AppError::NotFound("Agent not found".into()));
     }
     let mut filter = doc! {"user_id": user_id, "agent_id": agent, "shared_agent_thread": true,
-    "group_id": null, "voice_parent_conversation_id": null};
+    "collaboration": null, "group_id": null, "voice_parent_conversation_id": null};
     if let Some(cursor) = cursor {
         let (ms, id) = cursor
             .split_once(':')
@@ -1683,7 +1699,7 @@ pub async fn list_shared_history(
             .collection::<bson::Document>(CONVERSATIONS)
             .find_one(
                 doc! {"user_id": user_id, "agent_id": agent, "shared_agent_thread": true,
-                "group_id": null, "voice_parent_conversation_id": null},
+                "collaboration": null, "group_id": null, "voice_parent_conversation_id": null},
             )
             .projection(doc! {"_id": 1})
             .await?
@@ -1864,7 +1880,7 @@ pub(crate) async fn write_checkpoint_in_session(
     reply: &AssistantMessage,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
-    if row.guest_turn {
+    if row.guest_turn || row.collaboration.is_some() {
         return Ok(());
     }
     let collection = db.collection::<AssistantCheckpoint>(CHECKPOINTS);
@@ -2139,6 +2155,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            collaboration: None,
             owner_model_route: None,
             invocation_controlled: false,
             credential_invocation_id: None,
@@ -2193,6 +2210,9 @@ pub(crate) async fn begin_owner_turn_in_session(
             guest_turn: false,
         }
     };
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::check_start(&row, start)?;
+    }
     if row.guest_model_setup
         && (start.origin != TurnOrigin::Event
             || start.guest
@@ -2373,7 +2393,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if start.invocation_id.is_some()
+    let events = if row.collaboration.is_some()
+        || start.invocation_id.is_some()
         || start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
@@ -2573,6 +2594,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         return Err(AppError::Conflict(
             "Voice continuation credential changed".into(),
         ));
+    }
+    if row.collaboration.is_some() {
+        row.credential_api_key_id = credential_id.into();
+        super::collaboration_group_service::runtime::bind_key(db, &row, session).await?;
     }
     if row.group_request_id.is_some() {
         super::api_key_mutation_service::update_one(
@@ -2778,6 +2803,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        collaboration: row.collaboration.clone(),
         channel_adapter_origin: None,
         invocation_id: start
             .invocation_id
@@ -3012,7 +3038,8 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     // An agent's first own thread becomes its home; a hidden group
     // member, channel or isolated automation thread never does.
-    if row.group_id.is_none()
+    if row.collaboration.is_none()
+        && row.group_id.is_none()
         && row.channel.is_none()
         && row.platform_thread.is_none()
         && !row.automation_thread
@@ -3971,6 +3998,9 @@ async fn finish_turn_inner(
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message)).await?;
                 }
+                if current.collaboration.is_some() && let Some(turn) = settled_turn.as_ref() {
+                    Box::pin(super::collaboration_group_service::runtime::publish_reply(&db,&current,turn,&message,session)).await?;
+                }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -4558,6 +4588,12 @@ pub async fn read_group_tool_attachment(
         assistant_group::MESSAGES_COLLECTION_NAME as GROUP_MESSAGES,
     };
     let missing = || AppError::NotFound("Attachment not found".into());
+    if super::collaboration_group_service::marked(db, group_id).await? {
+        return super::collaboration_group_service::uploads::published_image(
+            db, keys, user, group_id, id,
+        )
+        .await;
+    }
     let access = super::assistant_upload_service::owner_scope(db, user, group_id)
         .await?
         .ok_or_else(missing)?;

@@ -348,9 +348,12 @@ pub(crate) async fn continue_turn(
     if !matches!(error.code, "tool_budget_exhausted" | "turn_timeout") {
         return Ok(false);
     }
-    let current = engine::get(&state.db, &row.user_id, &row.id)
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "continuation"))?;
+    let current = if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::refresh(&state.db, row).await
+    } else {
+        engine::get(&state.db, &row.user_id, &row.id).await
+    }
+    .map_err(|_| TurnError::internal("assistant_unavailable", "continuation"))?;
     let active = current
         .active_turn
         .as_ref()
@@ -527,7 +530,7 @@ pub(crate) async fn turn_notes(
     }
     // Someone other than the owner is talking: nothing private to the owner
     // (memory, other chats, the team, pending requests) goes into this turn.
-    if row.guest_turn {
+    if row.guest_turn || row.collaboration.is_some() {
         return notes;
     }
     if let Some(agent) = agent {
@@ -886,7 +889,7 @@ pub(crate) async fn run_owner_turn(
             .await;
             let failure=match &outcome {Err(error)=>Some(error),Ok(result)=>result.error.as_ref()};
             let route_failed=if row.guest_turn && !row.shared_agent_thread && let Some(error)=failure {
-                let current=engine::get(&state.db,&row.user_id,&row.id).await.ok();
+                let current=if row.collaboration.is_some() {super::collaboration_group_service::runtime::refresh(&state.db,&row).await.ok()}else{engine::get(&state.db,&row.user_id,&row.id).await.ok()};
                 current.as_ref().and_then(|r|r.active_turn.as_ref()).is_some_and(|turn|
                     super::assistant_model_observer::attribute(error,turn,Utc::now()).code=="guest_model_route_required"
                     && turn.model_route_diagnostic.as_ref().is_some_and(|d|super::assistant_service_execution::model_diagnostic::Reason::needs_owner_setup(&d.reason)))
@@ -1456,14 +1459,24 @@ async fn execute_turn_inner(
         notice: None,
     };
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
-    let mut history = engine::messages(
-        &state.db,
-        &row.user_id,
-        &row.id,
-        20,
-        Some(row.message_count + 1),
-    )
-    .await
+    let mut history = if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::history(
+            &state.db,
+            row,
+            20,
+            Some(row.message_count + 1),
+        )
+        .await
+    } else {
+        engine::messages(
+            &state.db,
+            &row.user_id,
+            &row.id,
+            20,
+            Some(row.message_count + 1),
+        )
+        .await
+    }
     .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     // Queued speech is visible to the human, but never becomes an instruction
     // until its own claim. Include earlier completed replies even if their

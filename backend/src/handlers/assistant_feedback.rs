@@ -151,7 +151,7 @@ async fn upsert(
         let gid = group_id
             .as_deref()
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
-        crate::services::org_group_service::get(&state.db, &user_id, gid, None).await?;
+        group_scope(&state.db, &user_id, gid).await?;
         let row = feedback_service::group_message(&state.db, gid, message_id)
             .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
@@ -206,6 +206,7 @@ pub async fn put_group(
     Path((id, message_id)): Path<(String, String)>,
     Json(input): Json<FeedbackInput>,
 ) -> AppResult<Json<FeedbackResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     upsert(&state, &auth, &message_id, None, Some(id), input).await
 }
 async fn withdraw(
@@ -220,7 +221,7 @@ async fn withdraw(
     engine::require_enabled(&state.db, &user_id).await?;
     if let Some(cid) = scope.as_deref() {
         if group {
-            crate::services::org_group_service::get(&state.db, &user_id, cid, None).await?;
+            group_scope(&state.db, &user_id, cid).await?;
             if feedback_service::group_message(&state.db, cid, &message_id)
                 .await?
                 .is_none()
@@ -269,6 +270,7 @@ pub async fn delete_group(
     auth: AuthUser,
     Path((id, message_id)): Path<(String, String)>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     withdraw(&state, &auth, message_id, Some(id), true).await
 }
 
@@ -544,4 +546,13 @@ mod input_tests {
     fn sanitize_comment_strips_controls_and_bidi() {
         assert_eq!(sanitize_comment("ok\u{0007}\u{202e}text"), "oktext");
     }
+}
+
+async fn group_scope(db: &mongodb::Database, actor: &str, group: &str) -> AppResult<()> {
+    if crate::services::collaboration_group_service::marked(db, group).await? {
+        crate::services::collaboration_group_service::get(db, actor, group).await?;
+    } else {
+        crate::services::org_group_service::get(db, actor, group, None).await?;
+    }
+    Ok(())
 }
