@@ -11500,6 +11500,7 @@ mod tests {
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
     include!("proxy_concurrency_tests.rs");
+    include!("proxy_precondition_tests.rs");
     use super::{
         enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,

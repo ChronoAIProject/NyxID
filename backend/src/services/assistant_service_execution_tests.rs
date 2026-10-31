@@ -818,3 +818,79 @@ fn guest_1995_codex_correlation_metadata_is_stateless_but_provider_handles_are_n
         assert!(!stateless_model_transport("v1/responses", &bad));
     }
 }
+
+#[tokio::test]
+async fn precondition_2113_http_projection_binds_exact_approval_to_write_revision() {
+    async fn write_gate(f: &Fixture, id: &str, operation: &Value, ack: Option<&str>) -> Decision {
+        check(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.chat,
+            id,
+            &f.owner,
+            operation,
+            acks::ActionFacts::of(acks::OwnerActionClass::Change),
+            ack,
+            "Update the selected rule",
+            false,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+    let f = orchestrator_fixture("execution_precondition_2113").await;
+    let id = connection(&f, &f.owner, "conditional-write", None).await;
+    mode(&f, AccessMode::AskEveryTime).await;
+    let target = target(&f, &id).await;
+    let projection = HttpProjection::default();
+    for name in ["if-match", "if-unmodified-since"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(name, "revision-one".parse().unwrap());
+        let operation = |headers: &HeaderMap| {
+            let mut op =
+                http_operation(&target, "PATCH", "/rules/one", None, br#"{"enabled":true}"#);
+            bind_headers(&mut op, &projection.headers(&target, headers));
+            op
+        };
+        let original = operation(&headers);
+        let ack = allow(
+            &f,
+            write_gate(&f, &id, &original, None).await.refusal.unwrap(),
+        )
+        .await;
+        headers.insert(name, "revision-two".parse().unwrap());
+        let changed = operation(&headers);
+        assert_ne!(original, changed);
+        assert_eq!(
+            write_gate(&f, &id, &changed, Some(&ack))
+                .await
+                .refusal
+                .unwrap()["error"],
+            "acknowledgement_invalid"
+        );
+        headers.remove(name);
+        let removed = operation(&headers);
+        assert_ne!(original, removed);
+        assert_eq!(
+            write_gate(&f, &id, &removed, Some(&ack))
+                .await
+                .refusal
+                .unwrap()["error"],
+            "acknowledgement_invalid"
+        );
+        // A fresh approval authorizes the retried operation at its new revision.
+        let new_ack = allow(
+            &f,
+            write_gate(&f, &id, &changed, None).await.refusal.unwrap(),
+        )
+        .await;
+        assert!(
+            write_gate(&f, &id, &changed, Some(&new_ack))
+                .await
+                .refusal
+                .is_none()
+        );
+    }
+}
