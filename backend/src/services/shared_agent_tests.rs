@@ -2466,6 +2466,36 @@ async fn shared_agent_actor_connection_dispatch_requires_consumable_private_cons
 mod transports;
 
 #[tokio::test]
+async fn guest_setup_2092_shared_recipients_never_initialize_owner_routes() {
+    let f = Fixture::new("guest_setup_shared").await;
+    let agent = publish(&f, false).await;
+    for actor in [&f.outsider, &f.member] {
+        assert!(
+            !super::assistant_guest_model_setup::eligible(&f.state.db, actor, &agent)
+                .await
+                .unwrap()
+        );
+        let ready = super::assistant_guest_model_setup::kick(
+            &f.state,
+            actor,
+            &agent.id,
+            &agent.model,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(ready, "shared execution keeps its existing own-model lane");
+        assert!(
+            super::assistant_guest_model_setup::record(&f.state.db, actor, &agent.id, &agent.model)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn shared_agent_crew_projection_keeps_skills_notes_and_rejects_other_surfaces() {
     use super::{
         assistant_agent_credential_service as credentials, assistant_group_service as groups,

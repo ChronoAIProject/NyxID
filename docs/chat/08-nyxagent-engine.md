@@ -287,13 +287,14 @@ inventory, delegation tokens, consent screens and MCP tools stay its grants.
 For a live guest turn, the exception requires an exact server-established
 model route. A normal owner model admission during the engine's active model
 attempt records `owner_model_route` on the thread and, when its profile matches
-the agent's configured profile, on the agent. The thread binding takes precedence;
-an agent default binding applies only to threads of that same profile.
+the agent's configured profile, on the agent. A successfully initialized route
+for that acting owner/profile can repair a stale thread binding; otherwise the
+thread binding precedes the agent default, which applies only to the same profile.
 It pins the catalog ID, saved connection ID (or explicitly catalog-only),
 model/endpoint/query/semantic-header identity, and the resolved execution digest
 with durable credential identity/epoch. Prompts, input-admission tokens,
 process-local fingerprints, refreshed token bytes and thread keys are not route
-identity. A changed route still requires a new owner admission.
+identity. A changed route still requires a new owner admission; NyxID performs visitor setup automatically through that admission path.
 
 Owner and guest model callbacks share the closed stateless generation classifier.
 Codex's bounded `client_metadata` correlation object is recognized on Responses:
@@ -330,7 +331,7 @@ the existing attribution window prevent a late or parallel callback from
 explaining the wrong failure.
 
 The human-only, engine-gated `GET /assistant/nyxagent/agents/{id}/guest-readiness`
-computes `status` (`ready` / `not_ready`), `reason`, and `fix` for an owned agent.
+computes `status` (`ready` / `setting_up` / `not_ready`), `reason`, and `fix` for an owned agent.
 Optional `conversation_id` must belong to that same owner and agent. The default
 read also projects conversation IDs whose profile or recorded route differs;
 this list is capped at 512 with an explicit truncation flag (then visible chats
@@ -342,19 +343,54 @@ readiness computation. NyxBot's channel-list tool computes at most once per
 distinct agent, and only for channels open to visitors in private chats or groups.
 Readiness is a model setup check, not permission to use services, and is never
 stored or evaluated on unrelated turn paths. Execution rechecks live authority.
-At settlement, only a current, attributable setup diagnostic tells a visitor
-the owner has not finished setup and has been notified. Other, missing or unknown
-reasons say only that the assistant cannot answer right now and to try again
-later. Neither reply names owner services or diagnostic reasons. A metadata-only notice is queued atomically once per
-agent/reason in 24 hours, with 48-hour TTL. The 15-second assistant sweep appends
-a fixed notice to the agent's home and attempts the owner's verified private
-chat on bots linked to that same agent through existing channel delivery. A
-missing channel agent binding means the owner's NyxBot, never the affected
-specialist. The notice names the assistant and a
-one-step remedy and links to `AssistantPage::AgentDetails`; it contains no
-visitor text and never needs the failing model. Private sends use a durable
-at-most-once barrier; uncertain sends are not retried. The app notice remains
-available when private posting is disabled or a linked platform is unavailable.
+Enabling visitors (`private_chats=everyone` or group `members=everyone`) starts
+setup immediately. Relinking an open bot starts it for the new specialist.
+The settings UI polls while `setting_up`; it displays “Model ready for visitors”
+after successful setup and the specific fix after an actual setup failure.
+
+Setup uses a hidden automation conversation with the linking person's ordinary
+identity, billing, owner pool, event-turn rate budget and transactional turn
+admission. The existing typed server transport checks its hidden setup claim,
+owner turn, key, administrator authority and Stop fence before dispatch; a phone
+or SMS session's guest transport never becomes owner authority. Its configured
+profile is server-selected. Its fixed input asks only
+for “OK”, with no automatic continuations. NyxAgent's strict Responses API does
+not accept `tools`, `tool_choice` or `max_output_tokens`; NyxID therefore projects
+only the authenticated setup model callback to an empty tool list, `tool_choice:
+none` and a 16-token output bound before admission/billing/egress. Model, target,
+headers and the runtime's prompt are unchanged. Once that genuine owner model
+call is admitted and accepted upstream, setup can stop through normal turn
+cancellation; the text of the hidden answer is not needed to establish a route.
+The setup key has no service, account or machine grants; setup MCP and non-model
+callbacks are refused. Only a genuine admitted owner model callback can record
+the exact route. Guest text, service selectors, models and credentials never
+enter setup. Shared recipients never establish owner routes. Organization bot
+links keep their existing linking-person authority; organization-agent use
+continues to require its existing administrator/member checks.
+
+A fenced, metadata-only `guest_model_setup` record in `assistant_service_execution`
+coordinates one attempt per acting owner/agent/profile across replicas. It has a
+seven-day TTL. A first guest waits up to 60 seconds, including any mapping-drift
+retry. Channel waits retain an encrypted, source-bound payload on `nyxbot_events`
+(maximum 32 waiting entries per owner), with the ordinary event TTL and delivery
+barrier. The pending owner-event queue is deliberately never used for guest
+work: older replicas would wake it with owner authority. New replicas recover
+waits through the existing 15-second sweep. Live audience, channel, agent and
+thread authority are checked again before guest admission; binding the source
+and claiming the turn commit together and remove the sealed pending input.
+
+Setup conversations are omitted from transcript/thread lists and are deleted
+through the normal credential-revoking conversation cleanup after completion.
+The sweep cleans crashed hidden turns. Failed setups retain closed reason codes
+and a durable notice outbox, never provider prose. Notices are deduplicated per
+acting owner/agent/reason for 24 hours, with a 48-hour notice TTL. The existing
+sweep appends fixed text to the owner's agent home and attempts verified private
+chats on bots linked to that agent. Guest callbacks themselves do not notify.
+The visitor receives “Visitor setup could not finish. The owner has been
+notified. Please try again later.” only for an actual setup failure. Other
+refusals retain the generic message. Setup retries after a short cooldown;
+credential/profile changes are revalidated on the next guest turn. Hidden setup
+never appears as an ordinary user/assistant exchange or wakes another agent.
 
 New channel threads inherit their linked agent's configured profile. Existing
 threads retain their model, including legacy channels created with the global
@@ -385,8 +421,9 @@ NyxAgent's policy must align this NyxID configuration too. Whenever NyxAgent's
 profile → model/service/path mapping changes, update `model-routes.json` with it.
 Until the map catches up, guests require an owner-recorded route for the new
 mapping; bootstrap refuses mismatches without learning from the callback or
-choosing another service. An owner reply can record the new exact route through
-the unchanged owner admission path, so map drift degrades safely. NyxAgent's model
+choosing another service. The automatic system owner setup records the new exact
+route through ordinary owner admission, then retries the original guest once.
+It never learns an owner route from a guest callback. NyxAgent's model
 listing does not publish the proxy path and is not used as routing authority.
 
 Bootstrap resolves that configured slug through the normal personal/legacy/org
@@ -395,6 +432,18 @@ pool. The selected connection must be the same catalog platform/master route,
 with no BYOK, node, per-agent credential override, owner connection headers or
 request-selected destination. Catalog-only calls cannot bypass a normal saved
 connection. No owner consent or durable route is created by a guest callback.
+An explicit platform connection may retain its old BYOK key ID; that unused key
+is excluded from the connection authority digest, including after deletion or
+rotation. Readiness preserves legacy catalog-master auth fields exactly as
+execution does; only explicit platform-key configuration derives effective
+provider auth. No personal connection row is required for a public catalog master.
+An owner-admitted no-auth model route is revalidated against the ordinary no-auth
+execution rules; this does not broaden the static default's master-route policy.
+The catalog's `inference.wire_protocol` does not override NyxAgent's generation
+endpoint: a `llm-deepseek` catalog marked `openai_completions` can still match the
+server-owned `responses` route when that is the actual authenticated callback.
+A BYOK or customized connection legitimately needs its exact admitted owner
+route, now established automatically.
 
 Every path still requires a closed stateless generation endpoint, non-empty
 exact model, no method override/pool, and the current turn's server-written
@@ -402,20 +451,14 @@ exact model, no method override/pool, and the current turn's server-written
 prompt bytes (context and tool results evolve). Saved-connection admissions
 revalidate the route at egress.
 
-An absent, changed or mismatched route returns HTTP 403 / `9000`,
-`guest_model_route_required`. When the exact recent model refusal explains the
-upstream failure, a setup diagnostic gives guests “The owner hasn't finished
-setting this assistant up for visitors and has been notified. Please try again
-later.” Other, missing or unknown diagnostic reasons give “This assistant can't
-answer right now. Please try again later.” Native relay, gateway, and phone/SMS
-adapters deliver this fixed local refusal through their normal output; the persisted turn
-remains failed for owner diagnostics. They do not turn arbitrary upstream errors
-into successful replies. Owner history retains the
-sanitized `failure_reason`; Details advises sending an owner message using the
-configured model to record its route. Stale/ambiguous evidence retains the
-existing generic error. The optional agent/thread bindings are additive; an old
-replica may drop the thread binding, in which case new readers use the matching
-agent binding or safe bootstrap, otherwise refuse. No migration widens access.
+An absent, changed or mismatched callback route still returns HTTP 403 / `9000`,
+`guest_model_route_required`, at the proxy boundary. The runtime waits for setup
+and retries a route mismatch once within the original setup deadline. It does
+not retry unrelated errors, admit a guest-chosen route or weaken approval/billing
+checks. Setup failure is retained as closed `failure_reason` metadata. All new
+state is additive; old replicas ignore the guest queue and hidden marker. They
+may still refuse their own cold guest turns until upgraded, while new replicas
+can resume the safe source-event queue. No migration widens guest authority.
 The model connection does not need to be a specialist tool grant. Guest service
 limits, explicit approval requirements, platform-key ACLs, billing and concurrency
 still apply. NyxBot guest tool calls remain refused; specialists keep their

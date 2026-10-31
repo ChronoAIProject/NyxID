@@ -310,6 +310,20 @@ async fn check_http_projected_inner(
             route
         });
     let mut operation = http_operation(target, method, path, query, body);
+    if crate::services::assistant_guest_model_setup::is_setup(&state.db, &chat.conversation_id)
+        .await?
+    {
+        let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        if model_route.is_none()
+            || request
+                .get("tools")
+                .is_some_and(|tools| !tools.as_array().is_some_and(|items| items.is_empty()))
+        {
+            return Err(AppError::Forbidden(
+                "Visitor setup only admits model generation without tools".into(),
+            ));
+        }
+    }
     bind_headers(&mut operation, &projection.headers(target, headers));
     if is_shared_chat(chat)
         && crate::services::telnyx_platform_service::contract(&target.service).is_some()

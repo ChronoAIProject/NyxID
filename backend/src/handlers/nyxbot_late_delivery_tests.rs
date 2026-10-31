@@ -840,15 +840,17 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
 
 #[tokio::test]
 async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery() {
-    const SETUP: &str = "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.";
+    const SETUP: &str =
+        "Visitor setup could not finish. The owner has been notified. Please try again later.";
     const RETRY: &str = "This assistant can't answer right now. Please try again later.";
     for reason in [
         None,
         Some("connection_not_platform"),
+        Some("model_connection_unavailable"),
         Some("no_admission"),
         Some("unknown_reason"),
     ] {
-        let expected = if reason == Some("connection_not_platform") {
+        let expected = if reason == Some("model_connection_unavailable") {
             SETUP
         } else {
             RETRY

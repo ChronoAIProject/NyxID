@@ -491,6 +491,9 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Server-created, tool-free visitor model initialization. Never client input.
+    #[serde(default)]
+    pub guest_model_setup: bool,
     /// Invocation conversations always enforce live execution independently of the legacy rollout.
     #[serde(default)]
     pub invocation_controlled: bool,

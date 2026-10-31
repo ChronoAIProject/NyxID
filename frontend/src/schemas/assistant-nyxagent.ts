@@ -446,7 +446,7 @@ export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
 export const guestReadinessSchema = z.object({
-  status: z.enum(["ready", "not_ready"]),
+  status: z.enum(["ready", "setting_up", "not_ready"]),
   reason: z.string().nullish(),
   fix: z.string().nullish(),
 });

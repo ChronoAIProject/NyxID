@@ -39,7 +39,7 @@ pub use bootstrap::{begin_model_attempt, finish_model_attempt};
 mod authority;
 pub use authority::connection_binding;
 mod availability;
-mod guest_model;
+pub(crate) mod guest_model;
 pub(crate) mod model_diagnostic;
 pub(crate) mod readiness;
 pub(crate) mod readiness_notice;

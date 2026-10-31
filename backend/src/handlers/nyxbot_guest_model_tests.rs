@@ -7,7 +7,7 @@ use tower::ServiceExt;
 #[path = "nyxbot_guest_channel_tests.rs"]
 mod channel_tests;
 
-async fn model_callback(
+pub(super) async fn model_callback(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((slug, path)): Path<(String, String)>,

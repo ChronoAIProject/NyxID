@@ -437,6 +437,9 @@ pub(crate) async fn after_turn(
     text: &str,
     error: Option<&TurnError>,
 ) {
+    if row.guest_model_setup {
+        return;
+    }
     let Some(turn) = row.active_turn.as_ref() else {
         return;
     };
@@ -3600,6 +3603,18 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if super::nyxbot::guest_setup_queue::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Guest model queue deferred");
+            }
+            if crate::services::assistant_guest_model_setup::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Guest model recovery deferred");
+            }
             if super::nyxbot::guest_model_notices::sweep(&state)
                 .await
                 .is_err()

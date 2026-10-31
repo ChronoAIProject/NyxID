@@ -241,7 +241,29 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
             IndexModel::builder().keys(doc! {"expires_at": 1})
                 .options(IndexOptions::builder().expire_after(Duration::ZERO).build()).build(),
             IndexModel::builder().keys(doc! {"user_id": 1, "conversation_id": 1, "api_key_id": 1, "turn_id": 1, "kind": 1}).build(),
+            IndexModel::builder().keys(doc! {"kind":1,"user_id":1,"agent_id":1,"profile":1}).build(),
+            IndexModel::builder().keys(doc! {"kind":1,"status":1,"until":1}).build(),
         ]).await?;
+    db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"guest_setup_deadline":1})
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>("assistant_conversations")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"guest_model_setup":1,"created_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! {"guest_model_setup":true})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()

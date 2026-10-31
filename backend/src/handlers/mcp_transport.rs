@@ -2460,6 +2460,25 @@ async fn handle_tools_call(
     client_accepts_sse: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
+    if let Some(chat) = auth.chat.as_ref() {
+        match crate::services::assistant_guest_model_setup::is_setup(
+            &state.db,
+            &chat.conversation_id,
+        )
+        .await
+        {
+            Ok(false) => {}
+            Ok(true) => {
+                return app_error_to_rpc(
+                    request.id.clone(),
+                    &crate::errors::AppError::Forbidden(
+                        "Visitor model setup cannot use tools".into(),
+                    ),
+                );
+            }
+            Err(error) => return app_error_to_rpc(request.id.clone(), &error),
+        }
+    }
     if let Some(chat) = auth.chat.as_ref()
         && !matches!(
             request

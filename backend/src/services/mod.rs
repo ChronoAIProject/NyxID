@@ -26,6 +26,7 @@ pub mod assistant_direct;
 pub mod assistant_engine_policy;
 pub mod assistant_engine_worker;
 pub mod assistant_feedback_service;
+pub(crate) mod assistant_guest_model_setup;
 mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_model_observer;
