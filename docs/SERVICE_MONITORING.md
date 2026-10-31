@@ -2,7 +2,7 @@
 
 The Monitoring card on `/keys/{id}` reads and manages one exact UserService
 through fixed NyxID routes. chrono-probe owns configuration, check resolution,
-scheduled observations, and discovered paths. NyxID stores no monitoring
+latest check results, and discovered paths. NyxID stores no monitoring
 configuration or results, runs no status ingestion job, and adds no monitoring
 work to normal REST, LLM, or MCP invocations.
 
@@ -32,8 +32,10 @@ Deploy a chrono-probe version implementing
 ([PR #9](https://github.com/ChronoAIProject/chrono-probe/pull/9)). The existing
 owner config and on-demand probe endpoints alone are insufficient: exact
 status reads and draft validation must also exist. This integration uses that
-PR's `interval_ms` / `stale_at` status contract. It never uses the full-inventory
-`/status` endpoint or a platform probe key.
+PR's `interval_ms` / `stale_at` status contract. For the unified latest result and
+saved-path behavior, also deploy [PR #12](https://github.com/ChronoAIProject/chrono-probe/pull/12)
+before this frontend update. It never uses the full-inventory `/status` endpoint
+or a platform probe key.
 
 chrono-probe must be configured to call this NyxID installation for identity,
 service inventory, and exact proxy execution. Its existing authorizer reads
@@ -97,24 +99,25 @@ the user to reload rather than silently overwriting another editor's changes.
 Clear removes owner overrides; a built-in or discovered health check can take
 over. It does not disable monitoring.
 
-Page load and Refresh perform scoped GETs only. Status uses existing scheduled
-observations. A missing snapshot remains unknown, including personal services
-without scheduled observations. Existing scheduled evidence expires at
-`stale_at`; stale, missing, invalid-time, and `no_health_path` evidence never
-renders a current healthy/unhealthy badge. Readiness without configured checks
-is labeled Not configured only when that is known.
+Page load and Refresh perform scoped GETs only. Status shows the latest completed check
+for each assertion, whether initiated manually or by the scheduler. Check now publishes
+its result in chrono-probe's existing status store; the UI reloads the authoritative
+status and renders one Health/Readiness summary, including after browser refresh.
+Saved owner paths and expectations remain visible before a first observation. A check
+that has not run remains unknown, and no duration or HTTP status is fabricated.
 
-Check now and Test draft execute through the normal NyxID proxy with the
-caller's authority, including ordinary approvals and billing. Owners with
-approvals set to **All requests** receive an approval prompt per check. Each
-check of a priced platform service bills the caller; page load and Refresh
-only read observations and do not execute or bill a check.
+chrono-probe orders observations by their check timestamp and fences obsolete owner
+configuration revisions. Saving or clearing configuration invalidates old evidence.
+Evidence expires at `stale_at`; stale, missing, invalid-time, and `no_health_path`
+evidence never renders a current healthy/unhealthy badge. Readiness without configured
+checks is labeled Not configured only when that is known.
 
-Check now and Test draft render their responses in component memory for the
-current page. Manual evidence expires after 60 seconds. These responses do not
-replace a scheduled observation or create a NyxID history. Query data is removed
-when the page's last observer unmounts; there is no status polling. A local
-10-second display timer only ages badges and makes no network request.
+Test draft remains temporary and does not publish a latest result. Its evidence expires
+after 60 seconds. NyxID stores no monitoring history or backend cache. Latest observations
+remain in chrono-probe's in-process store across browser refreshes, but are rebuilt after
+probe process restart; deploy a single probe replica as in its supplied manifests.
+There is no status polling. A local 10-second display timer only ages badges and makes
+no network request.
 
 ## Bounds and errors
 
