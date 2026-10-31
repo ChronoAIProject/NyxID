@@ -630,6 +630,8 @@ describe("upstream scope override forwarding (issue #917)", () => {
       // Existing params survive the rewrite to URLSearchParams.
       expect(query.get("key_id")).toBe("key-1");
       expect(query.get("redirect_path")).toBe("/keys/key-1");
+      // The provider tab lands on the standalone completion page.
+      expect(query.get("flow")).toBe("wz");
     });
   });
 

@@ -52,11 +52,12 @@ interface FlowProps {
    */
   readonly pairingId: string;
   /**
-   * `system` / `user` / `both`. OAuth flows only — when `user` or
-   * `both`, the flow runs a pre-step that PUTs the user's own
-   * `client_id` / `client_secret` onto the provider before redirect.
+   * OAuth flows only: collect the user's own OAuth app Client ID / Secret
+   * before sign-in and store them on the new connection. `false` signs in
+   * through NyxID's OAuth app. The caller decides from the provider's
+   * `credential_mode` and the user's choice of app.
    */
-  readonly credentialMode?: string;
+  readonly ownOAuthApp?: boolean;
   /** Admin-provided docs URL rendered in the OAuth-credentials step. */
   readonly documentationUrl?: string;
   /**
@@ -101,11 +102,6 @@ interface FlowProps {
  * register their own OAuth app and supply the resulting client
  * credentials before NyxID can redirect to the authorization URL.
  */
-function needsUserOAuthCredentials(credentialMode: string | undefined): boolean {
-  const m = (credentialMode ?? "system").toLowerCase();
-  return m === "user" || m === "both";
-}
-
 interface PlaceholderKeyResponse {
   readonly id: string;
   readonly status: string;
@@ -558,7 +554,7 @@ export function OAuthFlow({
   targetOrgId,
   endpointUrl,
   pairingId,
-  credentialMode,
+  ownOAuthApp = false,
   documentationUrl,
   scopeOverride,
   reconnectKeyId,
@@ -571,9 +567,8 @@ export function OAuthFlow({
   // carries its BYO creds), so we go straight to "starting".
   const isReconnect = Boolean(reconnectKeyId);
   // Distinct phase for the user-OAuth-app credential sub-step. When
-  // `credentialMode` allows user credentials we first GET the existing
-  // metadata; if already set we skip straight to the OAuth redirect,
-  // otherwise we gate on the user pasting client_id / client_secret.
+  // `ownOAuthApp` is set the user pastes client_id / client_secret (or
+  // copies them from an existing connection) before the OAuth redirect.
   const [phase, setPhase] = useState<
     "checking-credentials"
     | "needs-credentials"
@@ -582,7 +577,7 @@ export function OAuthFlow({
     | "done"
     | "error"
   >(
-    !isReconnect && needsUserOAuthCredentials(credentialMode)
+    !isReconnect && ownOAuthApp
       ? "checking-credentials"
       : "starting",
   );
@@ -805,8 +800,8 @@ export function OAuthFlow({
     onCancel();
   }
 
-  // Credential-mode pre-check. Skipped entirely when the provider
-  // uses `system` credentials.
+  // Own-app pre-step. Skipped when sign-in goes through NyxID's OAuth
+  // app.
   //
   // Multi-connection (NyxID): for BYO providers (`credential_mode:
   // "user"` — Lark / Feishu / Twitter) we ALWAYS show the credentials
@@ -826,7 +821,7 @@ export function OAuthFlow({
     // Manage-scopes mode re-auths an existing connection that already carries
     // its BYO credentials — skip the credential sub-step entirely.
     if (isReconnect) return;
-    if (!needsUserOAuthCredentials(credentialMode)) return;
+    if (!ownOAuthApp) return;
     setPhase("needs-credentials");
     // Fetch existing active keys to offer "copy from" when the user
     // already has a connection to this provider with BYO creds.
@@ -859,7 +854,7 @@ export function OAuthFlow({
         // Best-effort: if the fetch fails we just don't show the picker.
       }
     })();
-  }, [credentialMode, slug]);
+  }, [ownOAuthApp, slug]);
 
   function saveUserCredentials() {
     const copyMode = !!copyFromKeyId;
@@ -917,9 +912,9 @@ export function OAuthFlow({
           // Multi-connection BYO providers: thread the just-entered
           // `clientId` / `clientSecret` into `POST /keys` so the new
           // `UserApiKey` carries its own encrypted copy of the Custom
-          // App credentials. `credential_mode: "system"` providers
-          // (the codex / device-code case) just pass through empty
-          // strings here and the backend ignores them.
+          // App credentials. Sign-ins through NyxID's OAuth app just
+          // pass through empty strings here and the backend ignores
+          // them.
           const createPromise = createPlaceholderKey(
             slug,
             label,
@@ -965,8 +960,11 @@ export function OAuthFlow({
         // UserApiKey (rather than the legacy user_provider_tokens path).
         // Harmless for legacy keys: the backend just falls back to the
         // legacy write path when the key carries no connection_id.
+        // `flow=wz` lands the provider tab on the standalone completion page
+        // instead of the web app; `redirect_path` covers older servers.
         const initiateQuery = new URLSearchParams({
           redirect_path: `/keys/${placeholder.id}`,
+          flow: "wz",
           key_id: placeholder.id,
         });
         // Scope picker selection (NyxID#917). Sent as `scope_override` (the
@@ -1121,8 +1119,8 @@ export function OAuthFlow({
               : "Paste your OAuth app credentials"}
           </h3>
           <p className="text-12 text-muted-foreground">
-            This provider expects you to register your own OAuth app
-            and supply the resulting Client ID and Client Secret.
+            Register your own OAuth app with the provider and paste its
+            Client ID and Client Secret.
           </p>
           {documentationUrl ? (
             <a

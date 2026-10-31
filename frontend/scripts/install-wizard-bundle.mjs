@@ -46,6 +46,8 @@ const STATIC_ASSETS = [
   // header logo 404s.
   ["frontend/public/nyxid-coloured-logo.svg", "nyxid-coloured-logo.svg"],
   ["frontend/public/nyxid-coloured-logo-dark.svg", "nyxid-coloured-logo-dark.svg"],
+  // `NyxidIcon` on the shared "NyxID managed" OAuth-app card.
+  ["frontend/public/nyxid-coloured-icon.svg", "nyxid-coloured-icon.svg"],
 ]
 
 const EXTRAS = [

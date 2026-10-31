@@ -1227,3 +1227,118 @@ describe("CLI wizard platform-key selection", () => {
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/keys", { service_slug: "llm-xai", label: "xAI", use_platform_key: true }));
   });
 });
+
+// One-click OAuth (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md): `both`-mode
+// providers NyxID has its own app for sign in through it by default, with the
+// user's own app as the alternative, matching the dashboard and connect links.
+describe("CLI wizard OAuth app choice", () => {
+  const githubEntry = {
+    slug: "api-github",
+    name: "GitHub",
+    base_url: "https://api.github.com",
+    auth_method: "bearer",
+    provider_type: "oauth2",
+    provider_config_id: "prov-github",
+    credential_mode: "both",
+    has_platform_oauth_credentials: true,
+    platform_scope_allowlist: ["read:user", "user:email", "public_repo"],
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+    default_scopes: ["read:user", "user:email"],
+    scope_catalog: [
+      { scope: "read:user", label: "Read profile", description: "Read profile." },
+      { scope: "repo", label: "Private repositories", description: "Full repo access.", sensitive: true },
+    ],
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockOAuthFlow.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  async function continueToSignIn() {
+    await userEvent.click(
+      screen.getByRole("button", { name: /Continue with provider sign-in/i }),
+    );
+    await waitFor(() => expect(mockOAuthFlow).toHaveBeenCalled());
+    return mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly ownOAuthApp: boolean;
+      readonly scopeOverride: readonly string[];
+    };
+  }
+
+  it("signs in through NyxID's app by default and gates scopes to its allowlist", async () => {
+    mockGet.mockResolvedValue(githubEntry);
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-github" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    expect(
+      await screen.findByRole("radio", { name: /NyxID managed/ }),
+    ).toBeChecked();
+    expect(screen.getByRole("button", { name: /Private repositories/ })).toBeDisabled();
+
+    const props = await continueToSignIn();
+    expect(props.ownOAuthApp).toBe(false);
+    expect([...props.scopeOverride].sort()).toEqual(["read:user", "user:email"]);
+  });
+
+  it("explains NyxID managed in a tooltip and shows the NyxID logo", async () => {
+    mockGet.mockResolvedValue(githubEntry);
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-github" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    const managed = await screen.findByRole("radio", { name: /NyxID managed/ });
+    expect(managed.querySelector('img[src="/nyxid-coloured-icon.svg"]')).not.toBeNull();
+    await userEvent.hover(managed);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /consent screen shows NyxID’s own app/,
+    );
+  });
+
+  it("collects the user's own app when chosen, and drops own-app scopes on switching back", async () => {
+    mockGet.mockResolvedValue(githubEntry);
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-github" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    await userEvent.click(
+      await screen.findByRole("radio", { name: /Your own OAuth app/ }),
+    );
+    const repo = screen.getByRole("button", { name: /Private repositories/ });
+    expect(repo).toBeEnabled();
+    await userEvent.click(repo);
+    await userEvent.click(screen.getByRole("radio", { name: /NyxID managed/ }));
+    await userEvent.click(screen.getByRole("radio", { name: /Your own OAuth app/ }));
+    expect(screen.getByRole("button", { name: /Private repositories/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+
+    const props = await continueToSignIn();
+    expect(props.ownOAuthApp).toBe(true);
+    expect(props.scopeOverride).not.toContain("repo");
+  });
+
+  it.each([
+    ["both without NyxID's app", { has_platform_oauth_credentials: false }, true],
+    ["both on an older server", { has_platform_oauth_credentials: undefined }, true],
+    ["user", { credential_mode: "user" }, true],
+    ["system", { credential_mode: "system", has_platform_oauth_credentials: false }, false],
+  ] as const)("offers no choice for %s", async (_name, overrides, ownOAuthApp) => {
+    mockGet.mockResolvedValue({ ...githubEntry, ...overrides });
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-github" }} />, {
+      wrapper: createWrapper(),
+    });
+    await screen.findByRole("button", { name: /Continue with provider sign-in/i });
+    expect(screen.queryByRole("radio", { name: /NyxID managed/ })).not.toBeInTheDocument();
+
+    const props = await continueToSignIn();
+    expect(props.ownOAuthApp).toBe(ownOAuthApp);
+  });
+});
