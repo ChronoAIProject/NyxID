@@ -8,8 +8,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import ci_resources
 
@@ -103,16 +104,36 @@ class ResourceWrapperTests(unittest.TestCase):
     def test_wrapper_cancellation_reaches_descendants_and_cannot_succeed(self):
         ready = self.root / "ready"
         terminated = self.root / "terminated"
-        # Even a child that handles TERM by returning success must leave the gate cancelled.
-        source = (
-            "import os,signal,sys,time; from pathlib import Path; "
-            "pid=os.fork(); "
-            "signal.signal(signal.SIGTERM, lambda *_: "
-            "(Path(sys.argv[2]).write_text('stopped') if pid == 0 else None, sys.exit(0))); "
-            "Path(sys.argv[1]).write_text('ready') if pid == 0 else None; time.sleep(120)"
+        # Install the handler before fork, with TERM blocked until each process
+        # is ready. The descendant can only handle TERM after the direct child
+        # exits and closes the pipe: parent-first shutdown is intentional.
+        source = """
+import os, signal, sys, time
+from pathlib import Path
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+reader, writer = os.pipe()
+pid = None
+def terminate(*_):
+    if pid == 0:
+        Path(sys.argv[2]).write_text('stopped')
+    sys.exit(0)
+signal.signal(signal.SIGTERM, terminate)
+pid = os.fork()
+if pid == 0:
+    os.close(writer)
+    Path(sys.argv[1]).write_text('ready')
+    os.read(reader, 1)  # EOF proves that the parent has exited.
+else:
+    os.close(reader)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+time.sleep(120)
+"""
+        wrapper = (
+            "import sys; sys.path.insert(0,sys.argv[1]); from ci_resources import run; "
+            "sys.exit(run('cancel', [sys.executable, '-c', sys.argv[2], *sys.argv[3:]], cancellation_grace=1))"
         )
         child = subprocess.Popen(
-            [sys.executable, str(SCRIPT), "cancel", sys.executable, "-c", source,
+            [sys.executable, "-c", wrapper, str(SCRIPT.parent), source,
              str(ready), str(terminated)], env=self.environment, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
         )
@@ -130,11 +151,78 @@ class ResourceWrapperTests(unittest.TestCase):
                 child.kill()
                 child.wait()
 
+    def test_parent_exit_does_not_shorten_or_restart_descendant_grace(self):
+        # Force the exact losing schedule without relying on OS scheduling:
+        # wait() reaps a successful parent before the descendant handles TERM.
+        for cooperative in (True, False):
+            with self.subTest(cooperative=cooperative):
+                now = 0.0
+                handlers = {}
+                signals = []
+                received = False
+                repeated = False
+
+                def install(sig, handler):
+                    previous = handlers.get(sig, signal.SIG_DFL)
+                    handlers[sig] = handler
+                    return previous
+
+                def wait(timeout):
+                    nonlocal received
+                    if not received:
+                        received = True
+                        handlers[signal.SIGTERM](signal.SIGTERM, None)
+                    return 0  # The parent exits successfully on TERM.
+
+                def sleep(seconds):
+                    nonlocal now, repeated
+                    now += seconds
+                    if now >= .1 and not repeated:
+                        repeated = True
+                        handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+                def killpg(pid, sig):
+                    self.assertEqual(pid, 123)
+                    if sig == 0:
+                        # The cooperative descendant completes at t=.2; an
+                        # uncooperative one stays until the wrapper kills it.
+                        if cooperative and now >= .2:
+                            raise ProcessLookupError()
+                    else:
+                        signals.append((sig, now))
+
+                child = Mock(pid=123)
+                child.wait.side_effect = wait
+                child.poll.return_value = 0
+                with patch.dict(os.environ, self.environment, clear=True), \
+                     patch.object(ci_resources, "metadata", return_value={}), \
+                     patch.object(ci_resources, "snapshot", return_value={}), \
+                     patch.object(ci_resources.signal, "signal", side_effect=install), \
+                     patch.object(ci_resources.os, "killpg", side_effect=killpg), \
+                     patch.object(ci_resources.subprocess, "Popen", return_value=child), \
+                     patch.object(ci_resources, "time", SimpleNamespace(
+                         monotonic=lambda: now, sleep=sleep)), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    code = ci_resources.run("scheduled", ["unused"], cancellation_grace=1)
+                self.assertEqual(code, 143)
+                self.assertEqual(signals[0], (signal.SIGTERM, 0))
+                killed = [at for sig, at in signals if sig == signal.SIGKILL]
+                self.assertEqual(len(killed), 1)
+                self.assertGreaterEqual(killed[0], .2 if cooperative else 1)
+                self.assertLessEqual(killed[0], .25 if cooperative else 1.05)
+                self.assertTrue(repeated, "repeat cancellation cannot extend the deadline")
+
     def test_uncooperative_descendants_are_killed_within_bounded_grace(self):
-        ready = self.root / "uncooperative"
+        for parent_exits in (False, True):
+            with self.subTest(parent_exits=parent_exits):
+                self.check_uncooperative_descendant(parent_exits)
+
+    def check_uncooperative_descendant(self, parent_exits):
+        ready = self.root / f"uncooperative-{parent_exits}"
         source = (
             "import os,signal,sys,time; from pathlib import Path; "
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN); pid=os.fork(); "
+            f"signal.signal(signal.SIGTERM, {'lambda *_: sys.exit(0)' if parent_exits else 'signal.SIG_IGN'}); pid=os.fork(); "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN) if pid == 0 else None; "
             "Path(sys.argv[1]).write_text(str(os.getpid())) if pid == 0 else None; time.sleep(120)"
         )
         wrapper = (
