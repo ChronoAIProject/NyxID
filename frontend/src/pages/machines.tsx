@@ -1,35 +1,32 @@
-import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
-import {
-  MachineIsolationBadge,
-  MachineSharingBadge,
-} from "@/components/shared/machine-isolation";
+import { remoteMachineReportedProfile } from "@/lib/remote-machine-presentation";
+import { remoteMachineLifecyclePending } from "@/lib/remote-machine-lifecycle";
 import { useState } from "react";
-import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Monitor, Settings, History } from "lucide-react";
-import { useMachineUpdates, useRemoteMachines } from "@/hooks/use-machines";
-import type { MachineUpdateStatus, RemoteMachine } from "@/schemas/machines";
-import { RemoteMachineDetail } from "@/components/machines/remote-machine-detail";
-import { ErrorBanner } from "@/components/shared/error-banner";
+import { Server } from "lucide-react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
+import { useRemoteMachineContinuity } from "@/hooks/use-remote-machine-continuity";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  useMachineUpdates,
+  useRemoteMachines,
+  useRemoteMachineOperation,
+  useRemoteMachineEntitlement,
+} from "@/hooks/use-machines";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
 import { useAuthStore } from "@/stores/auth-store";
 import { parseMachinesSearch } from "@/lib/machine-search";
-import { SavedLoginsPage } from "@/pages/saved-logins";
+import { readRemoteMachineIntent } from "@/lib/remote-machine-intent";
+import { RemoteMachineDetail } from "@/components/machines/remote-machine-detail";
+import { RemoteMachineActivity } from "@/components/machines/remote-machine-activity";
+import { MachineCard } from "@/components/shared/machine-card";
 import { MachineActivity } from "@/components/shared/machine-activity";
 import { MachineSettings } from "@/components/shared/machine-settings";
+import { SavedLoginsPage } from "./saved-logins";
 import { PageHeader } from "@/components/shared/page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
-import { NodeStatusBadge } from "@/components/shared/node-status-badge";
-import { Badge } from "@/components/ui/badge";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Sheet,
@@ -38,84 +35,97 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
-import type { NodeInfo } from "@/types/nodes";
+import type { RemoteMachine } from "@/schemas/machines";
 
-function MachineCard({
-  node,
-  onSettings,
-  onActivity,
-  update,
-}: {
-  readonly node: NodeInfo;
-  readonly onSettings: () => void;
-  readonly onActivity: () => void;
-  readonly update?: MachineUpdateStatus;
+function RemoteProgress({ machine, children }: {
+  readonly machine: RemoteMachine;
+  readonly children: (progress: React.ReactNode, pending: boolean) => React.ReactNode;
 }) {
-  const machine = node.machine!;
-  return (
-    <article className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <Monitor className="h-4 w-4 text-text-tertiary" />
-        <h3 className="min-w-0 flex-1 truncate text-13 font-medium">
-          {node.name}
-        </h3>
-        {update?.update_available ? (
-          <Badge variant="warning">
-            Update available ({update.target_version})
-          </Badge>
-        ) : null}
-        <span className="text-11 text-muted-foreground">
-          v{node.metadata?.agent_version ?? "unknown"}
-        </span>
-        <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
-        <MachineIsolationBadge machine={machine} />
-        <MachineSharingBadge />
-      </div>
-      <p className="text-12 text-muted-foreground">
-        {[
-          machine.shell && "Commands",
-          machine.files && "Files",
-          (machine.browser ?? machine.computer) && "Browser",
-          machine.computer && "Computer",
-        ]
-          .filter(Boolean)
-          .join(" · ")}{" "}
-        · {machine.os} / {machine.arch}
-      </p>
-      <p className="text-12 text-muted-foreground">
-        {node.owner.display_name} ·{" "}
-        {node.is_connected ? "Connected" : "Disconnected"}
-        {machine.computer && !machine.computer_ready
-          ? " · Computer permissions or display unavailable"
-          : ""}
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {machine.computer || machine.browser ? (
-          <Button asChild disabled={!node.is_connected}>
-            <Link
-              to="/assistant/machines/$nodeId/desktop"
-              params={{ nodeId: node.id }}
-              disabled={!node.is_connected}
-            >
-              Watch / Take over desktop
-            </Link>
-          </Button>
-        ) : null}
-        <Button onClick={onActivity}>
-          <History />
-          Activity
-        </Button>
-        <Button onClick={onSettings} aria-label={`Settings for ${node.name}`}>
-          <Settings />
-          Settings
-        </Button>
-      </div>
-    </article>
+  const actor = useAuthStore((state) => state.user?.id);
+  const { operationId, acceptedAction, machineReadBehind, readError } = useRemoteMachineContinuity(machine.node_id, machine);
+  const unresolvedActions = (["pause", "resume", "delete"] as const).filter(
+    (action) => {
+      if (!actor) return false;
+      try {
+        return Boolean(
+          readRemoteMachineIntent(actor, `${machine.node_id}:${action}`),
+        );
+      } catch {
+        // An unreadable saved request also requires explicit status/review.
+        return true;
+      }
+    },
   );
+  // Observe accepted work beyond the Settings drawer lifetime. Mutation retries
+  // still use the original persisted operation/body/key in the lifecycle adapter.
+  const query = useRemoteMachineOperation(
+    operationId,
+  );
+  const operation =
+    !query.error && query.data && query.data.id === operationId && query.data.machine_id === machine.node_id
+      ? query.data
+      : undefined;
+  const active =
+    operation &&
+    !operation.terminal_at &&
+    !["succeeded", "failed"].includes(operation.state);
+  const action = acceptedAction ?? operation?.action;
+  const lifecyclePending = remoteMachineLifecyclePending(machine, operationId, operation, machineReadBehind);
+  const message =
+    readError ?? (query.error && operationId
+      ? "Operation status unavailable. Open Settings to check status."
+      : active && operation.delete_retry_stopped
+        ? "Deletion needs attention. Open Settings to retry the original deletion."
+        : operation?.state === "failed"
+          ? "The operation needs attention. Open Settings to review the confirmed result."
+          : operationId && !operation && !acceptedAction
+            ? "Current operation is awaiting confirmation. Open Settings to check status."
+          : machineReadBehind && !operationId
+            ? "Machine state is being refreshed. Open Settings to check status."
+          : lifecyclePending ||
+              [
+                "provisioning",
+                "stopping",
+                "resuming",
+                "deleting",
+                "reconciling",
+              ].includes(machine.resource_state)
+            ? action === "pause"
+              ? "Pausing your machine. Your workspace and free slot are kept."
+              : action === "delete"
+                ? "Deleting your machine. Your free slot stays occupied until deletion is confirmed."
+                : action === "resume"
+                  ? "Resuming your machine. Waiting for confirmation."
+                  : action === "create"
+                    ? "Setting up your machine. You can return later."
+                  : machine.resource_state === "provisioning"
+              ? "Setting up your machine. You can return later."
+              : machine.resource_state === "stopping"
+                ? "Pausing your machine. Your workspace and free slot are kept."
+                : machine.resource_state === "deleting"
+                  ? "Deleting your machine. Your free slot stays occupied until deletion is confirmed."
+                  : machine.resource_state === "reconciling"
+                    ? "Taking longer than usual. Open Settings to check status."
+                    : "Resuming your machine. Waiting for confirmation."
+            : null);
+  const progress = message || unresolvedActions.length ? (
+    <div
+      role="status"
+      className="space-y-2 rounded-lg border border-warning/30 p-3 text-12"
+    >
+      {unresolvedActions.map((action) => (
+        <p key={action}>
+          A previous {action} request has an unconfirmed result. Open Settings
+          to check status before retrying.
+        </p>
+      ))}
+      {message && <p>{message}</p>}
+    </div>
+  ) : null;
+  return children(progress, lifecyclePending);
 }
-
 export function MachinesPage() {
-  const remoteAdmission = useRemoteMachineAdmission();
+  const admission = useRemoteMachineAdmission();
   const navigate = useNavigate();
   const search = parseMachinesSearch(
     useSearch({ strict: false }) as Record<string, unknown>,
@@ -123,23 +133,46 @@ export function MachinesPage() {
   const nodes = useNodes({ pollIntervalMs: 5000 });
   const updates = useMachineUpdates();
   const remote = useRemoteMachines();
+  const entitlement = useRemoteMachineEntitlement(admission);
   const orgs = useOrgs();
   const userId = useAuthStore((state) => state.user?.id);
-  const [activityId, setActivityId] = useState<string>();
-  const [selectedId, setSelectedId] = useState<string | undefined>(
-    search.machine,
+  const [drawer, setDrawer] = useState<
+    | { id: string; view: "settings" | "activity"; action?: "pause" | "resume" }
+    | undefined
+  >(() =>
+    search.machine && search.tab !== "logins"
+      ? { id: search.machine, view: search.activity ? "activity" : "settings" }
+      : undefined,
   );
-  const [linkedMachine, setLinkedMachine] = useState(search.machine);
-  if (linkedMachine !== search.machine) {
-    setLinkedMachine(search.machine);
-    setSelectedId(search.machine);
+  const [location, setLocation] = useState(
+    JSON.stringify([userId, search.machine, search.tab, search.activity]),
+  );
+  const nextLocation = JSON.stringify([
+    userId,
+    search.machine,
+    search.tab,
+    search.activity,
+  ]);
+  if (location !== nextLocation) {
+    setLocation(nextLocation);
+    setDrawer(
+      search.machine && search.tab !== "logins"
+        ? drawer?.id === search.machine &&
+          drawer.view === (search.activity ? "activity" : "settings")
+          ? drawer
+          : {
+              id: search.machine,
+              view: search.activity ? "activity" : "settings",
+            }
+        : undefined,
+    );
   }
   const adminOrgs = new Set(
     orgs.data?.filter((org) => org.your_role === "admin").map((org) => org.id),
   );
-  const hostedMachines = remote.data ?? [];
-  const hostedIds = new Set(hostedMachines.map((machine) => machine.node_id));
-  const machines = (nodes.data ?? []).filter(
+  const hosted = remote.data ?? [];
+  const hostedIds = new Set(hosted.map((machine) => machine.node_id));
+  const selfHosted = (nodes.data ?? []).filter(
     (node) =>
       node.machine &&
       node.metadata?.provisioning_source !== "remote_machine" &&
@@ -147,37 +180,41 @@ export function MachinesPage() {
       (node.owner.id === userId ||
         (node.owner.kind === "org" && adminOrgs.has(node.owner.id))),
   );
-  const selected = machines.find((node) => node.id === selectedId);
-  const selectedRemote = hostedMachines.find(
-    (machine) => machine.node_id === selectedId,
+  const selected = selfHosted.find((node) => node.id === drawer?.id);
+  const selectedRemote = hosted.find(
+    (machine) => machine.node_id === drawer?.id,
   );
-  // Deleted resources leave the active list but retain an owner-readable
-  // tombstone. Resolve direct links independently so cleanup stays reviewable.
-  const remoteDetailId =
-    selectedRemote?.node_id ??
-    (selectedId &&
-    selectedId === search.machine &&
-    !selected &&
-    !nodes.isPending
-      ? selectedId
-      : undefined);
-  function openRemote(machineId: string, operationId?: string) {
-    setSelectedId(machineId);
+  const isRemote = Boolean(drawer && !selected && !nodes.isPending);
+  const name = selected?.name ?? selectedRemote?.name ?? "Remote machine";
+  function open(
+    id: string,
+    view: "settings" | "activity",
+    action?: "pause" | "resume",
+  ) {
+    setDrawer({ id, view, action });
     void navigate({
       to: "/assistant/machines",
-      search: { machine: machineId, operation: operationId },
+      search: {
+        machine: id,
+        activity: view === "activity" ? "tools" : undefined,
+      },
     });
   }
+  function close() {
+    setDrawer(undefined);
+    void navigate({ to: "/assistant/machines", search: {} });
+  }
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-5xl space-y-6">
       <Tabs
         value={search.tab ?? "machines"}
-        onValueChange={(tab) =>
+        onValueChange={(tab) => {
+          setDrawer(undefined);
           void navigate({
             to: "/assistant/machines",
             search: { tab: tab === "logins" ? "logins" : undefined },
-          })
-        }
+          });
+        }}
       >
         <TabsList>
           <TabsTrigger value="machines">Machines</TabsTrigger>
@@ -189,7 +226,7 @@ export function MachinesPage() {
             description="Remote and self-hosted computers for authorized agents and clients."
             actions={
               <div className="flex flex-wrap gap-2">
-                {remoteAdmission && (
+                {admission && (
                   <AddCtaButton
                     label="Create remote machine"
                     onClick={() =>
@@ -211,254 +248,233 @@ export function MachinesPage() {
           />
           <section aria-label="Remote machines" className="space-y-3">
             <h3 className="text-15 font-semibold">Remote machines</h3>
-            <p className="text-12 text-muted-foreground">
-              Personal hosted machines with a fixed workspace and selected
-              capabilities. Resource state, runtime billing and execution
-              authorization are independent.
-            </p>
-            {!remote.isPending &&
-              !remote.error &&
-              !remote.discoveryComplete && (
-                <p role="status" className="text-12 text-muted-foreground">
-                  Complete remote Machine discovery is not confirmed by this
-                  server.
-                </p>
-              )}
+            {(admission || hosted.length > 0) && (
+              <section
+                aria-label="Personal free slot"
+                className="flex flex-wrap items-center gap-3 rounded-xl border border-border/50 bg-card p-4 text-12"
+              >
+                <Server className="size-4 text-text-tertiary" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium">Personal free slot</p>
+                  <p className="text-11 text-muted-foreground">
+                    Machine runtime is free. Model and external API usage may be
+                    billed separately.
+                  </p>
+                </div>
+                <Badge variant="secondary">
+                  {entitlement.error || !entitlement.data
+                    ? "Availability not confirmed"
+                    : !entitlement.data.eligible
+                      ? "Not eligible"
+                      : entitlement.data.free_slot_available
+                        ? "Available · 0 of 1"
+                        : "1 of 1 in use"}
+                </Badge>
+              </section>
+            )}
             {remote.isPending ? (
-              <p role="status" className="text-12">
-                Loading remote machines…
-              </p>
+              <p role="status">Loading remote machines…</p>
             ) : remote.error ? (
               <ErrorBanner
                 message="Remote machine management could not be loaded. This deployment may not expose it yet."
                 onRetry={() => void remote.refetch()}
               />
-            ) : hostedMachines.length ? (
-              <RemoteMachineList
-                machines={hostedMachines}
-                onOpen={openRemote}
-              />
             ) : (
-              <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">
-                No remote machines. Check your free slot and the configured
-                profile before creating one.
-              </p>
+              <>
+                {!remote.discoveryComplete && (
+                  <p role="status" className="text-12 text-muted-foreground">
+                    Complete remote Machine discovery is not confirmed by this
+                    server.
+                  </p>
+                )}
+                <div className="grid gap-4 xl:grid-cols-2">
+                  {hosted.map((machine) => {
+                    const node = nodes.data?.find(
+                      (item) =>
+                        item.id === machine.node_id && item.owner.id === userId,
+                    );
+                    const presentation = machine.presentation;
+                    const profile = presentation
+                      ? remoteMachineReportedProfile(presentation)
+                      : node?.machine;
+                    const connected = Boolean(
+                      ["ready", "degraded"].includes(machine.resource_state) &&
+                      machine.authorization_state === "active" &&
+                      (presentation
+                        ? presentation.connected
+                        : node?.is_connected),
+                    );
+                    return (
+                      <RemoteProgress key={machine.node_id} machine={machine}>
+                        {(progress, actionPending) => <MachineCard
+                        id={machine.node_id}
+                        name={machine.name ?? machine.sandbox_name}
+                        owner="Personal account"
+                        machine={profile}
+                        connected={connected}
+                        desktopReady={
+                          presentation?.desktop_ready ?? profile?.computer_ready
+                        }
+                        version={
+                          presentation
+                            ? presentation.agent_version
+                            : node?.metadata?.agent_version
+                        }
+                        remote={machine}
+                        onSettings={() => open(machine.node_id, "settings")}
+                        onActivity={() => open(machine.node_id, "activity")}
+                        onAction={(action) =>
+                          open(machine.node_id, "settings", action)
+                        }
+                        progress={progress}
+                        actionPending={actionPending}
+                      />}
+                      </RemoteProgress>
+                    );
+                  })}
+                </div>
+                {!hosted.length && (
+                  <div className="space-y-3 rounded-xl border border-dashed border-border p-6 text-12">
+                    <p className="text-muted-foreground">
+                      {remote.discoveryComplete
+                        ? "No remote machines. Check your free slot before creating a workspace."
+                        : "No remote machines were returned. Discovery is not yet complete."}
+                    </p>
+                    {admission && (
+                      <Button
+                        onClick={() =>
+                          void navigate({
+                            to: "/assistant/machines/new",
+                            search: { where: "hosted" },
+                          })
+                        }
+                      >
+                        Create remote machine
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </section>
-          <h3 className="text-15 font-semibold">Self-hosted machines</h3>
-          {nodes.isPending || orgs.isPending ? (
-            <p role="status">Loading machines…</p>
-          ) : null}
-          {nodes.error || orgs.error ? (
-            <p role="alert" className="text-12 text-destructive">
-              Could not load machines.{" "}
-              {nodes.error?.message ?? orgs.error?.message}
-            </p>
-          ) : null}
-          {!nodes.isPending &&
-          !orgs.isPending &&
-          !nodes.error &&
-          !orgs.error &&
-          !machines.length ? (
-            <p className="rounded-xl border border-border/50 p-6 text-12 text-muted-foreground">
-              Add a machine to let NyxBot run commands, work with files and use
-              a desktop.
-            </p>
-          ) : null}
-          <div className="grid gap-4 xl:grid-cols-2">
-            {machines.map((node) => (
-              <MachineCard
-                key={node.id}
-                node={node}
-                update={updates.data?.find((row) => row.node_id === node.id)}
-                onSettings={() => setSelectedId(node.id)}
-                onActivity={() => setActivityId(node.id)}
-              />
-            ))}
-          </div>
+          <section aria-label="Self-hosted machines" className="space-y-3">
+            <h3 className="text-15 font-semibold">Self-hosted machines</h3>
+            {nodes.isPending || orgs.isPending ? (
+              <p role="status">Loading machines…</p>
+            ) : nodes.error || orgs.error ? (
+              <p role="alert">Could not load machines.</p>
+            ) : (
+              !selfHosted.length && (
+                <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">
+                  Add a machine to let NyxBot run commands, work with files and
+                  use a desktop.
+                </p>
+              )
+            )}
+            <div className="grid gap-4 xl:grid-cols-2">
+              {selfHosted.map((node) => (
+                <MachineCard
+                  key={node.id}
+                  id={node.id}
+                  name={node.name}
+                  owner={node.owner.display_name}
+                  machine={node.machine}
+                  version={node.metadata?.agent_version}
+                  connected={node.is_connected}
+                  desktopReady={node.machine?.computer_ready}
+                  update={updates.data?.find((row) => row.node_id === node.id)}
+                  onSettings={() => open(node.id, "settings")}
+                  onActivity={() => open(node.id, "activity")}
+                />
+              ))}
+            </div>
+          </section>
         </TabsContent>
         <TabsContent value="logins" className="mt-6">
-          <SavedLoginsPage />
+          <SavedLoginsPage
+            key={userId}
+            onBackToSettings={
+              search.machine
+                ? () => open(search.machine!, "settings")
+                : undefined
+            }
+          />
         </TabsContent>
       </Tabs>
       <Sheet
-        open={Boolean(remoteDetailId)}
-        onOpenChange={(open) => {
-          if (!open) {
-            setSelectedId(undefined);
-            void navigate({ to: "/assistant/machines", search: {} });
-          }
-        }}
-      >
-        <SheetContent className="w-full overflow-y-auto sm:max-w-3xl">
-          <SheetHeader className="pr-8">
-            <SheetTitle>Remote machine details</SheetTitle>
-            <SheetDescription>
-              Lifecycle, access, work history and billing for this machine.
-            </SheetDescription>
-          </SheetHeader>
-          {remoteDetailId ? (
-            <RemoteMachineDetail
-              key={`${userId}:${remoteDetailId}:${search.operation ?? ""}:${search.confirmation ?? ""}`}
-              operationId={search.operation}
-              confirmationId={search.confirmation}
-              machineId={remoteDetailId}
-              onClose={() => {
-                setSelectedId(undefined);
-                void navigate({ to: "/assistant/machines", search: {} });
-              }}
-              initialMachine={selectedRemote}
-              node={
-                nodes.error
-                  ? undefined
-                  : nodes.data?.find(
-                      (node) =>
-                        node.id === remoteDetailId && node.owner.id === userId,
-                    )
-              }
-            />
-          ) : null}
-        </SheetContent>
-      </Sheet>
-      <Sheet
-        open={Boolean(activityId)}
-        onOpenChange={(open) => {
-          if (!open) setActivityId(undefined);
+        open={Boolean(drawer)}
+        onOpenChange={(value) => {
+          if (!value) close();
         }}
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
           <SheetHeader className="shrink-0 p-5 pr-10">
-            <SheetTitle>Machine activity</SheetTitle>
+            <SheetTitle>
+              {drawer?.view === "activity"
+                ? "Machine activity"
+                : `${name} settings`}
+            </SheetTitle>
             <SheetDescription>
-              {machines.find((node) => node.id === activityId)?.name}
+              {drawer?.view === "activity"
+                ? name
+                : "Control confirmations, saved-login typing and specialist access."}
             </SheetDescription>
           </SheetHeader>
-          {activityId && (
-            <MachineActivity key={activityId} nodeId={activityId} />
-          )}
-        </SheetContent>
-      </Sheet>
-      <Sheet
-        open={Boolean(selected)}
-        onOpenChange={(open) => {
-          if (!open) setSelectedId(undefined);
-        }}
-      >
-        <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
-          <SheetHeader className="shrink-0 p-5 pr-10">
-            <SheetTitle>{selected?.name} settings</SheetTitle>
-            <SheetDescription>
-              Control confirmations, saved-login typing and specialist access.
-            </SheetDescription>
-          </SheetHeader>
-          {selected ? (
-            <MachineSettings
-              key={selected.id}
-              node={selected}
-              canManage
-              update={updates.data?.find((row) => row.node_id === selected.id)}
-            />
-          ) : null}
-        </SheetContent>
-      </Sheet>
-    </div>
-  );
-}
-
-function RemoteMachineList({
-  machines,
-  onOpen,
-}: {
-  readonly machines: RemoteMachine[];
-  readonly onOpen: (id: string) => void;
-}) {
-  const label = (value: string) =>
-    value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
-  const state = (machine: RemoteMachine) => (
-    <div className="flex flex-wrap gap-2">
-      <Badge
-        variant={
-          machine.resource_state === "ready"
-            ? "success"
-            : machine.resource_state === "failed"
-              ? "destructive"
-              : "secondary"
-        }
-      >
-        {label(machine.resource_state)}
-      </Badge>
-      <span className="text-11 text-muted-foreground">
-        Billing: {label(machine.billing_state)} · Authorization:{" "}
-        {label(machine.authorization_state)}
-      </span>
-    </div>
-  );
-  return (
-    <>
-      <div className="flex flex-col gap-3 md:hidden">
-        {machines.map((machine) => (
-          <article
-            key={machine.node_id}
-            className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
-          >
-            <h4 className="break-all text-13 font-semibold">
-              {machine.name ?? machine.sandbox_name}
-            </h4>
-            {state(machine)}
-            <p className="text-11 text-muted-foreground">
-              Generation {machine.runtime_generation} ·{" "}
-              {machine.profile.workspace_gib} GiB workspace
-            </p>
-            <Button onClick={() => onOpen(machine.node_id)}>
-              View details
-            </Button>
-          </article>
-        ))}
-      </div>
-      <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Machine</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>Runtime</TableHead>
-              <TableHead>
-                <span className="sr-only">Details</span>
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {machines.map((machine) => (
-              <TableRow key={machine.node_id}>
-                <TableCell>
-                  <div className="font-medium">
-                    {machine.name ?? machine.sandbox_name}
-                  </div>
-                  <div className="font-mono text-11 text-muted-foreground">
-                    {machine.node_id}
-                  </div>
-                </TableCell>
-                <TableCell>{state(machine)}</TableCell>
-                <TableCell>
-                  Generation {machine.runtime_generation}
-                  <br />
-                  <span className="text-11 text-muted-foreground">
-                    {machine.profile.workspace_gib} GiB workspace
-                  </span>
-                </TableCell>
-                <TableCell>
-                  <Button
-                    onClick={() => onOpen(machine.node_id)}
-                    aria-label={`View ${machine.name ?? machine.sandbox_name}`}
-                  >
-                    Details
-                  </Button>
-                </TableCell>
-              </TableRow>
+          {drawer &&
+            (drawer.view === "activity" ? (
+              isRemote ? (
+                <RemoteMachineActivity
+                  key={`${userId}:${drawer.id}`}
+                  machineId={drawer.id}
+                  initialTab={search.activity}
+                />
+              ) : (
+                <MachineActivity
+                  key={`${userId}:${drawer.id}`}
+                  nodeId={drawer.id}
+                />
+              )
+            ) : selected ? (
+              <MachineSettings
+                key={`${userId}:${selected.id}`}
+                node={selected}
+                canManage
+                update={updates.data?.find(
+                  (row) => row.node_id === selected.id,
+                )}
+              />
+            ) : isRemote ? (
+              <RemoteMachineDetail
+                key={`${userId}:${drawer.id}`}
+                machineId={drawer.id}
+                initialMachine={selectedRemote}
+                operationId={search.operation}
+                confirmationId={search.confirmation}
+                initialAgentId={search.agent}
+                initialAction={drawer.action}
+                node={
+                  nodes.error
+                    ? undefined
+                    : nodes.data?.find(
+                        (node) =>
+                          node.id === drawer.id && node.owner.id === userId,
+                      )
+                }
+                onClose={close}
+                onActivity={() => open(drawer.id, "activity")}
+                onLogins={() => {
+                  setDrawer(undefined);
+                  void navigate({
+                    to: "/assistant/machines",
+                    search: { tab: "logins", machine: drawer.id },
+                  });
+                }}
+              />
+            ) : (
+              <p role="status">Loading machine…</p>
             ))}
-          </TableBody>
-        </Table>
-      </div>
-    </>
+        </SheetContent>
+      </Sheet>
+    </div>
   );
 }

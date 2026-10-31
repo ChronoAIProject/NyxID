@@ -62,6 +62,11 @@ jobs:
       # MongoDB starts only on execution runners, leaving compiler memory free.
       - name: Build ordinary test archive
         if: '!inputs.coverage'
+        env:
+          # The ordinary archive exhausted the 16 GiB runner while compiling
+          # the workspace in parallel; keep the archive build within the
+          # runner's memory budget without changing the test selection.
+          CARGO_BUILD_JOBS: 1
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/backend-build.log" --
@@ -172,6 +177,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend test dependencies
+        run: npm ci --ignore-scripts --prefix frontend
       - uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-archive

@@ -18,6 +18,7 @@ use crate::{
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapRequest {
+    payload_version: u32,
     binding: nyxid_machine::managed::Binding,
     ticket: serde_json::Value,
     recipient_public_key: String,
@@ -34,6 +35,7 @@ pub struct BootstrapResponse {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareRequest {
+    payload_version: u32,
     node_id: String,
     pod_uid: String,
     ticket: serde_json::Value,
@@ -51,6 +53,11 @@ pub async fn prepare(
     Json(request): Json<PrepareRequest>,
 ) -> AppResult<(HeaderMap, Json<PrepareResponse>)> {
     require_workload_auth_only(&headers)?;
+    if request.payload_version != nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION {
+        return Err(AppError::ValidationError(
+            "managed_bootstrap_payload_version_unsupported".into(),
+        ));
+    }
     let binding = bootstrap::prepare_workload(
         &state.db,
         state.managed_bootstrap_verifier.as_ref(),
@@ -106,6 +113,11 @@ pub async fn bootstrap(
     Json(request): Json<BootstrapRequest>,
 ) -> AppResult<(HeaderMap, Json<BootstrapResponse>)> {
     require_workload_auth_only(&headers)?;
+    if request.payload_version != nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION {
+        return Err(AppError::ValidationError(
+            "managed_bootstrap_payload_version_unsupported".into(),
+        ));
+    }
     // Reject deployment URL mistakes before activating a credential delivery.
     let server_url = node_websocket_url(&state.config.base_url)?;
     let result = bootstrap::bootstrap(
@@ -113,6 +125,7 @@ pub async fn bootstrap(
         &state.encryption_keys,
         state.managed_bootstrap_verifier.as_ref(),
         bootstrap::BootstrapInput {
+            payload_version: request.payload_version,
             binding: request.binding,
             ticket: request.ticket,
             recipient_public_key: request.recipient_public_key,
@@ -209,7 +222,7 @@ mod tests {
             delivery_id: uuid::Uuid::new_v4().to_string(),
         };
         let key = nyxid_machine::bootstrap::generate_recipient().unwrap();
-        let body = serde_json::json!({"binding": binding, "ticket":{"verified":true}, "recipient_public_key":key.public_key_b64u().unwrap()}).to_string();
+        let body = serde_json::json!({"payload_version":nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,"binding": binding, "ticket":{"verified":true}, "recipient_public_key":key.public_key_b64u().unwrap()}).to_string();
         for (name, value) in [
             ("authorization", "Bearer delegated"),
             ("x-api-key", "nyxid_sk_key"),
@@ -238,5 +251,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn workload_routes_reject_missing_and_unknown_payload_version_before_provider_access() {
+        use axum::{
+            Router,
+            body::Body,
+            http::{Request, StatusCode},
+            routing::post,
+        };
+        use tower::ServiceExt;
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let app = Router::new()
+            .route("/prepare", post(prepare))
+            .route("/bootstrap", post(bootstrap))
+            .with_state(state);
+        let binding = nyxid_machine::managed::Binding {
+            node_id: uuid::Uuid::new_v4().to_string(),
+            sandbox_uid: uuid::Uuid::new_v4().to_string(),
+            pod_uid: uuid::Uuid::new_v4().to_string(),
+            runtime_generation: 1,
+            credential_epoch: 1,
+            writer_fence: uuid::Uuid::new_v4().to_string(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            delivery_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let key = nyxid_machine::bootstrap::generate_recipient()
+            .unwrap()
+            .public_key_b64u()
+            .unwrap();
+        for (path, base) in [
+            (
+                "/prepare",
+                serde_json::json!({"node_id":binding.node_id,"pod_uid":binding.pod_uid,"ticket":{},"recipient_public_key":key}),
+            ),
+            (
+                "/bootstrap",
+                serde_json::json!({"binding":binding,"ticket":{},"recipient_public_key":key}),
+            ),
+        ] {
+            for version in [
+                None,
+                Some(0),
+                Some(nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION + 1),
+            ] {
+                let mut body = base.clone();
+                if let Some(version) = version {
+                    body["payload_version"] = serde_json::json!(version);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::post(path)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if version.is_none() {
+                        StatusCode::UNPROCESSABLE_ENTITY
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    "{path}/{version:?}"
+                );
+            }
+        }
     }
 }

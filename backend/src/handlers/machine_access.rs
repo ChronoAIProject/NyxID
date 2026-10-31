@@ -18,6 +18,17 @@ pub struct MachineOption {
     node_id: String,
     name: String,
     revision: i64,
+    assignment_revision: i64,
+    membership: bool,
+    capability_edit_enabled: bool,
+    context_setup_enabled: bool,
+    context_policy_version: &'static str,
+    capability_edit_reason: Option<String>,
+    context_setup_reason: Option<String>,
+    authorization_applied: bool,
+    machine_configuration: Option<crate::models::remote_machine::SafeMachineConfigurationView>,
+    environment_applied: bool,
+    availability_reason: Option<String>,
     protocol_v2: bool,
     can_edit: bool,
     capabilities: nyxid_machine::authority::Capabilities,
@@ -52,6 +63,12 @@ pub async fn options(
         access::CONTEXT_FLAG,
     )
     .await?;
+    let editing = crate::services::feature_flag_service::personal_flag_enabled(
+        &state.db,
+        actor,
+        access::FLAG,
+    )
+    .await?;
     let writable = crate::services::machine_service::usable_owners(&state.db, actor).await?;
     let owners = if agent.user_id != actor {
         vec![agent.user_id.clone()]
@@ -65,10 +82,35 @@ pub async fn options(
         .sort(doc!{"name":1,"_id":1}).limit(500).await?.try_collect().await?;
     let node_ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
     let pending = access::revocation_status(&state.db, &agent.id, &node_ids).await?;
+    let hosted: Vec<crate::models::remote_machine::ManagedMachine> = state
+        .db
+        .collection(crate::models::remote_machine::COLLECTION_NAME)
+        .find(doc! {"_id":{"$in":&node_ids}})
+        .await?
+        .try_collect()
+        .await?;
+    let hosted = hosted
+        .into_iter()
+        .map(|machine| (machine.node_id.clone(), machine))
+        .collect::<std::collections::HashMap<_, _>>();
     Ok(nodes
         .into_iter()
         .filter_map(|node| {
-            let profile = node.machine?;
+            let profile = node.machine.clone()?;
+            let membership = agent.machine_node_ids.contains(&node.id)
+                || (agent.is_nyxbot()
+                    && !hosted.contains_key(&node.id)
+                    && policy.assignments.contains_key(&node.id));
+            let authorization_applied =
+                membership && profile.authority_v2() && !pending.contains_key(&node.id);
+            let machine_configuration = hosted.get(&node.id).map(|machine| {
+                crate::services::remote_machine_configuration::configuration_view(
+                    machine,
+                    Some(&node),
+                )
+            });
+            let can_edit = writable.contains(&node.user_id);
+
             let separated = access::separated_support(&profile);
             let assignment = policy
                 .assignments
@@ -80,7 +122,75 @@ pub async fn options(
             let selection_reason = selection_required.then(|| {
                 access::selection_message(access::pending_selection_reason(&profile, contexts))
             });
+            let availability_reason = if !membership {
+                Some("not_assigned")
+            } else if selection_required {
+                Some("machine_selection_required")
+            } else if assignment.capabilities == Default::default() {
+                Some("no_tools_granted")
+            } else if node.status != crate::models::node::NodeStatus::Online {
+                Some("machine_offline")
+            } else if hosted.get(&node.id).is_some_and(|machine| {
+                machine.resource_state != crate::models::remote_machine::ResourceState::Ready
+                    || !machine.writer_admitted
+                    || machine.authorization_state
+                        != crate::models::remote_machine::AuthorizationState::Active
+            }) {
+                Some("machine_lifecycle_not_ready")
+            } else if hosted.get(&node.id).is_some_and(|machine| {
+                crate::services::remote_machine_runtime::effective_execution_cutoff(machine)
+                    .is_none_or(|deadline| deadline <= chrono::Utc::now())
+            }) {
+                Some("machine_runtime_unavailable")
+            } else if assignment.mode == "separated" && !separated.available {
+                Some("separated_context_unavailable")
+            } else if pending.contains_key(&node.id) {
+                Some("authority_application_pending")
+            } else if machine_configuration
+                .as_ref()
+                .is_some_and(|c| c.state != "applied")
+            {
+                Some("machine_configuration_pending")
+            } else {
+                None
+            };
+            let environment_applied = authorization_applied
+                && !selection_required
+                && (assignment.mode != "separated" || separated.available)
+                && machine_configuration
+                    .as_ref()
+                    .is_some_and(|c| c.state == "applied");
             Some(MachineOption {
+                assignment_revision: assignment.revision,
+                membership,
+                capability_edit_enabled: editing,
+                context_setup_enabled: contexts,
+                context_policy_version: crate::models::machine_access::CONTEXT_POLICY_VERSION,
+                capability_edit_reason: if !can_edit {
+                    Some("owner_write_required")
+                } else if !editing {
+                    Some("machine_capability_editing_not_enabled")
+                } else if !profile.authority_v2() {
+                    Some("machine_authority_upgrade_required")
+                } else if selection_required {
+                    Some("machine_selection_required")
+                } else {
+                    None
+                }
+                .map(str::to_owned),
+                context_setup_reason: if !can_edit {
+                    Some("owner_write_required".into())
+                } else if !profile.authority_v2() {
+                    Some("machine_authority_upgrade_required".into())
+                } else if !contexts {
+                    Some("machine_context_setup_not_enabled".into())
+                } else {
+                    separated.reason.clone()
+                },
+                authorization_applied,
+                machine_configuration,
+                environment_applied,
+                availability_reason: availability_reason.map(str::to_owned),
                 revocation_pending: pending.get(&node.id).is_some_and(|p| {
                     !profile.authority_timing_v1
                         || p.get_bool("execution_pending").unwrap_or(true)
@@ -186,7 +296,9 @@ pub async fn put(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextRequestBody {
-    pub selection: Selection,
+    pub mode: nyxid_machine::context::Mode,
+    pub policy_version: String,
+    pub acknowledge_separation: bool,
 }
 
 #[derive(Serialize)]
@@ -197,8 +309,7 @@ pub struct ContextRequestResponse {
     pub message: &'static str,
 }
 
-/// Human Assistant → Machines opt-in. It creates the same owner action card
-/// as the native tool; mode is never changed directly by this route.
+/// NyxBot card entry point reuses the identical persisted typed action.
 pub async fn request_context(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -207,102 +318,35 @@ pub async fn request_context(
 ) -> AppResult<Json<ContextRequestResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
-    let agent = team::maintained_agent(&state.db, &actor, &agent_id).await?;
-    let option = Box::pin(options(&state, &actor, &agent.id))
-        .await?
-        .into_iter()
-        .find(|row| row.node_id == node_id)
-        .ok_or(AppError::MachineNotAllowed)?;
-    if !option.can_edit {
-        return Err(AppError::MachineNotAllowed);
-    }
-    let requested = body.selection.mode.as_deref().unwrap_or("");
-    if !matches!(
-        requested,
-        "separated" | "automatic" | "require_separated" | "shared_legacy"
-    ) {
-        return Err(AppError::ValidationError(
-            "Choose automatic, require_separated or shared_legacy".into(),
-        ));
-    }
-    if requested != "shared_legacy" {
-        if !crate::services::feature_flag_service::personal_flag_enabled(
-            &state.db,
-            &actor,
-            access::CONTEXT_FLAG,
-        )
-        .await?
-        {
-            return Err(AppError::ValidationError("Machine context setup is not enabled for this account; no shared fallback is selected".into()));
-        }
-        if option
-            .separated
-            .as_ref()
-            .is_none_or(|support| !support.available)
-        {
-            return Err(AppError::ValidationError(access::selection_message(
-                option
-                    .separated
-                    .as_ref()
-                    .and_then(|support| support.reason.as_deref())
-                    .unwrap_or("separated_capabilities_not_reported"),
-            )));
-        }
-    }
-    // The graphical control changes only the mode. Snapshot the assignment
-    // server-side so a forged request cannot widen capabilities or saved-login
-    // access behind a generic owner card; the current revision fences approval.
-    let selection = Selection {
-        mode: Some(requested.into()),
-        expected_revision: option.revision,
-        capabilities: if !option.protocol_v2
-            || (option.selection_required
-                && !crate::services::feature_flag_service::personal_flag_enabled(
-                    &state.db,
-                    &actor,
-                    access::FLAG,
-                )
-                .await?)
-        {
-            option.ceiling
-        } else {
-            option.capabilities
-        },
-        saved_login_ids: Some(option.saved_login_ids.unwrap_or_default()),
-    };
+    let action = crate::services::machine_context_review_service::prepare_action(
+        &state.db,
+        &actor,
+        &agent_id,
+        &node_id,
+        body.mode,
+        &body.policy_version,
+        body.acknowledge_separation,
+    )
+    .await?;
     let bot = Box::pin(team::ensure_nyxbot(&state.db, &actor)).await?;
     let home = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &bot)).await?;
-    let Some(chat) = crate::services::assistant_acknowledgement_service::for_key(
+    let chat = crate::services::assistant_acknowledgement_service::for_key(
         &state.db,
         &actor,
         Some(&home.credential_api_key_id),
     )
     .await?
-    else {
-        return Err(AppError::MachineBrowserUnavailable);
-    };
-    let summary = if requested == "shared_legacy" {
+    .ok_or(AppError::MachineBrowserUnavailable)?;
+    let summary = if body.mode == nyxid_machine::context::Mode::SharedLegacy {
         format!(
-            "Approve shared legacy access for {} on {}. {}",
-            agent.name,
-            option.name,
+            "Approve shared legacy mode. Tool and saved-login scope are fixed in the owner review. {}",
             nyxid_machine::context::SHARED_LEGACY_WARNING
         )
     } else {
-        format!(
-            "Separate workspace and browser for {} on {}. These contexts share the host kernel. Use a separate machine container or VM per agent for stronger isolation.",
-            agent.name, option.name
-        )
+        "Separate workspace and browser. Contexts share the host kernel. Tool and saved-login scope remain fixed; shared files and cookies are not copied.".into()
     };
     let row = crate::services::assistant_acknowledgement_service::request_machine_context(
-        &state.db,
-        &chat,
-        crate::models::machine_access::HumanContextAction {
-            agent_id: agent.id,
-            node_id,
-            selection,
-        },
-        &summary,
+        &state.db, &chat, action, &summary,
     )
     .await?;
     Ok(Json(ContextRequestResponse {
@@ -313,6 +357,163 @@ pub async fn request_context(
     }))
 }
 
+#[derive(Serialize)]
+pub struct MachineConfigurationTargetResponse {
+    revision: u64,
+    digest: String,
+    runtime_generation: i64,
+    credential_epoch: i64,
+}
+
+#[derive(Serialize)]
+pub struct ContextReviewResponse {
+    review_id: String,
+    agent_id: String,
+    node_id: String,
+    status: String,
+    mode: String,
+    policy_version: String,
+    expected_revision: i64,
+    capabilities: nyxid_machine::authority::Capabilities,
+    saved_login_ids: Option<Vec<String>>,
+    previous_mode: String,
+    capabilities_added: Vec<String>,
+    capabilities_removed: Vec<String>,
+    saved_login_ids_added: Vec<String>,
+    saved_login_ids_removed: Vec<String>,
+    warning: &'static str,
+    storage_note: &'static str,
+    expires_at: String,
+    applicable: bool,
+    applicability_reason: Option<&'static str>,
+    committed_revision: Option<i64>,
+    error_code: Option<String>,
+    machine_configuration_target: Option<MachineConfigurationTargetResponse>,
+    authorization_applied: bool,
+    machine_configuration: Option<crate::models::remote_machine::SafeMachineConfigurationView>,
+    environment_applied: bool,
+}
+async fn review_response(
+    state: &AppState,
+    actor: &str,
+    row: crate::models::machine_access::ContextReview,
+) -> AppResult<ContextReviewResponse> {
+    let applicable = crate::services::machine_context_review_service::validate_action(
+        &state.db,
+        actor,
+        &row.action,
+    )
+    .await
+    .is_ok();
+    let machine = Box::pin(options(state, actor, &row.action.agent_id))
+        .await?
+        .into_iter()
+        .find(|m| m.node_id == row.action.node_id);
+    let current = machine.as_ref();
+    let authorization_applied = row.committed_revision.is_some_and(|revision| {
+        current.is_some_and(|m| m.assignment_revision == revision && m.authorization_applied)
+    });
+    let environment_applied =
+        authorization_applied && current.is_some_and(|m| m.environment_applied);
+    let old = &row.action.snapshot.previous_assignment;
+    let new = &row.action.selection;
+    let before = old.saved_login_ids.as_deref().unwrap_or_default();
+    let after = new.saved_login_ids.as_deref().unwrap_or_default();
+    Ok(ContextReviewResponse {
+        review_id: row.id,
+        agent_id: row.action.agent_id,
+        node_id: row.action.node_id,
+        status: row.status.clone(),
+        mode: new.mode.clone().unwrap_or_default(),
+        policy_version: row.action.snapshot.policy_version,
+        expected_revision: new.expected_revision,
+        capabilities: new.capabilities,
+        saved_login_ids: new.saved_login_ids.clone(),
+        previous_mode: old.mode.clone(),
+        capabilities_added: vec![],
+        capabilities_removed: vec![],
+        saved_login_ids_added: after
+            .iter()
+            .filter(|id| !before.contains(id))
+            .cloned()
+            .collect(),
+        saved_login_ids_removed: before
+            .iter()
+            .filter(|id| !after.contains(id))
+            .cloned()
+            .collect(),
+        warning: nyxid_machine::context::SHARED_LEGACY_WARNING,
+        storage_note: "Mode changes do not move shared files or copy cookies. Separated workspaces are retained; HOME, browser profiles, downloads and tmp are temporary. Browser work waits for required profile cleanup.",
+        expires_at: row.expires_at.to_rfc3339(),
+        applicable,
+        applicability_reason: (!applicable && row.status != "committed")
+            .then_some("machine_context_review_stale"),
+        committed_revision: row.committed_revision,
+        error_code: row.error_code,
+        machine_configuration_target: row.action.snapshot.machine_configuration.map(|target| {
+            MachineConfigurationTargetResponse {
+                revision: target.revision,
+                digest: target.digest,
+                runtime_generation: target.runtime_generation,
+                credential_epoch: target.credential_epoch,
+            }
+        }),
+        authorization_applied,
+        machine_configuration: machine.and_then(|m| m.machine_configuration),
+        environment_applied,
+    })
+}
+pub async fn prepare_context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((agent, node)): Path<(String, String)>,
+    Json(body): Json<ContextRequestBody>,
+) -> AppResult<Json<ContextReviewResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    let row = crate::services::machine_context_review_service::prepare(
+        &state.db,
+        &actor,
+        &agent,
+        &node,
+        body.mode,
+        &body.policy_version,
+        body.acknowledge_separation,
+    )
+    .await?;
+    Ok(Json(review_response(&state, &actor, row).await?))
+}
+pub async fn review_context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((agent, node, review)): Path<(String, String, String)>,
+) -> AppResult<Json<ContextReviewResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    let row = crate::services::machine_context_review_service::get(
+        &state.db, &actor, &agent, &node, &review,
+    )
+    .await?;
+    Ok(Json(review_response(&state, &actor, row).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitContextBody {}
+pub async fn commit_context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((agent, node, review)): Path<(String, String, String)>,
+    Json(_): Json<CommitContextBody>,
+) -> AppResult<Json<ContextReviewResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    let row = crate::services::machine_context_review_service::commit(
+        &state.db, &actor, &agent, &node, &review,
+    )
+    .await?;
+    Ok(Json(review_response(&state, &actor, row).await?))
+}
+
 /// Apply a graphical owner-card decision through the same fenced transaction
 /// as the assistant tool path. The stored typed payload is the authority for
 /// this operation; request data is never re-read from the client.
@@ -321,24 +522,17 @@ pub async fn apply_human_context_action(
     actor: &str,
     action: &crate::models::machine_access::HumanContextAction,
 ) -> AppResult<()> {
-    if !action.selection.mode.as_deref().is_some_and(|mode| {
-        matches!(
-            mode,
-            "separated" | "automatic" | "require_separated" | "shared_legacy"
-        )
-    }) {
+    if !action
+        .selection
+        .mode
+        .as_deref()
+        .is_some_and(|mode| matches!(mode, "separated" | "shared_legacy"))
+    {
         return Err(AppError::ValidationError(
             "An explicit machine separation choice is required".into(),
         ));
     }
-    let policy = Box::pin(access::configure(
-        &state.db,
-        actor,
-        &action.agent_id,
-        &action.node_id,
-        action.selection.clone(),
-    ))
-    .await?;
+    let policy = Box::pin(access::configure_reviewed(&state.db, actor, action, None)).await?;
     crate::services::audit_service::log_async(
         state.db.clone(),
         Some(actor.to_owned()),

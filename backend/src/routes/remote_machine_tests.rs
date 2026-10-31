@@ -123,7 +123,7 @@ async fn remote_machine_full_router_indexes_unconfigured_admission_replay_and_ow
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{entitlement}");
-    let body = json!({"free_slot":true,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true});
+    let body = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":true,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true});
     let (status, created) = request(
         &app,
         "POST",
@@ -138,7 +138,7 @@ async fn remote_machine_full_router_indexes_unconfigured_admission_replay_and_ow
         StatusCode::CONFLICT,
         "unconfigured platform must not accept: {created}"
     );
-    let canonical = json!({"free_slot":true,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":null,"accept_account_balance":false});
+    let canonical = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":true,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":null,"accept_account_balance":false});
     let mut input = crate::services::remote_machine_service::CreateMachineInput::fixed(
         &user.to_string(),
         true,
@@ -469,7 +469,7 @@ async fn hosted_create_http_validates_and_preserves_choices_through_idempotent_r
     .unwrap();
     let (_, private) = build_router_with_state(state.clone());
     let app = private.with_state(state);
-    let body = json!({"name":"hosted-workstation","capabilities":["browser","computer","files"],"specialist_id":null,
+    let body = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"name":"hosted-workstation","capabilities":["browser","computer","files"],"specialist_id":null,
         "free_slot":true,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true});
     for invalid in [
         json!({"capabilities":["computer"]}),
@@ -480,6 +480,9 @@ async fn hosted_create_http_validates_and_preserves_choices_through_idempotent_r
         json!({"cpu_millis":4000}),
         json!({"memory_mib":8192}),
         json!({"workspace_gib":50}),
+        json!({"separation_choice":"unknown"}),
+        json!({"separation_policy_version":"unreviewed"}),
+        json!({"acknowledge_separation":false}),
     ] {
         let mut candidate = body.clone();
         for (k, v) in invalid.as_object().unwrap() {
@@ -490,6 +493,7 @@ async fn hosted_create_http_validates_and_preserves_choices_through_idempotent_r
             || invalid.get("memory_mib").is_some()
             || invalid.get("workspace_gib").is_some()
             || invalid.get("profile_version").is_some_and(Value::is_null)
+            || invalid.get("separation_choice").is_some()
         {
             StatusCode::UNPROCESSABLE_ENTITY
         } else {
@@ -506,6 +510,36 @@ async fn hosted_create_http_validates_and_preserves_choices_through_idempotent_r
         .await;
         assert_eq!(status, expected, "{invalid}: {value}");
     }
+    for required in [
+        "separation_choice",
+        "separation_policy_version",
+        "acknowledge_separation",
+    ] {
+        let mut candidate = body.clone();
+        candidate.as_object_mut().unwrap().remove(required);
+        let (status, response) = request(
+            &app,
+            "POST",
+            "/api/v1/remote-machines",
+            &token,
+            candidate,
+            Some("hosted-create-request"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "missing {required}: {response}"
+        );
+    }
+    assert_eq!(
+        db.collection::<mongodb::bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0,
+        "invalid consent must not allocate resources"
+    );
     let (status, created) = request(
         &app,
         "POST",
@@ -609,7 +643,7 @@ async fn obsolete_create_contract_rejects_even_with_saved_request_and_keeps_tele
     // Materialize the old durable shape directly; do not add a legacy allocation
     // path merely to manufacture historical records for this regression.
     let created = machine::create_machine(&db, input.clone()).await.unwrap();
-    let legacy_body = json!({"free_slot":true,"policy_version":"remote-machine-mvp-v1","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":null,"accept_account_balance":false});
+    let legacy_body = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":true,"policy_version":"remote-machine-mvp-v1","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":null,"accept_account_balance":false});
     // Production stores the digest of recursively sorted JSON. Feature
     // unification enables serde_json/preserve_order in this test binary, so
     // hashing the json! insertion order would fabricate an invalid old row.

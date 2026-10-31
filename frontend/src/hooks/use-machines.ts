@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useRef } from "react";
 import { api, apiClient } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
+import { acceptRemoteMachineIntent } from "@/lib/remote-machine-intent";
 import {
   REMOTE_MACHINE_PROFILE,
   remoteMachineActionRequestSchema,
@@ -125,6 +126,7 @@ function idempotencyHeaders(key: string) {
 
 export function useRemoteMachines(enabled = true, includeDeleted = false) {
   const owner = useAuthStore((state) => state.user?.id);
+  const client = useQueryClient();
   const query = safeRemoteMachineQuery(
     useQuery({
       queryKey: includeDeleted
@@ -170,6 +172,43 @@ export function useRemoteMachines(enabled = true, includeDeleted = false) {
       refetchInterval: 5000,
     }),
   );
+  const previous = useRef<
+    | {
+        owner: string | undefined;
+        includeDeleted: boolean;
+        machines: z.infer<typeof remoteMachineListResponseSchema>["machines"];
+      }
+    | undefined
+  >(undefined);
+  useEffect(() => {
+    // The list can observe disappearance before the operation's next poll,
+    // unmounting its observer. Only a complete successful read proves removal.
+    if (!query.data?.complete) return;
+    const prior = previous.current;
+    previous.current = { owner, includeDeleted, machines: query.data.machines };
+    if (
+      !owner ||
+      useAuthStore.getState().user?.id !== owner ||
+      prior?.owner !== owner ||
+      prior.includeDeleted !== includeDeleted
+    )
+      return;
+    const remaining = new Set(
+      query.data.machines
+        .filter((row) => row.resource_state !== "deleted")
+        .map((row) => row.node_id),
+    );
+    if (
+      prior.machines.some(
+        (old) =>
+          old.resource_state !== "deleted" && !remaining.has(old.node_id),
+      )
+    ) {
+      void client.invalidateQueries({
+        queryKey: ["remote-machine-entitlement", owner],
+      });
+    }
+  }, [client, owner, includeDeleted, query.data]);
   return {
     ...query,
     data: query.data?.machines,
@@ -329,8 +368,10 @@ export function useRemoteMachineAction() {
       );
     },
     retry: false,
-    onSuccess: (response, { machineId, owner }) => {
+    onSuccess: (response, { machineId, owner, body, idempotencyKey }) => {
       if (useAuthStore.getState().user?.id !== owner) return;
+      if (body.action !== "rekey" && response.operation.machine_id === machineId && response.operation.action === body.action)
+        acceptRemoteMachineIntent(owner, machineId, body.action, idempotencyKey, response.operation.id);
       client.setQueryData(
         remoteMachineOperationKey(owner, response.operation.id),
         response.operation,
@@ -419,7 +460,8 @@ export function useRetryRemoteMachineDelete() {
 
 export function useRemoteMachineOperation(id: string | undefined) {
   const owner = useAuthStore((state) => state.user?.id);
-  return safeRemoteMachineQuery(
+  const client = useQueryClient();
+  const query = safeRemoteMachineQuery(
     useQuery({
       queryKey: remoteMachineOperationKey(owner, id),
       queryFn: async () =>
@@ -437,6 +479,22 @@ export function useRemoteMachineOperation(id: string | undefined) {
           : 3000,
     }),
   );
+  const operation = query.data;
+  useEffect(() => {
+    if (
+      !owner ||
+      useAuthStore.getState().user?.id !== owner ||
+      operation?.id !== id ||
+      operation?.action !== "delete" ||
+      operation.state !== "succeeded"
+    )
+      return;
+    void client.invalidateQueries({ queryKey: remoteMachineOwnerKey(owner) });
+    void client.invalidateQueries({
+      queryKey: ["remote-machine-entitlement", owner],
+    });
+  }, [client, owner, id, operation?.id, operation?.action, operation?.state]);
+  return query;
 }
 
 export function useRemoteMachineEvents(

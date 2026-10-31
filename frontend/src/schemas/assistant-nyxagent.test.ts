@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assistantAgentCreateSchema,
+  assistantAgentGrantsRequestSchema,
   assistantAgentDetailSchema,
   assistantAgentListSchema,
   assistantAgentProfileSchema,
@@ -531,4 +532,14 @@ it("retains optional personal Telegram thread and turn provenance, including nul
   expect(nyxAgentMessageSchema.parse({ ...message, platform_origin: origin }).platform_origin).toEqual(origin);
   expect(nyxAgentMessageSchema.parse({ ...message, platform_origin: null }).platform_origin).toBeNull();
   expect(nyxAgentConversationSchema.parse(legacyConversation).platform_thread).toBeUndefined();
+});
+
+it("accepts only the disjoint membership or legacy replacement grant form", () => {
+  const member = {machine_membership:{node_id:"machine",assigned:true}};
+  expect(assistantAgentGrantsRequestSchema.parse(member)).toEqual(member);
+  for (const extra of [
+    {services:[]}, {machines:[]}, {logins:[]}, {account_read:false},
+    {guest_access:{}}, {capabilities:{}},
+  ]) expect(assistantAgentGrantsRequestSchema.safeParse({...member,...extra}).success).toBe(false);
+  expect(assistantAgentGrantsRequestSchema.safeParse({services:[],account_read:false}).success).toBe(true);
 });

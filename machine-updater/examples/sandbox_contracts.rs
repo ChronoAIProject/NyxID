@@ -17,6 +17,7 @@ fn main() -> anyhow::Result<()> {
         profile: PROFILE.into(),
         image: format!("node@sha256:{}", "a".repeat(64)),
         runtime_class: Some("sandboxed".into()),
+        seccomp_localhost_profile: None,
         workspace_storage_class: Some("verified".into()),
         workspace_size: "20Gi".into(),
         cpu_request: "2".into(),
@@ -34,12 +35,17 @@ fn main() -> anyhow::Result<()> {
     let mut retained_current = current.clone();
     retained_current.image = format!("node@sha256:{}", "b".repeat(64));
     retained_current.validate()?;
+    let mut localhost = current.clone();
+    localhost.seccomp_localhost_profile =
+        Some(format!("nyxid/remote-machine-v1-{}.json", "c".repeat(64)));
+    localhost.validate()?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "current": current.apply_object(),
             "current_default_storage": current_default_storage.apply_object(),
             "retained_current": retained_current.apply_object(),
+            "localhost": localhost.apply_object(),
         }))?
     );
     Ok(())

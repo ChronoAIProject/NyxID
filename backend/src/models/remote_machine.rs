@@ -6,6 +6,7 @@ use super::bson_datetime;
 pub const COLLECTION_NAME: &str = "managed_machines";
 pub const POLICY_VERSION: &str = "remote-machine-mvp";
 pub const DATA_POLICY_VERSION: &str = "remote-machine-data";
+pub const SEPARATION_POLICY_VERSION: &str = "remote-machine-separation-v1";
 
 pub fn default_name() -> String {
     "my-remote-machine".into()
@@ -20,6 +21,9 @@ fn default_assignment_state() -> String {
 /// Owner-selected local capability ceiling; this is not an agent grant.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HostedMachineChoices {
+    pub separation_choice: nyxid_machine::context::Choice,
+    pub separation_policy_version: String,
+    pub acknowledge_separation: bool,
     #[serde(default = "default_name")]
     pub name: String,
     #[serde(default = "default_capabilities")]
@@ -36,6 +40,9 @@ pub struct MachineProfileSpec {
     pub image_digest: String,
     #[serde(default)]
     pub runtime_class: Option<String>,
+    /// Fixed at creation; resume never reads today's platform seccomp default.
+    #[serde(default)]
+    pub seccomp_localhost_profile: Option<String>,
     pub cpu_millis: u32,
     pub memory_mib: u32,
     pub workspace_gib: u32,
@@ -50,6 +57,7 @@ impl MachineProfileSpec {
             profile_version: nyxid_machine::managed::PROFILE.into(),
             image_digest: image_digest.into(),
             runtime_class: None,
+            seccomp_localhost_profile: None,
             cpu_millis: nyxid_machine::managed::PROFILE_CPU_MILLIS,
             memory_mib: nyxid_machine::managed::PROFILE_MEMORY_MIB,
             workspace_gib: nyxid_machine::managed::PROFILE_WORKSPACE_GIB,
@@ -318,6 +326,11 @@ pub struct ManagedMachine {
     pub name: String,
     #[serde(default = "default_capabilities")]
     pub capabilities: Vec<String>,
+    pub configuration: nyxid_machine::managed::RequiredConfiguration,
+    pub separation_policy_version: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub separation_accepted_at: DateTime<Utc>,
+    pub configuration_evidence: Option<MachineConfigurationEvidence>,
     #[serde(default)]
     pub specialist_id: Option<String>,
     #[serde(default = "default_assignment_state")]
@@ -339,6 +352,10 @@ pub struct ManagedMachine {
     pub pvc_name: Option<String>,
     #[serde(default)]
     pub pvc_uid: Option<String>,
+    /// Accepted-create allocation identity, retained through resume/rekey.
+    pub hosted_storage_allocation_id: String,
+    /// The only daemon allowed to initialize an absent retained journal.
+    pub hosted_storage_initializer_runtime_id: Option<String>,
     #[serde(default)]
     pub pod_uid: Option<String>,
     pub resource_state: ResourceState,
@@ -426,9 +443,14 @@ pub struct SafeMachineProfileView {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SafeManagedMachineView {
+    #[serde(default)]
+    pub presentation: Option<SafeMachinePresentationView>,
     pub node_id: String,
     pub name: String,
     pub capabilities: Vec<String>,
+    pub separation_choice: nyxid_machine::context::Choice,
+    pub separation_policy_version: String,
+    pub machine_configuration: SafeMachineConfigurationView,
     pub specialist_id: Option<String>,
     pub specialist_assignment_state: String,
     pub specialist_assignment_error: Option<String>,
@@ -457,9 +479,77 @@ pub struct SafeManagedMachineView {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Read-only owner presentation. Deliberately not a Node or MachineProfile:
+/// runtime identities, connection routing, credentials and leases stay private.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SafeMachinePresentationView {
+    pub agent_version: Option<String>,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+    pub roots: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub commands_isolated: Option<bool>,
+    pub browser_isolated: bool,
+    pub separation_support: Option<bool>,
+    pub owner_confirmation: Option<nyxid_machine::Confirmation>,
+    pub allow_single_user_saved_logins: Option<bool>,
+    pub computer_mode: nyxid_machine::ComputerMode,
+    pub cua_version: Option<String>,
+    pub connected: bool,
+    pub desktop_ready: bool,
+    pub historical: bool,
+    pub configuration_current: bool,
+    pub last_reported_at: Option<DateTime<Utc>>,
+}
+
+/// An authenticated WSS observation, never an owner consent or Agent ACK.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MachineConfigurationEvidence {
+    pub configuration_revision: u64,
+    pub configuration_digest: String,
+    pub runtime_generation: i64,
+    pub credential_epoch: i64,
+    pub runtime_id: String,
+    pub connection_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SafeMachineConfigurationView {
+    pub version: u32,
+    pub revision: u64,
+    pub digest: String,
+    pub runtime_generation: i64,
+    pub state: String,
+    pub reason: Option<String>,
+}
+
 #[cfg(test)]
 mod profile_tests {
     use super::*;
+
+    #[test]
+    fn profile_persists_the_selected_localhost_seccomp_reference() {
+        let mut profile = MachineProfileSpec::fixed("image@sha256:abc");
+        let reference = format!("nyxid/remote-machine-v1-{}.json", "a".repeat(64));
+        profile.seccomp_localhost_profile = Some(reference.clone());
+        let document = bson::to_document(&profile).unwrap();
+        assert_eq!(
+            document.get_str("seccomp_localhost_profile").unwrap(),
+            reference
+        );
+        assert_eq!(
+            bson::from_document::<MachineProfileSpec>(document).unwrap(),
+            profile
+        );
+        let json = serde_json::to_value(&profile).unwrap();
+        assert_eq!(json["seccomp_localhost_profile"], reference);
+        assert_eq!(
+            serde_json::from_value::<MachineProfileSpec>(json).unwrap(),
+            profile
+        );
+    }
 
     #[test]
     fn current_profile_bson_preserves_unknown_temporary_capacity() {

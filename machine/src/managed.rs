@@ -7,6 +7,207 @@ pub const PROFILE_CPU_MILLIS: u32 = 2_000;
 pub const PROFILE_MEMORY_MIB: u32 = 2_048;
 pub const PROFILE_WORKSPACE_GIB: u32 = 20;
 
+/// Fixed Docker-default supervisor baseline, shared with the OCI exporter and
+/// image fixtures. Workers still drop UID/GID and set their own no_new_privs.
+pub static DOCKER_SUPERVISOR_CAPABILITIES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!(
+            "../resources/docker-supervisor-capabilities.json"
+        ))
+        .expect("embedded Docker supervisor capabilities must be valid JSON")
+    });
+
+/// Operator-installed immutable OCI profile. The reference embeds the exact
+/// artifact digest; admission separately binds new Machines to operator approval.
+pub fn validate_seccomp_localhost_profile(reference: &str) -> Result<(), &'static str> {
+    let digest = reference
+        .strip_prefix("nyxid/remote-machine-v1-")
+        .and_then(|value| value.strip_suffix(".json"))
+        .ok_or("managed_seccomp_profile_invalid")?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("managed_seccomp_profile_invalid");
+    }
+    Ok(())
+}
+
+/// Semantic contract, independent of envelope v1, authority v2 and evidence v4.
+/// Unknown/missing required versions are rejected; there is no legacy bridge.
+pub const BOOTSTRAP_PAYLOAD_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredConfiguration {
+    pub version: u32,
+    pub revision: u64,
+    pub separation_choice: crate::context::Choice,
+    /// Canonical sorted unique tool ceiling, independent of runtime infrastructure.
+    pub capabilities: Vec<String>,
+}
+impl RequiredConfiguration {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.version != CONFIG_VERSION || self.revision == 0 {
+            return Err("managed_configuration_version_invalid");
+        }
+        if self.capabilities.is_empty()
+            || self.capabilities.windows(2).any(|pair| pair[0] >= pair[1])
+            || self
+                .capabilities
+                .iter()
+                .any(|cap| !matches!(cap.as_str(), "shell" | "files" | "browser" | "computer"))
+            || (self.capabilities.iter().any(|cap| cap == "computer")
+                && !self.capabilities.iter().any(|cap| cap == "browser"))
+        {
+            return Err("managed_configuration_ceiling_invalid");
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String, &'static str> {
+        use sha2::{Digest, Sha256};
+        self.validate()?;
+        let mut digest = Sha256::new();
+        digest.update(b"nyxid-managed-configuration-v2\0");
+        digest.update(serde_json::to_vec(self).map_err(|_| "managed_configuration_invalid")?);
+        Ok(hex::encode(digest.finalize()))
+    }
+}
+
+/// Reported only after installing and validating the exact sealed configuration.
+/// Authentication comes from the WSS binding and live connection, not this DTO.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationReport {
+    pub configuration: RequiredConfiguration,
+    pub digest: String,
+    pub runtime_generation: u64,
+}
+
+/// Minted by accepted creation and bound to the controller-observed original
+/// PVC by sealed bootstrap. Neither a path nor a workload assertion supplies it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostedStorage {
+    pub original_pvc_uid: String,
+    pub allocation_id: String,
+}
+impl HostedStorage {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if uuid::Uuid::parse_str(&self.original_pvc_uid).is_err()
+            || uuid::Uuid::parse_str(&self.allocation_id).is_err()
+        {
+            return Err("hosted_storage_authority_invalid");
+        }
+        Ok(())
+    }
+}
+
+/// Returned only on the authenticated current WSS connection. Initialization
+/// is consumed once for one daemon UUID; every replacement must recover the
+/// original journal. This never authorizes Agent tools or profile generations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostedStorageGrant {
+    pub binding: Binding,
+    pub storage: HostedStorage,
+    pub runtime_id: String,
+    pub initialize: bool,
+}
+impl HostedStorageGrant {
+    pub fn validate(
+        &self,
+        binding: &Binding,
+        storage: &HostedStorage,
+        runtime_id: &str,
+    ) -> Result<(), &'static str> {
+        binding.validate()?;
+        storage.validate()?;
+        if self.binding != *binding
+            || self.storage != *storage
+            || self.runtime_id != runtime_id
+            || uuid::Uuid::parse_str(runtime_id).is_err()
+        {
+            return Err("hosted_storage_authority_mismatch");
+        }
+        Ok(())
+    }
+}
+
+/// Recipient-sealed payload. Raw credentials must never be logged or persisted
+/// by the backend; consumers keep them in protected ephemeral storage only.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapPayload {
+    pub payload_version: u32,
+    pub auth_token: zeroize::Zeroizing<String>,
+    pub signing_secret: zeroize::Zeroizing<String>,
+    pub configuration: RequiredConfiguration,
+    pub configuration_digest: String,
+    pub hosted_storage: HostedStorage,
+}
+impl BootstrapPayload {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.hosted_storage.validate()?;
+        if self.payload_version != BOOTSTRAP_PAYLOAD_VERSION
+            || self.configuration.digest()? != self.configuration_digest
+        {
+            return Err("managed_bootstrap_configuration_invalid");
+        }
+        Ok(())
+    }
+}
+impl std::fmt::Debug for BootstrapPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BootstrapPayload { [REDACTED] }")
+    }
+}
+
+#[cfg(test)]
+mod configuration_contract_tests {
+    use super::*;
+
+    #[test]
+    fn hosted_configuration_requires_current_version_and_exact_canonical_choices() {
+        let config = RequiredConfiguration {
+            version: CONFIG_VERSION,
+            revision: 1,
+            separation_choice: crate::context::Choice::Automatic,
+            capabilities: vec!["files".into(), "shell".into()],
+        };
+        assert!(config.validate().is_ok());
+        let digest = config.digest().unwrap();
+        let mut changed = config.clone();
+        changed.separation_choice = crate::context::Choice::SharedLegacy;
+        assert_ne!(digest, changed.digest().unwrap());
+        changed = config.clone();
+        changed.revision += 1;
+        assert_ne!(digest, changed.digest().unwrap());
+        for version in [0, CONFIG_VERSION - 1, CONFIG_VERSION + 1] {
+            changed = config.clone();
+            changed.version = version;
+            assert!(changed.validate().is_err());
+        }
+        for capabilities in [
+            vec![],
+            vec!["shell", "files"],
+            vec!["files", "files"],
+            vec!["computer"],
+            vec!["root"],
+        ] {
+            changed = config.clone();
+            changed.capabilities = capabilities.into_iter().map(str::to_owned).collect();
+            assert!(changed.validate().is_err());
+        }
+        changed = config;
+        changed.revision = 0;
+        assert!(changed.validate().is_err());
+    }
+}
+
 pub fn is_supported_profile(profile: &str) -> bool {
     profile == PROFILE
 }
@@ -453,6 +654,33 @@ impl Binding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seccomp_localhost_reference_binds_only_a_fixed_content_addressed_path() {
+        let digest = "0123456789abcdef".repeat(4);
+        let reference = format!("nyxid/remote-machine-v1-{digest}.json");
+        validate_seccomp_localhost_profile(&reference).unwrap();
+        for invalid in [
+            String::new(),
+            "arbitrary.json".into(),
+            format!("/{reference}"),
+            format!("../{reference}"),
+            format!("nyxid/../{reference}"),
+            format!("{reference}\n"),
+            format!("{reference}\0"),
+            format!("nyxid/remote-machine-v1-{}.json", digest.to_uppercase()),
+            format!("nyxid/remote-machine-v1-{}.json", &digest[..63]),
+            format!("nyxid/remote-machine-v1-{digest}0.json"),
+            format!("nyxid/remote-machine-v1-{}.json", "é".repeat(32)),
+        ] {
+            assert_eq!(
+                validate_seccomp_localhost_profile(&invalid),
+                Err("managed_seccomp_profile_invalid"),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
     #[test]
     fn managed_profile_accepts_only_current_full_machine() {
         assert!(is_supported_profile("remote-machine"));

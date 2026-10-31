@@ -20,6 +20,7 @@ const PAGE_BYTES: usize = 4096;
 pub struct Roots {
     roots: Vec<PathBuf>,
     excluded: Vec<PathBuf>,
+    workspace: Option<File>,
 }
 
 fn cstring(value: &std::ffi::OsStr) -> Result<CString> {
@@ -151,6 +152,9 @@ impl Roots {
     pub fn paths(&self) -> &[PathBuf] {
         &self.roots
     }
+    pub fn exclusions(&self) -> &[PathBuf] {
+        &self.excluded
+    }
     pub fn new(roots: &[PathBuf], excluded: &[PathBuf]) -> Result<Self> {
         let roots = roots
             .iter()
@@ -163,7 +167,34 @@ impl Roots {
             .iter()
             .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
             .collect();
-        Ok(Self { roots, excluded })
+        Ok(Self {
+            roots,
+            excluded,
+            workspace: None,
+        })
+    }
+
+    /// The separated child inherits the supervisor-pinned workspace as cwd.
+    /// Its private ancestors are deliberately not searchable by the child.
+    #[cfg(target_os = "linux")]
+    pub fn from_pinned_workspace(
+        roots: &[PathBuf],
+        excluded: &[PathBuf],
+        workspace: &Path,
+    ) -> Result<Self> {
+        if roots.len() != 1 || roots[0] != workspace || !workspace.is_absolute() {
+            return Err(super::MachineError::PathOutsideRoots.into());
+        }
+        Ok(Self {
+            roots: roots.to_vec(),
+            excluded: excluded.to_vec(),
+            workspace: Some(File::from(open_at(
+                libc::AT_FDCWD,
+                std::ffi::OsStr::new("."),
+                libc::O_PATH | libc::O_DIRECTORY,
+                0,
+            )?)),
+        })
     }
 
     pub fn cwd(&self, path: Option<&str>) -> Result<Vec<File>> {
@@ -174,10 +205,16 @@ impl Roots {
         let resolved = self.resolve(&supplied, false)?;
         // Keep every ancestor for the child to check after dropping privileges.
         // A root supervisor must not bypass a protected parent's permissions.
+        // Linux O_PATH also pins a worker-owned 0700 cwd without requiring the
+        // supervisor to read it. The child still checks X_OK on every ancestor.
+        #[cfg(target_os = "linux")]
+        const TRAVERSE: i32 = libc::O_PATH;
+        #[cfg(not(target_os = "linux"))]
+        const TRAVERSE: i32 = libc::O_RDONLY;
         let mut directories = vec![File::from(open_at(
             libc::AT_FDCWD,
             std::ffi::OsStr::new("/"),
-            libc::O_RDONLY | libc::O_DIRECTORY,
+            TRAVERSE | libc::O_DIRECTORY,
             0,
         )?)];
         for component in resolved.components() {
@@ -188,7 +225,7 @@ impl Roots {
                 directories.push(File::from(open_at(
                     parent.as_raw_fd(),
                     name,
-                    libc::O_RDONLY | libc::O_DIRECTORY,
+                    TRAVERSE | libc::O_DIRECTORY,
                     0,
                 )?));
             }
@@ -197,6 +234,10 @@ impl Roots {
     }
 
     fn resolve(&self, path: &Path, create: bool) -> Result<PathBuf> {
+        #[cfg(target_os = "linux")]
+        if let Some(workspace) = &self.workspace {
+            return self.resolve_in_workspace(workspace, path, create);
+        }
         let path = if path.is_absolute() {
             path.to_owned()
         } else {
@@ -215,6 +256,140 @@ impl Roots {
                 .excluded
                 .iter()
                 .any(|denied| resolved.starts_with(denied))
+        {
+            return Err(super::MachineError::PathOutsideRoots.into());
+        }
+        Ok(resolved)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn resolve_in_workspace(&self, workspace: &File, path: &Path, create: bool) -> Result<PathBuf> {
+        use std::collections::VecDeque;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = &self.roots[0];
+        let relative = if path.is_absolute() {
+            path.strip_prefix(root)
+                .map_err(|_| super::MachineError::PathOutsideRoots)?
+        } else {
+            path
+        };
+        let directory_syntax = |path: &Path| {
+            let bytes = path.as_os_str().as_bytes();
+            bytes.ends_with(b"/") || bytes == b"." || bytes.ends_with(b"/.")
+        };
+        let parts = |path: &Path, directory: bool| -> Result<VecDeque<std::ffi::OsString>> {
+            let mut parts: VecDeque<_> = path
+                .components()
+                .filter(|part| *part != Component::CurDir)
+                .map(|part| match part {
+                    Component::Normal(name) => Ok(name.to_owned()),
+                    Component::ParentDir => Ok("..".into()),
+                    _ => Err(super::MachineError::PathOutsideRoots.into()),
+                })
+                .collect::<Result<_>>()?;
+            if directory {
+                // Preserve canonicalize's directory requirement for `file/`
+                // and `file/.`, including inside a symbolic-link target.
+                parts.push_back(".".into());
+            }
+            Ok(parts)
+        };
+        let anchor = || {
+            open_at(
+                workspace.as_raw_fd(),
+                std::ffi::OsStr::new("."),
+                libc::O_PATH | libc::O_DIRECTORY,
+                0,
+            )
+        };
+        let mut pending = parts(relative, directory_syntax(path))?;
+        let mut directories = vec![anchor()?];
+        let mut resolved = PathBuf::new();
+        let mut links = 0;
+        let mut final_link = false;
+        while let Some(name) = pending.pop_front() {
+            if name == "." {
+                continue;
+            }
+            if name == ".." {
+                if !resolved.pop() {
+                    return Err(super::MachineError::PathOutsideRoots.into());
+                }
+                directories.pop();
+                continue;
+            }
+            let parent = directories.last().context("workspace unavailable")?;
+            let entry = match open_at(parent.as_raw_fd(), &name, libc::O_PATH, 0) {
+                Ok(entry) => entry,
+                Err(error)
+                    if create
+                        && !final_link
+                        && pending.is_empty()
+                        && error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    resolved.push(name);
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+            let entry = File::from(entry);
+            let metadata = entry.metadata()?;
+            if metadata.file_type().is_symlink() {
+                final_link |= pending.is_empty();
+                links += 1;
+                if links > 40 {
+                    bail!("too many symbolic links");
+                }
+                // Read the pinned link itself; a concurrent replacement cannot
+                // redirect this lookup. Subsequent opens still use NOFOLLOW.
+                let mut target = vec![0u8; 4096];
+                let length = unsafe {
+                    libc::readlinkat(
+                        entry.as_raw_fd(),
+                        c"".as_ptr(),
+                        target.as_mut_ptr().cast(),
+                        target.len(),
+                    )
+                };
+                if length < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                if length as usize == target.len() {
+                    bail!("symbolic link target too long");
+                }
+                target.truncate(length as usize);
+                let target = PathBuf::from(std::ffi::OsString::from_vec(target));
+                let directory = directory_syntax(&target);
+                let target = if target.is_absolute() {
+                    directories = vec![anchor()?];
+                    resolved.clear();
+                    target
+                        .strip_prefix(root)
+                        .map_err(|_| super::MachineError::PathOutsideRoots)?
+                } else {
+                    &target
+                };
+                let mut target = parts(target, directory)?;
+                target.append(&mut pending);
+                pending = target;
+                continue;
+            }
+            resolved.push(name);
+            if !pending.is_empty() {
+                if !metadata.is_dir() {
+                    bail!("not a directory");
+                }
+                directories.push(entry.into());
+            }
+        }
+        let resolved = root.join(resolved);
+        if self
+            .excluded
+            .iter()
+            .any(|denied| resolved.starts_with(denied))
         {
             return Err(super::MachineError::PathOutsideRoots.into());
         }
@@ -242,17 +417,28 @@ impl Roots {
             .filter(|root| resolved.starts_with(root))
             .max_by_key(|root| root.components().count())
             .context(super::MachineError::PathOutsideRoots)?;
-        let mut directory = open_at(
-            libc::AT_FDCWD,
-            std::ffi::OsStr::new("/"),
-            TRAVERSE | libc::O_DIRECTORY,
-            0,
-        )?;
-        for component in root.components() {
-            if let Component::Normal(name) = component {
-                directory = open_at(directory.as_raw_fd(), name, TRAVERSE | libc::O_DIRECTORY, 0)?;
+        let mut directory = if let Some(workspace) = &self.workspace {
+            open_at(
+                workspace.as_raw_fd(),
+                std::ffi::OsStr::new("."),
+                TRAVERSE | libc::O_DIRECTORY,
+                0,
+            )?
+        } else {
+            let mut directory = open_at(
+                libc::AT_FDCWD,
+                std::ffi::OsStr::new("/"),
+                TRAVERSE | libc::O_DIRECTORY,
+                0,
+            )?;
+            for component in root.components() {
+                if let Component::Normal(name) = component {
+                    directory =
+                        open_at(directory.as_raw_fd(), name, TRAVERSE | libc::O_DIRECTORY, 0)?;
+                }
             }
-        }
+            directory
+        };
         let components: Vec<_> = resolved.strip_prefix(root)?.components().collect();
         if components.is_empty() {
             return Ok((readable(&directory)?, CString::new(".")?));
@@ -605,6 +791,168 @@ fn digest(file: &mut File) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_resolution_preserves_links_directory_syntax_and_exclusions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::create_dir(root.join("private")).unwrap();
+        std::fs::write(root.join("marker"), "allowed").unwrap();
+        std::fs::write(root.join("private/key"), "denied").unwrap();
+        for (target, link) in [
+            ("../marker", "nested/link"),
+            ("marker/", "not-directory"),
+            ("loop", "loop"),
+            ("private/key", "secret-link"),
+            ("missing", "dangling"),
+        ] {
+            std::os::unix::fs::symlink(target, root.join(link)).unwrap();
+        }
+        std::os::unix::fs::symlink(root.join("marker"), root.join("absolute-link")).unwrap();
+        std::os::unix::fs::symlink(root.join("marker/"), root.join("absolute-not-directory"))
+            .unwrap();
+        let roots = Roots {
+            workspace: Some(File::open(&root).unwrap()),
+            excluded: vec![root.join("private")],
+            roots: vec![root.clone()],
+        };
+        for path in ["nested/link", "absolute-link", "nested/../marker"] {
+            assert_eq!(
+                roots.read(path, 0, 100, "text").unwrap()["content"],
+                "allowed"
+            );
+        }
+        for path in [
+            "marker/",
+            "marker/.",
+            "not-directory",
+            "loop",
+            "secret-link",
+            "../marker",
+            "dangling",
+            "absolute-not-directory",
+        ] {
+            assert!(roots.read(path, 0, 100, "text").is_err(), "{path}");
+            assert!(
+                roots.write(path, b"changed", "overwrite", None).is_err(),
+                "{path}"
+            );
+        }
+        assert_eq!(std::fs::read(root.join("marker")).unwrap(), b"allowed");
+        for path in [root.join("marker/"), root.join("marker/.")] {
+            assert!(roots.read(path.to_str().unwrap(), 0, 100, "text").is_err());
+            assert!(
+                roots
+                    .write(path.to_str().unwrap(), b"changed", "overwrite", None)
+                    .is_err()
+            );
+        }
+        assert!(!root.join("missing").exists());
+        assert!(roots.list("nested/..", 0, 0, None).is_ok());
+    }
+
+    #[test]
+    fn shared_roots_keep_absolute_access_and_internal_links() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(second.path().join("marker"), "second").unwrap();
+        std::os::unix::fs::symlink(second.path().join("marker"), first.path().join("link"))
+            .unwrap();
+        let roots = Roots::new(&[first.path().into(), second.path().into()], &[]).unwrap();
+        for path in [first.path().join("link"), second.path().join("marker")] {
+            assert_eq!(
+                roots.read(path.to_str().unwrap(), 0, 100, "text").unwrap()["content"],
+                "second"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a disposable hosted image, umask 077 and the fixed four capabilities"]
+    async fn hosted_worker_paths_support_private_umask_without_dac_override() {
+        use std::os::unix::fs::MetadataExt;
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        for field in ["CapEff", "CapPrm", "CapBnd"] {
+            let actual = status
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{field}:")))
+                .unwrap();
+            assert_eq!(u64::from_str_radix(actual.trim(), 16).unwrap(), 0xe1);
+        }
+        assert!(status.lines().any(|line| line == "NoNewPrivs:\t1"));
+        assert!(status.lines().any(|line| line == "Umask:\t0077"));
+        let root = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
+        let data = root.path().join("contexts");
+        super::super::hosted_context::directory(&data, true).unwrap();
+        for uid in [20000, 20003] {
+            let gate = data.join(uid.to_string());
+            std::fs::create_dir(&gate).unwrap();
+            std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o710)).unwrap();
+            std::os::unix::fs::chown(&gate, Some(0), Some(uid)).unwrap();
+            let workspace = gate.join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::write(workspace.join("private"), uid.to_string()).unwrap();
+            std::os::unix::fs::chown(workspace.join("private"), Some(uid), Some(uid)).unwrap();
+            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::os::unix::fs::chown(&workspace, Some(uid), Some(uid)).unwrap();
+        }
+        let workspace = data.join("20000/workspace");
+        assert_eq!(
+            File::open(&workspace).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let identity = super::super::process::Identity::resolve(Some("nyxc20000")).unwrap();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        identity.prepare_agent(&mut command).unwrap();
+        let access = command
+            .args(["-ec", "printf own > \"$1/marker\"; test \"$(cat \"$1/private\")\" = 20000; test ! -r \"$2/private\"; test ! -w \"$2\"; test ! -r \"$3\"; test ! -w \"$3\"", "sh"])
+            .arg(&workspace)
+            .arg(data.join("20003/workspace"))
+            .arg(&data)
+            .output()
+            .await
+            .unwrap();
+        let roots = Roots::new(std::slice::from_ref(&workspace), &[]).unwrap();
+        let pinned = roots.cwd(None);
+        println!(
+            "contexts_mode={:o} worker_path_success={} supervisor_pin_success={} worker_stderr={}",
+            std::fs::metadata(&data).unwrap().mode() & 0o777,
+            access.status.success(),
+            pinned.is_ok(),
+            String::from_utf8_lossy(&access.stderr)
+        );
+        assert!(
+            access.status.success(),
+            "worker must access its own retained path while sibling access stays denied"
+        );
+        let mut command = tokio::process::Command::new("/bin/cat");
+        identity.prepare_agent(&mut command).unwrap();
+        super::super::process::pin_cwd(&mut command, pinned.unwrap());
+        let output = command.arg("marker").output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"own");
+        assert_eq!(std::fs::metadata(&workspace).unwrap().mode() & 0o777, 0o700);
+        let pinned = roots.cwd(None).unwrap();
+        std::fs::set_permissions(data.join("20000"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut command = tokio::process::Command::new("/bin/true");
+        identity.prepare_agent(&mut command).unwrap();
+        super::super::process::pin_cwd(&mut command, pinned);
+        assert_eq!(
+            command.status().await.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        // Existing private metadata directories must never be broadened.
+        let private = root.path().join("metadata");
+        std::fs::create_dir(&private).unwrap();
+        super::super::hosted_context::directory(&private, true).unwrap();
+        assert_eq!(std::fs::metadata(private).unwrap().mode() & 0o777, 0o700);
+    }
+
     #[tokio::test]
     async fn command_directory_stays_pinned_after_parent_symlink_swap() {
         let root = tempfile::tempdir().unwrap();

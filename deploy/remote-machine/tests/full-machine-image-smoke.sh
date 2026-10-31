@@ -23,21 +23,24 @@ root=pathlib.Path(test_dir)
 output=root/'results'
 output.mkdir()
 all_results=[]
+supervisor_capabilities=json.loads((pathlib.Path(repo)/'machine/resources/docker-supervisor-capabilities.json').read_text())
+manifest=json.loads((pathlib.Path(repo)/'deploy/remote-machine/seccomp/manifest.json').read_text())
+seccomp=pathlib.Path(repo)/'deploy/remote-machine/seccomp'/pathlib.Path(manifest['localhost_profile']).name
 volume='nyxid-full-smoke-workspace-'+uuid.uuid4().hex[:12]
 subprocess.run(['docker','volume','create',volume],check=True,stdout=subprocess.DEVNULL)
 atexit.register(lambda: subprocess.run(['docker','volume','rm',volume],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL))
 retention_marker=uuid.uuid4().hex
 retained_node_id=str(uuid.uuid4())
-for capabilities,generation in [('shell,files',1),('browser',1),('shell,files,browser,computer',1),('shell,files',2)]:
+for capabilities,generation,initialize in [('shell,files',1,True),('browser',1,True),('shell,files,browser,computer',1,True),('shell,files',2,False)]:
     case='all-capabilities' if 'computer' in capabilities and 'shell' in capabilities else 'browser-computer' if 'computer' in capabilities else 'browser-only' if 'browser' in capabilities else 'commands-files'
     if generation > 1:
         case+='-retained'
     name='nyxid-full-smoke-'+uuid.uuid4().hex[:12]
-    command=['docker','run','--detach','--name',name,'--network','none','--read-only',
+    command=['docker','run','--detach','--name',name,'--network','none',
         '--cpus','2','--memory','2g','--memory-swap','2g',
-        '--cap-drop','ALL','--cap-add','CHOWN','--cap-add','SETUID','--cap-add','SETGID','--cap-add','KILL',
-        '--security-opt','no-new-privileges',
-        '--security-opt','seccomp='+repo+'/cli/resources/machine-container/seccomp.json',
+        '--cap-drop','ALL',
+        *[argument for cap in supervisor_capabilities for argument in ('--cap-add',cap)],
+        '--security-opt','seccomp='+str(seccomp),
         '--tmpfs','/var/lib/nyxid-machine:rw,nosuid,nodev,mode=0711,size=64m',
         '--tmpfs','/var/run/nyxid-workload:rw,nosuid,nodev,mode=0700,size=1m',
         '--tmpfs','/tmp:rw,nosuid,nodev,size=1g',
@@ -47,11 +50,22 @@ for capabilities,generation in [('shell,files',1),('browser',1),('shell,files,br
         '--mount',f'type=bind,source={output},target=/smoke-results',
         '--env','PYTHONPATH=/test-deps','--env','PYTHONDONTWRITEBYTECODE=1',
         '--env','NYXID_SMOKE_CAPABILITIES='+capabilities,
+        '--env','NYXID_SMOKE_STORAGE_INITIALIZE='+('1' if initialize else '0'),
         '--entrypoint','python3',image,'/smoke.py']
-    workspace=['--tmpfs','/workspace:rw,nosuid,nodev,size=32m']
+    context_volume=volume
+    if capabilities!='shell,files':
+        context_volume='nyxid-full-smoke-context-'+uuid.uuid4().hex[:12]
+        subprocess.run(['docker','volume','create',context_volume],check=True,stdout=subprocess.DEVNULL)
+        atexit.register(lambda value=context_volume: subprocess.run(['docker','volume','rm',value],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL))
+    # Create only the legacy subdirectory of this disposable volume. This is a
+    # fixture allocation, not authority to initialize the production journal.
+    subprocess.run(['docker','run','--rm','--network','none','--read-only','--cap-drop','ALL',
+        '--mount',f'type=volume,source={context_volume},target=/var/lib/nyxid-contexts,volume-nocopy',
+        '--entrypoint','python3',image,'-c',"import os; os.makedirs('/var/lib/nyxid-contexts/legacy',mode=0o755,exist_ok=True)"],check=True)
+    workspace=['--mount',f'type=volume,source={context_volume},target=/var/lib/nyxid-contexts,volume-nocopy',
+        '--mount',f'type=volume,source={context_volume},target=/workspace,volume-subpath=legacy,volume-nocopy']
     if capabilities=='shell,files':
-        workspace=['--mount',f'type=volume,source={volume},target=/workspace,volume-nocopy',
-            '--env',f'NYXID_SMOKE_GENERATION={generation}',
+        workspace += ['--env',f'NYXID_SMOKE_GENERATION={generation}',
             '--env','NYXID_SMOKE_NODE_ID='+retained_node_id,
             '--env','NYXID_SMOKE_RETENTION_MARKER='+retention_marker]
     command[2:2]=workspace

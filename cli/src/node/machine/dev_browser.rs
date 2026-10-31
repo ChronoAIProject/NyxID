@@ -26,6 +26,9 @@ struct Refusal(&'static str);
 #[derive(Debug, Clone, Copy)]
 pub enum Failure {
     Setup,
+    RuntimeDirectory,
+    ProfileDirectory,
+    AlreadyRunning,
     Identity,
     #[cfg(target_os = "linux")]
     Display,
@@ -43,6 +46,15 @@ impl Failure {
         match self {
             Self::Setup => {
                 "machine_browser_unavailable: developer browser setup is incomplete; repair managed browser policies and profile permissions"
+            }
+            Self::RuntimeDirectory => {
+                "machine_browser_unavailable: developer browser runtime directory is unavailable; check supervisor directory ownership and permissions"
+            }
+            Self::ProfileDirectory => {
+                "machine_browser_unavailable: developer browser profile directory initialization failed; check profile ownership and permissions or update the machine"
+            }
+            Self::AlreadyRunning => {
+                "machine_browser_unavailable: another supervisor owns this developer browser; use the running daemon"
             }
             Self::Identity => {
                 "machine_browser_unavailable: developer browser OS user is missing or cannot be used; rerun setup --separate-users or update the machine image"
@@ -90,6 +102,7 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {}
 
 pub struct DevBrowser {
+    _lock: std::fs::File,
     child: Child,
     pipe: BufReader<UnixStream>,
     next_id: u64,
@@ -123,7 +136,12 @@ impl DevBrowser {
                     .downcast_ref::<Failure>()
                     .copied()
                     .unwrap_or(Failure::Setup);
-                tracing::warn!(reason = ?failure, "developer browser launch failed");
+                browser::startup_failure(
+                    "developer",
+                    format_args!("{failure:?}"),
+                    identity,
+                    &error,
+                );
                 anyhow::Error::new(failure)
             })
     }
@@ -137,9 +155,24 @@ impl DevBrowser {
         if identity.uid == 0 {
             return Err(Failure::Identity.into());
         }
-        browser::protected_runtime_parent(directory)?;
+        browser::protected_runtime_parent(directory).context(Failure::RuntimeDirectory)?;
+        let run = directory.join("dev-browser-run");
+        browser::runtime_directory(&run, unsafe { libc::geteuid() }, identity.gid, 0o750)
+            .context(Failure::RuntimeDirectory)?;
+        let lock = browser::runtime_lock(&run).map_err(|error| {
+            let failure = if matches!(
+                error.downcast_ref::<browser::Failure>(),
+                Some(browser::Failure::AlreadyRunning)
+            ) {
+                Failure::AlreadyRunning
+            } else {
+                Failure::RuntimeDirectory
+            };
+            error.context(failure)
+        })?;
         let profile = directory.join("dev-browser-profile");
-        browser::runtime_directory(&profile, identity.uid, identity.gid, 0o700)?;
+        browser::runtime_directory(&profile, identity.uid, identity.gid, 0o700)
+            .context(Failure::ProfileDirectory)?;
         let (parent, child_pipe) = std::os::unix::net::UnixStream::pair()?;
         parent.set_nonblocking(true)?;
         // Reserve a descriptor above Chromium's fixed pipe slots before pre_exec.
@@ -222,12 +255,10 @@ impl DevBrowser {
                     super::dev_display::endpoint().context(Failure::Display)?;
                 command.env("DISPLAY", display).env("XAUTHORITY", authority);
             }
-            // Remove the cookie copied by older versions. Never share X11 trust.
-            match std::fs::remove_file(profile.join("Xauthority")) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
+            // The supervisor cannot traverse a worker-owned 0700 profile under
+            // the formal capabilities. Remove an old copied X11 cookie as the
+            // developer user; never take ownership of profile contents.
+            clear_legacy_authority(&profile, identity).await?;
         }
         command
             .arg(format!("--user-data-dir={}", profile.display()))
@@ -268,6 +299,7 @@ impl DevBrowser {
         drop(command);
         drop(child_pipe);
         let mut browser = Self {
+            _lock: lock,
             child,
             pipe: BufReader::new(UnixStream::from_std(parent)?),
             next_id: 0,
@@ -338,6 +370,31 @@ impl DevBrowser {
             tracing::warn!(?reason, ?exit_status, "developer browser transport failed");
         }
         result
+    }
+
+    /// Check the CDP child and pipe before a caller starts a business action.
+    /// This is deliberately a read-only handshake; recovery callers may drop
+    /// this instance and launch a fresh browser before submitting an action.
+    pub(crate) async fn probe(&mut self) -> Result<()> {
+        self.rpc(None, "Browser.getVersion", json!({}))
+            .await
+            .map(|_| ())
+    }
+
+    /// Kill and reap Chromium before a replacement uses the same profile.
+    /// The Drop implementation remains a last-resort kill path for cancelled
+    /// requests, while recovery waits for the child to release its locks.
+    pub(crate) async fn terminate(mut self) -> Result<()> {
+        if let Some(pid) = self.child.id() {
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait())
+            .await
+            .context(Failure::Exited)?
+            .context(Failure::Exited)?;
+        Ok(())
     }
 
     async fn rpc_inner(
@@ -411,14 +468,7 @@ impl DevBrowser {
                 .await?;
             tabs.push(json!({"targetId":created["targetId"],"type":"page","url":"about:blank"}));
         }
-        let id = requested
-            .or(self.selected.as_deref())
-            .and_then(|id| tabs.iter().find(|t| t["targetId"] == id))
-            .or_else(|| tabs.first())
-            .context("developer browser has no tabs")?["targetId"]
-            .as_str()
-            .context("invalid tab")?
-            .to_owned();
+        let id = select_target_id(requested, self.selected.as_deref(), &tabs)?;
         let session = if let Some(session) = self.sessions.get(&id) {
             session.clone()
         } else {
@@ -638,9 +688,14 @@ impl DevBrowser {
             value
                 .strip_prefix('f')
                 .and_then(|v| v.split_once(':'))
+                .filter(|(frame, reference)| {
+                    !reference.is_empty() && frames.iter().any(|(id, _)| id == frame)
+                })
                 .map(|(f, r)| (f.to_owned(), r.to_owned()))
+                .ok_or_else(|| anyhow::Error::new(Refusal("stale_ref")))
         };
-        let target = request["ref"].as_str().and_then(parse);
+        let target = request["ref"].as_str().map(parse).transpose()?;
+        let scope = request["scope"].as_str().map(parse).transpose()?;
         let mut local = request.clone();
         if let Some((_, r)) = &target {
             local["ref"] = json!(r);
@@ -660,11 +715,13 @@ impl DevBrowser {
             }
             // Effects are not repeated when collecting the updated snapshot.
         }
-        let scope = request["scope"].as_str().and_then(parse);
         let offset = request["offset"].as_u64().unwrap_or(0).min(100000);
         let mut skip = offset;
         let mut total = 0;
         let mut result = json!({"elements":[],"frames":[],"text":"","headings":[],"ready":"complete","more":{"elements":false,"text":false,"frames":frames.len()==64}});
+        // Internal observation correlation only; action_inner removes it from
+        // the public snapshot. HTTP redirects retain the navigation loader.
+        result["_loader_id"] = tree["frameTree"]["frame"]["loaderId"].clone();
         let mut full = false;
         for (frame, parent) in &frames {
             if scope.as_ref().is_some_and(|(f, _)| f != frame) {
@@ -806,14 +863,17 @@ impl DevBrowser {
             .target(new_tab.as_deref().or(request["tab_id"].as_str()))
             .await?;
         let mut extra = json!({});
+        let mut navigation_loader = None;
         match action {
             "navigate" => {
-                self.rpc(
-                    Some(&session),
-                    "Page.navigate",
-                    json!({"url":web_url(request["url"].as_str().context("url required")?)?}),
-                )
-                .await?;
+                let navigation = self
+                    .rpc(
+                        Some(&session),
+                        "Page.navigate",
+                        json!({"url":web_url(request["url"].as_str().context("url required")?)?}),
+                    )
+                    .await?;
+                navigation_loader = navigation["loaderId"].as_str().map(str::to_owned);
             }
             "back" | "forward" => {
                 let history = self
@@ -904,11 +964,16 @@ impl DevBrowser {
                     .unwrap_or(5000)
                     .clamp(100, 15000),
             );
-        let snapshot = loop {
+        let mut snapshot = loop {
             match self.page_action(&session, &parameters).await {
                 Ok(value)
                     if (!navigation || value["ready"] == "complete")
-                        && (action != "navigate" || value["url"] == request["url"])
+                        && (action != "navigate"
+                            || (value["url"] != "about:blank"
+                                && navigation_loader.as_ref().map_or_else(
+                                    || value["url"] == request["url"],
+                                    |loader| value["_loader_id"] == *loader,
+                                )))
                         && (action != "wait"
                             || (value["ready"] == "complete"
                                 && request["text"].as_str().is_none_or(|t| {
@@ -916,6 +981,9 @@ impl DevBrowser {
                                 }))) =>
                 {
                     break value;
+                }
+                Ok(_) if navigation && tokio::time::Instant::now() >= deadline => {
+                    return Err(Failure::Timeout.into());
                 }
                 Ok(value) if tokio::time::Instant::now() >= deadline => break value,
                 Err(error) if error.downcast_ref::<Failure>().is_some() => return Err(error),
@@ -928,6 +996,9 @@ impl DevBrowser {
                 _ => tokio::time::sleep(Duration::from_millis(50)).await,
             }
         };
+        if let Some(snapshot) = snapshot.as_object_mut() {
+            snapshot.remove("_loader_id");
+        }
         extra["status"] = json!("ok");
         extra["snapshot"] = snapshot;
         extra["snapshot"]["tab_id"] = json!(id);
@@ -947,6 +1018,32 @@ impl DevBrowser {
     }
 }
 
+fn select_target_id(
+    requested: Option<&str>,
+    selected: Option<&str>,
+    tabs: &[Value],
+) -> Result<String> {
+    if let Some(requested) = requested
+        && !tabs.iter().any(|tab| tab["targetId"] == requested)
+    {
+        return Err(Refusal("stale_tab").into());
+    }
+    if requested.is_none()
+        && let Some(selected) = selected
+        && !tabs.iter().any(|tab| tab["targetId"] == selected)
+    {
+        return Err(Refusal("stale_tab").into());
+    }
+    requested
+        .or(selected)
+        .and_then(|id| tabs.iter().find(|tab| tab["targetId"] == id))
+        .or_else(|| tabs.first())
+        .context("developer browser has no tabs")?["targetId"]
+        .as_str()
+        .context("invalid tab")
+        .map(str::to_owned)
+}
+
 // Detached/navigating frames can be skipped, but a dead pipe must reach the
 // caller as browser_unavailable, never as a successful empty snapshot.
 fn optional_frame<T>(result: Result<T>) -> Result<Option<T>> {
@@ -959,6 +1056,26 @@ fn optional_frame<T>(result: Result<T>) -> Result<Option<T>> {
 
 fn spawn(command: &mut Command) -> Result<Child> {
     command.spawn().context(Failure::Spawn)
+}
+
+#[cfg(target_os = "linux")]
+async fn clear_legacy_authority(profile: &Path, identity: &Identity) -> Result<()> {
+    let mut command = Command::new("/bin/rm");
+    identity.prepare(&mut command).context(Failure::Identity)?;
+    let status = command
+        .args(["-f", "--"])
+        .arg(profile.join("Xauthority"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .context(Failure::ProfileDirectory)?;
+    if !status.success() {
+        browser::record_exit("developer", "legacy_display_cookie_cleanup", status);
+        return Err(Failure::ProfileDirectory.into());
+    }
+    Ok(())
 }
 
 fn web_url(text: &str) -> Result<String> {
@@ -976,6 +1093,196 @@ fn web_url(text: &str) -> Result<String> {
 mod tests {
     use super::*;
 
+    // A CDP peer can acknowledge navigation while continuing to report an old
+    // document, or disconnect after receiving it. This exercises the real
+    // action/transport boundary without requiring a desktop or Chromium.
+    fn simulated_browser(
+        navigation_reply: &'static str,
+    ) -> (
+        DevBrowser,
+        std::sync::Arc<std::sync::atomic::AtomicU64>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (parent, peer) = UnixStream::pair().unwrap();
+        let mut command = Command::new("/bin/sleep");
+        Identity::resolve(None)
+            .unwrap()
+            .prepare(&mut command)
+            .unwrap();
+        let child = command.arg("30").spawn().unwrap();
+        let browser = DevBrowser {
+            _lock: tempfile::tempfile().unwrap(),
+            child,
+            pipe: BufReader::new(parent),
+            next_id: 0,
+            selected: None,
+            sessions: HashMap::new(),
+            console: VecDeque::new(),
+            network: VecDeque::new(),
+        };
+        let navigations = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let count = navigations.clone();
+        let task = tokio::spawn(async move {
+            let mut peer = BufReader::new(peer);
+            loop {
+                let mut bytes = Vec::new();
+                if peer.read_until(0, &mut bytes).await.unwrap() == 0 {
+                    break;
+                }
+                bytes.pop();
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "Target.getTargets" => {
+                        json!({"targetInfos":[{"targetId":"current-tab","type":"page"}]})
+                    }
+                    "Target.attachToTarget" => json!({"sessionId":"current-session"}),
+                    "Page.getFrameTree" => {
+                        json!({"frameTree":{"frame":{"id":"current-frame","loaderId":if navigation_reply == "redirected" { "requested-loader" } else { "old-loader" }}}})
+                    }
+                    "Page.createIsolatedWorld" => json!({"executionContextId":1}),
+                    "Runtime.evaluate" => {
+                        json!({"result":{"value":{"url":match navigation_reply { "redirected" => "https://example.test/redirected", "old_document" => "https://example.test/old", _ => "about:blank" },"ready":"complete","elements":[],"headings":[],"text":"","total":0,"more":{}}}})
+                    }
+                    "Page.navigate" => {
+                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        match navigation_reply {
+                            "disconnect" => break,
+                            "pending" => continue,
+                            _ => json!({"loaderId":"requested-loader"}),
+                        }
+                    }
+                    _ => json!({}),
+                };
+                let mut response =
+                    serde_json::to_vec(&json!({"id":request["id"],"result":result})).unwrap();
+                response.push(0);
+                peer.get_mut().write_all(&response).await.unwrap();
+            }
+        });
+        (browser, navigations, task)
+    }
+
+    #[tokio::test]
+    async fn navigation_never_reports_the_default_document_as_success() {
+        for observation in ["stale_document", "old_document"] {
+            let (mut browser, navigations, peer) = simulated_browser(observation);
+            let result = browser
+                .action(&json!({
+                    "action":"navigate", "url":"https://example.test/requested", "timeout_ms":100
+                }))
+                .await;
+            drop(browser);
+            peer.await.unwrap();
+            assert!(matches!(
+                result.unwrap_err().downcast_ref::<Failure>(),
+                Some(Failure::Timeout)
+            ));
+            assert_eq!(navigations.load(std::sync::atomic::Ordering::Relaxed), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn navigation_accepts_a_redirect_from_its_own_document() {
+        let (mut browser, navigations, peer) = simulated_browser("redirected");
+        let result = browser
+            .action(&json!({"action":"navigate","url":"https://example.test/requested"}))
+            .await
+            .unwrap();
+        drop(browser);
+        peer.await.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["snapshot"]["url"], "https://example.test/redirected");
+        assert!(result["snapshot"].get("_loader_id").is_none());
+        assert_eq!(navigations.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_snapshot_rejects_a_reference_from_an_old_browser() {
+        let (mut browser, _, peer) = simulated_browser("stale_document");
+        let result = browser
+            .action(&json!({"action":"snapshot","scope":"fold-frame:r1"}))
+            .await
+            .unwrap();
+        drop(browser);
+        peer.await.unwrap();
+        assert_eq!(result["status"], "refused");
+        assert_eq!(result["reason"], "stale_ref");
+    }
+
+    #[tokio::test]
+    async fn disconnect_after_navigation_submission_never_replays_it() {
+        let (mut browser, navigations, peer) = simulated_browser("disconnect");
+        let result = browser
+            .action(&json!({"action":"navigate","url":"https://example.test/requested"}))
+            .await;
+        drop(browser);
+        peer.await.unwrap();
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<Failure>(),
+            Some(Failure::PipeClosed)
+        ));
+        assert_eq!(navigations.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_discards_and_reaps_a_submitted_browser_action() {
+        let (mut browser, navigations, peer) = simulated_browser("pending");
+        let pid = browser.child.id().unwrap();
+        let action = tokio::spawn(async move {
+            browser
+                .action(&json!({"action":"navigate","url":"https://example.test/requested"}))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while navigations.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        action.abort();
+        assert!(action.await.unwrap_err().is_cancelled());
+        peer.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while unsafe { libc::kill(pid as i32, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancelled browser child must be reaped");
+        assert_eq!(navigations.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable hardened Linux supervisor"]
+    async fn legacy_display_cookie_cleanup_uses_the_developer_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
+        let profile = root.path().join("dev-browser-profile");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cookie = profile.join("Xauthority");
+        std::fs::write(&cookie, b"obsolete-fixture-cookie").unwrap();
+        std::os::unix::fs::chown(&profile, Some(1002), Some(1002)).unwrap();
+        assert_eq!(
+            std::fs::remove_file(&cookie).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let identity = Identity::resolve(Some("devbrowser")).unwrap();
+        clear_legacy_authority(&profile, &identity).await.unwrap();
+        clear_legacy_authority(&profile, &identity).await.unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(&profile).unwrap();
+        assert_eq!(
+            (meta.uid(), meta.gid(), meta.mode() & 0o7777),
+            (1002, 1002, 0o700)
+        );
+        std::os::unix::fs::chown(&profile, Some(0), Some(0)).unwrap();
+        assert!(!cookie.exists());
+    }
+
     fn assert_unavailable(error: anyhow::Error) {
         let error = super::super::MachineError::from(error);
         assert_eq!(error.public().0, 12413);
@@ -987,6 +1294,9 @@ mod tests {
     fn browser_failures_are_typed_and_do_not_expose_sources() {
         for failure in [
             Failure::Setup,
+            Failure::RuntimeDirectory,
+            Failure::ProfileDirectory,
+            Failure::AlreadyRunning,
             Failure::Identity,
             Failure::Spawn,
             Failure::Exited,
@@ -1027,6 +1337,7 @@ mod tests {
                 .unwrap();
             let child = command.arg("30").spawn().unwrap();
             let mut browser = DevBrowser {
+                _lock: tempfile::tempfile().unwrap(),
                 child,
                 pipe: BufReader::new(parent),
                 next_id: 0,
@@ -1055,6 +1366,35 @@ mod tests {
             let result = browser.rpc(None, "Browser.getVersion", json!({})).await;
             assert_unavailable(result.unwrap_err());
         }
+    }
+
+    #[test]
+    fn explicit_tab_reference_is_rejected_when_the_tab_is_gone() {
+        let tabs = vec![json!({"targetId":"current","type":"page"})];
+        let error = select_target_id(Some("stale"), None, &tabs).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<Refusal>().map(|refusal| refusal.0),
+            Some("stale_tab")
+        );
+    }
+
+    #[test]
+    fn stale_selected_tab_is_rejected_instead_of_remapping() {
+        let tabs = vec![json!({"targetId":"current","type":"page"})];
+        let error = select_target_id(None, Some("closed"), &tabs).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<Refusal>().map(|refusal| refusal.0),
+            Some("stale_tab")
+        );
+    }
+
+    #[test]
+    fn absent_tab_reference_still_uses_the_selected_live_tab() {
+        let tabs = vec![json!({"targetId":"current","type":"page"})];
+        assert_eq!(
+            select_target_id(None, Some("current"), &tabs).unwrap(),
+            "current"
+        );
     }
 
     #[test]

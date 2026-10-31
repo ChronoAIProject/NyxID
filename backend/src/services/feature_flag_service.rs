@@ -1256,6 +1256,78 @@ pub async fn search_rollout_targets(
         .collect()
 }
 
+/// Mode reviews contend on this row with both machine feature flags. Mutation
+/// and epoch advance are atomic, including inserts where no override existed.
+pub(crate) async fn advance_machine_review_epoch(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<bson::Document>("platform_settings")
+        .update_one(
+            doc! {"_id":crate::models::machine_access::CONTEXT_REVIEW_FENCE},
+            doc! {"$inc":{"epoch":1_i64}},
+        )
+        .upsert(true)
+        .session(session)
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+async fn mutate_machine_review_override(
+    db: &mongodb::Database,
+    flag: &str,
+    filter: bson::Document,
+    update: Option<bson::Document>,
+) -> AppResult<Option<FeatureFlagOverride>> {
+    let db = db.clone();
+    let relevant = matches!(
+        flag,
+        MACHINE_CAPABILITIES_FLAG_KEY | MACHINE_CONTEXTS_FLAG_KEY
+    );
+    if !relevant {
+        return match update {
+            Some(update) => Ok(db
+                .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+                .find_one_and_update(filter, update)
+                .upsert(true)
+                .return_document(mongodb::options::ReturnDocument::After)
+                .await?),
+            None => Ok(db
+                .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+                .find_one_and_delete(filter)
+                .await?),
+        };
+    }
+    db.client()
+        .start_session()
+        .await?
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<Option<FeatureFlagOverride>> = async {
+                advance_machine_review_epoch(&db, session).await?;
+                match &update {
+                    Some(update) => Ok(db
+                        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+                        .find_one_and_update(filter.clone(), update.clone())
+                        .upsert(true)
+                        .return_document(mongodb::options::ReturnDocument::After)
+                        .session(&mut *session)
+                        .await?),
+                    None => Ok(db
+                        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+                        .find_one_and_delete(filter.clone())
+                        .session(&mut *session)
+                        .await?),
+                }
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
 /// The org-row upsert behind [`set_platform_org_override`]. Gates live on the
 /// caller.
 #[cfg(test)]
@@ -1274,43 +1346,37 @@ async fn upsert_override_row(
         None => bson::Bson::Null,
     };
 
-    let row = db
-        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! {
+    let row = mutate_machine_review_override(
+        db,
+        flag_key,
+        doc! {
+            "org_user_id": org_user_id,
+            "flag_key": flag_key,
+            "definition_id": definition.id.clone(),
+            "target_kind": target.kind().as_str(),
+            "target_key": target_key.clone(),
+        },
+        Some(doc! {
+            "$set": {
+                "enabled": enabled,
+                "updated_at": now,
+                "updated_by": actor_id,
+            },
+            "$setOnInsert": {
+                "_id": Uuid::new_v4().to_string(),
                 "org_user_id": org_user_id,
                 "flag_key": flag_key,
                 "definition_id": definition.id.clone(),
                 "target_kind": target.kind().as_str(),
-                "target_key": target_key.clone(),
+                "target_key": target_key,
+                "created_at": now,
             },
-            doc! {
-                "$set": {
-                    "enabled": enabled,
-                    "updated_at": now,
-                    "updated_by": actor_id,
-                },
-                "$setOnInsert": {
-                    "_id": Uuid::new_v4().to_string(),
-                    "org_user_id": org_user_id,
-                    "flag_key": flag_key,
-                    "definition_id": definition.id.clone(),
-                    "target_kind": target.kind().as_str(),
-                    "target_key": target_key,
-                    "created_at": now,
-                },
-            },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .upsert(true)
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?
-        .ok_or_else(|| {
-            AppError::Internal("feature flag override upsert did not return the row".to_string())
-        })?;
+        }),
+    )
+    .await?
+    .ok_or_else(|| {
+        AppError::Internal("feature flag override upsert did not return the row".to_string())
+    })?;
 
     Ok(row)
 }
@@ -1357,44 +1423,38 @@ pub async fn set_platform_override(
         None => bson::Bson::Null,
     };
 
-    let row = db
-        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! {
-                "org_user_id": bson::Bson::Null,
+    let row = mutate_machine_review_override(
+        db,
+        flag_key,
+        doc! {
+            "org_user_id": bson::Bson::Null,
+            "flag_key": flag_key,
+            "definition_id": definition.id.clone(),
+            "target_kind": target.kind().as_str(),
+            "target_key": target_key.clone(),
+        },
+        Some(doc! {
+            "$set": {
+                "enabled": enabled,
+                "updated_at": now,
+                "updated_by": actor_id,
+            },
+            "$setOnInsert": {
+                "_id": Uuid::new_v4().to_string(),
                 "flag_key": flag_key,
                 "definition_id": definition.id.clone(),
                 "target_kind": target.kind().as_str(),
-                "target_key": target_key.clone(),
+                "target_key": target_key,
+                "created_at": now,
             },
-            doc! {
-                "$set": {
-                    "enabled": enabled,
-                    "updated_at": now,
-                    "updated_by": actor_id,
-                },
-                "$setOnInsert": {
-                    "_id": Uuid::new_v4().to_string(),
-                    "flag_key": flag_key,
-                    "definition_id": definition.id.clone(),
-                    "target_kind": target.kind().as_str(),
-                    "target_key": target_key,
-                    "created_at": now,
-                },
-            },
+        }),
+    )
+    .await?
+    .ok_or_else(|| {
+        AppError::Internal(
+            "platform feature flag override upsert did not return the row".to_string(),
         )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .upsert(true)
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?
-        .ok_or_else(|| {
-            AppError::Internal(
-                "platform feature flag override upsert did not return the row".to_string(),
-            )
-        })?;
+    })?;
     Ok(row)
 }
 
@@ -1410,16 +1470,19 @@ pub async fn clear_platform_override(
         Some(k) => bson::Bson::String(k),
         None => bson::Bson::Null,
     };
-    let row = db
-        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
-        .find_one_and_delete(doc! {
+    let row = mutate_machine_review_override(
+        db,
+        flag_key,
+        doc! {
             "org_user_id": bson::Bson::Null,
             "flag_key": flag_key,
             "definition_id": definition.id.clone(),
             "target_kind": target.kind().as_str(),
             "target_key": target_key,
-        })
-        .await?;
+        },
+        None,
+    )
+    .await?;
     Ok(row)
 }
 
@@ -1464,16 +1527,19 @@ pub async fn clear_platform_org_override(
     flag_key: &str,
 ) -> AppResult<Option<FeatureFlagOverride>> {
     let definition = get_definition(db, flag_key).await?;
-    let row = db
-        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
-        .find_one_and_delete(doc! {
+    let row = mutate_machine_review_override(
+        db,
+        flag_key,
+        doc! {
             "org_user_id": org_user_id,
             "flag_key": flag_key,
                 "definition_id": definition.id.clone(),
             "target_kind": FlagTargetKind::Org.as_str(),
             "target_key": bson::Bson::Null,
-        })
-        .await?;
+        },
+        None,
+    )
+    .await?;
     Ok(row)
 }
 
@@ -1738,10 +1804,33 @@ pub async fn patch_metadata(
 
 /// Cascade helper: drop every override for an org (used when the org is deleted).
 pub async fn delete_all_for_org(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
-    db.collection::<FeatureFlagOverride>(COLLECTION_NAME)
-        .delete_many(doc! { "org_user_id": org_user_id })
-        .await?;
-    Ok(())
+    let db = db.clone();
+    let org = org_user_id.to_owned();
+    db.client()
+        .start_session()
+        .await?
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                db.collection::<bson::Document>("platform_settings")
+                    .update_one(
+                        doc! {"_id":crate::models::machine_access::CONTEXT_REVIEW_FENCE},
+                        doc! {"$inc":{"epoch":1_i64}},
+                    )
+                    .upsert(true)
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<FeatureFlagOverride>(COLLECTION_NAME)
+                    .delete_many(doc! {"org_user_id":&org})
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 #[cfg(test)]

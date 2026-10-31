@@ -13,7 +13,7 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
-zeroize = "1"
+zeroize = { version = "1", features = ["serde"] }
 urlencoding = "2.1"
 uuid = { workspace = true }
 semver = "1"

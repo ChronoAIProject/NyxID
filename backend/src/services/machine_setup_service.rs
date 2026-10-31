@@ -185,6 +185,7 @@ pub async fn initiate(
         db,
         "",
         Choices {
+            machine_assignment: None,
             separation: None,
             legacy_warning_acknowledged: false,
             automatic_updates: None,
@@ -300,14 +301,20 @@ pub async fn setup_selection_reason(
     }
 }
 
-/// Page-only setups have no waiting NyxBot to apply the reviewed grant. Commit
-/// the grant and completion together so a reconnect cannot restore a later
-/// revoked grant. Chat-led setups leave verification and granting to NyxBot.
+fn completion_filter(id: &str) -> bson::Document {
+    doc! {"_id":id,"status":{"$in":["waiting","selection_required"]},"$or":[
+        {"conversation_id":null}, {"choices.machine_assignment":"membership_only"}
+    ]}
+}
+
+/// Page setups and explicitly tagged chat-origin setups commit membership and
+/// completion together. Untagged chat/pairing retains its NyxBot handoff.
+/// Reconnects cannot restore a subsequently revoked membership.
 pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
     use super::{api_key_mutation_service as transactions, assistant_team_service as team};
     let Some(row) = db
         .collection::<MachineSetup>(COLLECTION_NAME)
-        .find_one(doc! {"_id":id,"conversation_id":null,"status":{"$in":["waiting","selection_required"]}})
+        .find_one(completion_filter(id))
         .await?
     else {
         return Ok(());
@@ -328,10 +335,12 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
         return Ok(());
     }
     if let Some(reason) = Box::pin(setup_selection_reason(db, &row, &node)).await? {
-        db.collection::<MachineSetup>(COLLECTION_NAME).update_one(
-            doc! {"_id":id,"status":{"$in":["waiting","selection_required"]},"conversation_id":null},
-            doc! {"$set":{"status":"selection_required"}},
-        ).await?;
+        db.collection::<MachineSetup>(COLLECTION_NAME)
+            .update_one(
+                completion_filter(id),
+                doc! {"$set":{"status":"selection_required"}},
+            )
+            .await?;
         tracing::debug!(reason, "Machine setup awaits owner separation selection");
         return Ok(());
     }
@@ -342,12 +351,17 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
+                let Some(row) = db
+                    .collection::<MachineSetup>(COLLECTION_NAME)
+                    .find_one(completion_filter(&id))
+                    .session(&mut *session)
+                    .await?
+                else {
+                    return Ok(());
+                };
                 let changed = db
                     .collection::<MachineSetup>(COLLECTION_NAME)
-                    .update_one(
-                        doc! {"_id":&id,"status":{"$in":["waiting","selection_required"]},"conversation_id":null},
-                        doc! {"$set":{"status":"connected"}},
-                    )
+                    .update_one(completion_filter(&id), doc! {"$set":{"status":"connected"}})
                     .session(&mut *session)
                     .await?;
                 if changed.modified_count == 1
@@ -357,11 +371,18 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
                         &db,
                         &row.user_id,
                         agent,
-                        &team::GrantChange::Machine {
-                            base: Box::new(team::GrantChange::Add(Default::default())),
-                            machines: Some(vec![id.to_owned()]),
-                            logins: None,
-                            mode: team::MachineGrantMode::Add,
+                        &if row.choices.machine_assignment.is_some() {
+                            team::GrantChange::Membership {
+                                node_id: id.clone(),
+                                assigned: true,
+                            }
+                        } else {
+                            team::GrantChange::Machine {
+                                base: Box::new(team::GrantChange::Add(Default::default())),
+                                machines: Some(vec![id.clone()]),
+                                logins: None,
+                                mode: team::MachineGrantMode::Add,
+                            }
                         },
                         session,
                     )
@@ -443,11 +464,14 @@ pub async fn mint(
     };
     let mut set = doc! {"status":"issuing"};
     if let Some(choices) = choices {
-        set.insert(
-            "choices",
-            bson::to_bson(&choices)
-                .map_err(|_| AppError::Internal("Could not encode machine setup choices".into()))?,
-        );
+        let mut fields = bson::to_document(&choices)
+            .map_err(|_| AppError::Internal("Could not encode machine setup choices".into()))?;
+        if choices.machine_assignment.is_none() {
+            fields.remove("machine_assignment");
+        }
+        for (key, value) in fields {
+            set.insert(format!("choices.{key}"), value);
+        }
     }
     let row = db.collection::<MachineSetup>(COLLECTION_NAME).find_one_and_update(
         doc! {"_id":id,"user_id":owner,"status":expected_status,"expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":set},

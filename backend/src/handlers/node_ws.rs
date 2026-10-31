@@ -63,6 +63,8 @@ enum NodeMessage {
         token: zeroize::Zeroizing<String>,
         #[serde(default)]
         managed_runtime: Option<nyxid_machine::managed::Binding>,
+        #[serde(default)]
+        managed_daemon_id: Option<String>,
     },
     #[serde(rename = "heartbeat_pong")]
     HeartbeatPong {
@@ -1004,7 +1006,7 @@ async fn handle_node_connection(
                             )
                             .await;
 
-                            return Some((node.id, node.user_id, false, None));
+                            return Some((node.id, node.user_id, false, None, None));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Node registration failed");
@@ -1034,6 +1036,7 @@ async fn handle_node_connection(
                     node_id,
                     token,
                     managed_runtime,
+                    managed_daemon_id,
                 } => {
                     match node_service::validate_auth_token(&state.db, &token).await {
                         Ok(node) if node.id == node_id => {
@@ -1047,7 +1050,12 @@ async fn handle_node_connection(
                                         "remote_machine" | "managed_machine" | "agent_sandbox"
                                     )
                                 });
-                            if is_managed && managed_runtime.is_none() {
+                            if is_managed
+                                && (managed_runtime.is_none()
+                                    || managed_daemon_id
+                                        .as_deref()
+                                        .is_none_or(|id| uuid::Uuid::parse_str(id).is_err()))
+                            {
                                 let _ = ws_sink
                                     .send(Message::Text(
                                         serde_json::json!({
@@ -1085,7 +1093,13 @@ async fn handle_node_connection(
                             // Success is acknowledged only after ownership and local
                             // publication. A rejected lease must fail the auth phase,
                             // including for older agents whose clean-close retry is immediate.
-                            return Some((node.id, node.user_id, true, managed_runtime));
+                            return Some((
+                                node.id,
+                                node.user_id,
+                                true,
+                                managed_runtime,
+                                managed_daemon_id,
+                            ));
                         }
                         Ok(_) => {
                             let err_msg = serde_json::json!({
@@ -1162,19 +1176,20 @@ async fn handle_node_connection(
     })
     .await;
 
-    let (node_id, owner_user_id, needs_auth_ok, managed_runtime) = match auth_result {
-        Ok(Some(pair)) => pair,
-        _ => {
-            // Timeout or auth failure -- close connection
-            let _ = ws_sink
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 4001,
-                    reason: "Authentication timeout or failure".into(),
-                })))
-                .await;
-            return;
-        }
-    };
+    let (node_id, owner_user_id, needs_auth_ok, managed_runtime, managed_daemon_id) =
+        match auth_result {
+            Ok(Some(pair)) => pair,
+            _ => {
+                // Timeout or auth failure -- close connection
+                let _ = ws_sink
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 4001,
+                        reason: "Authentication timeout or failure".into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
 
     // Keep claim and publication in the same order for concurrent reconnects
     // on this replica. MongoDB still fences ownership across replicas/generations.
@@ -1257,6 +1272,33 @@ async fn handle_node_connection(
         None
     };
 
+    let hosted_storage = if let Some(binding) = managed_runtime.as_ref() {
+        let grant = match managed_daemon_id.as_deref() {
+            Some(runtime_id) => {
+                crate::services::remote_machine_bootstrap::claim_hosted_storage(
+                    &state.db,
+                    binding,
+                    runtime_id,
+                    &owner_fence,
+                )
+                .await
+            }
+            None => Err(crate::errors::AppError::MachineAuthorityStale),
+        };
+        match grant {
+            Ok(grant) => Some(grant),
+            Err(_) => {
+                state
+                    .node_ws_manager
+                    .unregister_connection_if(&node_id, &connection_id);
+                let _ = crate::services::node_owner_service::release(&state.db, &owner_fence).await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     if needs_auth_ok {
         let ok_msg = serde_json::json!({
             "type": "auth_ok",
@@ -1264,7 +1306,8 @@ async fn handle_node_connection(
             "heartbeat_interval_secs": state.config.node_heartbeat_interval_secs,
             "capabilities": { "proxy_binary_chunks": true },
             "managed_runtime": managed_runtime,
-            "managed_runtime_window": managed_runtime_window
+            "managed_runtime_window": managed_runtime_window,
+            "hosted_storage": hosted_storage
         });
         let acknowledged = tokio::select! {
             biased;
@@ -1530,7 +1573,10 @@ async fn handle_node_connection(
                 if managed_runtime.is_some() {
                     let accepted =
                         match capabilities.as_ref().and_then(|caps| caps.machine.as_ref()) {
-                            Some(profile) => {
+                            Some(profile)
+                                if managed_daemon_id.as_deref()
+                                    == Some(profile.runtime_id.as_str()) =>
+                            {
                                 crate::services::remote_machine_manager::accepts_node_profile(
                                     &state.db,
                                     &node_id_reader,
@@ -1539,7 +1585,7 @@ async fn handle_node_connection(
                                 .await
                                 .unwrap_or(false)
                             }
-                            None => false,
+                            _ => false,
                         };
                     if !accepted {
                         reason = "managed_profile_rejected";

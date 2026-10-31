@@ -1,6 +1,6 @@
 //! File bodies share the signed, streaming node transport with proxy uploads.
 //! Only the unprivileged worker opens paths; the supervisor scrubs read output.
-use super::{FileRequest, Runtime, files::Roots, string};
+use super::{FileRequest, Runtime, string};
 use crate::node::{proxy_upload::VerifiedUpload, ws_client::NodeWsMessage};
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
@@ -105,12 +105,11 @@ impl Runtime {
     /// with that user's access to the protected profile and display files.
     pub(super) async fn stage_clipboard_file(&self, path: &str) -> Result<tempfile::NamedTempFile> {
         tokio::time::timeout(Duration::from_secs(30), async {
-            let request = FileRequest {
-                roots: self.config.roots.clone(),
-                excluded: self.excluded.clone(),
-                operation: Operation::ShareFile,
-                parameters: json!({"path":path,"max_bytes":LIMIT}),
-            };
+            let request = self.file_request(
+                self.roots.paths().to_vec(),
+                Operation::ShareFile,
+                json!({"path":path,"max_bytes":LIMIT}),
+            );
             let header = Zeroizing::new(serde_json::to_vec(&request)?);
             let mut command = tokio::process::Command::new(std::env::current_exe()?);
             self.identity.prepare_agent(&mut command)?;
@@ -284,12 +283,7 @@ impl Runtime {
         }
         let limit = transfer_limit(operation, metadata)?;
         let id = string(metadata, "request_id")?;
-        let request = FileRequest {
-            roots: self.config.roots.clone(),
-            excluded: self.excluded.clone(),
-            operation,
-            parameters: metadata.clone(),
-        };
+        let request = self.file_request(self.roots.paths().to_vec(), operation, metadata.clone());
         let header = Zeroizing::new(serde_json::to_vec(&request)?);
         if header.len() > 65536 {
             bail!("file metadata limit exceeded");
@@ -377,7 +371,7 @@ pub fn worker() -> Result<()> {
     let mut header = Zeroizing::new(vec![0; length]);
     input.read_exact(&mut header)?;
     let request: FileRequest = serde_json::from_slice(&header)?;
-    let roots = Roots::new(&request.roots, &request.excluded)?;
+    let roots = request.file_roots()?;
     let path = string(&request.parameters, "path")?;
     let limit = transfer_limit(request.operation, &request.parameters)?;
     let mut output = std::io::stdout().lock();

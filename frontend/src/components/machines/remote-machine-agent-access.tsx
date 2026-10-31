@@ -8,6 +8,7 @@ import {
 import { useMachineAccess } from "@/hooks/use-machine-access";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { hasPendingMachineApplication } from "@/lib/machine-access";
 import { useAuthStore } from "@/stores/auth-store";
 import type { MachineAccess } from "@/schemas/machine-access";
 import { MachineCapabilityForm } from "@/components/assistant/machine-capabilities";
@@ -30,13 +31,15 @@ const membershipSchema = z.object({ assigned: z.boolean() });
 export function RemoteMachineAgentAccess({
   node,
   machineId,
+  initialAgentId,
 }: {
   readonly node?: NodeInfo;
   readonly machineId: string;
+  readonly initialAgentId?: string;
 }) {
   const agents = useNyxBotAgents();
   const userId = useAuthStore((s) => s.user?.id);
-  const [agentId, setAgentId] = useState<string>();
+  const [agentId, setAgentId] = useState<string | undefined>(initialAgentId);
   const options =
     agents.data?.agents.filter(
       (agent) =>
@@ -51,6 +54,14 @@ export function RemoteMachineAgentAccess({
         NyxBot and specialist access uses the existing Agent assignment policy.
         It remains bound to an owner turn; guests cannot use this machine. A
         grant does not bypass a paused runtime or funding requirement.
+      </p>
+      <p role="status" className="text-12 text-muted-foreground">
+        {node?.is_connected === false
+          ? "Machine is offline. New execution is unavailable until it reconnects."
+          : node?.is_connected === true
+            ? "Machine connection is online. Agent grants and runtime admission are checked separately."
+            : "Machine connection status is unavailable."}{" "}
+        Saved permissions do not confirm runtime availability.
       </p>
       {node ? (
         <OwnerConfirmation node={node} />
@@ -164,6 +175,12 @@ function AgentAssignment({
           className="space-y-3"
           aria-label="Specialist machine membership"
           onSubmit={form.handleSubmit(async (data) => {
+            if (
+              mutation.isPending ||
+              agent.can_maintain === false ||
+              !form.formState.isDirty
+            )
+              return;
             setError(undefined);
             setCapabilitySaveFailed(false);
             try {
@@ -199,6 +216,7 @@ function AgentAssignment({
         >
           <label className="flex items-start gap-2 text-12">
             <Checkbox
+              disabled={mutation.isPending || agent.can_maintain === false}
               checked={form.watch("assigned")}
               onCheckedChange={(value) =>
                 form.setValue("assigned", value === true)
@@ -207,9 +225,11 @@ function AgentAssignment({
             Assign this machine to {agent.display_name ?? agent.name}
           </label>
           <p className="text-12 text-muted-foreground">
-            With capability editing enabled, new assignments start with
-            capabilities off. Review the current policy after assigning.
-            Removing membership cancels this agent’s work on this machine.
+            Hosted assignments create membership only. New assignments start
+            with all tools and saved logins off, regardless of editing flags.
+            Review the current policy after assigning. Removing membership
+            requests cancellation of this agent’s work on this machine; delivery
+            and cleanup still need confirmation.
           </p>
           {error ? (
             <p role="alert" className="text-12 text-destructive">
@@ -250,9 +270,17 @@ function AgentAssignment({
         />
       ) : assignment ? (
         <HostedCapabilities
-          key={`${agent.id}:${assignment.revision}`}
+          key={agent.id}
           agentId={agent.id}
           machine={assignment}
+          membership={
+            agent.kind === "nyxbot"
+              ? "owner"
+              : assigned
+                ? "assigned"
+                : "not_assigned"
+          }
+          disabled={agent.can_maintain === false}
           onSaveError={() => {
             setCapabilitySaveFailed(true);
           }}
@@ -265,6 +293,21 @@ function AgentAssignment({
           Capabilities are not yet available from this Node.
         </p>
       )}
+      <Button
+        type="button"
+        size="sm"
+        variant="secondary"
+        disabled={query.isFetching}
+        onClick={() => void query.refetch()}
+      >
+        Refresh machine status
+      </Button>
+      {query.data?.some(hasPendingMachineApplication) ? (
+        <p className="text-12 text-muted-foreground">
+          Status refreshes for up to one minute while this page is active. Use
+          Refresh machine status for a later check.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -272,44 +315,53 @@ function AgentAssignment({
 function HostedCapabilities({
   agentId,
   machine,
+  membership,
+  disabled,
   onSaveError,
   onSaveSuccess,
+  availableLogins,
+  sharedLoginsAllowed,
 }: {
   readonly agentId: string;
   readonly machine: MachineAccess;
+  readonly membership: "owner" | "assigned" | "not_assigned";
+  readonly disabled: boolean;
   readonly onSaveError?: () => void;
   readonly onSaveSuccess?: () => void;
+  readonly availableLogins?: readonly {
+    id: string;
+    label: string;
+    username_hint: string;
+    eligible: boolean;
+  }[];
+  readonly sharedLoginsAllowed?: boolean;
 }) {
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
+  const contextsEnabled = useFeature(FEATURE_FLAG.MACHINE_CONTEXTS);
   return (
     <section aria-label="Hosted agent capabilities" className="space-y-3">
       <p className="text-12">Policy revision {machine.revision}</p>
       <p className="text-12 text-muted-foreground">
-        Saving cancels this agent’s current work on this machine. Browser is
-        required for Computer and Developer browser. Turning off Browser also
-        removes Computer and Developer browser; other grants are preserved.
-        External OAuth and Agent Key clients remain restricted to their existing
-        shell/file tools and do not gain Browser or Computer access here.
+        Saving requests cancellation of this agent’s current work on this
+        machine. Browser is required for Computer and Developer browser. Turning
+        off Browser also removes Computer and Developer browser; other grants
+        are preserved. External OAuth and Agent Key clients remain restricted to
+        their existing shell/file tools and do not gain Browser or Computer
+        access here.
       </p>
-      {!enabled || !machine.protocol_v2 ? (
-        <p role="status" className="text-12 text-muted-foreground">
-          Capability editing is unavailable until the account feature and Node
-          protocol support are enabled.
-        </p>
-      ) : null}
       <MachineCapabilityForm
         machine={machine}
         agentId={agentId}
-        disabled={!enabled}
+        membership={membership}
+        disabled={disabled}
+        capabilityEditing={enabled}
+        contextEnabled={contextsEnabled}
         onSaveError={onSaveError}
         onSaveSuccess={onSaveSuccess}
+        availableLogins={availableLogins}
+        sharedLoginsAllowed={sharedLoginsAllowed}
+        configurationApplicability="hosted"
       />
-      {machine.revocation_pending ? (
-        <p role="status" className="text-12 text-warning">
-          Revocation delivery is pending; this is not proof of physical runtime
-          stop.
-        </p>
-      ) : null}
     </section>
   );
 }

@@ -2993,6 +2993,8 @@ pub async fn list_agents(
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentRequest {
     #[serde(default)]
+    machine_assignment: Option<crate::models::machine_access::AssignmentIntent>,
+    #[serde(default)]
     org: Option<String>,
     #[serde(default)]
     machines: Option<Vec<String>>,
@@ -3016,6 +3018,9 @@ pub async fn create_agent(
     auth: AuthUser,
     Json(body): Json<CreateAgentRequest>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
+    if body.machine_assignment.is_some() {
+        super::login_client_context::require_first_party_human(&auth)?;
+    }
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let resource_owner = match body.org.as_deref() {
@@ -3043,12 +3048,13 @@ pub async fn create_agent(
         specialty: None,
         created_by: "user",
     };
-    match Box::pin(team::create_specialist_for(
+    match Box::pin(team::create_specialist_for_with_machine_assignment(
         &state.db,
         &state.encryption_keys,
         &owner,
         &resource_owner,
         request,
+        body.machine_assignment,
     ))
     .await?
     {
@@ -3232,7 +3238,7 @@ pub async fn update_agent(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GrantsRequest {
+pub struct GrantsReplacement {
     #[serde(default)]
     machines: Option<Vec<String>>,
     #[serde(default)]
@@ -3243,6 +3249,27 @@ pub struct GrantsRequest {
     /// services left out keep their current level.
     #[serde(default)]
     guest_access: BTreeMap<String, GuestAccess>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineMembership {
+    node_id: String,
+    assigned: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipRequest {
+    machine_membership: MachineMembership,
+}
+
+/// Disjoint forms reject mixed replacement/capability/login payloads.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum GrantsRequest {
+    Membership(MembershipRequest),
+    Replacement(GrantsReplacement),
 }
 
 /// The owner sets a specialist's grants directly (replacing them), with
@@ -3257,6 +3284,47 @@ pub async fn set_agent_grants(
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let current = team::maintained_agent(&state.db, &owner, &id).await?;
+    let body = match body {
+        GrantsRequest::Replacement(body) => body,
+        GrantsRequest::Membership(body) => {
+            let member = body.machine_membership;
+            // Keep the existing owner/node ACL and supported-protocol selection.
+            // Even removal names one authorized node; no generic node writes.
+            let resolved = Box::pin(crate::services::machine_service::resolve_grant_change(
+                &state.db,
+                &current.user_id,
+                Some(vec![member.node_id]),
+                None,
+                team::GrantChange::Add(Default::default()),
+                team::MachineGrantMode::Add,
+            ))
+            .await?;
+            let team::GrantChange::Machine {
+                machines: Some(nodes),
+                ..
+            } = resolved
+            else {
+                return Err(AppError::MachineNotAllowed);
+            };
+            let node_id = nodes
+                .into_iter()
+                .next()
+                .ok_or(AppError::MachineNotAllowed)?;
+            let agent = Box::pin(team::set_grants(
+                &state.db,
+                &owner,
+                &id,
+                team::GrantChange::Membership {
+                    node_id,
+                    assigned: member.assigned,
+                },
+            ))
+            .await?;
+            return Ok(Json(
+                json!({"id":agent.id,"account_read":agent.grants.account_read}),
+            ));
+        }
+    };
     let targets = Box::pin(team::resolve_targets(
         &state.db,
         state.node_ws_manager.as_ref(),

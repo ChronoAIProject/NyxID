@@ -17,10 +17,13 @@ pub struct NodeConfig {
     /// it absent and retain the existing registration and WSS behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_runtime: Option<nyxid_machine::managed::Binding>,
-    /// Immutable capability ceiling delivered inside the sealed bootstrap.
-    /// Older managed configs omitted this and retain shell/files only.
+    /// Exact semantic configuration installed by controlled sealed bootstrap.
+    /// Mandatory for managed nodes; self-hosted nodes leave this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_capabilities: Option<Vec<String>>,
+    pub managed_configuration: Option<nyxid_machine::managed::ConfigurationReport>,
+    /// Original retained-volume authority from recipient-sealed bootstrap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_storage: Option<nyxid_machine::managed::HostedStorage>,
     #[serde(default)]
     pub signing: SigningConfig,
     #[serde(default)]
@@ -438,7 +441,8 @@ impl NodeConfig {
                 auth_token_encrypted: String::new(),
             },
             managed_runtime: None,
-            managed_capabilities: None,
+            managed_configuration: None,
+            hosted_storage: None,
             signing: SigningConfig::default(),
             ssh: SshConfig::default(),
             machine: Default::default(),

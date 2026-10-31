@@ -1,111 +1,491 @@
-import { SHARED_LEGACY_WARNING } from "@/schemas/machines";
-import { MachineSeparationSupport } from "@/components/shared/machine-isolation";
-import type { MachineContextSelection } from "@/schemas/machine-access";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
+import {
+  machineSelectionSchema,
+  type MachineAccess,
+  type MachineSelection,
+} from "@/schemas/machine-access";
+import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
+import { MachineSeparationSupport } from "@/components/shared/machine-isolation";
 import { useAppForm } from "@/components/ui/form";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { hasPendingMachineApplication } from "@/lib/machine-access";
 import {
   useMachineAccess,
-  useRequestMachineContext,
   useSetMachineAccess,
 } from "@/hooks/use-machine-access";
-import { machineSelectionSchema, type MachineAccess, type MachineSelection } from "@/schemas/machine-access";
-const labels = { shell: "Shell commands", files: "File tools", browser: "Secure browser", computer: "Full computer control", developer_browser: "Developer browser" } as const;
+import { useNodes } from "@/hooks/use-nodes";
+import { useRemoteMachines } from "@/hooks/use-machines";
+import { useSavedLogins } from "@/hooks/use-saved-logins";
+import { MachineAuthorizationStatus } from "./machine-authorization-status";
+import { MachineContextReview } from "./machine-context-review";
+import { MachineApplicationStatus } from "./machine-application-status";
 
-export function MachineCapabilities({ agentId, disabled = false }: { readonly agentId: string; readonly disabled?: boolean }) {
+const labels = {
+  shell: "Shell commands",
+  files: "File tools",
+  browser: "Secure browser",
+  computer: "Full computer control",
+  developer_browser: "Developer browser",
+} as const;
+const capabilityKeys = Object.keys(labels) as Array<keyof typeof labels>;
+type Membership = "owner" | "assigned" | "not_assigned";
+
+export function MachineCapabilities({
+  agentId,
+  agent,
+  disabled = false,
+}: {
+  readonly agentId: string;
+  readonly agent?: Pick<AssistantAgent, "kind" | "machines"> & Partial<Pick<AssistantAgent, "logins">>;
+  readonly disabled?: boolean;
+}) {
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
   const contextsEnabled = useFeature(FEATURE_FLAG.MACHINE_CONTEXTS);
   const query = useMachineAccess(agentId, !disabled);
+  const nodes = useNodes();
+  const remoteMachines = useRemoteMachines();
+  const savedLogins = useSavedLogins("all");
+  const availableLogins = savedLogins.data?.map((login) => ({
+    id: login.id,
+    label: login.label,
+    username_hint: login.username_hint,
+    eligible: agent?.kind === "nyxbot" || Boolean(agent?.logins?.includes(login.id)),
+  }));
   if (!enabled && !contextsEnabled && !query.data?.length) return null;
-  return <section aria-label="Machine capabilities" className="space-y-3">
-    <p className="text-12 text-muted-foreground">Choose what this agent can do on each machine. With capability editing enabled, newly selected machines start with all permissions off. Existing legacy access stays until edited. Saving changes cancels this agent’s current work on that machine.</p>
-    {!enabled ? <p role="status" className="text-12 text-muted-foreground">Capability editing is not enabled yet. Existing restrictions still apply.</p> : null}
-    {query.error ? <p role="alert" className="text-12 text-destructive">Could not refresh machine capabilities. Displayed status may be out of date.</p> : null}
-    {query.data?.some(machine => machine.revocation_pending || machine.delivery_pending) ? <p className="text-12 text-muted-foreground">Status refreshes for up to one minute while this page is active. Use Refresh machine status for a later check.</p> : null}
-    <Button type="button" size="sm" variant="secondary" disabled={query.isFetching || disabled} onClick={() => void query.refetch()}>Refresh machine status</Button>
-    {query.data?.map(machine => <MachineCapabilityForm key={`${machine.node_id}:${machine.revision}`} machine={machine} agentId={agentId} disabled={disabled} capabilityEditing={enabled} contextEnabled={contextsEnabled} />)}
-  </section>;
+  return (
+    <section aria-label="Machine capabilities" className="space-y-3">
+      <p className="text-12 text-muted-foreground">
+        Choose what this agent can do on each machine. Membership, saved tools
+        and environment mode are separate settings. Existing restrictions still
+        apply when editing is disabled. Saving changes requests cancellation of
+        this agent’s current work on that machine.
+      </p>
+      {query.error ? (
+        <p role="alert" className="text-12 text-destructive">
+          Could not refresh machine capabilities. Displayed status may be out of
+          date.
+        </p>
+      ) : null}
+      {nodes.isError || remoteMachines.isError ? (
+        <p role="alert" className="text-12 text-destructive">Could not refresh Machine policy metadata. Saved login restrictions are retained; dependent changes wait for current policy.</p>
+      ) : null}
+      {query.isPending ? (
+        <p role="status" className="text-12 text-muted-foreground">
+          Loading machine access…
+        </p>
+      ) : null}
+      {query.data?.some(hasPendingMachineApplication) ? (
+        <p className="text-12 text-muted-foreground">
+          Status refreshes for up to one minute while this page is active. Use
+          Refresh machine status for a later check.
+        </p>
+      ) : null}
+      <Button
+        type="button"
+        size="sm"
+        variant="secondary"
+        disabled={query.isFetching || disabled}
+        onClick={() => void query.refetch()}
+      >
+        Refresh machine status
+      </Button>
+      {query.data?.map((machine) => {
+        const remote = remoteMachines.data?.find((row) => row.node_id === machine.node_id);
+        const node = nodes.data?.find((row) => row.id === machine.node_id);
+        const configurationApplicability = remote || machine.machine_configuration || node?.metadata?.provisioning_source === "remote_machine"
+          ? "hosted"
+          : node
+            ? "not_applicable"
+            : "unknown";
+        const currentMachine = remote
+          ? { ...machine, machine_configuration: remote.machine_configuration }
+          : machine;
+        const sharedLoginsAllowed = remoteMachines.isError || nodes.isError
+          ? null
+          : remote
+            ? remote.presentation?.allow_single_user_saved_logins ?? null
+            : node?.allow_single_user_saved_logins ?? null;
+        return <MachineCapabilityForm
+          key={`${agentId}:${machine.node_id}`}
+          machine={currentMachine}
+          agentId={agentId}
+          membership={
+            agent
+              ? agent.kind === "nyxbot"
+                ? "owner"
+                : agent.machines?.includes(machine.node_id)
+                  ? "assigned"
+                  : "not_assigned"
+              : undefined
+          }
+          disabled={disabled || Boolean(query.error)}
+          capabilityEditing={enabled}
+          contextEnabled={contextsEnabled}
+          availableLogins={availableLogins}
+          savedLoginsState={savedLogins.isError ? "error" : savedLogins.isPending ? "loading" : "ready"}
+          sharedLoginsAllowed={sharedLoginsAllowed}
+          configurationApplicability={configurationApplicability}
+        />
+      })}
+    </section>
+  );
 }
-export function MachineCapabilityForm({ machine, agentId, disabled = false, capabilityEditing = true, contextEnabled = false, onSaveError, onSaveSuccess }: { readonly machine: MachineAccess; readonly agentId: string; readonly disabled?: boolean; readonly capabilityEditing?: boolean; readonly contextEnabled?: boolean; readonly onSaveError?: () => void; readonly onSaveSuccess?: () => void }) {
+
+export function MachineCapabilityForm({
+  machine,
+  agentId,
+  membership,
+  disabled = false,
+  capabilityEditing = true,
+  contextEnabled = false,
+  onSaveError,
+  onSaveSuccess,
+  availableLogins,
+  sharedLoginsAllowed = null,
+  savedLoginsState = "ready",
+  configurationApplicability = "unknown",
+}: {
+  readonly machine: MachineAccess;
+  readonly agentId: string;
+  readonly membership?: Membership;
+  readonly disabled?: boolean;
+  readonly capabilityEditing?: boolean;
+  readonly contextEnabled?: boolean;
+  readonly onSaveError?: () => void;
+  readonly onSaveSuccess?: () => void;
+  readonly availableLogins?: readonly {
+    id: string;
+    label: string;
+    username_hint: string;
+    eligible: boolean;
+  }[];
+  readonly sharedLoginsAllowed?: boolean | null;
+  readonly savedLoginsState?: "ready" | "loading" | "error";
+  readonly configurationApplicability?: "hosted" | "not_applicable" | "unknown";
+}) {
   const mutation = useSetMachineAccess(agentId);
-  const contextMutation = useRequestMachineContext(agentId);
+  const descriptionId = useId();
   const [error, setError] = useState<string>();
-  const [contextRequested, setContextRequested] = useState(false);
-  const [legacyAccepted, setLegacyAccepted] = useState(false);
-  const needsSelection = machine.selection_required === true || machine.mode === "selection_required";
-  const separationAvailable = machine.separated?.available === true && !machine.separated.reason;
-  const form = useAppForm<MachineSelection>({ resolver: zodResolver(machineSelectionSchema), defaultValues: {
-    expected_revision: machine.revision, capabilities: machine.capabilities, saved_login_ids: machine.saved_login_ids,
-  } });
+  const [saved, setSaved] = useState(false);
+  const needsSelection =
+    machine.selection_required === true ||
+    machine.mode === "selection_required";
+  const separationAvailable =
+    machine.separated?.available === true && !machine.separated.reason;
+  const form = useAppForm<MachineSelection>({
+    resolver: zodResolver(machineSelectionSchema),
+    values: {
+      expected_revision: machine.revision,
+      capabilities: machine.capabilities,
+      saved_login_ids: machine.saved_login_ids,
+    },
+  });
   const caps = form.watch("capabilities");
-  const requestContext = async (mode: MachineContextSelection["mode"] = "separated") => {
-    setError(undefined);
-    try {
-      await contextMutation.mutateAsync({
-        node: machine.node_id,
-        selection: {
-          mode,
-          expected_revision: machine.revision,
-          capabilities: machine.capabilities,
-          saved_login_ids: machine.saved_login_ids ?? [],
-        },
-      });
-      setContextRequested(true);
-    } catch {
-      setError("Could not request this machine selection. Reload if access changed; automatic and required need current confirmed support.");
-    }
-  };
-  return <form className="space-y-3 rounded-lg border p-4" aria-label={`${machine.name} capabilities`} onSubmit={form.handleSubmit(async selection => {
-    setError(undefined);
-    try { await mutation.mutateAsync({ node: machine.node_id, selection }); form.reset(selection); onSaveSuccess?.(); }
-    catch { setError("Could not save capabilities. Reload if access changed."); onSaveError?.(); }
-  })}>
-    <div className="flex flex-wrap items-center gap-2"><span className="text-13 font-medium">{machine.name}</span><Badge variant="secondary">{needsSelection ? "Owner selection required" : machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy"}</Badge></div>
-    <p className="text-12 text-muted-foreground">{needsSelection ? "Execution is blocked until the owner records a supported choice or explicitly approves legacy access." : machine.mode === "separated" ? "This agent has its own workspace and browser profiles. Use a separate machine container or VM per agent for stronger separation; containers still share their host kernel." : "Workspace and browser sessions are shared with other agents in shared legacy mode on this machine."}</p>
-    <p role="status" className="text-12 text-muted-foreground">{machine.execution_note ?? (needsSelection ? "Execution is blocked until the owner completes separation selection." : machine.mode === "separated"
-      ? separationAvailable
-        ? "Granted commands and file tools use this agent’s separated workspace. No shared fallback."
-        : "This assignment requires separated mode, but separation is unavailable. Execution is refused. Restore support or ask the owner to change mode through an owner action card; no automatic shared fallback."
-      : "Granted commands and file tools run in shared mode, as configured, even when separation is unavailable. Shell uses the command user’s full OS permissions.")}</p>
-    {needsSelection ? <p role="status" className="text-12">{machine.selection_reason ?? "Choose a separation mode. Old nodes without capability evidence require an upgrade for separated access or an informed explicit legacy choice."}</p> : null}
-    {machine.can_edit && machine.mode !== "shared_legacy" ? <div className="space-y-2 rounded-lg border p-3 text-12">
-      <p>{SHARED_LEGACY_WARNING}</p>
-      <label className="flex items-start gap-2"><Checkbox disabled={disabled || contextMutation.isPending} checked={legacyAccepted} onCheckedChange={value => setLegacyAccepted(value === true)} />I explicitly choose shared legacy access and acknowledge this warning.</label>
-      <Button type="button" size="sm" variant="secondary" disabled={disabled || !legacyAccepted || contextMutation.isPending} onClick={() => void requestContext("shared_legacy")}>Request shared legacy owner approval</Button>
-    </div> : null}
-    {contextRequested || contextMutation.isSuccess ? <p role="status">Owner approval requested in the NyxBot Assistant thread.</p> : null}
-    <MachineSeparationSupport support={machine.separated} setupNote={machine.separated_setup_note} />
-    {machine.quarantine_pending ? <p role="status" className="text-12 text-warning">Browser cleanup is pending. Reconnect the machine and refresh status. New browser work stays blocked until cleanup finishes.</p> : null}
-    {machine.revocation_initialization_pending ? <p role="status" className="text-12 text-muted-foreground">Checking when earlier commands will stop. Refresh status in a few seconds.</p> : (machine.execution_revocation_pending ?? machine.revocation_pending) ? <p role="status" className="text-12 text-muted-foreground">Earlier commands are stopping.{machine.revocation_expires_at ? ` They should stop by ${new Date(machine.revocation_expires_at).toLocaleString()}.` : " Reconnect and refresh status to confirm they have stopped."} Refresh status before starting new work.</p> : machine.delivery_pending ? <p role="status" className="text-12 text-muted-foreground">Earlier commands have stopped. Updated permissions still need machine acknowledgement. Reconnect the machine and refresh status.</p> : null}
-    {machine.revocation_diagnostic ? <p role="status" className="text-12 text-warning">{machine.revocation_diagnostic === "authority_timing_upgrade_required" ? "Update and reconnect this machine to confirm permission changes." : "Recovery status needs administrator attention. Earlier commands are still marked as stopping; check machine diagnostics before continuing."}</p> : null}
-    {!machine.can_edit ? <p role="status" className="text-12">Only the machine owner or an organization admin can edit this access.</p> : null}
-    {!machine.protocol_v2 ? <p role="status" className="text-12">Update this machine before changing capabilities. Its existing access continues.</p> : null}
-    {contextEnabled && machine.mode !== "separated" && machine.can_edit ? (
-      separationAvailable ? (
-        <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/5 p-3">
-          <p className="text-12">Give this agent a separate workspace and browser through an owner-approved Assistant card.</p>
-          <Button type="button" size="sm" variant="secondary" disabled={disabled || contextMutation.isPending} onClick={() => void requestContext("separated")}>
-            Separate workspace and browser for this agent
-          </Button>
-        </div>
-      ) : null
-    ) : null}
-    <fieldset disabled={disabled || !capabilityEditing || needsSelection || !machine.can_edit || !machine.protocol_v2 || mutation.isPending} className="grid gap-2 sm:grid-cols-2">
-      <legend className="sr-only">Allowed capabilities</legend>
-      {(Object.keys(labels) as Array<keyof typeof labels>).map(key => <label key={key} className="flex items-center gap-2 text-12">
-        <Checkbox checked={caps[key]} disabled={!machine.ceiling[key] || ((key === "computer" || key === "developer_browser") && !caps.browser)} onCheckedChange={value => {
-          form.setValue(`capabilities.${key}`, value === true);
-          if (key === "browser" && value !== true) { form.setValue("capabilities.computer", false); form.setValue("capabilities.developer_browser", false); }
-        }} />{labels[key]}{!machine.ceiling[key] ? <span className="text-muted-foreground">(off on node)</span> : null}
-      </label>)}
-    </fieldset>
-    <details className="text-12 text-muted-foreground"><summary className="cursor-pointer">What these permissions mean</summary><p className="mt-2">Shell commands can read and write anything their OS user can access, even with file tools off. Full computer control can operate applications through their UI. Browser-only access avoids desktop authority. Developer browser permits JavaScript evaluation in its separate browser; saved logins stay in the secure browser.</p></details>
-    {error ? <p role="alert" className="text-12 text-destructive">{error}</p> : null}
-    <Button type="submit" size="sm" disabled={disabled || !capabilityEditing || needsSelection || !machine.can_edit || !machine.protocol_v2 || !form.formState.isDirty || mutation.isPending}>Save capabilities</Button>
-  </form>;
+  const editReasons = [
+    (!capabilityEditing || !machine.capability_edit_enabled) &&
+      "Capability editing is not enabled for this account. Existing restrictions still apply.",
+    needsSelection && "Choose an environment mode before editing capabilities.",
+    !machine.can_edit &&
+      "Only the machine owner or an organization admin can edit this access.",
+    !machine.protocol_v2 &&
+      "Update this machine before changing capabilities or environment mode. Its saved restrictions still apply.",
+    disabled &&
+      "This Agent is read-only or its current access could not be refreshed. Its saved permissions still apply.",
+  ].filter((reason): reason is string => Boolean(reason));
+  const busy = mutation.isPending;
+  const capabilityDisabled = editReasons.length > 0 || busy;
+  const savedTools = capabilityKeys
+    .filter((key) => machine.capabilities[key])
+    .map((key) => labels[key]);
+  return (
+    <form
+      className="space-y-3 rounded-xl border border-border p-4"
+      aria-label={`${machine.name} capabilities`}
+      onSubmit={form.handleSubmit(async (selection) => {
+        if (capabilityDisabled || !form.formState.isDirty) return;
+        setError(undefined);
+        setSaved(false);
+        try {
+          await mutation.mutateAsync({ node: machine.node_id, selection });
+          // Reactive values may already contain a newer policy while the
+          // mutation waits for other Agent queries. Keep those current defaults.
+          form.reset();
+          setSaved(true);
+          onSaveSuccess?.();
+        } catch {
+          setError("Could not save capabilities. Reload if access changed.");
+          onSaveError?.();
+        }
+      })}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-13 font-medium">{machine.name}</span>
+        <Badge variant="secondary">
+          {needsSelection
+            ? "Owner selection required"
+            : machine.mode === "separated"
+              ? "Separate workspace and browser"
+              : "Shared legacy"}
+        </Badge>
+      </div>
+      {membership ? (
+        <p className="text-12 text-muted-foreground">
+          Membership:{" "}
+          <span className="text-foreground">
+            {membership === "owner"
+              ? "Owner machine membership"
+              : membership === "assigned"
+                ? "Assigned"
+                : "Not assigned"}
+          </span>
+          . Membership and tool grants are separate.
+          {membership === "not_assigned"
+            ? " Saving capabilities also assigns this machine to the agent."
+            : ""}
+        </p>
+      ) : null}
+      <p className="text-12">
+        {savedTools.length
+          ? `Saved tools: ${savedTools.join(", ")}`
+          : "No tools granted. Membership alone does not authorize tools."}
+      </p>
+      <p className="text-12 text-muted-foreground">
+        {needsSelection
+          ? "Execution is blocked until the owner records a supported choice or explicitly approves legacy access."
+          : machine.mode === "separated"
+            ? "This agent is configured to use its own workspace and browser profiles. Use a separate machine container or VM per agent for stronger separation; containers still share their host kernel."
+            : "Workspace and browser sessions are shared with other agents in shared legacy mode on this machine."}
+      </p>
+      <p className="text-12 text-muted-foreground">
+        {machine.execution_note ??
+          (needsSelection
+            ? "Execution is blocked until the owner completes separation selection."
+            : machine.mode === "separated"
+              ? separationAvailable
+                ? "Granted commands and file tools use this agent’s separated workspace. No shared fallback."
+                : "This assignment requires separated mode, but separation is unavailable. Execution is refused. Restore support or ask the owner to change mode through the owner review below; no automatic shared fallback."
+              : "Granted commands and file tools run in shared mode, as configured, even when separation is unavailable. Shell uses the command user’s full OS permissions.")}
+      </p>
+      <p className="text-12 text-muted-foreground">
+        Saved permissions do not confirm runtime availability. Each execution
+        checks current membership, grants, machine connection, runtime, funding
+        and owner-turn requirements.
+      </p>
+      {needsSelection ? (
+        <p role="status" className="text-12">
+          {machine.selection_reason ??
+            "Choose a supported environment mode. Missing capability evidence requires a machine update before separated access can be selected."}
+        </p>
+      ) : null}
+      <MachineAuthorizationStatus machine={machine} />
+      <MachineApplicationStatus
+        authorizationApplied={machine.authorization_applied}
+        environmentApplied={machine.environment_applied}
+        configuration={machine.machine_configuration}
+        configurationApplicability={configurationApplicability}
+      />
+      {machine.availability_reason ? (
+        <p role="status" className="text-12 text-warning">
+          Agent tools unavailable:{" "}
+          {(
+            {
+              machine_selection_required:
+                "owner environment selection required",
+              no_tools_granted:
+                "no tools granted; this can be an intentional all-off policy",
+              machine_offline: "machine is offline",
+              separated_context_unavailable:
+                "separated support is unavailable; execution is refused without shared fallback",
+              authority_application_pending:
+                "Agent authority application is pending",
+              machine_configuration_pending:
+                "current hosted configuration evidence is pending",
+            } as Record<string, string>
+          )[machine.availability_reason] ??
+            machine.availability_reason.replaceAll("_", " ")}
+        </p>
+      ) : null}
+      <MachineSeparationSupport
+        support={machine.separated}
+        setupNote={machine.separated_setup_note}
+      />
+      <div
+        id={`${descriptionId}-editing`}
+        className="space-y-1 text-12 text-muted-foreground"
+      >
+        {editReasons.map((reason) => (
+          <p key={reason} role="status">
+            {reason}
+          </p>
+        ))}
+      </div>
+      <MachineContextReview
+        machine={machine}
+        agentId={agentId}
+        contextEnabled={contextEnabled}
+        disabled={disabled || mutation.isPending}
+        unsavedCapabilities={form.formState.isDirty}
+        configurationApplicability={configurationApplicability}
+      />
+      <fieldset
+        disabled={capabilityDisabled}
+        className="grid gap-2 sm:grid-cols-2"
+      >
+        <legend className="sr-only">Allowed capabilities</legend>
+        {capabilityKeys.map((key) => {
+          const reason = !machine.ceiling[key]
+            ? "Off on this machine. The machine capability ceiling does not allow this tool."
+            : (key === "computer" || key === "developer_browser") &&
+                !caps.browser
+              ? "Enable Secure browser for this agent first."
+              : undefined;
+          return (
+            <div key={key} className="space-y-1 text-12">
+              <label className="flex items-center gap-2">
+                <Checkbox
+                  aria-label={labels[key]}
+                  aria-describedby={`${descriptionId}-editing${reason ? ` ${descriptionId}-${key}` : ""}`}
+                  checked={caps[key]}
+                  disabled={capabilityDisabled || Boolean(reason)}
+                  onCheckedChange={(value) => {
+                    setSaved(false);
+                    form.setValue(`capabilities.${key}`, value === true);
+                    if (key === "browser" && value !== true) {
+                      form.setValue("capabilities.computer", false);
+                      form.setValue("capabilities.developer_browser", false);
+                      form.setValue("saved_login_ids", []);
+                    }
+                  }}
+                />
+                {labels[key]}
+              </label>
+              {reason ? (
+                <p
+                  id={`${descriptionId}-${key}`}
+                  className="text-muted-foreground"
+                >
+                  {reason}
+                </p>
+              ) : null}
+            </div>
+          );
+        })}
+      </fieldset>
+      {(availableLogins || savedLoginsState !== "ready") && (
+        <fieldset
+          className="space-y-3"
+          disabled={
+            capabilityDisabled ||
+            savedLoginsState !== "ready" ||
+            !caps.browser ||
+            (machine.mode !== "separated" && !sharedLoginsAllowed)
+          }
+        >
+          <legend className="mb-2 font-medium">Saved login access</legend>
+          <p className="text-muted-foreground">
+            Choose from this assistant’s existing login grants. Logins are used
+            only in the secure browser.
+          </p>
+          {!caps.browser && <p>Enable Browser to select saved logins.</p>}
+          {machine.mode !== "separated" && sharedLoginsAllowed !== true && (
+            <p>
+              {sharedLoginsAllowed === null
+                ? "Shared-session Saved Login policy is not reported. Existing grants are retained while policy is unavailable."
+                : "Saved logins are unavailable in shared sessions under the current machine policy. Existing grants are retained."}
+            </p>
+          )}
+          {savedLoginsState !== "ready" && (
+            <p role={savedLoginsState === "error" ? "alert" : "status"}>
+              {savedLoginsState === "error" ? "Saved logins could not be refreshed." : "Loading saved logins…"} Existing Machine login restrictions are retained.
+            </p>
+          )}
+          <p className="text-muted-foreground">
+            {machine.saved_login_ids === null
+              ? "Machine login scope: all account-granted logins."
+              : machine.saved_login_ids.length
+                ? `Machine login scope: ${machine.saved_login_ids.length} explicit login IDs.`
+                : "Machine login scope: no saved logins."}
+          </p>
+          {machine.saved_login_ids?.filter((id) => !availableLogins?.some((login) => login.id === id)).map((id) => (
+            <p key={id} className="text-muted-foreground">Retained login ID: {id} (metadata unavailable)</p>
+          ))}
+          {availableLogins?.map((login) => (
+            <label
+              key={login.id}
+              className="flex items-start gap-2.5 rounded-lg border border-border p-3"
+            >
+              <Checkbox
+                aria-label={`Allow ${login.label}`}
+                disabled={!login.eligible || savedLoginsState !== "ready"}
+                checked={
+                  form.watch("saved_login_ids")?.includes(login.id) ??
+                  login.eligible
+                }
+                onCheckedChange={(v) => {
+                  const previous =
+                    form.getValues("saved_login_ids") ??
+                    availableLogins!
+                      .filter((item) => item.eligible)
+                      .map((item) => item.id);
+                  form.setValue(
+                    "saved_login_ids",
+                    v === true
+                      ? [...new Set([...previous, login.id])]
+                      : previous.filter((id) => id !== login.id),
+                  );
+                }}
+              />
+              <span>
+                {login.label}
+                <span className="block text-11 text-muted-foreground">
+                  {login.username_hint}
+                  {!login.eligible && " · Not granted to this assistant"}
+                </span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+      )}
+      <details className="text-12 text-muted-foreground">
+        <summary className="cursor-pointer">
+          What these permissions mean
+        </summary>
+        <p className="mt-2">
+          Shell commands can read and write anything their OS user can access,
+          even with file tools off. Full computer control can operate
+          applications through their UI. Browser-only access avoids desktop
+          authority. Developer browser permits JavaScript evaluation in its
+          separate browser; saved logins stay in the secure browser.
+        </p>
+      </details>
+      {saved ? (
+        <p role="status" className="text-12 text-muted-foreground">
+          Capabilities saved. Saving does not confirm machine acknowledgement,
+          browser cleanup or hosted environment application. Refresh machine
+          status to check the Agent authority chain.
+        </p>
+      ) : null}
+      {error ? (
+        <p role="alert" className="text-12 text-destructive">
+          {error}
+        </p>
+      ) : null}
+      <div className="flex justify-end">
+        <Button
+          type="submit"
+          size="sm"
+          variant="primary"
+          disabled={capabilityDisabled || !form.formState.isDirty}
+          isLoading={mutation.isPending}
+        >
+          Save capabilities
+        </Button>
+      </div>
+    </form>
+  );
 }

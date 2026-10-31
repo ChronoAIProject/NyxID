@@ -18,7 +18,7 @@ function deferred<T>() {
 }
 function useGrantWrite() {
   const mutation = useSetNyxBotAgentGrants();
-  const body = { id: "agent-one", services: [], account_read: false, machines: ["machine-one"] };
+  const body = { id: "agent-one", machine_membership: { node_id: "machine-one", assigned: true } };
   return { run: () => mutation.mutateAsync(body), send: (onSuccess: () => void) => mutation.mutate(body, { onSuccess }), body, mutation };
 }
 function useCapabilityWrite() {

@@ -14,7 +14,6 @@ import {
 } from "@/hooks/use-billing";
 import { useCatalog } from "@/hooks/use-keys";
 import { BillingBenefits } from "@/components/billing/billing-benefits";
-import { BillingMachines } from "@/components/billing/billing-machines";
 import { BillingWalletCard } from "@/components/billing/billing-wallet-card";
 import { BillingTopUpHistory } from "@/components/billing/billing-topup-history";
 import { BillingUsageSummary } from "@/components/billing/billing-usage-summary";
@@ -214,7 +213,6 @@ export function BillingPage({
             onTopUpOpenChange={setTopUpOpen}
           />
           <BillingBenefits catalog={catalog} />
-          <BillingMachines />
           <BillingBill enabled={billingReady} />
           <BillingTopUpHistory />
         </TabsContent>

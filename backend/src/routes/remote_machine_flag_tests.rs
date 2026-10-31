@@ -308,7 +308,7 @@ async fn durable(f: &Fixture) -> Vec<(String, Vec<Document>)> {
     rows
 }
 fn create_body(free: bool, quote: Option<&str>) -> Value {
-    json!({"free_slot":free,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":quote,"accept_account_balance":!free})
+    json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":free,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":quote,"accept_account_balance":!free})
 }
 fn action_body(kind: &str, revision: i64, quote: Option<&str>) -> Value {
     json!({"action":kind,"expected_revision":revision,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":quote,"accept_account_balance":quote.is_some()})
@@ -914,6 +914,12 @@ async fn ready_fixture(f: &Fixture, id: &str) -> ManagedMachine {
         roots: vec!["/workspace".into()],
         authority_versions: vec![nyxid_machine::authority::VERSION],
         commands_isolated: Some(true),
+        separation_choice: Some(bound.configuration.separation_choice),
+        managed_configuration: Some(nyxid_machine::managed::ConfigurationReport {
+            configuration: bound.configuration.clone(),
+            digest: bound.configuration.digest().unwrap(),
+            runtime_generation: bound.runtime_generation as u64,
+        }),
         os: "linux".into(),
         arch: "aarch64".into(),
         ..Default::default()

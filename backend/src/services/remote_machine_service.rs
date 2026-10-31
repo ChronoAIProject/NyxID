@@ -168,7 +168,7 @@ impl CreateMachineInput {
             profile: fixed_profile(image_digest),
             sandbox_namespace: "nyxid-machine".into(),
             idempotency_key: "preview-key".into(),
-            request_body: json!({"profile":nyxid_machine::managed::PROFILE,"free_slot":free_slot, "policy_version":crate::models::remote_machine::POLICY_VERSION, "data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION, "acknowledge_shared_environment":true}),
+            request_body: json!({"profile":nyxid_machine::managed::PROFILE,"free_slot":free_slot, "policy_version":crate::models::remote_machine::POLICY_VERSION, "data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION, "acknowledge_shared_environment":true,"separation_choice":"shared_legacy","separation_policy_version":crate::models::remote_machine::SEPARATION_POLICY_VERSION,"acknowledge_separation":true}),
             now: None,
         }
     }
@@ -180,7 +180,17 @@ impl CreateMachineInput {
             node_id: node_id.into(),
             owner_id: self.owner_id.clone(),
             name: crate::models::remote_machine::default_name(),
-            capabilities: crate::models::remote_machine::default_capabilities(),
+            capabilities: vec!["files".into(), "shell".into()],
+            configuration: nyxid_machine::managed::RequiredConfiguration {
+                version: nyxid_machine::managed::CONFIG_VERSION,
+                revision: 1,
+                separation_choice: nyxid_machine::context::Choice::SharedLegacy,
+                capabilities: vec!["files".into(), "shell".into()],
+            },
+            separation_policy_version: crate::models::remote_machine::SEPARATION_POLICY_VERSION
+                .into(),
+            separation_accepted_at: now,
+            configuration_evidence: None,
             specialist_id: None,
             specialist_assignment_state: "none".into(),
             specialist_assignment_error: None,
@@ -193,6 +203,8 @@ impl CreateMachineInput {
             sandbox_uid: None,
             pvc_name: None,
             pvc_uid: None,
+            hosted_storage_allocation_id: Uuid::new_v4().to_string(),
+            hosted_storage_initializer_runtime_id: None,
             pod_uid: None,
             resource_state: ResourceState::Provisioning,
             billing_state: if self.free_slot {
@@ -530,9 +542,15 @@ fn canonical_json(value: Value) -> Value {
 
 pub fn safe_view(machine: &ManagedMachine) -> SafeManagedMachineView {
     SafeManagedMachineView {
+        presentation: None,
         node_id: machine.node_id.clone(),
         name: machine.name.clone(),
         capabilities: machine.capabilities.clone(),
+        separation_choice: machine.configuration.separation_choice,
+        separation_policy_version: machine.separation_policy_version.clone(),
+        machine_configuration: super::remote_machine_configuration::configuration_view(
+            machine, None,
+        ),
         specialist_id: machine.specialist_id.clone(),
         specialist_assignment_state: machine.specialist_assignment_state.clone(),
         specialist_assignment_error: machine.specialist_assignment_error.clone(),
@@ -723,12 +741,25 @@ async fn create_machine_inner(
         choices.specialist_id.as_deref(),
     )
     .await?;
+    if choices.separation_choice == nyxid_machine::context::Choice::RequireSeparated
+        && !super::feature_flag_service::personal_flag_enabled(
+            db,
+            &input.owner_id,
+            super::machine_access_service::CONTEXT_FLAG,
+        )
+        .await?
+    {
+        return Err(AppError::ValidationError("machine_context_setup_not_enabled: required separation is not enabled for this account".into()));
+    }
     let now = input.now.unwrap_or_else(Utc::now);
     let machine_id = Uuid::new_v4().to_string();
     let operation_id = Uuid::new_v4().to_string();
     let effect_id = Uuid::new_v4().to_string();
     let mut machine = input.preview(&machine_id, now);
     machine.name = choices.name;
+    machine.configuration.separation_choice = choices.separation_choice;
+    machine.configuration.capabilities = choices.capabilities.clone();
+    machine.separation_policy_version = choices.separation_policy_version;
     machine.capabilities = choices.capabilities;
     machine.specialist_id = choices.specialist_id;
     machine.specialist_assignment_state = if machine.specialist_id.is_some() {
@@ -991,6 +1022,7 @@ pub fn resolve_profile(
         profile_version: controlled.profile_version,
         image_digest: image_digest.into(),
         runtime_class: None,
+        seccomp_localhost_profile: None,
         cpu_millis: controlled.cpu_millis,
         memory_mib: controlled.memory_mib,
         workspace_gib: controlled.workspace_gib,
@@ -1021,6 +1053,11 @@ pub fn validate_fixed_profile(profile: &MachineProfileSpec) -> AppResult<()> {
     let mut expected = resolve_profile(&profile.profile_version, &profile.image_digest)?;
     // A retained current Machine binds its own RuntimeClass, not today's default.
     expected.runtime_class = profile.runtime_class.clone();
+    expected.seccomp_localhost_profile = profile.seccomp_localhost_profile.clone();
+    if let Some(reference) = &profile.seccomp_localhost_profile {
+        nyxid_machine::managed::validate_seccomp_localhost_profile(reference)
+            .map_err(|reason| AppError::ValidationError(reason.into()))?;
+    }
     if profile != &expected
         || profile.image_digest.trim().is_empty()
         || profile.runtime_class.as_ref().is_some_and(|name| {
@@ -1050,7 +1087,15 @@ pub fn fixed_profile(image_digest: impl Into<String>) -> MachineProfileSpec {
     profile.runtime_class = std::env::var("NYXID_REMOTE_MACHINE_RUNTIME_CLASS")
         .ok()
         .filter(|value| !value.trim().is_empty());
+    profile.seccomp_localhost_profile = configured_seccomp_localhost_profile();
     profile
+}
+
+pub(crate) fn configured_seccomp_localhost_profile() -> Option<String> {
+    // Only absence selects RuntimeDefault. Empty/non-Unicode settings must fail
+    // profile validation, never silently choose a different security policy.
+    std::env::var_os("NYXID_REMOTE_MACHINE_SECCOMP_LOCALHOST_PROFILE")
+        .map(|value| value.into_string().unwrap_or_default())
 }
 
 #[cfg(test)]

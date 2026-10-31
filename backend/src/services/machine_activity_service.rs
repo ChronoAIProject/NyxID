@@ -554,6 +554,75 @@ fn uuid(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Management-only history authority. Inactive and removed Nodes need the
+/// retained exact ManagedMachine binding; this does not affect execution or
+/// generic Node discovery. Missing-node history also requires retained data.
+pub async fn list_for_owner(
+    db: &Database,
+    actor: &str,
+    node_id: &str,
+    query: ActivityQuery,
+) -> AppResult<ActivityPage> {
+    let missing = || AppError::NotFound("Machine not found".into());
+    // Management history must distinguish an inactive retained Node from a
+    // genuinely removed one. Generic Node helpers deliberately hide inactive
+    // rows and remain unchanged for discovery and execution callers.
+    let node = db
+        .collection::<crate::models::node::Node>(crate::models::node::COLLECTION_NAME)
+        .find_one(doc! {"_id":node_id})
+        .await?;
+    let (owner, name) = if let Some(node) =
+        node.as_ref().filter(|n| n.is_active && n.machine.is_some())
+    {
+        (node.user_id.clone(), node.name.clone())
+    } else {
+        let managed = super::remote_machine_service::managed_machine_for_node(db, node_id)
+            .await?
+            .ok_or_else(missing)?;
+        if managed.node_id != node_id
+            || node
+                .as_ref()
+                .is_some_and(|n| n.user_id != managed.owner_id || n.machine.is_none())
+        {
+            return Err(missing());
+        }
+        // Direct owner ACLs intentionally do not perform a user lookup. The
+        // newly admitted retained-history path must not outlive owner erasure.
+        if db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":&managed.owner_id,"is_active":true,"platform_personal_deleting":{"$ne":true},"deletion_requested_at":bson::Bson::Null})
+            .projection(doc! {"_id":1}).await?.is_none()
+            || db.collection::<bson::Document>(super::erasure_admission::COLLECTION)
+                .find_one(doc! {"_id":&managed.owner_id,"erasure_accepted":true}).projection(doc! {"_id":1}).await?.is_some()
+        {
+            return Err(missing());
+        }
+        if node.is_none()
+            && db
+                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .find_one(doc! {"event_type":"machine_operation","event_data.node_id":node_id})
+                .projection(doc! {"_id":1})
+                .max_time(std::time::Duration::from_secs(3))
+                .await?
+                .is_none()
+        {
+            return Err(missing());
+        }
+        (managed.owner_id, managed.name)
+    };
+    if !super::org_service::resolve_owner_access(db, actor, &owner)
+        .await?
+        .can_write()
+    {
+        return Err(AppError::Forbidden(
+            "Machine activity is available to its owner or organization admin".into(),
+        ));
+    }
+    let mut page = Box::pin(list(db, node_id, query)).await?;
+    page.machine_name = Some(name);
+    page.agents = Box::pin(activity_agents(db, actor, &owner)).await?;
+    Ok(page)
+}
+
 pub async fn list(db: &Database, node: &str, query: ActivityQuery) -> AppResult<ActivityPage> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use futures::TryStreamExt;

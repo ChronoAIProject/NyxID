@@ -32,6 +32,52 @@ impl std::fmt::Debug for Input {
     }
 }
 
+fn owner_fence_error(error: AppError) -> AppError {
+    if let AppError::DatabaseError(ref database) = error
+        && database
+            .get_custom::<super::erasure_admission::OwnerFenceCreationRace>()
+            .is_some()
+    {
+        return AppError::Conflict("Saved login owner changed; reload before editing".into());
+    }
+    error
+}
+
+async fn fence_owner(
+    db: &Database,
+    actor: &str,
+    owner: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, actor, session)
+        .await
+        .map_err(owner_fence_error)?;
+    super::org_membership_authority::fence_live_member(db, actor, session).await?;
+    if owner != actor {
+        super::erasure_admission::fence_in_session(db, owner, session)
+            .await
+            .map_err(owner_fence_error)?;
+        super::org_membership_authority::fence_org(db, owner, session).await?;
+        let owner_live = db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":owner,"user_type":"org","is_active":true,"platform_personal_deleting":{"$ne":true}})
+            .projection(doc! {"_id":1}).session(&mut *session).await?.is_some();
+        let allowed = db
+            .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .find_one(
+                doc! {"org_user_id":owner,"member_user_id":actor,"role":"admin","revoked_at":null},
+            )
+            .session(&mut *session)
+            .await?
+            .is_some();
+        if !owner_live || !allowed {
+            return Err(AppError::Forbidden(
+                "Saved logins require owner or organization admin access".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn authorize(db: &Database, actor: &str, owner: &str) -> AppResult<()> {
     if !org_service::resolve_owner_access(db, actor, owner)
         .await?
@@ -223,10 +269,7 @@ pub async fn put(
         .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
     let result: AppResult<()> = async {
-        super::erasure_admission::fence_in_session(db, actor, &mut session).await?;
-        if owner != actor {
-            super::erasure_admission::fence_in_session(db, owner, &mut session).await?;
-        }
+        fence_owner(db, actor, owner, &mut session).await?;
         if id.is_some() {
             let result = db
                 .collection::<SavedLogin>(COLLECTION_NAME)
@@ -237,7 +280,9 @@ pub async fn put(
                 .session(&mut session)
                 .await?;
             if result.matched_count != 1 {
-                return Err(AppError::NotFound("Saved login not found".into()));
+                return Err(AppError::Conflict(
+                    "Saved login changed; reload before editing".into(),
+                ));
             }
         } else {
             db.collection::<SavedLogin>(COLLECTION_NAME)

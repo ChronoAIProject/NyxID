@@ -1285,6 +1285,10 @@ pub async fn decide_acknowledgement(
         let card = Box::pin(super::assistant_agent_learning::decide_authored_with_scope(&state, &auth, card, matches!(body.decision, Decision::Allow), body.accept_reduced_scope)).await?;
         return Ok(Json(card.into()));
     }
+    if state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .find_one(doc!{"_id":&ack_id,"user_id":&user,"conversation_id":&id,"machine_context":{"$ne":bson::Bson::Null}}).await?.is_some() {
+        super::login_client_context::require_first_party_human(&auth)?;
+    }
     let row = acknowledgements::decide(
         &state.db,
         &user,

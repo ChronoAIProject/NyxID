@@ -44,7 +44,7 @@ pub(super) fn custody_test_session() -> Session {
 pub struct Desktop {
     pub session: Mutex<Option<Session>>,
     pub sender: Mutex<Option<tokio::sync::mpsc::Sender<crate::node::ws_client::NodeWsMessage>>>,
-    pub capture: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
+    pub capture: Mutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(target_os = "linux")]
     input: Arc<std::sync::Mutex<Option<native_desktop::Input>>>,
 }
@@ -220,22 +220,38 @@ impl Runtime {
         Ok(json!({"accepted":true}))
     }
 
-    pub(super) fn start_capture(self: &Arc<Self>, display: Display) {
+    pub(super) async fn start_capture(self: &Arc<Self>, display: Display) {
+        let mut capture = self.desktop_for(display).capture.lock().await;
+        if capture.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
         let weak = Arc::downgrade(self);
-        self.desktop_for(display).capture.get_or_init(|| {
-            tokio::spawn(async move {
-                let state = Arc::new(std::sync::Mutex::new(None));
-                let mut interval = tokio::time::interval(FRAME_INTERVAL);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    interval.tick().await;
-                    let Some(runtime) = weak.upgrade() else {
-                        break;
-                    };
-                    let _ = runtime.capture_once(display, state.clone()).await;
+        *capture = Some(tokio::spawn(async move {
+            let state = Arc::new(std::sync::Mutex::new(None));
+            let mut interval = tokio::time::interval(FRAME_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_error = Instant::now() - std::time::Duration::from_secs(60);
+            let screen_name = match display {
+                Display::Secure => "secure",
+                Display::Dev => "dev",
+            };
+            loop {
+                interval.tick().await;
+                let Some(runtime) = weak.upgrade() else {
+                    break;
+                };
+                if let Err(error) = runtime.capture_once(display, state.clone()).await
+                    && last_error.elapsed() >= std::time::Duration::from_secs(1)
+                {
+                    tracing::warn!(
+                        screen = %screen_name,
+                        error = %error,
+                        "desktop capture failed"
+                    );
+                    last_error = Instant::now();
                 }
-            })
-        });
+            }
+        }));
     }
 
     async fn capture_once(
@@ -243,6 +259,10 @@ impl Runtime {
         display: Display,
         state: Arc<std::sync::Mutex<Option<CaptureState>>>,
     ) -> Result<()> {
+        let screen_name = match display {
+            Display::Secure => "secure",
+            Display::Dev => "dev",
+        };
         let desktop = self.desktop_for(display);
         let snapshot = {
             let mut session = desktop.session.lock().await;
@@ -344,6 +364,14 @@ impl Runtime {
             active.budget.reset();
         } else {
             active.frame_sequence = active.sequence;
+            if active.frame_sequence == 1 {
+                tracing::info!(
+                    screen = %screen_name,
+                    session_id = %id,
+                    frame_bytes = bytes.len(),
+                    "desktop first frame queued"
+                );
+            }
             active.coordinates = Some(Coordinates {
                 image: [
                     f64::from(u16::from_be_bytes(bytes[4..6].try_into()?)),
@@ -405,6 +433,291 @@ impl Coordinates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime(root: &std::path::Path) -> Arc<Runtime> {
+        Runtime::new(
+            &nyxid_machine::config::Config {
+                roots: vec![root.to_owned()],
+                allow_root: true,
+                ..Default::default()
+            },
+            "node",
+            &root.join("node"),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn capture_expires_idle_sessions_but_preserves_owner_control_and_backpressure() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = runtime(root.path());
+        for display in [Display::Secure, Display::Dev] {
+            let state = Arc::new(std::sync::Mutex::new(None));
+            let desktop = runtime.desktop_for(display);
+            runtime.capture_once(display, state.clone()).await.unwrap();
+
+            let mut expired = custody_test_session();
+            expired.refreshed = Instant::now() - IDLE_TIMEOUT - std::time::Duration::from_secs(1);
+            *desktop.session.lock().await = Some(expired);
+            runtime.capture_once(display, state.clone()).await.unwrap();
+            assert!(desktop.session.lock().await.is_none());
+
+            let mut controlled = custody_test_session();
+            let id = controlled.id;
+            controlled.controller = Some("owner".into());
+            controlled.refreshed =
+                Instant::now() - IDLE_TIMEOUT - std::time::Duration::from_secs(1);
+            *desktop.session.lock().await = Some(controlled);
+            runtime.capture_once(display, state.clone()).await.unwrap();
+            assert_eq!(desktop.session.lock().await.as_ref().unwrap().id, id);
+
+            desktop.session.lock().await.as_mut().unwrap().refreshed = Instant::now();
+            assert_eq!(
+                runtime
+                    .capture_once(display, state.clone())
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "desktop offline"
+            );
+            // A congested socket must not open the native display or encode a
+            // frame. This exercises the real capture admission without X11.
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(3);
+            *desktop.sender.lock().await = Some(sender);
+            runtime.capture_once(display, state.clone()).await.unwrap();
+            assert!(state.lock().unwrap().is_none());
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            let session = desktop.session.lock().await;
+            let active = session.as_ref().unwrap();
+            assert_eq!(active.id, id);
+            assert_eq!(active.controller.as_deref(), Some("owner"));
+            assert_eq!((active.sequence, active.frame_sequence), (0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn activity_frames_stay_on_the_selected_display_and_pause_for_owner() {
+        use crate::node::ws_client::NodeWsMessage;
+        let root = tempfile::tempdir().unwrap();
+        let runtime = runtime(root.path());
+        let mut receivers = Vec::new();
+        for display in [Display::Secure, Display::Dev] {
+            let desktop = runtime.desktop_for(display);
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            *desktop.sender.lock().await = Some(sender);
+            runtime.desktop_activity("no_session", display).await;
+            let session = custody_test_session();
+            let id = session.id;
+            *desktop.session.lock().await = Some(session);
+            receivers.push((display, id, receiver));
+        }
+        runtime.desktop_activity("click", Display::Secure).await;
+        runtime.desktop_activity("scroll", Display::Secure).await;
+        runtime.desktop_activity("navigate", Display::Dev).await;
+
+        for (display, id, mut receiver) in receivers {
+            let tools: &[&str] = match display {
+                Display::Secure => &["click", "scroll"],
+                Display::Dev => &["navigate"],
+            };
+            for (index, tool) in tools.iter().enumerate() {
+                let NodeWsMessage::Binary(bytes) = receiver.try_recv().unwrap() else {
+                    panic!("activity must use a binary machine frame");
+                };
+                let frame = Frame::decode(&bytes).unwrap();
+                assert_eq!(frame.kind, Kind::DesktopActivity);
+                assert_eq!(frame.id, id);
+                assert_eq!(frame.sequence, index as u64 + 1);
+                assert!(!frame.end);
+                assert_eq!(
+                    serde_json::from_slice::<Value>(frame.bytes).unwrap(),
+                    json!({"tool":tool})
+                );
+            }
+            let desktop = runtime.desktop_for(display);
+            desktop.session.lock().await.as_mut().unwrap().controller = Some("owner".into());
+            runtime.desktop_activity("owner_is_typing", display).await;
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert_eq!(
+                desktop.session.lock().await.as_ref().unwrap().sequence,
+                tools.len() as u64
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_input_rejects_stale_controller_and_invalid_payload_before_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = runtime(root.path());
+        let mut session = custody_test_session();
+        let id = session.id;
+        session.controller = Some("owner".into());
+        session.control_revision = 7;
+        *runtime.desktop.session.lock().await = Some(session);
+        let valid = json!({"session_id":id,"viewer_id":"owner","revision":7,
+            "tool":"type_text","arguments":{"text":"x"}});
+        for (key, value, reason) in [
+            (
+                "session_id",
+                json!(Uuid::new_v4()),
+                "owner controller required",
+            ),
+            ("viewer_id", json!("old-owner"), "owner controller required"),
+            ("revision", json!(6), "owner controller required"),
+            ("revision", Value::Null, "owner controller required"),
+            ("display", json!("dev"), "desktop session closed"),
+            ("tool", json!("run_command"), "unsupported desktop input"),
+            ("arguments", json!([]), "desktop input limit exceeded"),
+            (
+                "arguments",
+                json!({"text":"x".repeat(16385)}),
+                "desktop input limit exceeded",
+            ),
+        ] {
+            let mut input = valid.clone();
+            input[key] = value;
+            assert_eq!(
+                runtime.desktop_input(&input).await.unwrap_err().to_string(),
+                reason
+            );
+            assert!(
+                runtime
+                    .desktop
+                    .session
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .owner_text
+                    .is_empty()
+            );
+        }
+        let mut click = valid.clone();
+        click["tool"] = json!("click");
+        click["arguments"] = json!({"x":640,"y":400});
+        assert_eq!(
+            runtime.desktop_input(&click).await.unwrap_err().to_string(),
+            "wait for the first desktop frame"
+        );
+        runtime
+            .desktop
+            .session
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .coordinates = Some(Coordinates {
+            image: [640.0, 400.0],
+            screen: [1280.0, 800.0],
+        });
+        assert_eq!(
+            runtime.desktop_input(&click).await.unwrap_err().to_string(),
+            "desktop coordinate outside frame"
+        );
+        runtime
+            .desktop
+            .session
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .owner_text
+            .push_str(&"x".repeat(16384));
+        assert_eq!(
+            runtime.desktop_input(&valid).await.unwrap_err().to_string(),
+            "owner input field limit exceeded"
+        );
+        runtime
+            .desktop
+            .session
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .controller = None;
+        assert_eq!(
+            runtime.desktop_input(&valid).await.unwrap_err().to_string(),
+            "owner controller required"
+        );
+        runtime.desktop.session.lock().await.take();
+        assert_eq!(
+            runtime.desktop_input(&valid).await.unwrap_err().to_string(),
+            "desktop session closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_resumes_after_shutdown_and_preserves_running_task_on_reconnect() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(
+            &nyxid_machine::config::Config {
+                roots: vec![root.path().to_owned()],
+                allow_root: true,
+                ..Default::default()
+            },
+            "node",
+            &root.path().join("node"),
+        )
+        .unwrap();
+        let mut original = Vec::new();
+        for display in [Display::Secure, Display::Dev] {
+            runtime.start_capture(display).await;
+            original.push(
+                runtime
+                    .desktop_for(display)
+                    .capture
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .abort_handle(),
+            );
+        }
+
+        runtime.disconnect().await;
+        for (display, task) in [Display::Secure, Display::Dev].into_iter().zip(&original) {
+            runtime.start_capture(display).await;
+            assert_eq!(
+                runtime
+                    .desktop_for(display)
+                    .capture
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .id(),
+                task.id()
+            );
+            assert!(!task.is_finished());
+        }
+
+        runtime.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while original.iter().any(|task| !task.is_finished()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for (display, previous) in [Display::Secure, Display::Dev].into_iter().zip(original) {
+            runtime.start_capture(display).await;
+            let capture = runtime.desktop_for(display).capture.lock().await;
+            let task = capture.as_ref().unwrap();
+            assert!(
+                !task.is_finished(),
+                "reconnected desktop must have a live capture task"
+            );
+            assert_ne!(task.id(), previous.id());
+        }
+        runtime.shutdown().await;
+    }
+
     #[test]
     fn input_maps_downscaled_retina_frames_to_display_points() {
         let coordinates = Coordinates {

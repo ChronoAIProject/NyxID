@@ -502,6 +502,7 @@ impl Fixture {
             &crate::test_utils::test_encryption_keys(),
             &verifier,
             bootstrap::BootstrapInput {
+                payload_version: nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
                 binding: binding.clone(),
                 ticket,
                 recipient_public_key: key.public_key_b64u().unwrap(),
@@ -515,6 +516,12 @@ impl Fixture {
             crate::test_utils::register_test_node_connection(&state, &machine.node_id, sender)
                 .await;
         let profile = nyxid_machine::MachineProfile {
+            managed_configuration: Some(nyxid_machine::managed::ConfigurationReport {
+                configuration: machine.configuration.clone(),
+                digest: machine.configuration.digest().unwrap(),
+                runtime_generation: machine.runtime_generation as u64,
+            }),
+            separation_choice: Some(machine.configuration.separation_choice),
             version: nyxid_machine::PROTOCOL_VERSION,
             runtime_id: Uuid::new_v4().to_string(),
             shell: true,
@@ -610,6 +617,119 @@ async fn fixture(label: &str) -> Fixture {
         manager,
         machine: created.machine,
     }
+}
+
+#[tokio::test]
+async fn configuration_application_needs_current_runtime_report_independently_of_agent_ack() {
+    use crate::models::node::{COLLECTION_NAME as NODES, Node};
+    use crate::services::remote_machine_configuration::configuration_view;
+    let f = fixture("native_configuration_chain").await;
+    let machine = f.start().await;
+    let nodes = f.db.collection::<Node>(NODES);
+    let node = nodes
+        .find_one(doc! {"_id":&machine.node_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(configuration_view(&machine, Some(&node)).state, "applied");
+    let original = machine.configuration_evidence.clone().unwrap();
+    // An Agent outbox ACK proves only its authority chain. It cannot fill a
+    // missing configuration observation, including when no tools were granted.
+    f.db.collection::<Document>(crate::models::machine_access::OUTBOX).insert_one(doc!{
+        "_id":Uuid::new_v4().to_string(),"node_id":&machine.node_id,"agent_id":Uuid::new_v4().to_string(),
+        "pending":false,"acknowledged_at":bson::DateTime::now()
+    }).await.unwrap();
+    f.db.collection::<Document>(MACHINES)
+        .update_one(
+            doc! {"_id":&machine.node_id},
+            doc! {"$set":{"configuration_evidence":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        configuration_view(&f.current().await, Some(&node)).state,
+        "pending"
+    );
+    let binding = nyxid_machine::managed::Binding {
+        node_id: machine.node_id.clone(),
+        sandbox_uid: machine.sandbox_uid.clone().unwrap(),
+        pod_uid: machine.pod_uid.clone().unwrap(),
+        runtime_generation: machine.runtime_generation as u64,
+        credential_epoch: machine.credential_epoch as u64,
+        writer_fence: machine.writer_fence.clone(),
+        operation_id: machine.active_operation_id.clone().unwrap(),
+        delivery_id: machine.bootstrap_delivery_id.clone().unwrap(),
+    };
+    let connection = node
+        .connection_owner
+        .as_ref()
+        .unwrap()
+        .connection_id
+        .clone();
+    for drift in ["configuration", "generation", "runtime", "connection"] {
+        let mut stale = node.clone();
+        match drift {
+            "configuration" => {
+                stale
+                    .machine
+                    .as_mut()
+                    .unwrap()
+                    .managed_configuration
+                    .as_mut()
+                    .unwrap()
+                    .configuration
+                    .revision += 1
+            }
+            "generation" => {
+                stale
+                    .machine
+                    .as_mut()
+                    .unwrap()
+                    .managed_configuration
+                    .as_mut()
+                    .unwrap()
+                    .runtime_generation += 1
+            }
+            "runtime" => stale.machine.as_mut().unwrap().runtime_id = Uuid::new_v4().to_string(),
+            _ => {
+                stale.connection_owner.as_mut().unwrap().connection_id = Uuid::new_v4().to_string()
+            }
+        }
+        nodes
+            .replace_one(doc! {"_id":&node.id}, &stale)
+            .await
+            .unwrap();
+        // A new authenticated daemon can supply new evidence, but old stored
+        // runtime/connection evidence may never validate it automatically.
+        let mut previous = machine.clone();
+        previous.configuration_evidence = Some(original.clone());
+        assert_eq!(
+            configuration_view(&previous, Some(&stale)).state,
+            "pending",
+            "{drift}"
+        );
+        if drift != "runtime" {
+            assert!(
+                super::mark_runtime_online(&f.db, &machine.node_id, &binding, &connection)
+                    .await
+                    .is_err(),
+                "{drift}"
+            );
+            assert!(f.current().await.configuration_evidence.is_none());
+        }
+    }
+    nodes
+        .replace_one(doc! {"_id":&node.id}, &node)
+        .await
+        .unwrap();
+    super::mark_runtime_online(&f.db, &machine.node_id, &binding, &connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        configuration_view(&f.current().await, Some(&node)).state,
+        "applied"
+    );
+    f.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -804,6 +924,28 @@ async fn native_observation_rejects_late_operation_generation_and_stale_worker_r
     assert!(quarantined.native_uncertainty.is_some());
     assert!(!quarantined.writer_admitted);
     assert!(!lifecycle::runtime_fence_allows_bootstrap(&quarantined));
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_observation_rejects_out_of_order_heartbeat_replay() {
+    let f = fixture("native_out_of_order_heartbeat").await;
+    let current = f.start().await;
+    let original = current.native_observation.clone().unwrap();
+    let mut newer = original.clone();
+    newer.observed_at += chrono::Duration::milliseconds(10);
+    newer.sandbox_resource_version = "newer-resource-version".into();
+    newer.evidence_ref = "newer-evidence".into();
+
+    native::record(&f.db, &current, &newer, Document::new())
+        .await
+        .unwrap();
+    assert!(
+        native::record(&f.db, &current, &original, Document::new())
+            .await
+            .is_err(),
+        "an older heartbeat cannot overwrite a newer observation"
+    );
     f.db.drop().await.unwrap();
 }
 

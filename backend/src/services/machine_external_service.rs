@@ -645,7 +645,7 @@ pub(crate) async fn dispatch_authorized(
     .await?;
     if let Some(c) = admission.pending {
         return Ok(
-            json!({"status":"confirmation_pending","confirmation_id":c.id,"acknowledgement_id":c.id,"expires_at":c.expires_at,"owner_only":true,"approval_url":format!("{}/assistant/machines?confirmation={}",state.config.frontend_url.trim_end_matches('/'),c.id)}),
+            json!({"status":"confirmation_pending","confirmation_id":c.id,"acknowledgement_id":c.id,"expires_at":c.expires_at,"owner_only":true,"approval_url":format!("{}/assistant/machines?machine={}&confirmation={}",state.config.frontend_url.trim_end_matches('/'),node.id,c.id)}),
         );
     }
     if admission.replayed {

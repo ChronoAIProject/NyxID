@@ -587,6 +587,7 @@ const agentPersona = z
 
 /** "New agent": a specialist with its role, optional style and starting grants. */
 export const assistantAgentCreateSchema = z.object({
+  machine_assignment: z.literal("membership_only").optional(),
   org: z.string().optional(),
   name: agentName,
   display_name: agentDisplayName.optional(),
@@ -650,13 +651,20 @@ export const assistantAgentGrantsSchema = z.object({
   guest_access: z.record(z.string(), assistantGuestAccessSchema),
 });
 /** What the grants endpoint takes: levels only for services whose level changed. */
-export const assistantAgentGrantsRequestSchema = z.object({
+const assistantAgentGrantsReplacementSchema = z.object({
   machines: z.array(z.string()).optional(),
   logins: z.array(z.string()).optional(),
   services: z.array(z.string()),
   account_read: z.boolean(),
   guest_access: z.record(z.string(), assistantGuestAccessSchema).optional(),
 });
+/** A membership update never contains a stale snapshot of unrelated grants. */
+export const assistantAgentGrantsRequestSchema = z.union([
+  z.object({
+    machine_membership: z.object({ node_id: z.string().min(1), assigned: z.boolean() }).strict(),
+  }).strict(),
+  assistantAgentGrantsReplacementSchema.strict(),
+]);
 export type AssistantAgentGrants = z.infer<typeof assistantAgentGrantsSchema>;
 export type AssistantAgentGrantsRequest = z.infer<typeof assistantAgentGrantsRequestSchema>;
 
