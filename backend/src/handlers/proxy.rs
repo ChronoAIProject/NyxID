@@ -5720,8 +5720,10 @@ async fn execute_resolved_proxy_inner<'a>(
                             method.as_str(),
                             path,
                         )
+                        .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
                         .map(|guard| {
                             guard
+                                .observed(model_request.as_ref())
                                 .projected(&assistant_projection)
                                 .routed(Some(node_route))
                         })
@@ -6570,8 +6572,10 @@ async fn execute_resolved_proxy_inner<'a>(
                         method.as_str(),
                         path,
                     )
-                    .map(|guard| {
+                    .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
+                        .map(|guard| {
                         guard
+                            .observed(model_request.as_ref())
                             .projected(&assistant_projection)
                             .routed(node_route.as_ref())
                     })
@@ -6828,8 +6832,10 @@ async fn execute_resolved_proxy_inner<'a>(
                     method.as_str(),
                     path,
                 )
-                .map(|guard| {
+                .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
+                        .map(|guard| {
                     guard
+                        .observed(model_request.as_ref())
                         .projected(&assistant_projection)
                         .routed(node_route.as_ref())
                 });

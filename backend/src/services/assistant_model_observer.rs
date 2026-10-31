@@ -182,6 +182,14 @@ impl ModelRequest {
         Ok(())
     }
 
+    pub(crate) async fn dispatched(&self) -> AppResult<()> {
+        if self.setup {
+            super::assistant_guest_model_setup::backoff::dispatched(&self.db, &self.conversation)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn fault(&self, kind: &str, attributable: bool) -> AppResult<()> {
         let mut fence = self.fence();
         // Stop is still a live captured turn; its cancellation is diagnostic.

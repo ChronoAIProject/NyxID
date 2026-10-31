@@ -1523,6 +1523,7 @@ pub async fn update_agent(
             .ok_or_else(not_found)?
     };
     if !shared_manager {
+        super::assistant_guest_model_setup::backoff::reset(db, actor, id, None).await?;
         super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
     }
     Ok(updated)
@@ -1624,6 +1625,7 @@ pub async fn set_agent_policy(
         updated.access_mode_override,
     )
     .await;
+    super::assistant_guest_model_setup::backoff::reset(db, &actor.user_id, id, None).await?;
     super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
     if current.access_mode_override != updated.access_mode_override {
         super::assistant_acknowledgement_service::retire_full_access_confirmations(

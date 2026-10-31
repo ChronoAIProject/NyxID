@@ -2523,6 +2523,13 @@ pub(super) async fn prepare_guest_model(
             .await
         }
     };
+    crate::services::assistant_guest_model_setup::backoff::reset(
+        &state.db,
+        owner,
+        &agent.id,
+        Some(&profile),
+    )
+    .await?;
     crate::services::assistant_guest_model_setup::kick(state, owner, &agent.id, &profile, false)
         .await?;
     Ok(())

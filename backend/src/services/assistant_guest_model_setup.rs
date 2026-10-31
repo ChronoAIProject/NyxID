@@ -22,6 +22,8 @@ pub(crate) const INSTRUCTION: &str = "Initialize this assistant's model connecti
 pub(crate) const WAIT: Duration = Duration::from_secs(60);
 const RETRY: i64 = 60;
 
+pub(crate) mod backoff;
+
 pub(crate) async fn is_setup(db: &mongodb::Database, conversation: &str) -> AppResult<bool> {
     Ok(db
         .collection::<Document>("assistant_conversations")
@@ -251,6 +253,9 @@ async fn claim(
                 }
             }
         }
+        let retry_target = existing.as_ref().and_then(|r| r.get_document("retry_target").ok());
+        let retry_config = backoff::fingerprint(db, agent, retry_target).await?;
+        let model_failures = existing.as_ref().and_then(|r| r.get_i64("model_failures").ok()).unwrap_or(0);
         let mut row=team::create_automation_thread(db,keys,actor,agent,"Preparing visitors",tx).await?;
         if row.shared_agent_thread {return Err(AppError::Forbidden("Shared setup refused".into()));}
         row.guest_model_setup=true;
@@ -264,6 +269,7 @@ async fn claim(
         let claim=uuid::Uuid::new_v4().to_string();
         rows.replace_one(doc!{"_id":&id},doc!{"_id":&id,"kind":KIND,"user_id":actor,"agent_id":&agent.id,"profile":profile,
             "status":"setting_up","claim":&claim,"conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,
+            "model_failures":model_failures,"retry_config":retry_config,"retry_target":retry_target,
             "until":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::from_std(*budget).expect("bounded setup budget")+chrono::Duration::seconds(5)),
             "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::days(7))}).upsert(true).session(&mut *tx).await?;
         Ok(Some((claim,row)))
@@ -308,6 +314,12 @@ async fn kick_bounded(
     let agent = team::agent(&state.db, actor, agent_id).await?;
     if !eligible(&state.db, actor, &agent).await? {
         return Ok(true);
+    }
+    // Settle an expired worker before considering another claim. Otherwise a
+    // guest racing the sweep could bypass the failed dispatch's backoff.
+    expire_wait(state, actor, agent_id, profile).await?;
+    if let Some(record) = record(&state.db, actor, agent_id, profile).await? {
+        backoff::refresh(&state.db, &agent, &record).await?;
     }
     let record = record(&state.db, actor, agent_id, profile).await?;
     if record.as_ref().is_some_and(|r| {
@@ -408,10 +420,10 @@ fn run(
         let _ = engine::request_stop(&state.db, &row.user_id, &row.id).await;
         let filter =
             doc! {"kind":KIND,"claim":token,"conversation_id":&row.id,"status":"setting_up"};
-        let updated=state.db.collection::<Document>(execution::COLLECTION).update_one(filter,doc!{"$set":{
+        let updated=state.db.collection::<Document>(execution::COLLECTION).update_one(filter,backoff::terminal(doc!{
         "status":if route.is_some(){"ready"}else{"failed"},"route":bson::to_bson(&route).unwrap_or(bson::Bson::Null),
-        "cleanup_thread_id":&row.id,"notice_pending":reason.is_some(),"reason":reason,"until":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::seconds(RETRY))},
-        "$unset":{"conversation_id":"","api_key_id":""}}).await;
+        "cleanup_thread_id":&row.id,"notice_pending":reason.is_some(),"reason":reason},
+        doc!{"conversation_id":"","api_key_id":""},route.is_some())).await;
         let Ok(updated) = updated else {
             // Retain the hidden thread and claim for crash recovery if the
             // terminal write is unavailable; deletion would erase the outbox.
@@ -613,8 +625,11 @@ pub(crate) async fn expire_wait(
         .collection::<Document>(execution::COLLECTION)
         .find_one_and_update(
             filter,
-            doc! {"$set":{"status":"failed","reason":"setup_timeout","notice_pending":true,
-            "until":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::seconds(RETRY))}},
+            backoff::terminal(
+                doc! {"status":"failed","reason":"setup_timeout","notice_pending":true},
+                doc! {},
+                false,
+            ),
         )
         .await?
         && let Ok(id) = row.get_str("conversation_id")
@@ -648,7 +663,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         let _ = engine::request_stop(&state.db, actor, id).await;
         let updated=state.db.collection::<Document>(execution::COLLECTION).update_one(
             doc!{"kind":KIND,"claim":token,"status":"setting_up"},
-            doc!{"$set":{"status":"failed","reason":"setup_timeout","notice_pending":true,"cleanup_thread_id":id,"until":bson::DateTime::now()},"$unset":{"conversation_id":"","api_key_id":""}}
+            backoff::terminal(doc!{"status":"failed","reason":"setup_timeout","notice_pending":true,"cleanup_thread_id":id},doc!{"conversation_id":"","api_key_id":""},false)
         ).await?;
         let _ = updated;
     }
