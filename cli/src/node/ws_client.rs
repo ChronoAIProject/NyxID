@@ -814,6 +814,26 @@ fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
         .to_string()
 }
 
+async fn verify_runtime_window(
+    signed: &nyxid_machine::managed::SignedRuntimeWindow,
+    binding: &nyxid_machine::managed::Binding,
+    key: &[u8],
+) -> std::result::Result<(), &'static str> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let issued = signed.window.issued_at_ms;
+    if issued > now {
+        // A fast local connection can outrun a small host/VM clock difference.
+        // Authenticate before waiting, then retain the original verifier and
+        // absolute cutoff; no window is admitted before its signed issue time.
+        if issued > now.saturating_add(nyxid_machine::authority::CLOCK_SKEW_MS) {
+            return Err("runtime window rejected");
+        }
+        signed.verify(binding, key, issued)?;
+        tokio::time::sleep(Duration::from_millis((issued - now) as u64)).await;
+    }
+    signed.verify(binding, key, chrono::Utc::now().timestamp_millis())
+}
+
 /// Main connection loop with exponential backoff reconnection.
 #[allow(clippy::too_many_arguments)]
 async fn run_connection_loop(
@@ -1061,8 +1081,8 @@ async fn connect_and_serve(
             hex::decode(secret.as_str())
                 .map_err(|_| Error::AuthFailed("Managed runtime signing key invalid".into()))?,
         );
-        window
-            .verify(binding, &bytes, chrono::Utc::now().timestamp_millis())
+        verify_runtime_window(&window, binding, &bytes)
+            .await
             .map_err(|_| Error::AuthFailed("Managed runtime deadline invalid".into()))?;
         let storage = config
             .hosted_storage
@@ -1353,16 +1373,22 @@ async fn connect_and_serve(
             }
             Some("managed_runtime_window") => {
                 if let (Some(machine), Some(secret)) = (&machine, &signing_secret) {
-                    let accepted = serde_json::from_value::<
+                    let window = serde_json::from_value::<
                         nyxid_machine::managed::SignedRuntimeWindow,
                     >(parsed["window"].clone())
-                    .ok()
-                    .is_some_and(|window| {
-                        let bytes = zeroize::Zeroizing::new(
-                            hex::decode(secret.as_str()).unwrap_or_default(),
-                        );
-                        machine.apply_managed_window(&window, &bytes).is_ok()
-                    });
+                    .ok();
+                    let bytes =
+                        zeroize::Zeroizing::new(hex::decode(secret.as_str()).unwrap_or_default());
+                    let accepted = if let (Some(window), Some(binding)) =
+                        (window, config.managed_runtime.as_ref())
+                    {
+                        verify_runtime_window(&window, binding, &bytes)
+                            .await
+                            .is_ok()
+                            && machine.apply_managed_window(&window, &bytes).is_ok()
+                    } else {
+                        false
+                    };
                     if !accepted {
                         machine.shutdown().await;
                         break false;
@@ -4905,6 +4931,72 @@ mod tests {
 
     fn shared_signing_secret(secret: &str) -> SharedSigningSecret {
         Arc::new(Zeroizing::new(secret.to_string()))
+    }
+
+    #[tokio::test]
+    async fn managed_runtime_window_waits_for_its_verified_issue_time() {
+        use futures::FutureExt;
+        use nyxid_machine::managed::{Binding, RuntimeWindow, SignedRuntimeWindow};
+        let id = || uuid::Uuid::new_v4().to_string();
+        let binding = Binding {
+            node_id: id(),
+            sandbox_uid: id(),
+            pod_uid: id(),
+            runtime_generation: 1,
+            credential_epoch: 1,
+            writer_fence: id(),
+            operation_id: id(),
+            delivery_id: id(),
+        };
+        let issued = chrono::Utc::now().timestamp_millis() + 1_000;
+        let window = SignedRuntimeWindow::sign(
+            RuntimeWindow {
+                binding: binding.clone(),
+                control_revision: 1,
+                issued_at_ms: issued,
+                run_not_after_ms: issued + 60_000,
+            },
+            &[7; 32],
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                verify_runtime_window(&window, &binding, &[8; 32]).now_or_never(),
+                Some(Err(_))
+            ),
+            "a forged future window must be rejected without waiting"
+        );
+        let mut excessive = window.window.clone();
+        excessive.issued_at_ms = chrono::Utc::now().timestamp_millis()
+            + nyxid_machine::authority::CLOCK_SKEW_MS
+            + 10_000;
+        excessive.run_not_after_ms = excessive.issued_at_ms + 60_000;
+        let excessive = SignedRuntimeWindow::sign(excessive, &[7; 32]).unwrap();
+        assert!(
+            matches!(
+                verify_runtime_window(&excessive, &binding, &[7; 32]).now_or_never(),
+                Some(Err(_))
+            ),
+            "clock differences beyond the existing bound must be rejected without waiting"
+        );
+        let verification = verify_runtime_window(&window, &binding, &[7; 32]);
+        tokio::pin!(verification);
+        assert!(
+            verification.as_mut().now_or_never().is_none(),
+            "a valid future window must wait instead of terminating the runtime"
+        );
+        verification.await.unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        assert!(
+            now >= issued,
+            "the original future-time check must still hold"
+        );
+        assert!(window.verify(&binding, &[7; 32], now).is_ok());
+        assert!(
+            window
+                .verify(&binding, &[7; 32], window.window.run_not_after_ms)
+                .is_err()
+        );
     }
 
     fn rci_test_config(server_url: String) -> NodeConfig {

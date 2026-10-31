@@ -44,7 +44,7 @@ pub(super) fn custody_test_session() -> Session {
 pub struct Desktop {
     pub session: Mutex<Option<Session>>,
     pub sender: Mutex<Option<tokio::sync::mpsc::Sender<crate::node::ws_client::NodeWsMessage>>>,
-    pub capture: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
+    pub capture: Mutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(target_os = "linux")]
     input: Arc<std::sync::Mutex<Option<native_desktop::Input>>>,
 }
@@ -220,22 +220,38 @@ impl Runtime {
         Ok(json!({"accepted":true}))
     }
 
-    pub(super) fn start_capture(self: &Arc<Self>, display: Display) {
+    pub(super) async fn start_capture(self: &Arc<Self>, display: Display) {
+        let mut capture = self.desktop_for(display).capture.lock().await;
+        if capture.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
         let weak = Arc::downgrade(self);
-        self.desktop_for(display).capture.get_or_init(|| {
-            tokio::spawn(async move {
-                let state = Arc::new(std::sync::Mutex::new(None));
-                let mut interval = tokio::time::interval(FRAME_INTERVAL);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    interval.tick().await;
-                    let Some(runtime) = weak.upgrade() else {
-                        break;
-                    };
-                    let _ = runtime.capture_once(display, state.clone()).await;
+        *capture = Some(tokio::spawn(async move {
+            let state = Arc::new(std::sync::Mutex::new(None));
+            let mut interval = tokio::time::interval(FRAME_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_error = Instant::now() - std::time::Duration::from_secs(60);
+            let screen_name = match display {
+                Display::Secure => "secure",
+                Display::Dev => "dev",
+            };
+            loop {
+                interval.tick().await;
+                let Some(runtime) = weak.upgrade() else {
+                    break;
+                };
+                if let Err(error) = runtime.capture_once(display, state.clone()).await
+                    && last_error.elapsed() >= std::time::Duration::from_secs(1)
+                {
+                    tracing::warn!(
+                        screen = %screen_name,
+                        error = %error,
+                        "desktop capture failed"
+                    );
+                    last_error = Instant::now();
                 }
-            })
-        });
+            }
+        }));
     }
 
     async fn capture_once(
@@ -243,6 +259,10 @@ impl Runtime {
         display: Display,
         state: Arc<std::sync::Mutex<Option<CaptureState>>>,
     ) -> Result<()> {
+        let screen_name = match display {
+            Display::Secure => "secure",
+            Display::Dev => "dev",
+        };
         let desktop = self.desktop_for(display);
         let snapshot = {
             let mut session = desktop.session.lock().await;
@@ -344,6 +364,14 @@ impl Runtime {
             active.budget.reset();
         } else {
             active.frame_sequence = active.sequence;
+            if active.frame_sequence == 1 {
+                tracing::info!(
+                    screen = %screen_name,
+                    session_id = %id,
+                    frame_bytes = bytes.len(),
+                    "desktop first frame queued"
+                );
+            }
             active.coordinates = Some(Coordinates {
                 image: [
                     f64::from(u16::from_be_bytes(bytes[4..6].try_into()?)),
@@ -405,6 +433,73 @@ impl Coordinates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn capture_resumes_after_shutdown_and_preserves_running_task_on_reconnect() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(
+            &nyxid_machine::config::Config {
+                roots: vec![root.path().to_owned()],
+                allow_root: true,
+                ..Default::default()
+            },
+            "node",
+            &root.path().join("node"),
+        )
+        .unwrap();
+        let mut original = Vec::new();
+        for display in [Display::Secure, Display::Dev] {
+            runtime.start_capture(display).await;
+            original.push(
+                runtime
+                    .desktop_for(display)
+                    .capture
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .abort_handle(),
+            );
+        }
+
+        runtime.disconnect().await;
+        for (display, task) in [Display::Secure, Display::Dev].into_iter().zip(&original) {
+            runtime.start_capture(display).await;
+            assert_eq!(
+                runtime
+                    .desktop_for(display)
+                    .capture
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .id(),
+                task.id()
+            );
+            assert!(!task.is_finished());
+        }
+
+        runtime.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while original.iter().any(|task| !task.is_finished()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for (display, previous) in [Display::Secure, Display::Dev].into_iter().zip(original) {
+            runtime.start_capture(display).await;
+            let capture = runtime.desktop_for(display).capture.lock().await;
+            let task = capture.as_ref().unwrap();
+            assert!(
+                !task.is_finished(),
+                "reconnected desktop must have a live capture task"
+            );
+            assert_ne!(task.id(), previous.id());
+        }
+        runtime.shutdown().await;
+    }
+
     #[test]
     fn input_maps_downscaled_retina_frames_to_display_points() {
         let coordinates = Coordinates {

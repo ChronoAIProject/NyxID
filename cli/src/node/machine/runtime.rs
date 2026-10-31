@@ -841,8 +841,10 @@ impl Runtime {
         }
         *self.desktop_secret.lock().await = Some(zeroize::Zeroizing::new(signing_secret.to_vec()));
         if self.config.computer || self.config.browser_enabled() {
-            self.start_capture(nyxid_machine::desktop::Display::Secure);
-            self.start_capture(nyxid_machine::desktop::Display::Dev);
+            self.start_capture(nyxid_machine::desktop::Display::Secure)
+                .await;
+            self.start_capture(nyxid_machine::desktop::Display::Dev)
+                .await;
         }
         Ok(())
     }
@@ -2693,14 +2695,14 @@ impl Runtime {
     }
 
     async fn stop_local(&self) {
-        if let Some(task) = self.dev_desktop.capture.get() {
+        if let Some(task) = self.dev_desktop.capture.lock().await.take() {
             task.abort();
         }
         if let Some(browser) = self.browser.lock().await.take() {
             browser.stop().await;
         }
         self.dev_browser.lock().await.take();
-        if let Some(task) = self.desktop.capture.get() {
+        if let Some(task) = self.desktop.capture.lock().await.take() {
             task.abort();
         }
         if let Some(driver) = &self.driver {
