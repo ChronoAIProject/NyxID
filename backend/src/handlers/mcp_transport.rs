@@ -4395,7 +4395,7 @@ fn handle_machine_tool<'a>(
         let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
             return tool_result(
                 request_id,
-                "Machines require an assistant chat key on an owner turn",
+                "No Machine access granted. Authorize this client with an explicit Machine selection, or use an assistant chat key on an owner turn.",
                 true,
             );
         };

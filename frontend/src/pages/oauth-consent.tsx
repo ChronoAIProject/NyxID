@@ -338,6 +338,7 @@ function StandardConsentPage({
     search.get("external_subject_external_user_id") ?? "";
   const bindingGrantId = search.get("binding_grant_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
+  const [machineSelectionRequired, setMachineSelectionRequired] = useState(false);
   const [preparedMachineRequest, setPreparedMachineRequest] = useState<string | null>(null);
   const machineScope = scope.split(/\s+/).includes("machine") || Boolean(readMachineConsentScope(consentRequest)?.scope.split(/\s+/).includes("machine"));
   // Server-resolved hints: the app's declared default services matched to
@@ -388,9 +389,9 @@ function StandardConsentPage({
   const identityScopes = agentAccess
     ? scopes.filter((item) => IDENTITY_SCOPE_WORDS[item])
     : [];
-  const listedScopes = agentAccess
-    ? scopes.filter((item) => !IDENTITY_SCOPE_WORDS[item] && item !== "proxy")
-    : scopes;
+  // Machine authority is reviewed separately in the optional selection below.
+  const listedScopes = scopes.filter((item) => item !== "machine" &&
+    (!agentAccess || (!IDENTITY_SCOPE_WORDS[item] && item !== "proxy")));
   const redirectHost = parseHost(redirectUri);
   const email = preview?.email ?? user?.email;
   const selectableServices = useMemo(
@@ -982,7 +983,7 @@ function StandardConsentPage({
         </details>
       </div>
 
-      {machineScope && <MachineGrantConsent consentRequest={consentRequest} onPrepared={setPreparedMachineRequest} disabled={Boolean(preview)} allowedServiceIds={submittedAccess.allow_all_services ? undefined : submittedAccess.allowed_service_ids} />}
+      {machineScope && <MachineGrantConsent consentRequest={consentRequest} onPrepared={setPreparedMachineRequest} onSelectionRequired={setMachineSelectionRequired} disabled={Boolean(preview)} allowedServiceIds={submittedAccess.allow_all_services ? undefined : submittedAccess.allowed_service_ids} />}
       <form
         method="POST"
         action="/oauth/authorize/decision"
@@ -1059,7 +1060,7 @@ function StandardConsentPage({
           variant="primary"
           name="decision"
           value="allow"
-          disabled={Boolean(preview) || (machineScope && !preparedMachineRequest)}
+          disabled={Boolean(preview) || (machineScope && machineSelectionRequired && !preparedMachineRequest)}
           className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-44")}
         >
           {bindingReview ? "Update access" : "Allow access"}
