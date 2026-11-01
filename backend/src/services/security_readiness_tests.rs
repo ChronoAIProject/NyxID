@@ -387,3 +387,23 @@ async fn platform_policy_process_child() {
     );
     db.drop().await.unwrap();
 }
+
+#[test]
+fn protected_org_and_hosted_intent_writes_require_every_replica_capability_and_drain() {
+    let now = Utc::now();
+    let a = local("a", "a1", &["a", "b"], false);
+    let b = local("b", "b1", &["a", "b"], false);
+    for capability in [
+        flags::ORG_INSTRUCTION_FLAG_KEY,
+        flags::HOSTED_CONNECT_INTENT_FLAG_KEY,
+    ] {
+        let good = vec![row(&a, now), row(&b, now)];
+        assert!(assess(&good, &a, capability, false, now).ready);
+        let mut old_writer = good.clone();
+        old_writer[1].capabilities.retain(|c| c != capability);
+        assert!(!assess(&old_writer, &a, capability, false, now).ready);
+        let mut undrained = good;
+        undrained[1].drained = false;
+        assert!(!assess(&undrained, &a, capability, false, now).ready);
+    }
+}

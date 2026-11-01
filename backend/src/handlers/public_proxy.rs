@@ -164,6 +164,7 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
     service.inject_delegation_token = false;
 
     proxy_service::ProxyTarget {
+        credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,
         base_url: service.base_url.clone(),

@@ -80,6 +80,8 @@ pub struct DeliveryBinding {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
     #[serde(default)]
+    pub instruction_receipt_version: u32,
+    #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]
     pub cma: Option<CmaOperation>,

@@ -5707,6 +5707,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        instruction_receipt_version: 0,
         secret_context_versions: Default::default(),
         cma: None,
         id: "watch".into(),

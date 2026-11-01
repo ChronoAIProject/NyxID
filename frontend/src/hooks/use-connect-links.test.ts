@@ -7,6 +7,7 @@ import {
   compactCompleteConnectLinkInput,
   connectLinkStorageKey,
   useCompleteConnectLink,
+  useCreateAssistantConnectLink,
 } from "@/hooks/use-connect-links";
 import { api } from "@/lib/api-client";
 
@@ -155,4 +156,11 @@ describe("connect link completion mutation", () => {
       });
     },
   );
+});
+
+it("creates an assistant hosted link with explicit personal intent", async () => {
+  post.mockResolvedValue({ id: "65dd8fe8-9ee8-4c89-af1e-b283a17bcf37", connect_url: "https://nyx.test/connect/token", expires_at: "2026-10-30T10:15:00Z" });
+  const { result } = renderHook(() => useCreateAssistantConnectLink(), { wrapper: createWrapper() });
+  await act(async () => { await expect(result.current.mutateAsync("github")).resolves.toBe("https://nyx.test/connect/token"); });
+  expect(post).toHaveBeenCalledWith("/connect-links", { service_slug: "github", use_platform_key: false, assistant_personal: true });
 });

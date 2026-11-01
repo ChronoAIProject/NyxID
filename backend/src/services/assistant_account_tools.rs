@@ -1346,17 +1346,25 @@ impl AccountTools<'_> {
                 let providers = platform_key_service::load_providers(self.db).await?;
                 let services =
                     unified_key_service::list_keys(self.db, self.keys, user, &providers).await?;
-                Ok(bounded_list(
-                    services
-                        .iter()
-                        .map(|s| {
-                            json!({"id": s.id, "slug": s.slug,
-                    "label": short(&s.label), "is_active": s.is_active, "status": s.status,
-                    "api_key_id": s.api_key_id, "auto_connected": s.auto_connected})
-                        })
-                        .collect(),
-                ))
+                let mut rows = Vec::new();
+                for service in services {
+                    let connection = self
+                        .db
+                        .collection::<crate::models::user_service::UserService>("user_services")
+                        .find_one(doc! {"_id":&service.id})
+                        .await?;
+                    let facts = if let Some(connection) = connection {
+                        super::assistant_connection_service::facts(self.db, user, &connection)
+                            .await?
+                    } else {
+                        Value::Null
+                    };
+                    rows.push(json!({"id":service.id,"slug":service.slug,"label":short(&service.label),"is_active":service.is_active,
+                        "status":service.status,"api_key_id":service.api_key_id,"auto_connected":service.auto_connected,"connection":facts}));
+                }
+                Ok(bounded_list(rows))
             }
+
             "set_service_enabled" => {
                 user_service_service::update_user_service(
                     self.db,

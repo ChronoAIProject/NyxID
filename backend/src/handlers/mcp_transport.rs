@@ -3707,7 +3707,7 @@ async fn authorize_mcp_operation(
 
 /// Tells the assistant what each `chat_access` value means so it calls gated
 /// tools instead of telling the user it lacks permission.
-const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = call freely. \
+const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = scope allows a call; organization connections still require explicit owner instruction this turn or an exact approved card, including Full access. \
     acknowledgement_required (subagents only) = call the tool now; NyxID asks your \
     orchestrator for permission and tells you to end your turn; you are resumed with \
     the decision. source meanings: user_service = a personal or organization connection; \
@@ -4992,6 +4992,16 @@ async fn handle_meta_search(
     } else {
         mcp_service::rank_search_candidates(candidates, query)
     };
+    let connection_facts = match crate::services::assistant_connection_service::mcp_facts(
+        &state.db,
+        &auth.user_id,
+        &services,
+    )
+    .await
+    {
+        Ok(facts) => facts,
+        Err(error) => return app_error_to_rpc(request_id, &error),
+    };
     let results: Vec<_> = ranked_candidates
         .into_iter()
         .map(|tool| {
@@ -5002,6 +5012,10 @@ async fn handle_meta_search(
             });
             if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
                 value["service_id"] = serde_json::json!(service.service_id);
+                value["connection"] = connection_facts
+                    .get(&service.service_id)
+                    .cloned()
+                    .unwrap_or_default();
                 value["executable"] = serde_json::json!(service.executable);
                 value["preference_rank"] =
                     serde_json::json!(ranks.get(&service.service_id).copied());
@@ -5120,8 +5134,27 @@ async fn handle_meta_list_connected(
         }
     };
 
+    let connection_facts = match crate::services::assistant_connection_service::mcp_facts(
+        &state.db,
+        &auth.user_id,
+        &services,
+    )
+    .await
+    {
+        Ok(facts) => facts,
+        Err(error) => return app_error_to_rpc(request_id, &error),
+    };
     let mut result =
         mcp_service::list_connected_services_ranked(&services, query, &ranks, &auth.user_id);
+    if let Some(rows) = result["services"].as_array_mut() {
+        for row in rows {
+            row["connection"] = row["service_id"]
+                .as_str()
+                .and_then(|id| connection_facts.get(id))
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
     if auth.chat.is_some()
         && let Some(rows) = result["services"].as_array_mut()
     {
@@ -5202,6 +5235,28 @@ async fn handle_meta_connect(
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
 ) -> Response {
+    let catalog = match crate::services::assistant_connection_service::resolve_catalog(
+        &state.db,
+        &auth.user_id,
+        arguments["service_id"].as_str(),
+        arguments["service_slug"].as_str(),
+    )
+    .await
+    {
+        Ok(catalog) => catalog,
+        Err(error) => return tool_result(request_id, &error.to_string(), true),
+    };
+    let service_id = catalog.id.as_str();
+    if auth.chat.is_none()
+        && !auth.allow_all_services
+        && !auth.allowed_service_ids.contains(&catalog.id)
+    {
+        return tool_result(
+            request_id,
+            &restricted_connect_refusal(auth, &state.config.frontend_url),
+            true,
+        );
+    }
     if let Some(chat) = auth.chat.as_ref()
         && !chat.access_request_allowed()
     {
@@ -5226,7 +5281,7 @@ async fn handle_meta_connect(
             )
             .await;
         }
-        let refusal = if chat.guest {
+        let mut refusal = if chat.guest {
             crate::services::assistant_acknowledgement_service::access_request_denied()
         } else {
             crate::services::assistant_access_policy::with_frontend(
@@ -5234,6 +5289,21 @@ async fn handle_meta_connect(
                 &state.config.frontend_url,
             )
         };
+        if !chat.guest {
+            refusal["catalog_service_id"] = serde_json::json!(catalog.id);
+            refusal["service_slug"] = serde_json::json!(catalog.slug);
+            if catalog.service_type == "ssh" {
+                refusal["connect_own"] =
+                    serde_json::json!({"supported":false,"reason":"ssh_requires_advanced_setup"});
+                refusal["instructions"] = serde_json::json!(
+                    "Ask the owner to use Plugins → Advanced setup for SSH, then grant this specialist access. Hosted SSH connection is unsupported."
+                );
+            } else {
+                refusal["instructions"] = serde_json::json!(
+                    "Ask the owner to connect their account through NyxBot or Plugins, then grant this specialist access. Completing a link never grants the specialist automatically."
+                );
+            }
+        }
         return tool_result(request_id, &refusal.to_string(), true);
     }
     if auth.chat.is_some() && arguments.get("credential").is_some() {
@@ -5247,27 +5317,6 @@ async fn handle_meta_connect(
             true,
         );
     }
-    let service_id = match arguments.get("service_id").and_then(|s| s.as_str()) {
-        Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
-        Some(_) => return tool_result(request_id, "Invalid service_id format", true),
-        None => return tool_result(request_id, "service_id is required", true),
-    };
-
-    // Scoped API keys can only connect services already in their allow-list.
-    // An assistant chat key acts for its owner and only mints a hosted link the
-    // owner completes in the UI, so it may connect any catalog service; the new
-    // connection still needs its own card before the chat can use it.
-    if auth.chat.is_none()
-        && !auth.allow_all_services
-        && !auth.allowed_service_ids.contains(&service_id.to_string())
-    {
-        return tool_result(
-            request_id,
-            &restricted_connect_refusal(auth, &state.config.frontend_url),
-            true,
-        );
-    }
-
     let credential = arguments.get("credential").and_then(|c| c.as_str());
     let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
     let scopes = match mcp_service::parse_connect_scopes(arguments.get("scopes")) {
@@ -5297,24 +5346,38 @@ async fn handle_meta_connect(
         }
     }
 
-    match mcp_service::connect_service_with_binding(
-        &state.db,
-        &state.encryption_keys,
-        state.node_ws_manager.as_ref(),
-        &auth.user_id,
-        service_id,
-        credential,
-        credential_label,
-        &state.config.frontend_url,
-        auth.api_key_name.as_deref(),
-        &scopes,
-        arguments
-            .get("use_platform_key")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-    )
-    .await
-    {
+    let connected = if auth.chat.is_some() {
+        crate::services::assistant_connection_service::hosted(
+            &state.db,
+            &auth.user_id,
+            &catalog,
+            &state.config.frontend_url,
+            arguments["use_platform_key"].as_bool().unwrap_or(false),
+            credential_label,
+            auth.api_key_name.as_deref(),
+            &scopes,
+        )
+        .await
+    } else {
+        mcp_service::connect_service_with_binding(
+            &state.db,
+            &state.encryption_keys,
+            state.node_ws_manager.as_ref(),
+            &auth.user_id,
+            service_id,
+            credential,
+            credential_label,
+            &state.config.frontend_url,
+            auth.api_key_name.as_deref(),
+            &scopes,
+            arguments
+                .get("use_platform_key")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        )
+        .await
+    };
+    match connected {
         Ok(mut result) => {
             if result.get("status").and_then(|value| value.as_str()) == Some("pending_connection") {
                 // A chat resumes by itself when the user finishes the link.

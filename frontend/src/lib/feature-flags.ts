@@ -37,6 +37,8 @@ export const FEATURE_FLAG = {
   ORG_AGENTS: "assistant:org-agents",
   SHARED_AGENTS: "assistant:shared-agents",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
+  ORG_INSTRUCTION: "assistant:org-instruction-v1",
+  HOSTED_CONNECT_INTENT: "assistant:hosted-connect-intent-v1",
   MACHINE_CONTEXTS: "assistant:machine-contexts",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
   GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",

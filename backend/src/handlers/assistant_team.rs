@@ -164,6 +164,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
         invocation_id: None,
@@ -910,6 +911,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
             invocation_id: invocation_id.map(str::to_owned),
@@ -2630,6 +2632,24 @@ async fn dispatch_settings(
                         crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
                     )
                     .await?,
+                    false,
+                ));
+            }
+            if area == "add_service"
+                && let Some(reference) = args["service"].as_str()
+            {
+                let (id, slug) = if uuid::Uuid::parse_str(reference).is_ok() {
+                    (Some(reference), None)
+                } else {
+                    (None, Some(reference))
+                };
+                let catalog = crate::services::assistant_connection_service::resolve_catalog(
+                    &state.db, owner, id, slug,
+                )
+                .await?;
+                return Ok((
+                    json!({"area":area,"action":"connect_service","catalog_service_id":catalog.id,"service_slug":catalog.slug,
+                    "instructions":"Call nyx__connect_service with this catalog_service_id as service_id or service_slug; give the owner its hosted link. Never use /keys for connecting an account."}),
                     false,
                 ));
             }

@@ -5,6 +5,8 @@ pub const COLLECTION_NAME: &str = "assistant_acknowledgements";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAcknowledgement {
+    #[serde(default)]
+    pub connect_own: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     /// The tool call (turn activity) that raised this card or receipt, so the

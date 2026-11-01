@@ -1,3 +1,5 @@
+import { AssistantLinkModal } from "./assistant-link-modals";
+import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
 import { DecisionReceipt } from "./decision-receipt";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { AuthoredSkillCard } from "./authored-skill-card";
@@ -38,7 +40,10 @@ export function NyxAgentAcknowledgementCard({
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
   const [error, setError] = useState<string>();
-  const confirmationsBypassed = accessMode === "autopilot" && acknowledgement.decider === "user";
+  const confirmationsBypassed =
+    accessMode === "autopilot" &&
+    acknowledgement.decider === "user" &&
+    !["org_connection", "delegation"].includes(acknowledgement.confirmation?.reason ?? "");
   if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} confirmationsBypassed={confirmationsBypassed} deciding={deciding} onDecision={onDecision} />;
   const label = title(acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
@@ -114,6 +119,9 @@ export function NyxAgentAcknowledgementCard({
           {error}
         </p>
       ) : null}
+      {acknowledgement.connect_own?.supported && acknowledgement.connect_own.service_slug ? (
+        <ConnectOwnAction slug={acknowledgement.connect_own.service_slug} />
+      ) : null}
       <div className="flex justify-end gap-2">
         <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>
           Deny
@@ -124,4 +132,20 @@ export function NyxAgentAcknowledgementCard({
       </div>
     </section>
   );
+}
+
+function ConnectOwnAction({ slug }: { readonly slug: string }) {
+  const [href, setHref] = useState<string | null>(null);
+  const [error, setError] = useState<string>();
+  const connect = useCreateAssistantConnectLink();
+  return <>
+    <Button variant="outline" disabled={connect.isPending} onClick={() => {
+      setError(undefined);
+      void connect.mutateAsync(slug).then(setHref).catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : "Could not create connection link.");
+      });
+    }}>Connect your own</Button>
+    {error ? <p role="alert" className="text-12 text-destructive">{error}</p> : null}
+    <AssistantLinkModal href={href} onClose={() => setHref(null)} />
+  </>;
 }

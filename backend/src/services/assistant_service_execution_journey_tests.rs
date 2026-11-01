@@ -761,6 +761,7 @@ pub(super) async fn execute(
 #[tokio::test]
 async fn actual_bootstrap_card_allow_resumes_model_tool_model_and_new_turn_asks_again() {
     let f = orchestrator_fixture("bootstrap_round_trip").await;
+    super::instructions::activate(&f).await;
     mode(&f, AccessMode::Nyxmode).await;
     let owner = org(&f).await;
     let c = catalog(&f).await;

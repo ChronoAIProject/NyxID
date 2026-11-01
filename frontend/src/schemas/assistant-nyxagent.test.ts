@@ -156,6 +156,22 @@ describe("NyxBot message and card schemas", () => {
     expect(nyxAgentMessageSchema.parse({ ...message, role: "user", continuation_of: row.id }).continuation_of).toBe(row.id);
   });
 
+  it("preserves protected org reasons and supported or unsupported personal setup offers", () => {
+    const card = { id: "12345678-1234-4123-8123-123456789012", kind: "action", status: "pending",
+      summary: "Read the organization connection", service_slug: "github", service_name: "GitHub",
+      tool_name: "nyxid.service_execution", created_at: at, decided_at: null, expires_at: at,
+      confirmation: { risk: "read", access_mode: "autopilot", reason: "org_connection" } };
+    for (const connect_own of [
+      { supported: true, catalog_service_id: "catalog", service_slug: "github" },
+      { supported: false, reason: "ssh_requires_advanced_setup" },
+    ]) {
+      expect(nyxAgentAcknowledgementSchema.parse({ ...card, connect_own })).toMatchObject({
+        confirmation: { reason: "org_connection" }, connect_own,
+      });
+    }
+    expect(nyxAgentAcknowledgementSchema.parse(card).connect_own).toBeUndefined();
+  });
+
   it("parses a history with team members", () => {
     const page = nyxAgentHistorySchema.parse({
       conversation: { ...legacyConversation, members: [] },

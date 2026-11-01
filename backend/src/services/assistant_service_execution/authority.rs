@@ -107,8 +107,17 @@ pub fn connection_binding<'a>(
         } else {
             Value::Null
         };
-        let authority = json!({"owner":key.user_id,"expires":key.expires_at,"scopes":key.assistant_operation_scopes,
+        let mut authority = json!({"owner":key.user_id,"expires":key.expires_at,"scopes":key.assistant_operation_scopes,
         "allowed":allowed,"all_services":key.allow_all_services,"nodes":nodes,"mode":mode});
+        if let Some(chat) = acks::for_key(db, &key.user_id, Some(api_key_id)).await?
+            && instruction::covered(db, &chat, &service).await?
+        {
+            authority
+                .as_object_mut()
+                .expect("authority object")
+                .remove("mode");
+            authority["binding_version"] = json!(2);
+        }
         let mut service = serde_json::to_value(service)
             .map_err(|_| AppError::Internal("Connection projection failed".into()))?;
         let mut endpoint = serde_json::to_value(endpoint)

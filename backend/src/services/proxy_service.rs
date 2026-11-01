@@ -67,6 +67,7 @@ impl ProxyBody {
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
+    pub credential_deferred: bool,
     pub workspace_destinations_pending: bool,
     pub target_id: Option<String>,
     pub base_url: String,
@@ -155,6 +156,17 @@ async fn decrypt_master_credential_string(
     std::str::from_utf8(&decrypted_bytes)
         .map(|value| Zeroizing::new(value.to_owned()))
         .map_err(|_| AppError::Internal("Failed to decode credential".into()))
+}
+
+impl ProxyTarget {
+    pub(crate) fn require_credential_materialized(&self) -> AppResult<()> {
+        if self.credential_deferred {
+            return Err(AppError::Forbidden(
+                "Organization connection requires execution admission".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Catalog master credentials stay on NyxID, including legacy internal rows.
@@ -1122,6 +1134,7 @@ pub(crate) fn prepare_node_request(
     caller_token: Option<&str>,
     extra_outbound_headers: &[(String, String)],
 ) -> AppResult<PreparedNodeRequest> {
+    target.require_credential_materialized()?;
     super::lark_attachment_tool::refuse_reserved_path(path)?;
     let mut node_delegated = delegated.to_vec();
     extend_with_path_credential(&mut node_delegated, target);
@@ -1223,6 +1236,7 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1248,6 +1262,7 @@ pub async fn resolve_admin_proxy_target(
     let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
 
     Ok(ProxyTarget {
+        credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
         ),
@@ -1338,6 +1353,7 @@ pub async fn resolve_curation_proxy_target(
     };
     Ok((
         ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1456,6 +1472,7 @@ pub async fn resolve_proxy_target(
             super::default_header_service::catalog(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1507,6 +1524,7 @@ pub async fn resolve_proxy_target(
         super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
         ),
@@ -1535,6 +1553,7 @@ pub(crate) async fn resolve_catalog_platform_target(
     if super::platform_key_service::no_auth_platform_service(&service) {
         super::platform_key_service::require(db, &service, owner_id).await?;
         return Ok(ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1564,6 +1583,7 @@ pub(crate) async fn resolve_catalog_platform_target(
     service.auth_key_name = auth_key_name.clone();
     service.requires_user_credential = false;
     Ok(ProxyTarget {
+        credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
         ),
@@ -1669,6 +1689,7 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                credential_deferred: false,
                 workspace_destinations_pending:
                     super::destination_routing::workspace_destinations_pending(&service),
                 target_id: None,
@@ -1742,6 +1763,7 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1833,12 +1855,20 @@ async fn lookup_service_pool_member(
 
 #[derive(Clone, Copy)]
 pub struct ProxyExecutionContext<'a> {
+    assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
     shared_access: Option<&'a super::shared_agent_service::RequestAccess>,
     pub connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     pub platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 }
 
 impl<'a> ProxyExecutionContext<'a> {
+    pub fn with_assistant_chat(
+        mut self,
+        chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    ) -> Self {
+        self.assistant_chat = chat;
+        self
+    }
     pub fn with_assistant_access(
         mut self,
         access: Option<&'a super::org_agent_service::RequestAccess>,
@@ -1854,12 +1884,14 @@ impl<'a> ProxyExecutionContext<'a> {
             connection_expiry_notifier,
             platform_user_rate_limit,
             shared_access: None,
+            assistant_chat: None,
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct ProxyCredentialResolution<'a> {
+    assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
     shared_access: Option<&'a super::shared_agent_service::RequestAccess>,
     connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
@@ -1871,6 +1903,7 @@ impl<'a> ProxyCredentialResolution<'a> {
     fn materialize(context: ProxyExecutionContext<'a>) -> Self {
         Self {
             shared_access: context.shared_access,
+            assistant_chat: context.assistant_chat,
             connection_expiry_notifier: context.connection_expiry_notifier,
             platform_user_rate_limit: context.platform_user_rate_limit,
             materialize_credentials: true,
@@ -1881,6 +1914,7 @@ impl<'a> ProxyCredentialResolution<'a> {
     fn read_only_snapshot() -> Self {
         Self {
             shared_access: None,
+            assistant_chat: None,
             connection_expiry_notifier: None,
             platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(
             ),
@@ -3054,7 +3088,10 @@ async fn finish_resolution(
     let header_catalog = user_service.catalog_service_id.clone();
     let mut resolution = box_resolution_future(|| async move {
 
-    let materialize_credentials = credential_resolution.materialize_credentials;
+    let defer_org = if let Some(chat) = credential_resolution.assistant_chat {
+        super::assistant_service_execution::instruction::covered(db, chat, &user_service).await?
+    } else { false };
+    let materialize_credentials = credential_resolution.materialize_credentials && !defer_org;
     let connection_expiry_notifier = credential_resolution.connection_expiry_notifier;
     let platform_user_rate_limit = credential_resolution.platform_user_rate_limit;
     // For auto-provisioned services, verify the catalog entry is still eligible
@@ -3176,6 +3213,7 @@ async fn finish_resolution(
         };
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            credential_deferred: !materialize_credentials,
                 base_url: catalog_service.base_url.clone(),
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
@@ -3220,6 +3258,7 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            credential_deferred: !materialize_credentials,
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
                 target_id: None,
@@ -3325,6 +3364,7 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            credential_deferred: !materialize_credentials,
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
                 target_id: None,
@@ -3392,6 +3432,7 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            credential_deferred: !materialize_credentials,
             workspace_destinations_pending: catalog_proxy_authorization
                 .workspace_destinations_pending,
             target_id: None,
@@ -4458,6 +4499,7 @@ async fn forward_request_with_egress_guard_inner(
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    target.require_credential_materialized()?;
     super::lark_attachment_tool::refuse_reserved_path(path)?;
     if super::telnyx_platform_service::contract(&target.service).is_some() {
         let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
@@ -6705,6 +6747,7 @@ mod tests {
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.clone(),
@@ -8126,6 +8169,7 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.clone(),
@@ -8529,6 +8573,7 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.clone(),
@@ -8772,6 +8817,7 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.clone(),
@@ -9206,6 +9252,7 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9227,6 +9274,7 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9248,6 +9296,7 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9266,6 +9315,7 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9284,6 +9334,7 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9302,6 +9353,7 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9354,6 +9406,7 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9374,6 +9427,7 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9597,6 +9651,7 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: "https://example.test".into(),

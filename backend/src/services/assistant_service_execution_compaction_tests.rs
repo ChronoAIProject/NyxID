@@ -323,6 +323,7 @@ async fn org_stateful_model_transport_full_access_and_auto_resume_keep_exact_con
     for (path, body) in exact_model_requests() {
         for setting in [AccessMode::Autopilot, AccessMode::Nyxmode] {
             let mut f = orchestrator_fixture("org_compact_runtime").await;
+            super::instructions::activate(&f).await;
             mode(&f, setting).await;
             let owner = org(&f).await;
             let catalog = catalog(&f).await;

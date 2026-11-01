@@ -4,6 +4,7 @@ use super::*;
 /// It is deliberately not deserializable from HTTP headers or MCP arguments.
 #[derive(Clone)]
 pub struct Admission {
+    pub(super) owner_instruction_receipt: bool,
     pub(super) shared_permit: Option<crate::services::shared_agent_consent::Permit>,
     pub(super) connection: String,
     pub(super) binding: String,

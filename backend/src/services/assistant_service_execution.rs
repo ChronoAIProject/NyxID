@@ -51,6 +51,7 @@ mod http;
 mod receipts;
 mod request_identity;
 pub(crate) use receipts::HttpApprovalReceipt;
+pub(crate) mod instruction;
 mod resolution;
 mod selection;
 use availability::verified_unavailable;
@@ -173,11 +174,15 @@ async fn check_job_http_inner(
         refusal: None,
         automatic: None,
         admission: Some(Admission {
+            owner_instruction_receipt: false,
             shared_permit: None,
             connection: id.to_owned(),
             binding: connection_binding(&state.db, id, &chat.api_key_id).await?,
-            execution: Some(execution_digest(target)),
-            execution_credential: true,
+            execution: Some(execution_projection_digest(
+                target,
+                !target.credential_deferred,
+            )),
+            execution_credential: !target.credential_deferred,
             operation: digest(json!({"job_id":job})),
             operation_identity: json!({"job_id":job}),
             native_execution: None,
@@ -294,6 +299,13 @@ async fn check_inner(
         .await?;
     let service =
         super::user_service_service::get_user_service(db, effective_owner, connection_id).await?;
+    let instruction_covered = instruction::covered(db, chat, &service).await?
+        && !matches!(
+            operation["kind"].as_str(),
+            Some("raw_inference" | "legacy_inference" | "machine_job")
+        );
+    let instruction_required =
+        instruction_covered && !instruction::owner_instruction(db, chat, &service).await?;
     if let Some(access) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
         if !chat.turn_live || chat.turn_stopped {
             return Err(AppError::AssistantTurnRequired);
@@ -335,7 +347,18 @@ async fn check_inner(
         }
         // Connection consent is independent of the actor's action policy.
         // Always may remember a connection; it never bypasses an action card.
-        let gate = acks::confirmation_needed(db, chat, facts, false).await?;
+        let gate = acks::confirmation_needed_with_org(
+            db,
+            chat,
+            facts,
+            false,
+            if instruction_required {
+                acks::OrgInstructionRequirement::Required
+            } else {
+                acks::OrgInstructionRequirement::None
+            },
+        )
+        .await?;
         if let Some(need) = gate.ask() {
             let args = json!({"connection_id": connection_id, "execution_binding": binding,
                 "operation": operation, "acknowledgement_id": acknowledgement});
@@ -343,6 +366,11 @@ async fn check_inner(
                 acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, summary)
                     .await?
             {
+                let refusal = if instruction_required {
+                    attach_org_offer(db, chat, &service, &binding, operation, refusal).await?
+                } else {
+                    refusal
+                };
                 return Ok(Decision {
                     refusal: Some(refusal),
                     admission: None,
@@ -372,11 +400,13 @@ async fn check_inner(
             refusal: None,
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
+                owner_instruction_receipt: instruction_covered,
                 shared_permit: permit,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(execution_digest),
-                execution_credential: true,
+                execution: target
+                    .map(|target| execution_projection_digest(target, !target.credential_deferred)),
+                execution_credential: target.is_some_and(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -709,15 +739,19 @@ async fn check_inner(
             });
         }
     }
-    if chat.guest {
+    if chat.guest && !instruction_required {
         return Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                owner_instruction_receipt: false,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(|target| execution_projection_digest(target, !pool)),
-                execution_credential: !pool,
+                execution: target.map(|target| {
+                    execution_projection_digest(target, !pool && !target.credential.is_empty())
+                }),
+                execution_credential: !pool
+                    && target.is_some_and(|target| !target.credential.is_empty()),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -754,8 +788,10 @@ async fn check_inner(
             summary.to_owned()
         };
         let gate = if resource_replay && acknowledgement.is_some() {
-            acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
-        } else { acks::confirmation_needed(db, chat, facts, org && !model_consent).await? };
+            acks::Gate::Ask(acks::ConfirmationNeed { org_instruction: if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }, class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
+        } else { acks::confirmation_needed_with_org(db, chat, facts,
+            org && !model_consent && !instruction_covered,
+            if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }).await? };
         if gate.ask().is_some() {
             // Legacy idle calls can retain their existing automatic behavior, but
             // cannot mint or redeem turn-bound consent without an admitted turn.
@@ -777,20 +813,21 @@ async fn check_inner(
                             "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
                         }}).upsert(true).await?;
             }
-            return Ok(Decision {
-                refusal: Some(refusal),
-                admission: None,
-                automatic: None,
-            });
+            let mut refusal = refusal;
+            if instruction_required {
+                refusal = attach_org_offer(db, chat, &service, &binding, operation, refusal).await?;
+            }
+            return Ok(Decision { refusal: Some(refusal), admission: None, automatic: None });
         }
         Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                owner_instruction_receipt: instruction_covered,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(|target| execution_projection_digest(target, !pool)),
-                execution_credential: !pool,
+                execution: target.map(|target| execution_projection_digest(target, !pool && !target.credential.is_empty())),
+                execution_credential: !pool && target.is_some_and(|target| !target.credential.is_empty()),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -807,6 +844,29 @@ async fn check_inner(
     .await
 }
 
+async fn attach_org_offer(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    service: &UserService,
+    binding: &str,
+    operation: &Value,
+    refusal: Value,
+) -> AppResult<Value> {
+    let refusal =
+        super::assistant_connection_service::org_refusal(db, chat, service, refusal).await?;
+    if let Some(id) = refusal["acknowledgement_id"].as_str() {
+        db.collection::<Document>(COLLECTION).update_one(doc! {"_id":id},doc! {"$setOnInsert":{
+            "kind":"card_binding","user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+            "api_key_id":&chat.api_key_id,"turn_id":&chat.turn_id,"connection_id":&service.id,
+            "owner_id":&service.user_id,"catalog_service_id":&service.catalog_service_id,
+            "binding":binding,"operation":bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(25))
+        }}).upsert(true).await?;
+    }
+    Ok(refusal)
+}
+
+#[cfg(test)]
 fn execution_digest(target: &super::proxy_service::ProxyTarget) -> String {
     execution_projection_digest(target, true)
 }

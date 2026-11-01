@@ -124,6 +124,8 @@ describe("feature flag catalog", () => {
       ASSISTANT_OWNER_INVOCATIONS: "assistant:owner-invocations",
       MACHINE_CAPABILITIES: "assistant:machine-capabilities",
       MACHINE_CONTEXTS: "assistant:machine-contexts",
+      ORG_INSTRUCTION: "assistant:org-instruction-v1",
+      HOSTED_CONNECT_INTENT: "assistant:hosted-connect-intent-v1",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
   GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
       CHANNEL_MEDIA: "assistant:channel-media",

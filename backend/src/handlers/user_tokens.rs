@@ -2567,6 +2567,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<ConnectLink>(CONNECT_LINKS)
             .insert_one(ConnectLink {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 id: link_id.clone(),
                 user_id: user_id.clone(),

@@ -22,34 +22,14 @@ const mocks = vi.hoisted(() => ({
   useUpdateKey: vi.fn(),
   useDeleteKey: vi.fn(),
   useUpdateExternalApiKey: vi.fn(),
-  addDialogProps: null as {
-    readonly launch?: "popup";
-    readonly flow?: "cc";
-    readonly onPopupViewResult?: (keyId: string) => boolean;
-  } | null,
+  createConnect: vi.fn(),
 }));
-
-// The full add-service dialog has its own test suite and many hooks; stub it
-// to a marker so this test only asserts Connect opens it with the right slug
-// and hands it the popup contract.
-vi.mock("@/components/dashboard/add-key-dialog", () => ({
-  AddKeyDialog: ({
-    open,
-    prefillSlug,
-    ...props
-  }: {
-    readonly open: boolean;
-    readonly prefillSlug?: string;
-    readonly launch?: "popup";
-    readonly flow?: "cc";
-    readonly onPopupViewResult?: (keyId: string) => boolean;
-  }) =>
-    ((mocks.addDialogProps = props),
-    open ? (
-      <div role="dialog" aria-label="Add service" data-prefill={prefillSlug}>
-        Add service dialog
-      </div>
-    ) : null),
+vi.mock("@/hooks/use-connect-links", () => ({
+  useCreateAssistantConnectLink: () => ({ mutateAsync: mocks.createConnect, isPending: false }),
+}));
+vi.mock("./assistant-link-modals", () => ({
+  AssistantLinkModal: ({ href }: { readonly href: string | null }) => href
+    ? <div role="dialog" aria-label="Hosted connection" data-href={href} /> : null,
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
@@ -172,7 +152,7 @@ describe("PluginsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockLoaded();
-    mocks.addDialogProps = null;
+    mocks.createConnect.mockImplementation(async (slug: string) => `/connect/${slug}`);
     // Manage-modal hooks: a fully-shaped key + no-op mutations.
     mocks.useKey.mockReturnValue({
       data: {
@@ -218,34 +198,18 @@ describe("PluginsView", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     // The card itself is the only CTA — there is no nested Connect button.
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
-    const dialog = await screen.findByRole("dialog", { name: "Add service" });
-    expect(dialog).toHaveAttribute("data-prefill", "github");
+    const dialog = await screen.findByRole("dialog", { name: "Hosted connection" });
+    expect(dialog).toHaveAttribute("data-href", "/connect/github");
+    expect(mocks.createConnect).toHaveBeenCalledWith("github");
   });
 
-  it("runs plugin OAuth in the managed popup and opens the result in place", async () => {
-    const user = userEvent.setup();
+  it("offers a personal hosted connection when Added contains only an org account", async () => {
+    mockLoaded({ keyRows: [{ ...keys[0]!, credential_source: { type: "org", org_id: "org", org_name: "Acme", role: "admin", allowed: true } }] as unknown as KeyInfo[] });
     render(<PluginsView />);
-    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
-    await screen.findByRole("dialog", { name: "Add service" });
-    // Both props are load-bearing: the backend mints an attempt nonce only for
-    // `cc`, and without one the popup opens and immediately closes again.
-    expect(mocks.addDialogProps).toMatchObject({ launch: "popup", flow: "cc" });
-
-    const onPopupViewResult = mocks.addDialogProps?.onPopupViewResult;
-    expect(onPopupViewResult).toBeTypeOf("function");
-    let handled = false;
-    act(() => {
-      handled = onPopupViewResult?.("key-popup") ?? false;
-    });
-    // Handled === true is what makes the popup ack and stop waiting.
-    expect(handled).toBe(true);
-
-    expect(
-      screen.queryByRole("dialog", { name: "Add service" }),
-    ).not.toBeInTheDocument();
-    // Falls through to the same manage modal an Added card opens.
-    expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(mocks.useKey).toHaveBeenCalledWith("key-popup");
+    expect(screen.getByRole("button", { name: "Manage OpenAI" })).toBeVisible();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Connect your own" }));
+    expect(await screen.findByRole("dialog", { name: "Hosted connection" })).toHaveAttribute("data-href", "/connect/openai");
+    expect(screen.getByRole("link", { name: "Advanced setup" })).toHaveAttribute("href", "/keys?tab=services&action=add-service");
   });
 
   it("connects from the keyboard", async () => {
@@ -254,8 +218,8 @@ describe("PluginsView", () => {
     screen.getByRole("button", { name: "Connect Stripe" }).focus();
     await user.keyboard("{Enter}");
     expect(
-      await screen.findByRole("dialog", { name: "Add service" }),
-    ).toHaveAttribute("data-prefill", "stripe");
+      await screen.findByRole("dialog", { name: "Hosted connection" }),
+    ).toHaveAttribute("data-href", "/connect/stripe");
   });
 
   it("opens the manage modal straight from a connected card", async () => {

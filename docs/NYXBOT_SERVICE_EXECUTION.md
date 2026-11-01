@@ -56,13 +56,31 @@ rollout, use the web picker or put `/service <UUID>` alone on the first line;
 older admission replicas do not recognize inline requests or attributed channel
 commands. Upgrade all admission replicas for those forms to work consistently.
 
+## Protected organization use and connecting a personal account
+
+The org rule activates with `assistant:org-instruction-v1` after deployment readiness. It covers NyxBot and personal specialists, including shared personal-specialist execution after its existing sharing ACL. Agent ownership comes from the agent owner's actual UserType; org-owned specialists retain their existing contract. Platform bindings, auto-provisioned services and NyxBot's model transport, including initial generation and compaction, retain their existing behavior.
+
+A new server-owned `owner_instruction_version: 1` is minted only at first-party owner UI admission or verified private owner-channel admission. It binds the exact connection, actor, key, conversation, live turn and expiry. Existing `explicit` and `selection_source: owner` records alone are insufficient. API/delegated input, automation text, guest/group/channel-group messages and model `_nyxid_via` never mint it. A card-derived selection must still consume its exact single-use card. Selecting one org connection never authorizes its sibling or a pool's other members.
+
+An outstanding typed org requirement always persists reason `org_connection`, even when webhook/risk policies also ask. Full startup/batch retirement skips these cards; UI retains Allow/Deny in Full. New v2 org bindings omit mode preference but retain scope, ACL, credential epoch, configuration and exact operation, so Auto-to-Full approval remains redeemable once. Trusted selection removes only the org requirement; independent sensitive/destructive gates remain.
+
+Org credentials resolve as metadata before the action gate. Only an admitted selection or atomic exact-card consumption permits refresh/token exchange. The same private Admission survives materialization and is revalidated against current authority and the held destination before HTTP, WebSocket or node dispatch. Refusals include org/connection facts and a server-generated `connect_own` offer on the acknowledgement card. Supported offers require a visible, personally connectable catalog; custom/SSH/inaccessible entries carry an explicit unsupported reason and owner-card/Advanced guidance.
+
+New machine commands record their exact declarations and an instruction receipt; unresolved declarations are tracked per connection separately from display labels, with ownership and personal-setup guidance for each in the refusal. One combined card authorizes the bounded command and declared identities and offers hosted personal setup when supported. Legacy org jobs without proof refuse and require an owner-reviewed replacement command. Async watches retain a receipt only for the admitted submission's declared status/result/cancel lifecycle. Unproven legacy org watches pause without provider traffic until the owner approves that bounded continuation; its card also carries personal-setup guidance, and the receipt cannot authorize another submission.
+
+Requests about “my account” require the owner's personal connection. Discovery returns `connection` facts with visible catalog ID/slug, owner type (`person` or `organization`), relation (`self`, `shared_person`, `organization`), org display name and `account: {status: "unknown"}`. NyxID does not infer a provider username or call `/me`. Org data must never be presented as the owner's personal data.
+
+`nyx__connect_service` accepts visible catalog UUID/slug and returns a hosted link with personal intent by default for eligible assistant keys. Explicit platform intent also requires hosted human completion. `assistant:hosted-connect-intent-v1` activates the additive stored lock; preview displays it and completion/resume cannot switch it. Non-assistant and legacy links retain their override behavior. Plugins uses the same hosted modal under the human session and offers **Connect your own** on org-only Added cards. **Manage** and **Advanced setup** remain available; SSH/custom/node setup stays in Advanced. Named `settings_link add_service` returns structured connect guidance; unnamed opens Plugins. Specialist keys cannot create links: the owner connects through NyxBot or Plugins and grants the specialist separately.
+
+See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for the required reader/UI-first deployment and drained-writer activation. The table below describes the activated rule for covered org connections; the excluded model transport contract remains as described in its section.
+
 ## Existing permission modes
 
 | Mode | Organization connection use | Other actions |
 | --- | --- | --- |
-| Full access (`autopilot`) | No prompt; exact selection and priority still enforced | Existing bypass behavior and successful-effect receipts |
-| Auto (`nyxmode`) | Existing action card before use, including reads | Existing sensitive/destructive classification |
-| Ask every time (`ask_every_time`) | Existing action card before use, including reads | Existing change/sensitive/destructive classification |
+| Full access (`autopilot`) | Trusted owner selection this turn or an exact single-use org card | Existing bypass behavior and successful-effect receipts |
+| Auto (`nyxmode`) | Trusted owner selection this turn or an exact single-use org card, including reads | Existing sensitive/destructive classification |
+| Ask every time (`ask_every_time`) | Trusted owner selection this turn or an exact single-use org card, including reads | Existing change/sensitive/destructive classification |
 
 Organization ownership comes from the resolved effective owner and authoritative
 User type, never a model flag or an unrelated catalog creator. Public Person-owned
@@ -196,8 +214,10 @@ each send. Ordinary active watches remain usable while the conversation
 is idle or running a later turn; it never supplies a synthetic live turn. Each
 send rechecks the live key, membership, service scope, connection/configuration
 and credential generation, contract and lease. Revocation stops further polling.
-Legacy watches admitted before this feature keep their bounded result/cancel
-lifecycle under live authority checks. New versioned user-managed submissions
+Legacy personal watches keep their bounded result/cancel lifecycle under live
+authority checks. After org-instruction activation, legacy org watches pause
+without provider traffic until an owner card authorizes that exact existing
+operation's bounded continuation and stores its instruction receipt. New versioned user-managed submissions
 require both connection and endpoint-contract snapshots. Organization approval
 of the submission covers this bounded continuation; it does not authorize a
 second submission or arbitrary background requests.

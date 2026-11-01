@@ -220,23 +220,23 @@ pub fn live_turn(row: &AssistantConversation, now: DateTime<Utc>) -> Option<&Act
 pub const CONTEXT_NOTICE: &str =
     "Conversation context was reset; the assistant was given a recap of this chat.";
 /// NyxBot: the owner's single personal agent and chief of staff. Its threads
-/// follow the effective owner/agent mode. Full access never asks; successful
+/// follow the effective owner/agent mode. Org instruction remains mandatory; successful
 /// confirmation bypasses remain visible as automatic receipts.
 pub const SYSTEM_PROMPT: &str = concat!(
     "You are NyxBot, the user's personal AI agent and chief of staff inside NyxID. ",
-    "You persist across NyxID and chat apps; follow the effective permission mode for ",
-    "the owner's account and connected services. Use services with NyxID ",
-    "tools; connect new ones with nyx__connect_service and give its link. Never ask for raw ",
-    "credentials. Manage keys, channel bots, services, nodes and approvals with nyxid__ tools. ",
+    "Follow the effective permission mode for ",
+    "the owner's account and connected services. Use NyxID tools; connect via ",
+    "nyx__connect_service and give its link. Never ask for raw credentials. ",
+    "Manage keys/bots/services/nodes/approvals with nyxid__ tools. ",
     "For uncovered settings (agent-key creation, security, profile, billing, organizations), ",
     "give the exact page with nyxid__settings_link. ",
-    "In Full access, act without extra confirmation. On acknowledgement_required retry acknowledgement_id once allowed, never denied. ",
-    "Say results/skips plainly; name skill/version/agent. ",
+    "Full access needs owner instruction for org use. My account means personal: offer nyx__connect_service first, never /keys or org data as personal. On acknowledgement_required retry acknowledgement_id once allowed, never denied. ",
+    "Report results/skips; name skill/version/agent. ",
     "When the owner must finish a connect link, channel bot setup or verification outside ",
     "chat, explain what to do and end your turn. NyxID resumes you when they finish; never ",
     "ask them to reply that they are done or connected. Service approvals wait for the ",
     "owner in the app, phone or Telegram and continue automatically; report timeouts. ",
-    "Remember durable preferences, people and ongoing goals with nyxid__remember; remove ",
+    "Save durable preferences, people and goals with nyxid__remember; remove ",
     "stale facts with nyxid__forget. Never store secrets. ",
     "When work is specialized or parallel, or the user asks for an agent, reuse a fitting ",
     "specialist with nyxid__list_subagents or create one with nyxid__spawn_subagent: a short ",
@@ -404,6 +404,7 @@ pub fn base_prompt(
             ),
         ),
     };
+    prompt.push_str("\nRequests about my account require the owner's personal connection. Never present an organization's account or data as the owner's. If only an organization connection exists, offer nyx__connect_service for their own account first and ask before organization use, in every mode including Full access. Never send /keys for connecting; use a hosted connect link or Plugins. Specialists cannot create connect links: direct the owner to NyxBot or Plugins, then request a separate specialist grant.");
     prompt.push_str(TASK_COMPLETION_PROMPT);
     if row.role == AgentRole::Orchestrator && !row.guest_turn {
         prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot.");
@@ -659,8 +660,15 @@ pub struct TurnRequest {
 
 /// One turn to claim: a user message, an orchestrator instruction to a
 /// subagent, a batch of NyxID events, or a channel message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerInstructionSource {
+    FirstPartyOwner,
+    VerifiedPrivateChannel,
+}
+
 #[derive(Clone)]
 pub struct TurnStart {
+    pub owner_instruction_source: Option<OwnerInstructionSource>,
     pub media_event_ids: Vec<String>,
     pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
     pub invocation_id: Option<String>,
@@ -846,6 +854,7 @@ impl From<&TurnRequest> for TurnStart {
             conversation_id: request.conversation_id.clone(),
             text: request.text.clone(),
             model: request.model.clone(),
+            owner_instruction_source: None,
             origin: TurnOrigin::User,
             channel: None,
             title: None,
