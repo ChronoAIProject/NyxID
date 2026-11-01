@@ -54,6 +54,7 @@ export function OAuthIncrementalConsentPage({
   const email = useAuthStore((state) => state.user?.email);
   const { data: services, isLoading, isError } = useUserServices();
   const [optionalIds, setOptionalIds] = useState<readonly string[]>([]);
+  const [machineSelectionRequired, setMachineSelectionRequired] = useState(false);
   const [preparedMachineRequest, setPreparedMachineRequest] = useState<string | null>(null);
   const machineScope = Boolean(request?.scope.split(/\s+/).includes("machine"));
   const [expired, setExpired] = useState(() =>
@@ -85,7 +86,7 @@ export function OAuthIncrementalConsentPage({
   const addedScopes =
     snapshot?.scopes
       .split(/\s+/)
-      .filter((scope) => scope && !currentScopes.includes(scope)) ?? [];
+      .filter((scope) => scope && !currentScopes.includes(scope) && (scope !== "machine" || machineSelectionRequired)) ?? [];
   const unavailable = [
     ...new Set([...requiredAdditions, ...optionalIds]),
   ].filter((id) => !available.some((service) => service.id === id));
@@ -100,7 +101,7 @@ export function OAuthIncrementalConsentPage({
   const blocked = Boolean(
     error ||
     expired ||
-    (machineScope && !preparedMachineRequest) ||
+    (machineScope && machineSelectionRequired && !preparedMachineRequest) ||
     (needsServiceInventory && (isLoading || isError || unavailable.length)),
   );
   const errorMessage =
@@ -395,7 +396,7 @@ export function OAuthIncrementalConsentPage({
                     />
                   </div>
                 </details>
-                {machineScope && <MachineGrantConsent consentRequest={request.token} onPrepared={setPreparedMachineRequest} disabled={expired} allowedServiceIds={snapshot.allow_all_services ? undefined : [...new Set([...currentIds, ...additions])]} />}
+                {machineScope && <MachineGrantConsent consentRequest={request.token} onPrepared={setPreparedMachineRequest} onSelectionRequired={setMachineSelectionRequired} disabled={expired} allowedServiceIds={snapshot.allow_all_services ? undefined : [...new Set([...currentIds, ...additions])]} />}
                 <form
                   method="POST"
                   action="/oauth/authorize/incremental/decision"
