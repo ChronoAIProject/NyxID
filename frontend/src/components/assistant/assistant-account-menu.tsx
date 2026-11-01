@@ -76,9 +76,9 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
       <DropdownMenuItem asChild>
         <Link to="/approvals/settings" onClick={activateLink}>
           <Bell aria-hidden="true" />
-          <span className="flex-1">Notification settings</span>
-          <span aria-hidden="true" className="text-10 text-text-tertiary">
-            Studio
+          <span className="min-w-0 flex-1">
+            Notification settings
+            <span aria-hidden="true" className="block text-10 text-text-tertiary">Studio</span>
           </span>
           <span className="sr-only"> (opens in Studio)</span>
         </Link>
@@ -123,7 +123,7 @@ export function AssistantAccountMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild ref={triggerRef}>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent align={align} side={side} className="w-56 p-2"
+      <DropdownMenuContent align={align} side={side} className="w-max min-w-0 max-w-[calc(100vw-1rem)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto p-2"
         onCloseAutoFocus={() => {
           const request = pending.current;
           pending.current = null;

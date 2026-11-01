@@ -50,13 +50,13 @@ export function AssistantSearchButton({ onOpen }: { readonly onOpen: () => void 
     <TooltipProvider delayDuration={200}>
       <Tooltip>
         <TooltipTrigger asChild>
-          <button
+          <button data-icon-button=""
             type="button"
             onClick={onOpen}
             aria-label="Search"
             aria-keyshortcuts={SEARCH_SHORTCUT_ARIA}
             aria-haspopup="dialog"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+            className="flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
           >
             <Search aria-hidden="true" className="h-4 w-4" />
           </button>

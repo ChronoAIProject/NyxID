@@ -7,7 +7,7 @@ import { extendTailwindMerge } from "tailwind-merge";
 const twMerge = extendTailwindMerge({
   extend: {
     theme: {
-      text: ["9", "10", "11", "12", "13", "14", "15", "17", "20", "22", "24", "28", "36"],
+      text: ["9", "10", "11", "12", "13", "14", "15", "16", "17", "20", "22", "24", "28", "36"],
     },
   },
 });

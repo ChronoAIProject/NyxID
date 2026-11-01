@@ -67,3 +67,36 @@ for (const width of [1280, 390, 320]) {
     await expect(page.getByText("Project notes 1.md", { exact: true }).first()).toBeVisible();
   });
 }
+
+for (const width of [320, 1280]) {
+  for (const density of [0.5, 2]) {
+    test(`attachment cards fit their controls at ${width}px with large text and ${density}× spacing`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.addInitScript((spacing) => {
+        localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: 2, density: spacing }, version: 1 }));
+      }, density);
+      await openAssistant(page, { faults: { nyxagentEnabled: true, modelControlsEnabled: false } });
+      await page.getByLabel("Choose attachments").setInputFiles([
+        { name: "Reference.png", mimeType: "image/png", buffer: png },
+        { name: "Project notes.md", mimeType: "text/markdown", buffer: Buffer.from("# Notes\nA useful document to review.") },
+      ]);
+      const strip = page.getByRole("list", { name: "Attachments", exact: true });
+      await expect(strip.getByRole("status")).toHaveText(["Ready", "Ready"]);
+      // Both the image and document must contain the enlarged remove target.
+      for (const card of await strip.getByRole("listitem").all()) {
+        const bounds = await card.boundingBox();
+        const control = await card.getByRole("button", { name: /^Remove / }).boundingBox();
+        expect(control!.x).toBeGreaterThanOrEqual(bounds!.x);
+        expect(control!.y).toBeGreaterThanOrEqual(bounds!.y);
+        expect(control!.x + control!.width).toBeLessThanOrEqual(bounds!.x + bounds!.width);
+        expect(control!.y + control!.height).toBeLessThanOrEqual(bounds!.y + bounds!.height);
+      }
+      const label = strip.getByText("Project notes.md", { exact: true });
+      expect(await label.evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBe(28);
+      await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeInViewport();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await page.getByRole("button", { name: "Remove Project notes.md" }).click();
+      await expect(strip.getByRole("listitem")).toHaveCount(1);
+    });
+  }
+}

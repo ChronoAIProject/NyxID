@@ -105,11 +105,11 @@ export function MockScenariosAction() {
               aria-label="Enable mock scenarios"
             />
           </div>
-          <p className="text-11 leading-4 text-muted-foreground">
+          <p className="text-11 leading-normal text-muted-foreground">
             Shapes matching assistant HTTP fixtures. Session-only; other
             messages use the default fixture stream.
           </p>
-          <div className="flex gap-2 text-11 leading-4 text-warning">
+          <div className="flex gap-2 text-11 leading-normal text-warning">
             <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
             <p>
               Action cards open real connection journeys and can create real
@@ -208,7 +208,7 @@ export function MockScenariosAction() {
             </Button>
           </div>
           {world.connected.length === 0 ? (
-            <p className="mt-2 text-11 leading-4 text-text-tertiary">
+            <p className="mt-2 text-11 leading-normal text-text-tertiary">
               Nothing connected - <code className="font-mono">need</code> flows
               will run their connect step.
             </p>
@@ -217,14 +217,14 @@ export function MockScenariosAction() {
               {world.connected.map((serviceSlug) => (
                 <span
                   key={serviceSlug}
-                  className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-success/30 bg-success/10 pl-2 pr-1 text-10 text-success"
+                  className="inline-flex max-w-full items-center gap-1 rounded-md border border-success/30 bg-success/10 pl-2 pr-1 text-10 text-success"
                 >
                   <span className="truncate font-mono">{serviceSlug}</span>
-                  <button
+                  <button data-icon-button=""
                     type="button"
                     onClick={() => disconnectService(serviceSlug)}
                     aria-label={`Remove ${serviceSlug} from mock world`}
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] hover:bg-success/15 focus-visible:outline-none"
+                    className="flex shrink-0 items-center justify-center rounded-[4px] hover:bg-success/15 focus-visible:outline-none"
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -234,7 +234,7 @@ export function MockScenariosAction() {
           )}
         </section>
 
-        <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-10 leading-4 text-text-tertiary">
+        <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-10 leading-normal text-text-tertiary">
           <p>
             Edit flows in{" "}
             <code className="font-mono">

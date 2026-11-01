@@ -217,7 +217,7 @@ function ResponseCapture({
         <AssistantWireReplayView exchange={entry} />
       ) : capture.sse ? (
         <div className="overflow-hidden rounded-lg border border-border/60 bg-background/60">
-          <div className="max-h-96 overflow-auto font-mono text-10 leading-5">
+          <div className="max-h-96 overflow-auto font-mono text-10 leading-normal">
             {capture.sse.lines.slice(0, visibleLines).map((line, index) => (
               <div
                 key={`${String(index)}-${line.ending}`}
@@ -252,7 +252,7 @@ function ResponseCapture({
           ) : null}
         </div>
       ) : capture.body ? (
-        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-10 leading-5 text-muted-foreground">
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-10 leading-normal text-muted-foreground">
           {capture.body.text}
         </pre>
       ) : (
@@ -283,11 +283,11 @@ function WireLogPayload({
           <h4 className="text-10 font-semibold uppercase text-text-tertiary">
             Request {index + 1} - backend echo
           </h4>
-          <p className="text-11 leading-5 text-muted-foreground">
+          <p className="text-11 leading-normal text-muted-foreground">
             Reconstructed request assembled by NyxID before credential and
             identity injection; headers are an allowlisted subset.
           </p>
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-10 leading-5 text-muted-foreground">
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-10 leading-normal text-muted-foreground">
             {requestJson(envelope)}
           </pre>
         </section>
@@ -425,7 +425,7 @@ function WireLogEntry({
                 <TooltipContent>NyxID response to this browser</TooltipContent>
               </Tooltip>
             </span>
-            <span className="mt-1 block break-all font-mono text-11 leading-5 text-muted-foreground">
+            <span className="mt-1 block break-all font-mono text-11 leading-normal text-muted-foreground">
               {entry.label}
             </span>
           </span>
@@ -654,7 +654,7 @@ export function AssistantWireLogPanel({
           )}
         </div>
 
-        <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-11 leading-4 text-text-tertiary">
+        <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-11 leading-normal text-text-tertiary">
           <p>
             Raw captures are session-only and may contain sensitive payloads
             verbatim without the chat renderer's credential redaction, including

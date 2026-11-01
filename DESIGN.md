@@ -83,6 +83,25 @@ Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`)
 | 22px | Page titles on mobile (auto-scales to 28px at `sm`), `text-lg` mid-page section headings (`channel-bots`, `org-detail`) |
 | 28px | Page titles on `sm+` (`PageHeader`, `font-bold`, `letter-spacing: -0.03em`); dashboard greeting |
 
+The assistant uses a reading scale scoped by `html.assistant-display`, including
+portaled menus and account settings: `text-9`/`text-10` resolve to 12px,
+`text-11` to 13px, `text-12` to 14px, and `text-13` to 15px at 1×. Chat messages
+and the composer use `text-16` (16px), with unitless line heights. Markdown
+headings use 16–24px, and code blocks and tables use 14px. These values all
+follow the selected text multiplier; spacing remains independent. Controls
+reserve room for their line height and a 1.5rem minimum pointer target.
+Settings rows wrap according to the space their content needs.
+Assistant interface icons use the surrounding label's font size (`1.125em`),
+including sidebar glyphs, portaled menus, and dialog controls. Icon gaps and
+padding use `em` multiplied by the user's density, so increasing text size
+also increases the space around each icon. Controls use automatic height and
+content width, with relative minimum targets; labelled controls and settings
+rows wrap within the available width. Avoid fixed dimensions on icon buttons.
+Use unitless line heights for helper text. Attachment cards grow with their
+labels and controls; thumbnail limits must not constrain the card's text.
+On iOS, inputs have a 16px minimum to prevent focus zoom and still grow with
+larger text preferences.
+
 > **Off-scale sizes in use** (not endorsed; reconcile when touching the file): `text-2xl` on `StatCard` values in `developer-apps.tsx`; `text-22 font-bold` on node-detail metric values; `text-3xl md:text-5xl font-normal` on the `developer-app-detail` not-found heading; `text-base` on `ApprovalSetupWizard` `CardTitle`; `text-9` badges on `channel-conversation-detail`. New code should snap to the scale above.
 
 Mobile Activity cards lead with the service name at 15px; the action and URL use secondary text at 12px. Service names may wrap to two lines.
