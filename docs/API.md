@@ -4209,6 +4209,8 @@ The slug is resolved to the service UUID internally. All proxy behavior (credent
 
 Only active services are resolved by slug. Inactive services return `1003 not_found`.
 
+The service root accepts both `/api/v1/proxy/s/{slug}` and `/api/v1/proxy/s/{slug}/`; both forward `/` to the service. The UUID route (`/api/v1/proxy/{service_id}` and `/api/v1/proxy/{service_id}/`) and the public route (`/public/s/{slug}` and `/public/s/{slug}/`) behave the same way.
+
 **Auth:** Required
 
 **Path Parameters:**

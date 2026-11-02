@@ -391,7 +391,8 @@ Account deletion purges agents, settings, threads and channel records.
 ### Independent CMA custom-event bindings
 
 An owner may create a custom event binding for an existing NyxBot or specialist
-from the first-party NyxID API. This is an independent CMAEG source, not a
+from the first-party NyxID API (`/api/v1/assistant/nyxagent/custom-event-bindings`;
+routes in `docs/CHANNEL_EVENT_GATEWAY.md`). This is an independent CMAEG source, not a
 chat-platform bot and not a reuse of a `NyxbotChannel` provider key. The owner
 chooses the destination channel and partition; NyxID pins every delivery to
 that destination (which must have a verified relay reply anchor). CMA's producer HMAC credential is returned once at creation
