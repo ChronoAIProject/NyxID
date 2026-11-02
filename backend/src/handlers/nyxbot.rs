@@ -4800,6 +4800,23 @@ async fn responses_with_producers_impl(
     if row.platform == "discord" && !discord_provider_context(&row, context) {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     }
+    if crate::services::nyxbot_response_recovery::metadata(&request["metadata"]).is_ok() {
+        match crate::services::nyxbot_response_recovery::load(&state.db, &row, &response_id).await {
+            Ok(Some(stored)) => {
+                if stored.request_hash != sha256_hex(request.to_string()) {
+                    return problem(StatusCode::CONFLICT, "response_command_changed");
+                }
+                return native_responses::stream(state, row, headers.clone(), response_id, None);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return problem(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "response_recovery_unavailable",
+                );
+            }
+        }
+    }
     // Durable admission: one turn per idempotency key, context kept verbatim.
     let native_group_event = row.gateway_bot_mentions.enabled
         && activity["source"]["type"] == "nyxid_relay"
@@ -4958,6 +4975,67 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     }
+    let stored =
+        match relay_responses::prepare(&state, &row, &admitted, &request, &response_id).await {
+            Ok(stored) => stored,
+            Err(_) => {
+                discard_failed_provider_event(&state.db, &event_key).await;
+                return problem(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "response_recovery_unavailable",
+                );
+            }
+        };
+    if let Some(stored) = stored {
+        let task_state = state.clone();
+        let task_row = row.clone();
+        let task_response = response_id.clone();
+        tokio::spawn(async move {
+            let _ = Box::pin(dispatch_relay_response(
+                task_state,
+                task_row,
+                request,
+                text,
+                partition,
+                event_key,
+                task_response,
+                now,
+                Some(stored),
+            ))
+            .await;
+        });
+        return native_responses::stream(state, row, headers.clone(), response_id, None);
+    }
+    Box::pin(dispatch_relay_response(
+        state,
+        row,
+        request,
+        text,
+        partition,
+        event_key,
+        response_id,
+        now,
+        None,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_relay_response(
+    state: AppState,
+    row: NyxbotChannel,
+    request: Value,
+    text: String,
+    partition: String,
+    event_key: String,
+    response_id: String,
+    now: chrono::DateTime<Utc>,
+    stored: Option<crate::models::nyxbot_gateway_response::GatewayResponse>,
+) -> Response {
+    let context = &request["event_context"];
+    let activity = &context["activity"];
+    let event_id = activity["event_id"].as_str().unwrap_or_default();
+    let events = state.db.collection::<NyxbotEvent>(EVENTS);
     let sender_id = activity["actor"]["id"]
         .as_str()
         .unwrap_or_default()
@@ -4984,7 +5062,7 @@ async fn responses_with_producers_impl(
             &state.db,
             &row.channel_bot_id,
             &row.route_api_key_id,
-            &event_id,
+            event_id,
             &sender_id,
         )
         .await
@@ -5031,6 +5109,10 @@ async fn responses_with_producers_impl(
         &mut thread_reply,
     ))
     .await;
+    if let Some(stored) = stored {
+        relay_responses::settle_admission(&state, &stored, &inbound, thread_reply).await;
+        return StatusCode::ACCEPTED.into_response();
+    }
     let finish = |status: &'static str, conversation: Option<String>| {
         let state = state.clone();
         let event_key = event_key.clone();
@@ -6610,6 +6692,10 @@ mod custom_event_contract_tests {
 mod native_discord;
 #[path = "nyxbot_native_responses.rs"]
 pub(crate) mod native_responses;
+#[path = "nyxbot_relay_responses.rs"]
+mod relay_responses;
+#[path = "nyxbot_typing.rs"]
+pub(super) mod typing;
 
 fn native_callback(state: &AppState, row: &NyxbotChannel, relay: String) -> String {
     if row.gateway_source.is_some() {

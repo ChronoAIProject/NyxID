@@ -6742,3 +6742,273 @@ async fn hosted_watch_reports_gateway_configuration_separately_from_outage() {
         upstream.abort();
     }
 }
+
+#[tokio::test]
+async fn relay_gateway_recovery_survives_dropped_observer_and_replays_once() {
+    use crate::services::nyxbot_response_recovery as recovery;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    for recover in [true, false] {
+        let (state, calls, server) = setup("relay_response_recovery").await;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        enable_relay_response_recovery(&state).await;
+        let (mut row, key) = channel(&state, "gateway").await;
+        row.owner_sender_ids = vec!["7".into()];
+        row.gateway_channel_id = Some("cmaeg1.ch.test".into());
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        assert_eq!(
+            put_binding(
+                State(state.clone()),
+                Path("bnd_chats".into()),
+                bearer(&key),
+                Json(binding_body(&key, OWNER))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        ensure_partition(&state, &key, PARTITION).await;
+        row = load_channel(&state, OWNER, &row.id).await.unwrap();
+        let gateway = MockServer::start().await;
+        relay_responses::clear_capabilities(&gateway.uri());
+        let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
+        svc.id = Uuid::new_v4().to_string();
+        svc.slug = GATEWAY_SLUG.into();
+        svc.base_url = gateway.uri();
+        state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(svc)
+            .await
+            .unwrap();
+        Mock::given(path("/channel-capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"relay_authoring":{"response_recovery_providers":["nyxbot"]}}),
+            ))
+            .expect(1)
+            .mount(&gateway)
+            .await;
+        Mock::given(path("/events/cmaeg1.ev.sealed-reference/reply-target"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "reply_target_ref":"cmaeg1.rt.recovery", "expires_at":(Utc::now()+ChronoDuration::hours(23)).timestamp()
+        }))).mount(&gateway).await;
+        Mock::given(path("/reply-targets/cmaeg1.rt.recovery/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"delivery":{"outcome":"confirmed"}})),
+            )
+            .expect(if recover { 0 } else { 1 })
+            .mount(&gateway)
+            .await;
+        let mut request = event("Hello", "7", "relay-recovery-event");
+        request["metadata"] = json!({"cmaeg.channel":&sha256_hex("cmaeg1.ch.test")[..16],"cmaeg.event":"relay-recovery-event","cmaeg.partition":"0123456789abcdef","cmaeg.actor":"7"});
+        let blocked = calls.lock().await;
+        let response = respond(&state, &key, &request, "relay-recovery-command").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response.headers()["x-cma-response-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        // CMA's submission observer disappears before model work completes.
+        drop(response);
+        if recover {
+            let snapshot =
+                native_responses::snapshot(State(state.clone()), Path(id.clone()), bearer(&key))
+                    .await;
+            assert_eq!(snapshot.status(), StatusCode::OK);
+        }
+        let admitted = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
+        drop(blocked);
+        if !recover {
+            // A legacy CMA consumer never asks for recovery. NyxID's detached
+            // sender must still deliver the committed answer exactly once.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    late_delivery::process(&state, &admitted.event_key).await;
+                    let event = state
+                        .db
+                        .collection::<NyxbotEvent>(EVENTS)
+                        .find_one(doc! {"_id":&admitted.event_key})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if event.delivery.as_ref().is_some_and(|d| d.state == "sent") {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let body = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let response = native_responses::snapshot(
+                    State(state.clone()),
+                    Path(id.clone()),
+                    bearer(&key),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body: Value = serde_json::from_str(&body_text(response).await).unwrap();
+                if body["status"] == "completed" {
+                    break body;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(body.to_string().contains("Here is your answer"), recover);
+        if !recover {
+            assert_eq!(body["output"], json!([]));
+        }
+        let stored = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
+        let event = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"_id":&stored.event_key})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event.delivery.unwrap().state,
+            if recover { "replay" } else { "sent" }
+        );
+        late_delivery::process(&state, &stored.event_key).await;
+        let wire = body_text(respond(&state, &key, &request, "relay-recovery-command").await).await;
+        assert_eq!(wire.matches("event: response.completed").count(), 1);
+        assert!(wire.contains("response.completed"));
+        assert_eq!(calls.lock().await.len(), 1);
+        let payload = recovery::payload(&state.encryption_keys, &stored)
+            .await
+            .unwrap();
+        for (n, frame) in payload.frames.iter().enumerate() {
+            assert_eq!(frame["sequence_number"], n);
+        }
+        let resumed = native_responses::events(
+            State(state.clone()),
+            Path(id),
+            axum::extract::Query(native_responses::Cursor {
+                starting_after: Some(
+                    wire.lines()
+                        .filter_map(|line| line.strip_prefix("id: "))
+                        .next_back()
+                        .unwrap()
+                        .to_owned(),
+                ),
+            }),
+            bearer(&key),
+        )
+        .await;
+        assert_eq!(body_text(resumed).await, "");
+        // A different event also negotiates recovery, using the cached public
+        // capability. The gateway expectation above remains exactly one GET.
+        request["event_context"]["activity"]["event_id"] = json!("relay-recovery-second");
+        request["metadata"]["cmaeg.event"] = json!("relay-recovery-second");
+        let second = respond(&state, &key, &request, "relay-recovery-second-command").await;
+        assert!(second.headers().contains_key("x-cma-response-id"));
+        assert!(body_text(second).await.contains("Here is your answer"));
+        assert_eq!(calls.lock().await.len(), 2);
+        gateway.verify().await;
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+async fn enable_relay_response_recovery(state: &AppState) {
+    state
+        .db
+        .collection::<bson::Document>("feature_flag_overrides")
+        .insert_one(doc! {
+            "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
+            "flag_key":feature_flag_service::NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY,
+            "target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"admin",
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn relay_gateway_recovery_flag_off_preserves_live_stream_without_discovery() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let (state, calls, server) = setup("relay_recovery_flag_off").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let (mut row, key) = channel(&state, "gateway").await;
+    row.owner_sender_ids = vec!["7".into()];
+    row.gateway_channel_id = Some("cmaeg1.ch.test".into());
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_chats".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER))
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    ensure_partition(&state, &key, PARTITION).await;
+    let gateway = MockServer::start().await;
+    relay_responses::clear_capabilities(&gateway.uri());
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.id = Uuid::new_v4().to_string();
+    service.slug = GATEWAY_SLUG.into();
+    service.base_url = gateway.uri();
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(service)
+        .await
+        .unwrap();
+    Mock::given(path("/channel-capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "relay_authoring":{"response_recovery_providers":["nyxbot"]}
+        })))
+        .expect(0)
+        .mount(&gateway)
+        .await;
+    let mut request = event("Hello", "7", "relay-flag-off");
+    // Even malformed recovery-only metadata remains irrelevant with flag off.
+    request["metadata"] = json!({"cmaeg.channel":"wrong","cmaeg.event":"wrong",
+        "cmaeg.partition":"wrong","cmaeg.actor":"wrong"});
+    let response = respond(&state, &key, &request, "relay-flag-off-command").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("x-cma-response-id"));
+    let wire = body_text(response).await;
+    assert!(wire.contains("Here is your answer"));
+    assert_eq!(wire.matches("event: response.completed").count(), 1);
+    assert_eq!(calls.lock().await.len(), 1);
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(EVENTS)
+            .count_documents(doc! {"gateway_response_id":{"$exists":true}})
+            .await
+            .unwrap(),
+        0
+    );
+    gateway.verify().await;
+    server.abort();
+    state.db.drop().await.unwrap();
+}

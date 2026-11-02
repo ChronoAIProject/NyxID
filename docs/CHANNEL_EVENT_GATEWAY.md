@@ -654,7 +654,9 @@ keeping platform latency out of CMA's 20-second submission budget. Dropping that
 dispatch; recovery reads never submit it again.
 
 Snapshots and frames are envelope encrypted in `nyxbot_gateway_responses`, with
-24-hour TTL and a 768-KiB payload bound; output is capped at 32,000 characters.
+24-hour TTL. Native output remains capped at 32,000 characters; negotiated
+relay responses preserve complete answer text. The shared encrypted payload
+bound is 15 MiB, below MongoDB’s document limit.
 This is provider conversation state; relay messages and event logs remain
 metadata-only under ADR-013.
 Only the four non-secret CMA command identity fields (`cmaeg.channel`,
@@ -1133,3 +1135,125 @@ References: CMA `CMAEG_Native_WhatsApp.md`, `CMAEG_Native_WhatsApp_Groups.md`,
 types at CMA `5b23e23a7aadead851ca2651a220eda4825b2335`, and merged
 #1152, #1156, #1157, #1159. CMA's broader features do not
 imply NyxID support for media, templates, reactions, controls or groups.
+
+### Channel turn reliability (#2089, #2091, #2095)
+
+Relay-sourced provider responses can opt into the same encrypted, 24-hour durable
+snapshots and numbered event replay as native responses. The registered flag
+`nyxbot:relay-response-recovery` defaults off and resolves for the channel’s
+linking person (`row.user_id`), including live organization overrides. Flag-off
+returns to the existing live-stream path before recovery metadata validation or
+any capability request. In addition to this owner opt-in, NyxID requires the
+four exact `cmaeg.*` command identity fields and gateway discovery advertising
+`relay_authoring.response_recovery_providers` containing `nyxbot`. Gateways that
+omit these additive capabilities retain the existing live stream and late-reply
+barrier. Accepted commands never restart model/tool work on POST duplication or
+GET recovery. Dispatch survives the submission observer disconnecting. Streams
+retain 15-second SSE keepalives, including during relay image delivery; images
+use the existing per-image ledger before the final recovery text is persisted,
+so replay does not resend confirmed or uncertain media. Relay recovery preserves
+complete multipart answer text instead of applying the native 32,000-character
+cap; the encrypted replay document remains bounded below MongoDB’s document limit.
+
+A recovery GET atomically claims final delivery for CMA. Until then, the live
+POST stream and the existing asynchronous late sender retain their shared
+barrier. An observer disconnect detaches the event even before turn admission;
+a recovery claim can beat the late sender, but can never reclaim `sending`,
+`sent` or `unknown`. Recovery returns no sendable output if that sender already
+won. Cursor replay and stream output share the accepted response ID for CMA's
+deduplication. NyxID records
+`nyxbot_channel_answer_delivery` with `outcome: recovery_ready` and
+`reason: gateway_delivery_receipt_not_available` when the committed answer is
+available. This is **not** evidence of Telegram delivery. Legacy streams now
+record `outcome: streamed`, `reason: platform_delivery_unconfirmed`; a potentially
+sent answer is never retried as a late reply. Existing asynchronous sends retain
+confirmed `sent` versus `unknown` outcomes.
+
+Checked against CMA `7e0bbfe91dcc6f5523fa6c5deaf611e34332d147`: the legacy
+`turns/consume.rs` and `turns/runner.rs` consume the live response;
+`turns/routed/adapter.rs` uses the durable recovery contract.
+
+CMA operational requirement: the `nyxbot` provider must have both recovery routes
+configured **and the Telegram `nyxid_relay` execution path must use the routed,
+durable response journal**, not only the legacy `TurnRunner` live-stream
+consumer. `response_recovery_providers` advertises configured paths, not that a
+particular channel is executing through the journal. On submission disconnect,
+use the accepted response ID, GET the snapshot, then replay `/events` with the
+last durably delivered cursor. Do not start another provider turn or send the
+generic failure solely because the synchronous observer ended. Recovered text
+and stream text must share CMA's existing durable delivery barrier. A terminal
+platform outcome should be exposed to NyxID through a provider-authenticated,
+metadata-only receipt containing the accepted response ID and closed
+`confirmed|rejected|unknown` outcome; until that contract exists, NyxID cannot
+assert a recovered response reached Telegram. No CMA code is changed here.
+
+NyxID retries a structured pre-execution `dependency_unavailable` response
+(502/503/504) or a transport-proven failed connection only while the same live
+turn has no accepted response, output, model request or tool activity. There are
+at most three attempts, with 2s then 4s backoff inside a 15s retry window. The
+same command key, turn and live authority checks apply. A bare gateway 502/504,
+read timeout or reset after possible dispatch is ambiguous and is not retried.
+Exhausted proven refusals settle as `assistant_start_unavailable` and say that
+nothing was done; gateway presentation uses a human text reply instead of a
+generic failed-response fallback.
+
+Typing uses the retained event's advertised `capabilities.typing` and
+`POST /events/{event_ref}/typing`. Current CMA documents relay typing as
+unsupported. For Telegram `nyxid_relay`, NyxID therefore uses its own adapter's
+`sendChatAction` with the exact retained inbound chat/topic. Full owner/sender/
+route authority is checked once when the task resolves its destination. The bot
+credential (or gateway agent key and event-reference path) is held in `Zeroizing`
+only for that task’s lifetime. Each four-second tick checks the live turn/Stop,
+the retained event’s turn binding, and channel eligibility with three reads; it
+does not decrypt credentials or discover the gateway again. The first failed
+check or platform error ends the task; settle/cancellation aborts it. Typing
+creates no messages. Native
+or unsupported sources without the typing capability receive no typing calls.
+Telegram has no explicit stop-typing API; its last indicator expires naturally.
+
+Reader rollout is fenced by the existing security-readiness mechanism's
+`nyxbot:relay-response-recovery-v1` capability; a mixed fleet keeps admitting
+relay events through the legacy path until every declared replica can serve
+these responses. This uses the existing roster and drain configuration, with
+no new environment variables. The separately negotiated Lark/Feishu followed
+thread path retains its existing stream/late-send routing contract so its
+resolved `thread_reply` choice cannot change after the first durable frame.
+
+Only after the owner flag check, capability discovery uses a bounded in-process
+cache (64 gateway bases) with one refresh in flight per base. Positive results
+last five minutes, explicit negatives thirty seconds, and transport/HTTP errors
+only one second. A cache miss is best effort and bounded to two seconds: an
+unavailable capability endpoint leaves the legacy path available within CMA’s
+submission budget. Capability omission never upgrades the delivery owner.
+Even with discovery present, a lost observer only transfers ownership to CMA
+when a recovery read wins the event's atomic claim. This also keeps configured
+but non-routed legacy CMA consumers on the existing late-delivery fallback.
+
+Rollout: deploy all compatible readers first, then enable
+`nyxbot:relay-response-recovery` for one owner. Verify normal replies, observer
+disconnect recovery, exactly-once late delivery, and the metadata-only delivery
+audits for that owner before widening the flag to more people or organizations.
+Readiness and CMA advertisement alone never enable recovery. Turning the flag
+off restores legacy admission for new events; already accepted durable
+responses retain their recovery and delivery barriers.
+
+Diagnostic correlation: `nyxbot_channel_delivery_failing` describes callback or
+provider admission health, not final-answer delivery. Its notification queues a
+separate `origin=event` turn; ordinary inbound Telegram turns use `origin=channel`.
+A nearby event-origin model failure therefore cannot be attributed to the
+customer's confirmation from timestamps alone. Failure audits now include the
+nullable `channel_event_id` alongside the turn ID and timing metadata. The
+2026-10-29 evidence identifies a real missing-recovery/receipt path; it does not
+prove the exact CMA deadline or transport failure without CMA's execution log.
+
+CMA follow-up acceptance test: accept one `nyxbot` command, close its POST
+observer while its model is blocked, then let it commit tool writes and finish
+at 82 seconds. Fetch the same response snapshot and replay from the last
+committed cursor; exactly one final platform reply may be sent and no second
+provider POST may run. Repeat with NyxID's late-send claim winning first: the
+recovery snapshot must contain no sendable output. A receipt extension should
+bind `{response_id, delivery_id, outcome, reason}` to the current provider
+channel/key, use `delivery_id` for idempotency, and report closed outcomes
+`confirmed`, `rejected`, or `unknown` (no message text, tool data, tokens or opaque
+event/reply refs). `unknown` must remain terminal for sending. This is a proposed
+cross-service extension, not an endpoint implemented by this change.

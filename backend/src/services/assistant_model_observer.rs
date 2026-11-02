@@ -31,6 +31,7 @@ pub struct ModelRequest {
 }
 
 struct Completion {
+    started: std::time::Instant,
     db: Database,
     conversation: String,
     turn: String,
@@ -42,17 +43,28 @@ impl Completion {
         if self.done.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        complete_request(&self.db, &self.conversation, &self.turn).await?;
+        complete_request(
+            &self.db,
+            &self.conversation,
+            &self.turn,
+            self.started.elapsed(),
+        )
+        .await?;
         Ok(())
     }
 }
 
-async fn complete_request(db: &Database, conversation: &str, turn: &str) -> AppResult<()> {
+async fn complete_request(
+    db: &Database,
+    conversation: &str,
+    turn: &str,
+    elapsed: std::time::Duration,
+) -> AppResult<()> {
     db.collection::<bson::Document>(COLLECTION_NAME)
         .update_one(
             doc! {"_id": conversation, "active_turn.turn_id": turn},
             vec![
-                doc! {"$set": {"active_turn.model_requests_active": {"$max": [0, {"$subtract": [
+                doc! {"$set": {"active_turn.timing.model_ms":{"$add":[{"$ifNull":["$active_turn.timing.model_ms",0]}, elapsed.as_millis().min(i64::MAX as u128) as i64]}, "active_turn.model_requests_active": {"$max": [0, {"$subtract": [
                     {"$ifNull": ["$active_turn.model_requests_active", 0]}, 1
                 ]}]}}},
             ],
@@ -67,8 +79,9 @@ impl Drop for Completion {
             let db = self.db.clone();
             let conversation = self.conversation.clone();
             let turn = self.turn.clone();
+            let elapsed = self.started.elapsed();
             tokio::spawn(async move {
-                let _ = complete_request(&db, &conversation, &turn).await;
+                let _ = complete_request(&db, &conversation, &turn, elapsed).await;
             });
         }
     }
@@ -96,6 +109,7 @@ impl ModelRequest {
                 turn: turn.turn_id.clone(),
                 attempt: Uuid::new_v4().to_string(),
                 completion: Arc::new(Completion {
+                    started: std::time::Instant::now(),
                     db: db.clone(),
                     conversation: conversation.into(),
                     turn: turn.turn_id.clone(),
@@ -109,6 +123,7 @@ impl ModelRequest {
                     request.turn_fence(),
                     vec![doc! {"$set": {
                         "active_turn.model_attempt_id": &request.attempt,
+                        "active_turn.timing.model_calls":{"$add":[{"$ifNull":["$active_turn.timing.model_calls",0]},1]},
                         "active_turn.model_attribution_uncertain": {"$or": [
                             {"$ifNull": ["$active_turn.model_attribution_uncertain", false]},
                             {"$gt": [{"$ifNull": ["$active_turn.model_requests_active", 0]}, 0]}
@@ -161,6 +176,14 @@ impl ModelRequest {
             )
             .await?;
         self.complete().await
+    }
+
+    pub async fn first_output(&self) -> AppResult<()> {
+        let mut filter = self.turn_fence();
+        filter.insert("active_turn.timing.first_output_ms", bson::Bson::Null);
+        self.db.collection::<bson::Document>(COLLECTION_NAME).update_one(filter,
+            vec![doc! {"$set":{"active_turn.timing.first_output_ms":{"$max":[0,{"$subtract":["$$NOW","$active_turn.started_at"]}]}}}]).await?;
+        Ok(())
     }
 
     pub async fn complete(&self) -> AppResult<()> {
@@ -370,6 +393,8 @@ pub fn protocol(path: &str) -> Protocol {
 }
 
 pub struct StreamObserver {
+    output: bool,
+    output_taken: bool,
     protocol: Protocol,
     terminal: bool,
     failed: bool,
@@ -380,6 +405,8 @@ impl StreamObserver {
     pub fn new(protocol: Protocol) -> Self {
         Self {
             protocol,
+            output: false,
+            output_taken: false,
             terminal: false,
             failed: false,
             decoder: super::sse_parser::BoundedEventDecoder::with_max_bytes(
@@ -423,6 +450,33 @@ impl StreamObserver {
         {
             self.failed = true;
         }
+        self.output |= match self.protocol {
+            Protocol::Responses => {
+                matches!(
+                    kind,
+                    "response.output_text.delta"
+                        | "response.function_call_arguments.delta"
+                        | "response.reasoning_summary_text.delta"
+                ) && value["delta"].as_str().is_some_and(|s| !s.is_empty())
+            }
+            Protocol::ChatCompletions => value["choices"].as_array().is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    choice["delta"]["content"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())
+                        || choice["delta"]["tool_calls"]
+                            .as_array()
+                            .is_some_and(|calls| !calls.is_empty())
+                })
+            }),
+            Protocol::Anthropic => {
+                kind == "content_block_delta"
+                    && ["text", "partial_json", "thinking"]
+                        .iter()
+                        .any(|key| value["delta"][*key].as_str().is_some_and(|s| !s.is_empty()))
+            }
+            Protocol::Unknown => false,
+        };
         self.terminal |= match self.protocol {
             Protocol::Responses => matches!(
                 kind,
@@ -432,6 +486,13 @@ impl StreamObserver {
             Protocol::Anthropic => kind == "message_stop",
             Protocol::Unknown => false,
         };
+    }
+    pub fn take_first_output(&mut self) -> bool {
+        if !self.output || self.output_taken || self.invalid_framing {
+            return false;
+        }
+        self.output_taken = true;
+        true
     }
     pub fn provider_failed(&self) -> bool {
         self.failed && !self.invalid_framing

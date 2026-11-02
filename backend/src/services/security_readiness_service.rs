@@ -51,6 +51,7 @@ pub const CAPABILITIES: &[&str] = &[
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,
+    super::nyxbot_response_recovery::RELAY_READINESS,
 ];
 const MAX_AGE_SECS: i64 = 45;
 

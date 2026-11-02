@@ -6955,7 +6955,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         .await;
                         return Err(AppError::DurableOperationOutcomeUncertain);
                     }
-                    if is_pool_attempt {
+                    if is_pool_attempt || nyxagent_admission {
                         return Err(encode_pool_attempt_error(error));
                     }
                     return Err(error.into_app_error());

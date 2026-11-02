@@ -160,6 +160,8 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    #[serde(default)]
+    pub timing: Option<TurnTiming>,
     /// Closed metadata from a failed model callback, or the upstream code alone.
     #[serde(default)]
     pub failure_reason: Option<Box<TurnFailureReason>>,
@@ -185,4 +187,18 @@ pub struct ChannelDelivery {
     pub status: String,
     pub heard_prefix_chars: Option<i64>,
     pub heard_prefix_matches_sent: bool,
+}
+
+/// Metadata only. Durations sum per-call wall time (parallel calls may overlap).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TurnTiming {
+    pub queue_wait_ms: u64,
+    pub admission_wait_ms: u64,
+    pub first_output_ms: Option<u64>,
+    pub model_ms: u64,
+    pub tool_ms: u64,
+    pub model_calls: u64,
+    pub tool_calls: u64,
+    pub total_ms: u64,
 }

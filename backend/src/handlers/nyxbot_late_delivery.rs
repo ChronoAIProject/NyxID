@@ -68,8 +68,14 @@ pub(super) async fn prepare(
         target_ciphertext: None,
         target_expires_at: None,
     };
+    let metadata = bson::to_bson(&metadata)
+        .map_err(|_| AppError::Internal("Channel delivery unavailable".into()))?;
     let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null},
-        doc! {"$set": {"delivery": bson::to_bson(&metadata).map_err(|_| AppError::Internal("Channel delivery unavailable".into()))?}}).await?;
+        vec![doc! {"$set": {"delivery": {"$mergeObjects": [
+            {"$literal": metadata},
+            {"$cond": [{"$eq": ["$gateway_replay_claimed", true]}, {"state":"replay"},
+                {"$cond":[{"$eq":["$gateway_observer_detached",true]},{"state":"pending"},{}]}]},
+        ]}}}]).await?;
     if prepared.matched_count != 1 {
         return Err(AppError::Conflict("Channel event already admitted".into()));
     }
@@ -188,7 +194,7 @@ fn provider_stream_inner(
                             tokio::spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if error.code == "guest_model_route_required" => {
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable") => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
                             tokio::spawn(async move { process(&wake_state, &wake_event).await; });
@@ -205,12 +211,17 @@ fn provider_stream_inner(
                     }
                 } else if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
                     guard.disarm();
+                    if let Ok(Some(event)) = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {"_id":&event_key}).await {
+                        audit(&state, &event.user_id, "nyxbot_channel_answer_delivery", json!({"event_id":event.id,
+                            "conversation_id":event.conversation_id,"turn_id":event.turn_id,"transport":"gateway",
+                            "outcome":"streamed","reason":"platform_delivery_unconfirmed"})).await;
+                    }
                     match outcome {
                         Ok(text) => {
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if error.code == "guest_model_route_required" => {
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable") => {
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => yield json!({"type": "response.failed", "response": {
@@ -265,10 +276,20 @@ pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
         .try_collect()
         .await?;
     for response in pending {
+        let event_key = &response.event_key;
         crate::services::nyxbot_response_recovery::refresh(
             &state.db,
             &state.encryption_keys,
             &response,
+            |text| async move {
+                stream_images(
+                    state,
+                    event_key,
+                    &text,
+                    std::time::Instant::now() + Duration::from_secs(135),
+                )
+                .await
+            },
         )
         .await?;
     }
@@ -520,7 +541,7 @@ async fn event_images(
     .await
 }
 
-async fn stream_images(
+pub(super) async fn stream_images(
     state: &AppState,
     event_id: &str,
     text: &str,

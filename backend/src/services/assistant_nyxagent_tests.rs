@@ -1252,6 +1252,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            timing: Default::default(),
             collaboration: None,
             channel_adapter_origin: None,
             invocation_id: None,
@@ -7462,5 +7463,126 @@ fn readiness_2092_visitor_copy_only_claims_notice_for_current_setup_reasons() {
                 .message
                 .contains("notified")
         );
+    }
+}
+
+#[tokio::test]
+async fn channel_turn_timings_count_model_tools_and_preserve_legacy_defaults() {
+    use crate::services::{
+        assistant_model_observer::ModelRequest, assistant_turn_observability as observe,
+    };
+    let db = connect_transaction_test_database("channel_turn_timings").await;
+    let mut row = stale_test_row(Utc::now());
+    let active = row.active_turn.as_mut().unwrap();
+    active.started_at = Utc::now() - chrono::Duration::seconds(1);
+    active.queued_at = Some(active.started_at);
+    let turn = active.turn_id.clone();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    mark_dequeued(&db, &row, &turn).await.unwrap();
+    let model = ModelRequest::capture(&db, &row.id, "key", &turn)
+        .await
+        .unwrap()
+        .unwrap();
+    let tool = activity_started_for_turn(&db, &row.user_id, &row.id, &turn, "tool")
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    observe::first_output(&db, &row).await.unwrap();
+    model.complete().await.unwrap();
+    model.complete().await.unwrap();
+    activity_finished_for_turn(&db, &row.user_id, &row.id, &turn, &tool, true, None)
+        .await
+        .unwrap();
+    let once = get(&db, &row.user_id, &row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .timing
+        .tool_ms;
+    activity_finished_for_turn(&db, &row.user_id, &row.id, &turn, &tool, true, None)
+        .await
+        .unwrap();
+    let live = get(&db, &row.user_id, &row.id).await.unwrap();
+    let timing = observe::metadata(live.active_turn.as_ref().unwrap(), Utc::now())
+        .timing
+        .unwrap();
+    assert_eq!(timing.model_calls, 1);
+    assert_eq!(timing.tool_calls, 1);
+    assert!(timing.model_ms >= 25);
+    assert!(timing.tool_ms >= 25);
+    assert_eq!(timing.tool_ms, once);
+    assert!(timing.queue_wait_ms >= 1000);
+    assert!(timing.first_output_ms.unwrap() >= 1000);
+    let mut legacy = bson::to_document(&live).unwrap();
+    legacy
+        .get_document_mut("active_turn")
+        .unwrap()
+        .remove("timing");
+    let legacy: AssistantConversation = bson::from_document(legacy).unwrap();
+    assert_eq!(legacy.active_turn.unwrap().timing.model_calls, 0);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn channel_start_retry_is_closed_by_model_output_activity_or_session_change() {
+    use crate::services::assistant_start_retry::untouched;
+    let db = connect_transaction_test_database("channel_start_retry_proof").await;
+    let mut row = stale_test_row(Utc::now());
+    row.active_turn.as_mut().unwrap().started_at = Utc::now();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    assert!(untouched(&db, &row).await.unwrap());
+    for change in [
+        doc! {"active_turn.model_attempt_id":"model"},
+        doc! {"active_turn.activity_total":1},
+        doc! {"active_turn.reply":{"text":"output"}},
+        doc! {"active_turn.capacity_accepted_at":bson::DateTime::now()},
+        doc! {"active_turn.running_response":{"response_id":"accepted"}},
+        doc! {"active_turn.stop_requested":true},
+        doc! {"nyxagent_session_id":"changed"},
+    ] {
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(doc! {"_id":&row.id}, doc! {"$set":change})
+            .await
+            .unwrap();
+        assert!(!untouched(&db, &row).await.unwrap());
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn channel_model_first_output_excludes_keepalives_and_reports_once() {
+    use crate::services::assistant_model_observer::{Protocol, StreamObserver};
+    for (protocol, data) in [
+        (
+            Protocol::Responses,
+            r#"{"type":"response.output_text.delta","delta":"hi"}"#,
+        ),
+        (
+            Protocol::ChatCompletions,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#,
+        ),
+        (
+            Protocol::Anthropic,
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}"#,
+        ),
+    ] {
+        let mut observer = StreamObserver::new(protocol);
+        observer.event(None, "{}");
+        assert!(!observer.take_first_output());
+        observer.event(None, data);
+        assert!(observer.take_first_output());
+        assert!(!observer.take_first_output());
     }
 }

@@ -47,6 +47,7 @@ export const FEATURE_FLAG = {
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
   NYXBOT_ADAPTERS: "nyxbot:service-adapters",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
+  NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",
   DISCORD_GATEWAY: "channel:discord-gateway",
   NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
   NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
