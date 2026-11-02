@@ -1329,6 +1329,7 @@ mod tests {
             actor_id: actor_x.clone(),
             group_id: None,
             generation: 1,
+            runtime_id: org_node.machine.as_ref().unwrap().runtime_id.clone(),
             mode: "separated".into(),
         };
         f.state
@@ -1454,6 +1455,7 @@ mod tests {
             actor_id: actor_x,
             group_id: None,
             generation: 1,
+            runtime_id: personal_node.machine.as_ref().unwrap().runtime_id.clone(),
             mode: "separated".into(),
         };
         f.state

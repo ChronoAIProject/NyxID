@@ -9,7 +9,6 @@ use mongodb::{
     options::IndexOptions,
 };
 use nyxid_machine::managed::Binding;
-use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -79,6 +78,7 @@ impl VerifiedBootstrapTicket {
 }
 
 pub struct BootstrapInput {
+    pub payload_version: u32,
     pub binding: Binding,
     pub ticket: Value,
     pub recipient_public_key: String,
@@ -222,6 +222,56 @@ fn digest_envelope(envelope: &nyxid_machine::bootstrap::Envelope) -> AppResult<S
     Ok(hex::encode(Sha256::digest(encoded)))
 }
 
+fn hosted_storage(machine: &ManagedMachine) -> AppResult<nyxid_machine::managed::HostedStorage> {
+    let storage = nyxid_machine::managed::HostedStorage {
+        original_pvc_uid: machine.pvc_uid.clone().ok_or_else(rekey_required)?,
+        allocation_id: machine.hosted_storage_allocation_id.clone(),
+    };
+    storage.validate().map_err(|_| rekey_required())?;
+    Ok(storage)
+}
+
+/// Existing lifecycle + Node-connection authority decides allocation/recovery.
+/// A replayable Create operation, epoch number or absent local directory is
+/// never a fresh-allocation fact. The first authenticated daemon consumes that
+/// right durably; reconnects of that daemon converge, replacements recover.
+pub async fn claim_hosted_storage(
+    db: &Database,
+    binding: &Binding,
+    runtime_id: &str,
+    owner: &super::node_owner_service::NodeOwnerFence,
+) -> AppResult<nyxid_machine::managed::HostedStorageGrant> {
+    if uuid::Uuid::parse_str(runtime_id).is_err() || owner.node_id != binding.node_id {
+        return Err(AppError::MachineAuthorityStale);
+    }
+    let db = db.clone();
+    let binding = binding.clone();
+    let runtime_id = runtime_id.to_owned();
+    let owner = owner.clone();
+    db.client().start_session().await?.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result:AppResult<nyxid_machine::managed::HostedStorageGrant>=async {
+                let machine=db.collection::<ManagedMachine>(MACHINES).find_one(doc!{"_id":&binding.node_id}).session(&mut *session).await?.ok_or_else(rekey_required)?;
+                validate_binding(&machine,&binding)?;
+                let storage=hosted_storage(&machine)?;
+                super::remote_machine_service::ensure_owner_eligible_in_session(&db,session,&machine.owner_id).await?;
+                // Ciphertext TTL bounds credential replay, not authenticated
+                // reconnects. The accepted allocation remains on Machine.
+                if machine.bootstrap_delivery_id.as_deref()!=Some(binding.delivery_id.as_str()) || machine.bootstrap_digest.is_none() {return Err(rekey_required());}
+                let mut node_filter=owner.filter();
+                node_filter.insert("is_active",true); node_filter.insert("user_id",&machine.owner_id);
+                node_filter.insert("connection_owner.expires_at",doc!{"$gt":bson::DateTime::now()});
+                if db.collection::<bson::Document>(crate::models::node::COLLECTION_NAME).update_one(node_filter,doc!{"$inc":{"machine_storage_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(AppError::MachineAuthorityStale);}
+                let initializer=machine.hosted_storage_initializer_runtime_id.as_deref().unwrap_or(&runtime_id);
+                let updated=db.collection::<bson::Document>(MACHINES).update_one(doc!{"_id":&machine.node_id,"revision":machine.revision},doc!{"$set":{"hosted_storage_initializer_runtime_id":initializer},"$inc":{"revision":1_i64}}).session(&mut *session).await?;
+                if updated.matched_count!=1 {return Err(rekey_required());}
+                Ok(nyxid_machine::managed::HostedStorageGrant {binding:binding.clone(),storage,runtime_id:runtime_id.clone(),initialize:initializer==runtime_id})
+            }.await;
+            api_key_mutation_service::transaction_result(result)
+        }).await.map_err(api_key_mutation_service::map_transaction_error)
+}
+
 /// Activate credentials and their replay envelope atomically. Every replay
 /// authenticates the provider ticket again and live-checks the full machine
 /// fence. A new recipient/delivery cannot recover or rotate an existing epoch.
@@ -248,6 +298,11 @@ pub async fn bootstrap(
         &input.recipient_public_key,
     )
     .map_err(|_| AppError::ValidationError("invalid bootstrap recipient public key".into()))?;
+    if input.payload_version != nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION {
+        return Err(AppError::ValidationError(
+            "managed_bootstrap_payload_version_unsupported".into(),
+        ));
+    }
     let verified = verifier.verify(&input.ticket, &input.binding).await?;
     let now = Utc::now();
     if verified.binding != input.binding
@@ -267,24 +322,25 @@ pub async fn bootstrap(
         .await?
         .ok_or_else(|| AppError::Unauthorized("managed workload is unavailable".into()))?;
     validate_binding(&selected, &input.binding)?;
-    let selected_capabilities = selected.capabilities;
+    let storage = hosted_storage(&selected)?;
+    let configuration = selected.configuration.clone();
+    let configuration_digest = configuration
+        .digest()
+        .map_err(|_| AppError::Conflict("managed_configuration_invalid".into()))?;
     let material = node_service::prepare_managed_credentials(
         encryption_keys,
         &input.binding.node_id,
         &selected.owner_id,
     )
     .await?;
-    #[derive(Serialize)]
-    struct Secrets<'a> {
-        auth_token: &'a str,
-        signing_secret: &'a str,
-        capabilities: &'a [String],
-    }
     let plaintext = Zeroizing::new(
-        serde_json::to_vec(&Secrets {
-            auth_token: &material.auth_token,
-            signing_secret: &material.signing_secret,
-            capabilities: &selected_capabilities,
+        serde_json::to_vec(&nyxid_machine::managed::BootstrapPayload {
+            payload_version: nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
+            auth_token: Zeroizing::new(material.auth_token.to_string()),
+            signing_secret: Zeroizing::new(material.signing_secret.to_string()),
+            configuration: configuration.clone(),
+            configuration_digest: configuration_digest.clone(),
+            hosted_storage: storage.clone(),
         })
         .map_err(|_| AppError::Internal("bootstrap payload serialization failed".into()))?,
     );
@@ -299,6 +355,10 @@ pub async fn bootstrap(
     let row = ManagedBootstrapDelivery {
         id: input.binding.delivery_id.clone(),
         binding: input.binding.clone(),
+        payload_version: input.payload_version,
+        configuration_revision: configuration.revision,
+        configuration_digest: configuration_digest.clone(),
+        hosted_storage: storage.clone(),
         recipient_key_digest: recipient_digest.clone(),
         sealed_digest: digest_envelope(&sealed)?,
         sealed,
@@ -315,11 +375,11 @@ pub async fn bootstrap(
             let machine = db.collection::<ManagedMachine>(MACHINES).find_one(doc! {"_id": &input.binding.node_id})
                 .session(&mut *session).await?.ok_or_else(|| AppError::Unauthorized("managed workload is unavailable".into()))?;
             validate_binding(&machine, &input.binding)?;
-            if machine.capabilities != selected_capabilities {return Err(rekey_required());}
+            if machine.configuration != configuration || machine.configuration.capabilities != machine.capabilities || hosted_storage(&machine)? != storage {return Err(rekey_required());}
             super::remote_machine_service::ensure_owner_eligible_in_session(&db, session, &machine.owner_id).await?;
             if let Some(existing) = db.collection::<ManagedBootstrapDelivery>(DELIVERIES)
                 .find_one(doc! {"_id": &input.binding.delivery_id}).session(&mut *session).await? {
-                if existing.binding != input.binding || existing.recipient_key_digest != recipient_digest
+                if existing.payload_version != input.payload_version || existing.configuration_revision != configuration.revision || existing.configuration_digest != configuration_digest || existing.hosted_storage != storage || existing.binding != input.binding || existing.recipient_key_digest != recipient_digest
                     || existing.expires_at <= now || machine.bootstrap_delivery_id.as_deref() != Some(&existing.id)
                     || machine.bootstrap_digest.as_deref() != Some(&existing.sealed_digest)
                 { return Err(rekey_required()); }

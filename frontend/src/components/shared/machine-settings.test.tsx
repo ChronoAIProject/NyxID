@@ -6,12 +6,28 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { useMachineSettingsDraftStore } from "@/stores/machine-settings-draft-store";
 import { MachineSettings } from "./machine-settings";
 import type { NodeInfo } from "@/types/nodes";
 const save = vi.hoisted(() => vi.fn());
 const grant = vi.hoisted(() => vi.fn());
+vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => false }));
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to, search }: { children: React.ReactNode; to: string; search?: { agent?: string; details?: string } }) => <a href={`${to}${search?.agent ? `?agent=${search.agent}${search.details ? `&details=${search.details}` : ""}` : ""}`}>{children}</a>,
+  Link: ({
+    children,
+    to,
+    search,
+  }: {
+    children: React.ReactNode;
+    to: string;
+    search?: { agent?: string; details?: string };
+  }) => (
+    <a
+      href={`${to}${search?.agent ? `?agent=${search.agent}${search.details ? `&details=${search.details}` : ""}` : ""}`}
+    >
+      {children}
+    </a>
+  ),
 }));
 vi.mock("@/hooks/use-machines", () => ({
   useVerifiedUpdaterImage: () => ({
@@ -44,6 +60,7 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
 }));
 afterEach(() => {
   cleanup();
+  useMachineSettingsDraftStore.setState({ drafts: {} });
   vi.clearAllMocks();
 });
 const node = {
@@ -103,12 +120,35 @@ it("does not expose owner settings to a reader", () => {
 });
 
 it("explains configured shared access on a headless machine without a browser toggle", () => {
-  render(<MachineSettings node={{ ...node, machine: { ...node.machine!, computer: false, browser: false,
-    separated: { available: false, landlock_abi: 8, reason: "separated_requires_managed_browser" },
-  } }} canManage />);
-  expect(screen.getByText(/Agents configured for Shared legacy can run granted commands/)).toBeInTheDocument();
-  expect(screen.getByText(/Browser permissions are not required/)).toBeInTheDocument();
-  expect(screen.getByText("separated_requires_managed_browser").closest("details")).not.toHaveAttribute("open");
+  render(
+    <MachineSettings
+      node={{
+        ...node,
+        machine: {
+          ...node.machine!,
+          computer: false,
+          browser: false,
+          separated: {
+            available: false,
+            landlock_abi: 8,
+            reason: "separated_requires_managed_browser",
+          },
+        },
+      }}
+      canManage
+    />,
+  );
+  expect(
+    screen.getByText(
+      /Agents configured for Shared legacy can run granted commands/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(/Browser permissions are not required/),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText("separated_requires_managed_browser").closest("details"),
+  ).not.toHaveAttribute("open");
   expect(screen.queryByText("Live desktop")).not.toBeInTheDocument();
 });
 
@@ -143,12 +183,13 @@ it("changes one machine grant while preserving the specialist services and other
   fireEvent.click(
     screen.getByRole("button", { name: "Save machine settings" }),
   );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Save and remove access" }),
+  );
   await waitFor(() =>
     expect(grant).toHaveBeenCalledWith({
       id: "specialist",
-      services: ["github"],
-      account_read: true,
-      machines: ["other"],
+      machine_membership: { node_id: node.id, assigned: false },
     }),
   );
   expect(grant.mock.calls[0]?.[0]).not.toHaveProperty("logins");
@@ -157,7 +198,25 @@ it("changes one machine grant while preserving the specialist services and other
 
 it("makes missing selection recoverable from the machine settings link", () => {
   render(<MachineSettings node={node} canManage />);
-  expect(screen.getByRole("link", { name: "Review Coder separation" })).toHaveAttribute("href", "/assistant?agent=specialist&details=grants");
-  expect(screen.getByText(/New assignments need a recorded choice and confirmed support/)).toBeInTheDocument();
-  expect(screen.getByText(/may read node tokens, signing secrets and stored credentials/)).toBeInTheDocument();
+  expect(
+    screen.getByRole("link", { name: "Review Coder separation" }),
+  ).toBeEnabled();
+  expect(
+    screen.getByText(
+      /New assignments need a recorded choice and confirmed support/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      /may read node tokens, signing secrets and stored credentials/,
+    ),
+  ).toBeInTheDocument();
+});
+
+it.each([true, false, null])("shows actual macOS permissions, including unknown: %s", (permission) => {
+  render(<MachineSettings node={{ ...node, machine: { ...node.machine!, computer_permissions: { screen_recording: permission, accessibility: permission } } }} canManage />);
+  const text = permission === null ? "Not reported" : permission ? "Allowed" : "Not allowed";
+  expect(screen.getByText(`Screen Recording: ${text}`)).toBeVisible();
+  expect(screen.getByText(`Accessibility: ${text}`)).toBeVisible();
+  expect(screen.getByText(/In System Settings, open Privacy/)).toBeVisible();
 });

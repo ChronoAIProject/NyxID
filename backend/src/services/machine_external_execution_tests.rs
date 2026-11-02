@@ -732,6 +732,7 @@ async fn external_sibling_shared_view_never_rebinds_or_renews_original_child() {
 #[tokio::test]
 async fn external_confirmation_owner_only_bound_and_consumed_once() {
     let mut f = fixture("external_confirmation").await;
+    assert!(f.state.db.name().starts_with("nyxid_test_"));
     f.node.machine_confirm = nyxid_machine::Confirmation::All;
     f.state
         .db
@@ -741,7 +742,9 @@ async fn external_confirmation_owner_only_bound_and_consumed_once() {
         .unwrap();
     let source = source(&f, &f.secret).await;
     let (peer, mut requests) = peer(&f).await;
-    let args = json!({"machine":f.node.id,"command":"printf tested","background":true});
+    // A caller may select by name; the approval link must select the resolved
+    // Machine ID so the existing machine + confirmation route opens its UI.
+    let args = json!({"machine":f.node.name,"command":"printf tested","background":true});
     let pending = dispatch_authorized(&f.state, &source, "nyx__machine_exec", &mut args.clone())
         .await
         .unwrap();
@@ -805,6 +808,22 @@ async fn external_confirmation_owner_only_bound_and_consumed_once() {
     );
     peer.abort();
     f.state.db.drop().await.unwrap();
+
+    // Assert after fixture cleanup so the red regression leaves no database.
+    let approval_url = url::Url::parse(pending["approval_url"].as_str().unwrap()).unwrap();
+    let frontend_url = url::Url::parse(&f.state.config.frontend_url).unwrap();
+    assert_eq!(approval_url.origin(), frontend_url.origin());
+    assert_eq!(approval_url.path(), "/assistant/machines");
+    let query: BTreeMap<_, _> = approval_url.query_pairs().collect();
+    assert_eq!(
+        query.get("machine").map(|value| value.as_ref()),
+        Some(f.node.id.as_str()),
+        "the produced pending response must open the exact resolved Machine"
+    );
+    assert_eq!(
+        query.get("confirmation").map(|value| value.as_ref()),
+        Some(id)
+    );
 }
 
 #[tokio::test]

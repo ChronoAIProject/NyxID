@@ -7,7 +7,7 @@ import {
   RemoteMachineQuota,
 } from "./remote-machine-preflight";
 import { RemoteMachinePlatformReadiness } from "./remote-machine-platform-readiness";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -39,8 +39,10 @@ import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
 import { useBillingWallet } from "@/hooks/use-billing";
 import { exactCredits, formatExactCredits } from "@/lib/credits";
+import { remoteMachineActionEligible } from "@/lib/remote-machine-lifecycle";
 import {
   clearRemoteMachineIntent,
+  acceptRemoteMachineIntent,
   getRemoteMachineIntent,
   readRemoteMachineIntent,
   type RemoteMachineIntent,
@@ -65,6 +67,7 @@ type Props = {
   readonly onOpenChange: (open: boolean) => void;
   readonly machine: RemoteMachine;
   readonly onAccepted: (machineId: string, operationId: string) => void;
+  readonly onCheck: () => Promise<boolean>;
 };
 
 export function RemoteMachinePaidStart({
@@ -72,6 +75,7 @@ export function RemoteMachinePaidStart({
   onOpenChange,
   machine,
   onAccepted,
+  onCheck,
 }: Props) {
   const ownerId = useAuthStore((state) => state.user?.id);
   const enabled = useRemoteMachineAdmission();
@@ -92,6 +96,7 @@ export function RemoteMachinePaidStart({
           key={`${ownerId}:${machine.node_id}`}
           machine={machine}
           onAccepted={onAccepted}
+          onCheck={onCheck}
           onClose={() => onOpenChange(false)}
         />
       ) : null}
@@ -102,8 +107,9 @@ export function RemoteMachinePaidStart({
 function PaidStartContent({
   machine,
   onAccepted,
+  onCheck,
   onClose,
-}: Pick<Props, "onAccepted"> & {
+}: Pick<Props, "onAccepted" | "onCheck"> & {
   readonly machine: RemoteMachine;
   readonly onClose: () => void;
 }) {
@@ -132,6 +138,10 @@ function PaidStartContent({
     }
   });
   const [error, setError] = useState<string>();
+  const [unknown, setUnknown] = useState(Boolean(saved));
+  const [checking, setChecking] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const inFlight = useRef(false);
   const [conflict, setConflict] = useState(false);
   const [now, setNow] = useState(Date.now);
   const form = useAppForm<z.infer<typeof acceptanceSchema>>({
@@ -160,7 +170,7 @@ function PaidStartContent({
       : undefined;
   const acceptable = Boolean(offer && isRemoteMachinePaidQuote(offer, now));
   const expired = Boolean(offer && Date.parse(offer.valid_until) <= now);
-  const busy = action.isPending;
+  const busy = action.isPending || checking || submitting;
   const available =
     !wallet.error && wallet.data && ownerId && wallet.data.owner_id === ownerId
       ? exactCredits(
@@ -170,20 +180,28 @@ function PaidStartContent({
         )
       : null;
   const permittedState =
-    machine.resource_state === "paused" &&
+    remoteMachineActionEligible(machine.resource_state, "resume") &&
     machine.free_slot !== true &&
     machine.billing_state !== "free";
   const canSubmit = Boolean(
     ownerId &&
     !unreadable &&
     !conflict &&
+    !unknown &&
     !busy &&
     (saved || (acceptable && permittedState && !quote.isPending)),
   );
 
   async function submit() {
-    if (!canSubmit || !ownerId || useAuthStore.getState().user?.id !== ownerId)
+    if (
+      inFlight.current ||
+      !canSubmit ||
+      !ownerId ||
+      useAuthStore.getState().user?.id !== ownerId
+    )
       return;
+    inFlight.current = true;
+    setSubmitting(true);
     setError(undefined);
     try {
       assertRemoteMachineAdmission(ownerId);
@@ -215,20 +233,48 @@ function PaidStartContent({
         operationId: response.operation.id,
       };
       if (useAuthStore.getState().user?.id !== ownerId) return;
-      clearRemoteMachineIntent(ownerId, scope, intent.idempotencyKey);
+      acceptRemoteMachineIntent(ownerId, machine.node_id, "resume", intent.idempotencyKey, result.operationId);
       onAccepted(result.machineId, result.operationId);
       onClose();
     } catch (cause) {
       if (useAuthStore.getState().user?.id !== ownerId) return;
-      setConflict(
+      const rejected =
         cause instanceof ApiError &&
-          [400, 402, 403, 404, 409, 410, 422].includes(cause.status),
-      );
+        cause.status >= 400 &&
+        cause.status < 500 &&
+        cause.status !== 408;
+      setConflict(rejected);
+      setUnknown(!rejected);
+      if (rejected) clearRemoteMachineIntent(ownerId, scope);
       setError(
         cause instanceof Error
           ? cause.message
-          : "The response is unknown. Retry the saved request to recover its result.",
+          : "The response is unknown. Check status before retrying the saved request.",
       );
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
+    }
+  }
+
+  async function check() {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setChecking(true);
+    try {
+      const loaded = await onCheck();
+      if (useAuthStore.getState().user?.id !== ownerId) return;
+      if (loaded) {
+        setUnknown(false);
+        setError(undefined);
+      } else {
+        setError(
+          "The current machine and operation could not both be confirmed. Check status again before retrying the original request.",
+        );
+      }
+    } finally {
+      inFlight.current = false;
+      setChecking(false);
     }
   }
 
@@ -239,6 +285,7 @@ function PaidStartContent({
       setSaved(null);
       setUnreadable(false);
       setConflict(false);
+      setUnknown(false);
       setError(undefined);
       form.reset({ accepted: false });
       requestQuote({
@@ -436,6 +483,23 @@ function PaidStartContent({
           {!permittedState && !saved ? (
             <ErrorBanner message="Paid resume is available only for a paused paid Machine. Reload its current details." />
           ) : null}
+          {unknown && (
+            <div className="space-y-2 text-12">
+              <p role="status">
+                The request result is unknown. Check status before retrying the
+                original paid request.
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void check()}
+                disabled={busy}
+                isLoading={checking}
+              >
+                Check request status
+              </Button>
+            </div>
+          )}
           {error ? <ErrorBanner message={error} /> : null}
           {conflict ? (
             <p role="alert" className="text-12 text-muted-foreground">

@@ -40,8 +40,8 @@ RUN --mount=type=cache,id=nyxid-machine-target-${TARGETARCH},target=/build/targe
       cp -a cli/container/public-cargo-cache/cache cli/container/public-cargo-cache/index /usr/local/cargo/registry/ \
       && printf '%s\n' '{"dl":"https://static.crates.io/crates","api":"https://crates.io"}' \
         > /usr/local/cargo/registry/index/index.crates.io-1949cf8c6b5b557f/config.json \
-      && cargo build --locked --offline --release -p nyxid-cli --bin nyxid; \
-    else cargo build --locked --release -p nyxid-cli --bin nyxid; fi \
+      && CARGO_INCREMENTAL=1 cargo build --locked --offline --release -p nyxid-cli --bin nyxid; \
+    else CARGO_INCREMENTAL=1 cargo build --locked --release -p nyxid-cli --bin nyxid; fi \
     && mkdir -p /out && cp target/release/nyxid /out/nyxid
 
 
@@ -76,9 +76,12 @@ RUN useradd --uid 1000 --create-home --shell /bin/sh agent \
     && useradd --uid 1001 --create-home --shell /usr/sbin/nologin browser \
     && useradd --uid 1002 --create-home --shell /usr/sbin/nologin devbrowser \
     && chmod 0700 /home/browser /home/devbrowser \
-    && mkdir -p /workspace /var/lib/nyxid-machine/desktop \
+    && mkdir -p /workspace /var/lib/nyxid-machine/desktop /var/lib/nyxid-contexts \
     && chown agent:agent /workspace \
     && chmod 0711 /var/lib/nyxid-machine /var/lib/nyxid-machine/desktop
+
+COPY cli/container/hosted-account-pool.py /opt/nyxid/hosted-account-pool.py
+RUN python3 /opt/nyxid/hosted-account-pool.py && rm /opt/nyxid/hosted-account-pool.py
 
 COPY cli/resources/cua/release.json /opt/nyxid/cua-release.json
 RUN python3 - <<'INSTALL'
@@ -113,7 +116,7 @@ ENV DISPLAY=:99 XAUTHORITY=/var/lib/nyxid-machine/desktop/Xauthority \
 RUN chmod 0755 /usr/local/bin/nyxid-machine-entrypoint /usr/local/bin/nyxid-desktop-session \
         /usr/local/bin/nyxid-machine-desktop-start /usr/local/bin/nyxid-machine-healthcheck \
     && NYXID_MACHINE_CONTAINER=1 /usr/local/bin/nyxid node machine-browser-install --port 32248
-VOLUME ["/workspace", "/var/lib/nyxid-machine"]
+VOLUME ["/workspace", "/var/lib/nyxid-machine", "/var/lib/nyxid-contexts"]
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/nyxid-machine-entrypoint"]
 

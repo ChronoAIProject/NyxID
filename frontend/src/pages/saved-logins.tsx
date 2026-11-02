@@ -38,7 +38,9 @@ import {
   type SavedLoginInput,
 } from "@/schemas/saved-logins";
 
-export function SavedLoginsPage() {
+export function SavedLoginsPage({
+  onBackToSettings,
+}: { readonly onBackToSettings?: () => void } = {}) {
   const [owner, setOwner] = useState<string | null>(null);
   const logins = useSavedLogins(owner);
   const remove = useDeleteSavedLogin();
@@ -53,6 +55,11 @@ export function SavedLoginsPage() {
           <AddCtaButton label="Add login" onClick={() => setEditing("new")} />
         }
       />
+      {onBackToSettings && (
+        <Button variant="outline" onClick={onBackToSettings}>
+          Back to machine settings
+        </Button>
+      )}
       <div className="max-w-xs">
         <OrgScopeSelect value={owner} onChange={setOwner} />
       </div>
@@ -153,7 +160,7 @@ function SavedLoginCard({
           <Badge variant="info">Confirm each sign-in</Badge>
         ) : null}
       </div>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Button onClick={() => onEdit(login)}>Replace</Button>
         <Button variant="destructive" onClick={() => onDelete(login)}>
           Delete

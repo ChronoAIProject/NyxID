@@ -3,7 +3,8 @@
 use crate::{
     errors::{AppError, AppResult},
     models::remote_machine::{
-        COLLECTION_NAME as MACHINES, ManagedMachine, NativeRuntimeObservation, ResourceState,
+        AuthorizationState, COLLECTION_NAME as MACHINES, ManagedMachine, NativeRuntimeObservation,
+        ResourceState,
     },
 };
 use chrono::{DateTime, Duration, Utc};
@@ -55,6 +56,30 @@ pub fn predecessor_stopped(machine: &ManagedMachine) -> bool {
         })
 }
 
+fn observation_materially_changed(
+    previous: &NativeRuntimeObservation,
+    current: &NativeRuntimeObservation,
+) -> bool {
+    previous.sandbox_uid != current.sandbox_uid
+        || previous.pod_uid != current.pod_uid
+        || previous.runtime_generation != current.runtime_generation
+        || previous.credential_epoch != current.credential_epoch
+        || previous.writer_fence != current.writer_fence
+        || previous.operation_id != current.operation_id
+        || previous.sandbox_generation != current.sandbox_generation
+        || previous.running != current.running
+        || previous.suspended != current.suspended
+        || previous.stop_confirmed != current.stop_confirmed
+        || previous.run_not_after != current.run_not_after
+}
+
+fn bindings_materially_changed(machine: &ManagedMachine, bindings: &Document) -> AppResult<bool> {
+    let stored = bson::to_document(machine).map_err(|_| pending())?;
+    Ok(bindings
+        .iter()
+        .any(|(key, value)| stored.get(key) != Some(value)))
+}
+
 /// Latch known uncertainty before returning an observation failure. No later
 /// NotFound/healthy replacement clears this row; operators investigate it.
 pub async fn quarantine(
@@ -93,11 +118,15 @@ pub async fn record(
     {
         return Err(pending());
     }
+    let bindings_changed = bindings_materially_changed(machine, &bindings)?;
+    let observation_bson = bson::to_bson(observation).map_err(|_| pending())?;
+    let observation_time = bson::DateTime::from_chrono(observation.observed_at);
+    let exact_observation = machine
+        .native_observation
+        .as_ref()
+        .is_some_and(|previous| previous == observation);
     let mut set = bindings;
-    set.insert(
-        "native_observation",
-        bson::to_bson(observation).map_err(|_| pending())?,
-    );
+    set.insert("native_observation", observation_bson.clone());
     set.insert(
         "updated_at",
         bson::DateTime::from_chrono(observation.observed_at),
@@ -105,10 +134,39 @@ pub async fn record(
     if !observation.running {
         set.insert("writer_admitted", false);
     }
-    db.collection::<ManagedMachine>(MACHINES).find_one_and_update(
-        doc!{"_id":&machine.node_id,"revision":machine.revision,"runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,"active_operation_id":&machine.active_operation_id,"native_uncertainty":bson::Bson::Null},
-        doc!{"$set":set,"$inc":{"revision":1_i64}}
-    ).return_document(ReturnDocument::After).await?.ok_or_else(pending)
+    let material_change = machine
+        .native_observation
+        .as_ref()
+        .is_none_or(|previous| observation_materially_changed(previous, observation))
+        || bindings_changed
+        || (!observation.running && machine.writer_admitted)
+        // A direct replay of the exact observation is still admitted once so
+        // the existing revision CAS fences a concurrent stale worker. Once
+        // its timestamp is already persisted, the conditional predicate below
+        // rejects the duplicate without adding another lifecycle version.
+        || (exact_observation && machine.updated_at != observation.observed_at);
+    let mut update = doc! {"$set": set};
+    if material_change {
+        update.insert("$inc", doc! {"revision": 1_i64});
+    }
+    let mut filter = doc! {"_id":&machine.node_id,"revision":machine.revision,"runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,"active_operation_id":&machine.active_operation_id,"native_uncertainty":bson::Bson::Null};
+    if machine.native_observation.is_some() {
+        // Heartbeat-only observations share the lifecycle revision, so an
+        // older in-flight read must not overwrite a newer resource-version,
+        // evidence reference, or freshness timestamp.
+        filter.insert(
+            "native_observation.observed_at",
+            doc! {"$lte": observation_time},
+        );
+    }
+    if exact_observation {
+        filter.insert("updated_at", doc! {"$ne": observation_time});
+    }
+    db.collection::<ManagedMachine>(MACHINES)
+        .find_one_and_update(filter, update)
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(pending)
 }
 
 /// Bootstrap admission precedes application Ready, which still requires the
@@ -127,9 +185,15 @@ pub async fn activate(db: &Database, machine: &ManagedMachine) -> AppResult<Mana
     {
         return Err(pending());
     }
+    let admission_change =
+        !machine.writer_admitted || machine.authorization_state != AuthorizationState::Active;
+    let mut update = doc! {"$set":{"writer_admitted":true,"authorization_state":"active","updated_at":bson::DateTime::now()}};
+    if admission_change {
+        update.insert("$inc", doc! {"revision": 1_i64});
+    }
     db.collection::<ManagedMachine>(MACHINES).find_one_and_update(
         doc!{"_id":&machine.node_id,"revision":machine.revision,"native_observation":bson::to_bson(observation).map_err(|_|pending())?,"native_uncertainty":bson::Bson::Null},
-        doc!{"$set":{"writer_admitted":true,"authorization_state":"active","updated_at":bson::DateTime::now()},"$inc":{"revision":1_i64}}
+        update,
     ).return_document(ReturnDocument::After).await?.ok_or_else(pending)
 }
 

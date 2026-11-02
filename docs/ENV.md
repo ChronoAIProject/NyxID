@@ -131,6 +131,19 @@ API connectivity and CA must be verified in the deployment environment. See
 local-fixture limits and pending environment acceptance. No IAM/RBAC changes
 are supplied or authorized by this configuration support.
 
+## Remote Machine seccomp selection
+
+| Variable | Default | Description |
+|---|---|---|
+| `NYXID_REMOTE_MACHINE_SECCOMP_LOCALHOST_PROFILE` | Unset: explicit `RuntimeDefault` | Optional operator-installed `nyxid/remote-machine-v1-<64 lowercase hex>.json`, bound to exact reviewed artifact bytes. Empty, padded, arbitrary or malformed references fail configuration. Must equal `seccomp-localhost-profile` in the operator's `nyxid-machine-approved-runtime` ConfigMap for new Sandboxes. |
+
+Install the generated policy on every eligible Linux kubelet node before
+selecting it. The choice is saved with each Machine; resume preserves it after
+deployment settings change. Missing files or runtime loading failures never
+trigger a fallback. Reference validation and admission do not prove node
+installation or complete separated/browser readiness. See the
+[installation procedure](../deploy/remote-machine/README.md#explicit-localhost-seccomp-installation).
+
 ## Cluster coordination
 
 NyxID uses MongoDB for shared ownership, leases, replay checks, rate windows,

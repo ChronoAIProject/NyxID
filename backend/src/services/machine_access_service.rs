@@ -402,9 +402,18 @@ pub async fn migrate_in_session(
             } else {
                 Default::default()
             };
+            let hosted = super::remote_machine_configuration::hosted_node_choices(
+                db,
+                &batch.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+            )
+            .await?;
             for node in batch {
                 if let Some(profile) = node.machine.as_ref() {
-                    let assignment = if agent.is_nyxbot() {
+                    let assignment = if let Some(choice) = hosted.get(&node.id) {
+                        super::remote_machine_configuration::hosted_assignment(
+                            profile, *choice, 1, contexts,
+                        )
+                    } else if agent.is_nyxbot() {
                         if profile.separation_choice.is_none()
                             && compatibility.contains_key(&node.id)
                         {
@@ -428,6 +437,14 @@ pub async fn migrate_in_session(
             }
         }
     }
+    enqueue_hosted_assignments(
+        db,
+        &agent.id,
+        &policy.assignments.keys().cloned().collect::<Vec<_>>(),
+        policy.revision,
+        session,
+    )
+    .await?;
     agent.machine_access = Some(Box::new(policy));
     db.collection::<Document>(AGENTS)
         .update_one(
@@ -485,9 +502,16 @@ pub async fn new_assignments(
     nodes: &[String],
     revision: i64,
 ) -> AppResult<std::collections::BTreeMap<String, Assignment>> {
+    let hosted = super::remote_machine_configuration::hosted_node_choices(db, nodes).await?;
     let mut assignments = nodes
         .iter()
-        .map(|id| (id.clone(), unresolved_assignment(revision)))
+        .map(|id| {
+            let mut assignment = unresolved_assignment(revision);
+            if hosted.contains_key(id) {
+                assignment.saved_login_ids = Some(vec![]);
+            }
+            (id.clone(), assignment)
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
     if nodes.is_empty() {
         return Ok(assignments);
@@ -503,12 +527,41 @@ pub async fn new_assignments(
     while let Some(node) = rows.try_next().await? {
         if let Some(profile) = node.machine {
             assignments.insert(
-                node.id,
-                selected_assignment(&profile, revision, editing, contexts),
+                node.id.clone(),
+                if let Some(choice) = hosted.get(&node.id) {
+                    super::remote_machine_configuration::hosted_assignment(
+                        &profile, *choice, revision, contexts,
+                    )
+                } else {
+                    selected_assignment(&profile, revision, editing, contexts)
+                },
             );
         }
     }
     Ok(assignments)
+}
+
+pub async fn new_assignments_with_intent(
+    db: &Database,
+    actor: &str,
+    nodes: &[String],
+    revision: i64,
+    intent: Option<model::AssignmentIntent>,
+) -> AppResult<std::collections::BTreeMap<String, Assignment>> {
+    let mut assignments = Box::pin(new_assignments(db, actor, nodes, revision)).await?;
+    if intent == Some(model::AssignmentIntent::MembershipOnly) {
+        for assignment in assignments.values_mut() {
+            initialize_membership(assignment);
+        }
+    }
+    Ok(assignments)
+}
+
+/// Authority for a new/re-added rollout membership never depends on feature flags.
+fn initialize_membership(assignment: &mut Assignment) {
+    assignment.capabilities = Capabilities::default();
+    assignment.saved_login_ids = Some(Vec::new());
+    assignment.legacy = false;
 }
 
 /// Materialize only missing NyxBot assignments, after the caller's live node ACL.
@@ -558,21 +611,25 @@ async fn legacy_nyxbot_assignments(
             // batched projection never becomes one database lookup per node.
             let ids: Vec<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
             let live_nodes: Vec<Node> = db.collection::<Node>(NODES)
-                .find(doc! {"_id":{"$in":ids},"is_active":true,"user_id":{"$in":&owners}})
+                .find(doc! {"_id":{"$in":&ids},"is_active":true,"user_id":{"$in":&owners}})
                 .session(&mut *session).await?.stream(&mut *session).try_collect().await?;
             let compatibility = compatibility_capabilities(&db,&actor,&live_nodes,session).await?;
+            let hosted = super::remote_machine_configuration::hosted_node_choices(&db, &ids.iter().map(|id|(*id).to_owned()).collect::<Vec<_>>()).await?;
             for node in &live_nodes {
                 if !policy.assignments.contains_key(&node.id)
                     && let Some(profile) = node.machine.as_ref()
                 {
                     let preexisting = agent.created_at <= cutoff.to_chrono()
                         && compatibility.contains_key(&node.id);
-                    let assignment = if preexisting && profile.separation_choice.is_none() {
+                    let assignment = if let Some(choice)=hosted.get(&node.id) {
+                        super::remote_machine_configuration::hosted_assignment(profile, *choice, revision, contexts)
+                    } else if preexisting && profile.separation_choice.is_none() {
                         Assignment { capabilities: compatibility[&node.id], legacy:true, revision, ..Default::default() }
                     } else {
                         selected_assignment(profile, revision, false, contexts)
                     };
                     policy.assignments.insert(node.id.clone(), assignment);
+                    if hosted.contains_key(&node.id) {enqueue(&db,&agent.id,&node.id,revision,session).await?;}
                     changed = true;
                 }
             }
@@ -687,12 +744,25 @@ pub async fn authorize(
 /// Preserve existing policy; new selections follow the acting person's editor flag.
 /// Removed assignments retain a bounded all-off preference: a later Grants
 /// selection or implicit discovery must not resurrect revoked authority.
+#[cfg(test)]
 pub async fn membership_changed(
     db: &Database,
     actor: &str,
     agent: &mut AssistantAgent,
     before: &[String],
     logins_changed: bool,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    membership_changed_with_intent(db, actor, agent, before, logins_changed, None, session).await
+}
+
+pub async fn membership_changed_with_intent(
+    db: &Database,
+    actor: &str,
+    agent: &mut AssistantAgent,
+    before: &[String],
+    logins_changed: bool,
+    intent: Option<model::AssignmentIntent>,
     session: &mut ClientSession,
 ) -> AppResult<()> {
     let after = agent.machine_node_ids.clone();
@@ -752,9 +822,36 @@ pub async fn membership_changed(
             "Machine assignment history is full. At most 64 new choices, including removed assignments, may be retained. Reuse a previously selected machine or create another agent.".into(),
         ));
     }
-    policy
-        .assignments
-        .extend(Box::pin(new_assignments(db, actor, &added, policy.revision)).await?);
+    policy.assignments.extend(
+        Box::pin(new_assignments_with_intent(
+            db,
+            actor,
+            &added,
+            policy.revision,
+            intent,
+        ))
+        .await?,
+    );
+    if intent == Some(model::AssignmentIntent::MembershipOnly) {
+        // A retained tombstone is not an active assignment. Re-adding it starts
+        // empty while retaining mode, profile cleanup and revocation fences.
+        for node in agent
+            .machine_node_ids
+            .iter()
+            .filter(|node| !before.contains(node))
+        {
+            let assignment = policy
+                .assignments
+                .get_mut(node)
+                .expect("initialized assignment");
+            initialize_membership(assignment);
+            assignment.revision = policy.revision;
+            if !added.contains(node) {
+                enqueue(db, &agent.id, node, policy.revision, session).await?;
+            }
+        }
+    }
+    enqueue_hosted_assignments(db, &agent.id, &added, policy.revision, session).await?;
     if logins_changed {
         db.collection::<Document>(model::CONTEXTS)
             .update_many(
@@ -771,6 +868,22 @@ pub async fn membership_changed(
     }
     Ok(())
 }
+pub async fn enqueue_hosted_assignments(
+    db: &Database,
+    agent: &str,
+    nodes: &[String],
+    revision: i64,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    for node in super::remote_machine_configuration::hosted_node_choices(db, nodes)
+        .await?
+        .into_keys()
+    {
+        enqueue(db, agent, &node, revision, session).await?;
+    }
+    Ok(())
+}
+
 /// Destruction commits its durable cancellation records with the agent tombstone.
 pub async fn destroyed_in_session(
     db: &Database,
@@ -903,6 +1016,45 @@ pub async fn configure(
     node_id: &str,
     selection: Selection,
 ) -> AppResult<Policy> {
+    configure_inner(db, actor, agent_id, node_id, selection, None, None).await
+}
+
+pub async fn configure_reviewed(
+    db: &Database,
+    actor: &str,
+    action: &model::HumanContextAction,
+    review_id: Option<&str>,
+) -> AppResult<Policy> {
+    if !matches!(
+        action.selection.mode.as_deref(),
+        Some("separated" | "shared_legacy")
+    ) {
+        return Err(AppError::ValidationError(
+            "Choose an explicit owner-reviewed context mode".into(),
+        ));
+    }
+    super::machine_context_review_service::validate_action(db, actor, action).await?;
+    configure_inner(
+        db,
+        actor,
+        &action.agent_id,
+        &action.node_id,
+        action.selection.clone(),
+        Some(action.clone()),
+        review_id.map(str::to_owned),
+    )
+    .await
+}
+
+async fn configure_inner(
+    db: &Database,
+    actor: &str,
+    agent_id: &str,
+    node_id: &str,
+    selection: Selection,
+    reviewed: Option<model::HumanContextAction>,
+    review_id: Option<String>,
+) -> AppResult<Policy> {
     let editing = super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await?;
     let contexts =
         super::feature_flag_service::personal_flag_enabled(db, actor, CONTEXT_FLAG).await?;
@@ -988,6 +1140,7 @@ pub async fn configure(
     let actor = actor.to_owned();
     session.start_transaction().and_run2(async move |session| {
         let result=Box::pin(async {
+            if let Some(action)=reviewed.as_ref() { super::machine_context_review_service::fence_action(&db,session,&actor,action).await?; }
             let mut agent=db.collection::<AssistantAgent>(AGENTS).find_one(doc!{"_id":&agent_id,"destroyed_at":bson::Bson::Null})
                 .session(&mut *session).await?.ok_or_else(refused)?;
             Box::pin(super::org_agent_service::require_maintain(&db, &actor, &agent)).await?;
@@ -1001,7 +1154,17 @@ pub async fn configure(
             if policy.version != 2 { return Err(AppError::MachineAuthorityUnsupported); }
             if policy.revision!=selection.expected_revision {return Err(AppError::Conflict("Machine access changed; reload before saving".into()));}
             if !policy.assignments.contains_key(&node_id) && policy.assignments.len()>=64 {return Err(AppError::ValidationError("At most 64 new machine assignments".into()));}
-            let old = policy.assignments.get(&node_id).cloned().unwrap_or_else(|| selected_assignment(&profile, policy.revision, editing, contexts));
+            let old = policy.assignments.get(&node_id).cloned().unwrap_or_else(|| if let Some(action)=reviewed.as_ref() {
+                let mut assignment=unresolved_assignment(policy.revision);
+                if action.snapshot.machine_configuration.is_some() {assignment.saved_login_ids=Some(vec![]);}
+                assignment
+            } else {selected_assignment(&profile, policy.revision, editing, contexts)});
+            if let Some(action)=reviewed.as_ref() {
+                let target_logins=old.saved_login_ids.clone().or_else(||(selection.mode.as_deref()==Some("separated")).then(Vec::new));
+                if old!=action.snapshot.previous_assignment || selection.capabilities!=old.capabilities || selection.saved_login_ids!=target_logins {
+                    return Err(super::machine_context_review_service::stale());
+                }
+            }
             let mode = if let Some(requested) = selection.mode.as_deref() {
                 let choice = match requested {
                     "shared_legacy" => Choice::SharedLegacy,
@@ -1036,6 +1199,12 @@ pub async fn configure(
             db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
                 .update_many(doc!{"conversation_id":{"$in":ids},"status":{"$in":["pending","allowed"]},"$or":[{"kind":"machine","service_id":&node_id},{"tool_name":{"$regex":"^(nyx__machine_|nyxid__machine_)"}}]},doc!{"$set":{"status":"expired"}}).session(&mut *session).await?;
             Box::pin(super::assistant_team_service::sync_thread_authority(&db,&agent,&rows,session)).await?;
+            if let Some(id)=review_id.as_ref() {
+                let saved=db.collection::<Document>(model::ContextReview::COLLECTION_NAME).update_one(doc!{"_id":id,"actor_id":&actor,"status":"approved"},
+                    doc!{"$set":{"status":"committed","committed_revision":agent.machine_access.as_ref().expect("policy").revision,"error_code":bson::Bson::Null}})
+                    .session(&mut *session).await?;
+                if saved.matched_count!=1 {return Err(super::machine_context_review_service::stale());}
+            }
             Ok(*agent.machine_access.expect("policy"))
         }).await; transactions::transaction_result(result)
     }).await.map_err(transactions::map_transaction_error)
@@ -1104,6 +1273,7 @@ pub fn admit<'a>(
             actor_id: chat.user_id.clone(),
             group_id: authority.group_id.clone(),
             generation: 1,
+            runtime_id: profile.runtime_id.clone(),
             mode: access.mode.clone(),
         };
         let db = db.clone();
@@ -1135,12 +1305,27 @@ pub fn admit<'a>(
             let turn=db.collection::<Document>("assistant_conversations").update_one(doc!{"_id":&lease.authority.conversation_id,"active_turn.turn_id":&lease.authority.turn_id,"active_turn.stop_requested":false},
                 doc!{"$addToSet":{"active_turn.machine_node_ids":&lease.node_id}}).session(&mut *session).await?;
             if turn.matched_count!=1 {return Err(AppError::MachineTurnStopped);}
-            let persisted = db.collection::<model::Context>(model::CONTEXTS).find_one_and_update(
+            let mut persisted = db.collection::<model::Context>(model::CONTEXTS).find_one_and_update(
                 doc!{"node_id":&context.node_id,"owner_id":&context.owner_id,"agent_id":&context.agent_id,"actor_id":&context.actor_id,"group_id":&context.group_id},
                 doc!{"$setOnInsert":bson::to_document(&context).map_err(|_|refused())?})
                 .upsert(true).return_document(mongodb::options::ReturnDocument::After)
                 .session(&mut *session).await?.ok_or_else(refused)?;
             if persisted.mode != lease.authority.mode { return Err(AppError::MachineAuthorityStale); }
+            if persisted.runtime_id != lease.authority.runtime_id {
+                // The Node and assignment writes above serialize this with
+                // live runtime replacement and grant changes. Retried and
+                // concurrent admissions see one generation for this daemon;
+                // neither the Node nor a client can mint a profile generation.
+                let mut update=doc!{"$set":{"runtime_id":&lease.authority.runtime_id}};
+                if persisted.mode=="separated" {
+                    persisted.generation.checked_add(1).filter(|g|*g>0).ok_or_else(refused)?;
+                    update.get_document_mut("$set").map_err(|_|refused())?.insert("login_ids",bson::Bson::Array(vec![]));
+                    update.insert("$inc",doc!{"generation":1_i64});
+                }
+                persisted=db.collection::<model::Context>(model::CONTEXTS).find_one_and_update(
+                    doc!{"_id":&persisted.id,"generation":persisted.generation,"runtime_id":&persisted.runtime_id,"mode":&persisted.mode},update)
+                    .return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?.ok_or(AppError::MachineAuthorityStale)?;
+            }
             if let Some(login) = &login_binding {
                 let fenced = db.collection::<Document>(crate::models::saved_login::COLLECTION_NAME).update_one(doc!{"_id":login},doc!{"$inc":{"machine_fill_fence":1}}).session(&mut *session).await?;
                 if fenced.matched_count != 1 { return Err(refused()); }
@@ -1428,6 +1613,7 @@ pub(super) async fn revoke_one(state: &crate::AppState, row: Document) -> AppRes
             group_id: None,
             generation: 1,
             mode: "shared_legacy".into(),
+            runtime_id: node.machine.as_ref().expect("profile").runtime_id.clone(),
         };
         {
             let context = contexts.first().unwrap_or(&fallback);

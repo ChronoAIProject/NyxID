@@ -82,12 +82,12 @@ afterEach(() => {
   useAuthStore.getState().setUser(null);
 });
 
-function renderDialog() {
+function renderDialog(machineAssignment?: "membership_only") {
   const onCreated = vi.fn();
   const onClose = vi.fn();
   render(
     <QueryClientProvider client={client}>
-      <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}><NewAgentDialog onClose={onClose} onCreated={onCreated} /></OverlayLayer>
+      <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}><NewAgentDialog machineAssignment={machineAssignment} onClose={onClose} onCreated={onCreated} /></OverlayLayer>
     </QueryClientProvider>,
   );
   return { onCreated, onClose, user: userEvent.setup() };
@@ -265,3 +265,23 @@ it("opens Ownership above the assistant dialog and preserves keyboard selection"
   await user.click(screen.getByRole("option", { name: "Team" }));
   expect(screen.getByRole("combobox", { name: "Ownership" })).toHaveTextContent("Team");
 });
+
+it.each([false, true])(
+  "Settings-origin Agent creation tags selected Machine membership with org editing %s",
+  async (enabled) => {
+    orgEnabled = enabled;
+    const { onCreated, user } = renderDialog("membership_only");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "developer");
+    await user.type(
+      screen.getByRole("textbox", { name: "Role" }),
+      "Fixes code",
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Workspace VM" }));
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(posts[0]).toMatchObject({
+      machine_assignment: "membership_only",
+      machines: ["machine-1"],
+    });
+  },
+);

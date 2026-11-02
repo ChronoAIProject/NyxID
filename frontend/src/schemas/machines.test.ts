@@ -20,6 +20,7 @@ import {
   remoteMachineJobOutputSchema,
 } from "./machines";
 
+const consent = { separation_choice: "automatic", separation_policy_version: "remote-machine-separation-v1", acknowledge_separation: true };
 const time = "2026-10-14T01:00:00Z";
 const paidQuote = {
   platform: remoteMachinePlatformFixture,
@@ -50,7 +51,10 @@ const paidQuote = {
     job_history_days: 30,
     operation_history_days: 90,
     terminal_output_max_retention_seconds: 3600,
-    shared_environment_mode: "shared_legacy",
+    separation_policy_version: "remote-machine-separation-v1",
+    separation_choices: ["automatic", "require_separated", "shared_legacy"],
+    separation_warning: "Shared OS access can expose files through the execution identity.",
+    shared_environment_mode: "per_agent",
     cross_client_secret_isolation: false,
     inbound_network_service: false,
     persistent_environment_variables: false,
@@ -150,10 +154,8 @@ describe("Remote Machine safe schemas", () => {
         isRemoteMachinePaidQuote({ ...paidQuote, ...patch }, Date.parse(time)),
       ).toBe(false);
   });
-  it("keeps additive runtime funding fields without inferring them for older servers", () => {
-    expect(
-      remoteMachineSchema.parse(remoteMachineFixture).free_slot,
-    ).toBeUndefined();
+  it("requires the current runtime funding projection without inferring omitted fields", () => {
+    expect(remoteMachineSchema.safeParse({ ...remoteMachineFixture, free_slot: undefined }).success).toBe(false);
     const parsed = remoteMachineSchema.parse({
       ...remoteMachineFixture,
       free_slot: false,
@@ -166,6 +168,7 @@ describe("Remote Machine safe schemas", () => {
   });
   it("requires the quote and charging acceptance together for paid create", () => {
     const body = {
+      ...consent,
       free_slot: false,
       policy_version: "remote-machine-mvp",
       data_policy_version: "remote-machine-data",
@@ -243,6 +246,7 @@ describe("Remote Machine safe schemas", () => {
 
   it("requires explicit policy acceptance for creation", () => {
     const body = {
+      ...consent,
       free_slot: true,
       policy_version: "remote-machine-mvp",
       data_policy_version: "remote-machine-data",
@@ -456,6 +460,7 @@ describe("Remote Machine safe schemas", () => {
 });
 
 const hostedCreate = {
+  ...consent,
   free_slot: true,
   policy_version: "remote-machine-mvp",
   data_policy_version: "remote-machine-data",
@@ -464,7 +469,7 @@ const hostedCreate = {
 it("defaults hosted creation and preserves explicit configuration in the safe projection", () => {
   expect(remoteMachineCreateRequestSchema.parse(hostedCreate)).toMatchObject({
     name: "my-remote-machine",
-    capabilities: ["shell", "files"],
+    capabilities: ["files", "shell"],
     specialist_id: null,
   });
   const config = {
@@ -479,12 +484,12 @@ it("defaults hosted creation and preserves explicit configuration in the safe pr
     remoteMachineSchema.parse({
       ...remoteMachineFixture,
       ...config,
-      specialist_assignment_state: "permissions_required",
+      specialist_assignment_state: "not_assigned",
       specialist_assignment_error: "specialist_assignment_unavailable",
     }),
   ).toMatchObject({
     ...config,
-    specialist_assignment_state: "permissions_required",
+    specialist_assignment_state: "not_assigned",
     specialist_assignment_error: "specialist_assignment_unavailable",
   });
 });
@@ -508,6 +513,7 @@ it("rejects invalid hosted names, empty or unknown capabilities and desktop with
 
 it("binds request schemas to the sole controlled profile and rejects arbitrary dimensions", () => {
   const body = {
+    ...consent,
     free_slot: true,
     profile_version: "remote-machine",
     policy_version: "remote-machine-mvp",

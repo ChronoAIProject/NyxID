@@ -1,6 +1,29 @@
 use chrono::Utc;
 use serde_json::json;
 
+#[test]
+fn hosted_contract_requires_choice_and_versioned_consent() {
+    use super::remote_machine_configuration::normalize_request;
+    let mut missing = json!({"name":"test-hosted","capabilities":["files"]});
+    assert!(
+        normalize_request(&mut missing).is_err(),
+        "missing choice must not imply shared consent"
+    );
+    for choice in ["automatic", "require_separated", "shared_legacy"] {
+        let mut body = json!({"name":"test-hosted","capabilities":["shell","files","files"],
+            "separation_choice":choice,"separation_policy_version":"remote-machine-separation-v1",
+            "acknowledge_separation":true});
+        let good = normalize_request(&mut body);
+        assert!(good.is_ok(), "{choice}: {good:?}");
+        assert_eq!(body["capabilities"], json!(["files", "shell"]));
+        body["separation_policy_version"] = json!("unreviewed");
+        assert!(normalize_request(&mut body).is_err());
+        body["separation_policy_version"] = json!("remote-machine-separation-v1");
+        body["acknowledge_separation"] = json!(false);
+        assert!(normalize_request(&mut body).is_err());
+    }
+}
+
 use crate::models::remote_machine::{AuthorizationState, BillingState, ResourceState};
 use crate::services::remote_machine_service::{
     CreateMachineInput, RuntimeIdentity, can_write_runtime, canonical_idempotency_digest,
@@ -213,7 +236,14 @@ fn fixed_profile_rejects_custom_allocations() {
     }
     let mut saved = profile.clone();
     saved.runtime_class = Some("saved-runtime-a".into());
+    saved.seccomp_localhost_profile =
+        Some(format!("nyxid/remote-machine-v1-{}.json", "a".repeat(64)));
     lifecycle::validate_fixed_profile(&saved).unwrap();
+    for invalid in ["", "../escape.json", "/absolute.json", "arbitrary.json"] {
+        let mut changed = saved.clone();
+        changed.seccomp_localhost_profile = Some(invalid.into());
+        assert!(lifecycle::validate_fixed_profile(&changed).is_err());
+    }
     profile.workspace_gib = 40;
     assert!(lifecycle::validate_fixed_profile(&profile).is_err());
     profile = lifecycle::fixed_profile("image@sha256:abc");
@@ -841,20 +871,20 @@ async fn remote_machine_ineligible_owner_and_paid_creation_leave_no_resources() 
     let mut paid = creation(&owner, "paid-missing-quote");
     paid.free_slot = false;
     paid.profile.image_digest = format!("registry.test/nyxid@sha256:{}", "a".repeat(64));
-    paid.request_body = json!({"free_slot":false,"accept_account_balance":true,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
+    paid.request_body = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":false,"accept_account_balance":true,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
     assert!(matches!(
         Box::pin(lifecycle::create_machine(&db, paid.clone())).await,
         Err(crate::errors::AppError::ValidationError(_))
     ));
     let quote_id = uuid::Uuid::new_v4().to_string();
     paid.idempotency_key = "paid-missing-acceptance".into();
-    paid.request_body = json!({"free_slot":false,"quote_id":&quote_id,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
+    paid.request_body = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":false,"quote_id":&quote_id,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
     assert!(matches!(
         Box::pin(lifecycle::create_machine(&db, paid.clone())).await,
         Err(crate::errors::AppError::ValidationError(_))
     ));
     paid.idempotency_key = "paid-missing-billing".into();
-    paid.request_body = json!({"free_slot":false,"quote_id":quote_id,"accept_account_balance":true,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
+    paid.request_body = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":false,"quote_id":quote_id,"accept_account_balance":true,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
     assert!(matches!(
         Box::pin(lifecycle::create_machine(&db, paid)).await,
         Err(crate::errors::AppError::BillingProviderUnavailable(_))
@@ -1562,6 +1592,17 @@ async fn hosted_creation_persists_display_name_and_capabilities_and_binds_retrie
     let replay = lifecycle::create_machine(&db, input.clone()).await.unwrap();
     assert!(replay.replayed);
     assert_eq!(first.machine.node_id, replay.machine.node_id);
+    assert_eq!(
+        replay.machine.configuration.separation_choice,
+        nyxid_machine::context::Choice::SharedLegacy
+    );
+    assert_eq!(replay.machine.configuration.revision, 1);
+    let mut changed_choice = input.clone();
+    changed_choice.request_body["separation_choice"] = json!("automatic");
+    assert!(matches!(
+        lifecycle::create_machine(&db, changed_choice).await,
+        Err(crate::errors::AppError::Conflict(_))
+    ));
     input.request_body["name"] = json!("another-machine");
     assert!(lifecycle::create_machine(&db, input).await.is_err());
     assert_eq!(
@@ -1584,6 +1625,10 @@ async fn hosted_creation_rejects_invalid_configuration_before_reserving_resource
         json!({"capabilities":["computer"]}),
         json!({"capabilities":["shell","developer_browser"]}),
         json!({"specialist_id":uuid::Uuid::new_v4().to_string()}),
+        json!({"separation_choice":"unknown"}),
+        json!({"separation_policy_version":"unreviewed"}),
+        json!({"acknowledge_separation":false}),
+        json!({"separation_choice":"require_separated"}),
     ]
     .into_iter()
     .enumerate()
@@ -1742,7 +1787,7 @@ async fn hosted_specialist_destroyed_before_readiness_is_reported_without_grant(
 }
 
 #[tokio::test]
-async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_revocation() {
+async fn hosted_specialist_assignment_is_membership_only_and_never_regrants_revocation() {
     use crate::services::{
         assistant_team_service as team, machine_access_service as access,
         remote_machine_configuration as config,
@@ -1765,6 +1810,11 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
         let mut input = creation(&f.owner, "specialist-config");
         input.request_body["specialist_id"] = json!(f.chat.agent_id);
         input.request_body["capabilities"] = json!(["shell", "files", "browser", "computer"]);
+        input.request_body["separation_choice"] = json!(if explicit_legacy {
+            "shared_legacy"
+        } else {
+            "automatic"
+        });
         let created = lifecycle::create_machine(&f.state.db, input.clone())
             .await
             .unwrap();
@@ -1820,7 +1870,7 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
                 "selection_required"
             }
         );
-        let default_enabled = explicit_legacy && !editor_enabled;
+        let default_enabled = false;
         assert_eq!(grant.capabilities.shell, default_enabled);
         assert_eq!(grant.capabilities.files, default_enabled);
         assert_eq!(grant.capabilities.browser, default_enabled);
@@ -1831,14 +1881,7 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
             .unwrap()
             .unwrap();
         let view = config::safe_view(&f.state.db, &machine).await.unwrap();
-        assert_eq!(
-            view.specialist_assignment_state,
-            if editor_enabled || !explicit_legacy {
-                "permissions_required"
-            } else {
-                "assigned"
-            }
-        );
+        assert_eq!(view.specialist_assignment_state, "assigned");
         team::set_grants(
             &f.state.db,
             &f.owner,
@@ -1870,7 +1913,7 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
                 .await
                 .unwrap()
                 .specialist_assignment_state,
-            "permissions_required"
+            "not_assigned"
         );
         f.state.db.drop().await.unwrap();
     }

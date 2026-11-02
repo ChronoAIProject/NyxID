@@ -55,3 +55,8 @@ it("allows the hosted setup shortcut without propagating an arbitrary mode", () 
     "unknown",
   );
 });
+
+it("carries only a bounded selected Agent identifier into hosted Access", () => {
+  expect(parseMachinesSearch({ machine: "machine-1", agent: "specialist-1", selection: { shell: true } })).toEqual({ tab: undefined, machine: "machine-1", agent: "specialist-1" });
+  expect(parseMachinesSearch({ agent: "../other?token=secret" })).not.toHaveProperty("agent");
+});

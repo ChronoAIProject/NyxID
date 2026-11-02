@@ -243,7 +243,7 @@ async fn input(f: &Fixture) -> CreateMachineInput {
         )
         .await
         .unwrap();
-    input.request_body = json!({"free_slot":false,"quote_id":quote.id,"accept_account_balance":true,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
+    input.request_body = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":false,"quote_id":quote.id,"accept_account_balance":true,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
     input
 }
 async fn current(f: &Fixture, id: &str) -> ManagedMachine {
@@ -365,6 +365,12 @@ async fn start_ready_with_age(f: &Fixture, age_seconds: i64) -> ManagedMachine {
     let connection = Uuid::new_v4().to_string();
     let now = Utc::now();
     let profile = nyxid_machine::MachineProfile {
+        separation_choice: Some(bound.configuration.separation_choice),
+        managed_configuration: Some(nyxid_machine::managed::ConfigurationReport {
+            configuration: bound.configuration.clone(),
+            digest: bound.configuration.digest().unwrap(),
+            runtime_generation: bound.runtime_generation as u64,
+        }),
         version: nyxid_machine::PROTOCOL_VERSION,
         runtime_id: Uuid::new_v4().to_string(),
         shell: true,
@@ -1701,7 +1707,7 @@ async fn mounted_profile_quote_and_preflight_exclude_foreign_rates_and_bind_reso
         entitlement["billing_preflight"]["funds"]["estimated_seconds"],
         quoted["billing_preflight"]["funds"]["estimated_seconds"]
     );
-    let create = json!({"free_slot":false,"profile_version":"test-only-foreign-profile","quote_id":quoted["quote_id"],"accept_account_balance":true,
+    let create = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":false,"profile_version":"test-only-foreign-profile","quote_id":quoted["quote_id"],"accept_account_balance":true,
         "policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true});
     let (status, _) = send(&app, &token, "POST", "/api/v1/remote-machines", create).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

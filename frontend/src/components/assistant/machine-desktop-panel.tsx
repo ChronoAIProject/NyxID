@@ -145,11 +145,18 @@ export function MachineDesktopPanel({
   const [action, setAction] = useState("");
   const [error, setError] = useState<string>();
   const [stalled, setStalled] = useState(false);
+  const [frameReady, setFrameReady] = useState(false);
+  const [frameStalled, setFrameStalled] = useState(false);
   useEffect(() => {
     if (connected) return;
     const timer = window.setTimeout(() => setStalled(true), 8000);
     return () => window.clearTimeout(timer);
   }, [connected, nodeId, conversationId, attempt, display, contextId]);
+  useEffect(() => {
+    if (!connected || frameReady || frameStalled || error) return;
+    const timer = window.setTimeout(() => setFrameStalled(true), 8000);
+    return () => window.clearTimeout(timer);
+  }, [connected, frameReady, frameStalled, error, nodeId, conversationId, attempt, display, contextId]);
   const wasActive = useRef(Boolean(turnActive));
   useEffect(() => {
     if (turnActive) {
@@ -167,7 +174,7 @@ export function MachineDesktopPanel({
     ? error
       ? "offline"
       : "attention"
-    : error || reason || controller === "requested" || controller === "owner"
+    : error || frameStalled || reason || controller === "requested" || controller === "owner"
       ? "attention"
       : "live";
   const statusText = !connected
@@ -178,9 +185,17 @@ export function MachineDesktopPanel({
       ? "You are in control"
       : controller === "owner"
         ? "Owner in control in another tab"
-        : reason || controller === "requested"
-          ? "Needs you"
-          : "Watching the agent";
+        : !frameReady
+          ? frameStalled
+            ? "Needs attention"
+            : "Waiting for desktop frame…"
+          : reason || controller === "requested"
+            ? "Needs you"
+            : "Watching the agent";
+  const frameError = frameStalled && !frameReady
+    ? "Desktop connected, but no screen frame has arrived. Reconnect to continue."
+    : undefined;
+  const visibleError = error ?? frameError;
   useEffect(() => {
     onStatus?.(status);
   }, [onStatus, status]);
@@ -194,6 +209,8 @@ export function MachineDesktopPanel({
     setConnected(false);
     setError(undefined);
     setStalled(false);
+    setFrameReady(false);
+    setFrameStalled(false);
     const ws = new WebSocket(
       desktopUrl(nodeId, conversationId, display, contextId),
     );
@@ -293,6 +310,9 @@ export function MachineDesktopPanel({
                 .getContext("2d")
                 ?.drawImage(next, rect?.x ?? 0, rect?.y ?? 0);
               hasFrame = true;
+              setFrameReady(true);
+              setFrameStalled(false);
+              setError(undefined);
               lastFrame = frame.sequence;
               paint();
             } finally {
@@ -319,6 +339,8 @@ export function MachineDesktopPanel({
             session.current = message.session_id;
             sequence.current = 0n;
             setConnected(true);
+            setFrameReady(false);
+            setFrameStalled(false);
             setControls(false);
             setError(undefined);
           }
@@ -677,19 +699,24 @@ export function MachineDesktopPanel({
           }}
         />
         {/* What is wrong, or what is needed, shows on the screen itself. */}
-        {!connected || error ? (
+        {!connected || !frameReady || visibleError ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-xl bg-background/70 p-4 text-center backdrop-blur-[2px] dark:bg-black/60">
-            {error ? (
+            {visibleError ? (
               <>
-                <p role="alert" className="max-w-sm text-destructive">{error}</p>
+                <p role="alert" className="max-w-sm text-destructive">{visibleError}</p>
               </>
-            ) : (
+            ) : !connected ? (
               <p className="flex items-center gap-2 text-muted-foreground">
                 <span className="h-1.5 w-1.5 rounded-full bg-warning motion-safe:animate-pulse" aria-hidden="true" />
                 Connecting…
               </p>
+            ) : (
+              <p className="flex items-center gap-2 text-muted-foreground">
+                <span className="h-1.5 w-1.5 rounded-full bg-warning motion-safe:animate-pulse" aria-hidden="true" />
+                Waiting for desktop frame…
+              </p>
             )}
-            {error || (!connected && stalled) ? (
+            {visibleError || (!connected && stalled) ? (
               <Button size="sm" onClick={() => setAttempt((value) => value + 1)}>Reconnect</Button>
             ) : null}
             {reason ? <p role="status" className="max-w-sm text-warning">NyxBot needs you on this machine: {reason}</p> : null}

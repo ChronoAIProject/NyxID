@@ -298,6 +298,11 @@ fn deny_agent_namespaces() -> std::io::Result<()> {
 pub(super) struct ProbeTimeout;
 
 #[cfg(any(target_os = "linux", test))]
+#[derive(Debug, thiserror::Error)]
+#[error("separated_mechanism_probe_exited")]
+pub(super) struct ProbeExited;
+
+#[cfg(any(target_os = "linux", test))]
 struct ProbeGroup(i32);
 
 #[cfg(any(target_os = "linux", test))]
@@ -404,9 +409,13 @@ pub(super) async fn probe_running(
         let mut buffer = [0u8; 4096];
         let mut eof = false;
         loop {
-            anyhow::ensure!(child.try_wait()?.is_none(), "separated_mechanism_probe_exited");
-            if observe(pid, &output)? {
-                anyhow::ensure!(child.try_wait()?.is_none(), "separated_mechanism_probe_exited");
+            anyhow::ensure!(child.try_wait()?.is_none(), ProbeExited);
+            let observation = observe(pid, &output);
+            // Proc data can disappear while an observer is reading it. Check
+            // the child before propagating an observation error, so an exit
+            // cannot be reported as inaccessible data from a live process.
+            anyhow::ensure!(child.try_wait()?.is_none(), ProbeExited);
+            if observation? {
                 return Ok(());
             }
             tokio::select! {
@@ -506,6 +515,61 @@ pub fn pin_cwd(command: &mut Command, directories: Vec<std::fs::File>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn live_probe_classifies_exit_during_observation_before_proc_read_error() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let error = probe_running(command, std::time::Duration::from_secs(1), |pid, _| {
+            assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
+            // Keep the exited child waitable: the real probe must observe and
+            // reap it, rather than mistake its disappearing proc data for a
+            // live process whose required observations are inaccessible.
+            let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe {
+                    libc::waitid(libc::P_PID, pid, &mut status, libc::WEXITED | libc::WNOWAIT)
+                },
+                0
+            );
+            assert_eq!(unsafe { status.si_pid() }, pid as i32);
+            Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+                .context("browser_proc_network_identity_unreadable")
+        })
+        .await
+        .unwrap_err();
+        assert!(error.is::<ProbeExited>());
+        assert_eq!(error.to_string(), "separated_mechanism_probe_exited");
+        assert!(!error.is::<ProbeTimeout>());
+    }
+
+    #[tokio::test]
+    async fn live_probe_preserves_inaccessible_observation_while_child_is_alive() {
+        for errno in [libc::EACCES, libc::ENOENT] {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30");
+            let error = probe_running(command, std::time::Duration::from_secs(1), |pid, _| {
+                assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+                Err(std::io::Error::from_raw_os_error(errno))
+                    .context("browser_proc_network_identity_unreadable")
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "browser_proc_network_identity_unreadable"
+            );
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(errno)
+            );
+            assert!(!error.is::<ProbeExited>() && !error.is::<ProbeTimeout>());
+        }
+    }
 
     #[tokio::test]
     async fn live_probe_sweeps_on_observation_and_timeout() {

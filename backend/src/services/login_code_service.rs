@@ -266,8 +266,8 @@ pub async fn redeem(
         return Err(AppError::LoginCodeInvalid);
     }
     if !(super::session_authority::may_derive(user.mfa_enabled, row.mfa_assured)
-        || row.device_request_id.is_some()
-            && app_policy::permits(&user, false, row.mfa_policy_revision.as_deref()))
+        || (row.device_request_id.is_some()
+            && app_policy::permits(&user, false, row.mfa_policy_revision.as_deref())))
     {
         return Err(AppError::MfaStepUpRequired);
     }

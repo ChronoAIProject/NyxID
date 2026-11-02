@@ -30,6 +30,7 @@ pub fn intent(
         profile: machine.profile.profile_version.clone(),
         image: machine.profile.image_digest.clone(),
         runtime_class: machine.profile.runtime_class.clone(),
+        seccomp_localhost_profile: machine.profile.seccomp_localhost_profile.clone(),
         workspace_storage_class: storage_class.map(str::to_owned),
         workspace_size: format!("{}Gi", machine.profile.workspace_gib),
         cpu_request: format!("{}m", machine.profile.cpu_millis),
@@ -101,6 +102,8 @@ mod tests {
         retained.runtime_generation = 1;
         retained.credential_epoch = 1;
         retained.profile.runtime_class = Some("saved-runtime".into());
+        retained.profile.seccomp_localhost_profile =
+            Some(format!("nyxid/remote-machine-v1-{}.json", "b".repeat(64)));
         let resumed = intent(
             &retained,
             &uuid::Uuid::new_v4().to_string(),
@@ -111,6 +114,15 @@ mod tests {
         resumed.validate().unwrap();
         assert_eq!(resumed.image, retained.profile.image_digest);
         assert_eq!(resumed.runtime_class, retained.profile.runtime_class);
+        assert_eq!(
+            resumed.seccomp_localhost_profile,
+            retained.profile.seccomp_localhost_profile
+        );
+        assert_eq!(
+            resumed.apply_object()["spec"]["podTemplate"]["spec"]["containers"][0]["securityContext"]
+                ["seccompProfile"],
+            serde_json::json!({"type": "Localhost", "localhostProfile": retained.profile.seccomp_localhost_profile})
+        );
         assert_eq!(resumed.profile, nyxid_machine::managed::PROFILE);
         for obsolete in ["remote-shell-files-v1", "remote-shell-files-v2"] {
             retained.profile.profile_version = obsolete.into();

@@ -13,6 +13,7 @@ import {
 import { billingWallet } from "../src/test/billing-fixture";
 import { assistantAgentListSchema } from "../src/schemas/assistant-nyxagent";
 import type { ApiKey } from "../src/types/api";
+import { machineAccessFixture } from "../src/test/machine-access-fixture";
 
 export const machineId = "11111111-1111-4111-8111-111111111111";
 export const otherMachineId = "22222222-2222-4222-8222-222222222222";
@@ -143,6 +144,8 @@ export interface MachineMock {
   unknown: string[];
   agents: boolean;
   capabilitiesEditable: boolean;
+  capabilityEditing: boolean;
+  contextSetup: boolean;
   admissions: boolean;
   listed: boolean;
   detailStatus: number;
@@ -182,6 +185,8 @@ export async function installMachineMock(
     unknown: [],
     agents: false,
     capabilitiesEditable: true,
+    capabilityEditing: true,
+    contextSetup: false,
     admissions: true,
     listed: true,
     detailStatus: 200,
@@ -264,7 +269,8 @@ export async function installMachineMock(
           billing_available: true,
           enabled_features: [
             "experimental:ai-assistant",
-            "assistant:machine-capabilities",
+            ...(state.capabilityEditing ? ["assistant:machine-capabilities"] : []),
+            ...(state.contextSetup ? ["assistant:machine-contexts"] : []),
             ...(state.admissions ? ["experimental:remote-machines"] : []),
           ],
         },
@@ -373,11 +379,18 @@ export async function installMachineMock(
       body = state.assigned
         ? [
             {
+              ...machineAccessFixture,
               node_id: machineId,
               name: state.machine.name,
               revision: 8,
               protocol_v2: true,
               can_edit: state.capabilitiesEditable,
+              assignment_revision: 8,
+              capability_edit_enabled: state.capabilityEditing,
+              context_setup_enabled: state.contextSetup,
+              membership: state.assigned,
+              availability_reason: "no_tools_granted",
+              machine_configuration: state.machine.machine_configuration,
               legacy: false,
               mode: "shared_legacy",
               capabilities: emptyCapabilities,

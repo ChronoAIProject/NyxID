@@ -575,6 +575,7 @@ mod tests {
             &keys,
             &verifier,
             BootstrapInput {
+                payload_version: nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
                 binding: prepared.clone(),
                 ticket: ticket.clone(),
                 recipient_public_key: public.clone(),
@@ -588,6 +589,7 @@ mod tests {
             &keys,
             &verifier,
             BootstrapInput {
+                payload_version: nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
                 binding: prepared.clone(),
                 ticket: ticket.clone(),
                 recipient_public_key: public.clone(),

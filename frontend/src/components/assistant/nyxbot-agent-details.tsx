@@ -338,7 +338,7 @@ export function AgentDetailsSheet({
                 </>
               ) : (
                 <Section id={GRANTS_SECTION_ID} title="Access" description="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first.">
-                  <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
+                  <MachineCapabilities agentId={agent.id} agent={agent} disabled={agent.status === "destroyed" || agent.can_maintain === false} />
                 </Section>
               )}
               <AgentConnections key={agent.id} agent={agent} />
@@ -753,7 +753,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
           <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
           {agent.owner_kind !== "org" && !agent.share_role ? <CollaborationGuestControls agentId={agent.id} /> : null}
           {agent.owner_kind !== "org" ? <AgentOperationScopes agentId={agent.id} disabled={readOnly} guests /> : null}
-          <MachineCapabilities agentId={agent.id} disabled={readOnly} />
+          <MachineCapabilities agentId={agent.id} agent={agent} disabled={readOnly} />
         </>
       ) : null}
     </Section>

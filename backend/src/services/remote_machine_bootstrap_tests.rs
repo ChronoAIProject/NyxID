@@ -8,6 +8,7 @@ use crate::{
     services::remote_machine_service as lifecycle,
     test_utils::{connect_transaction_test_database, test_encryption_keys, test_user},
 };
+use mongodb::bson::Document;
 
 struct TestWorkloadIdentity;
 #[async_trait::async_trait]
@@ -135,6 +136,7 @@ pub(crate) async fn fixture() -> (
 
 fn request(binding: &Binding, keypair: &nyxid_machine::bootstrap::RecipientKey) -> BootstrapInput {
     BootstrapInput {
+        payload_version: nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
         binding: binding.clone(),
         ticket: serde_json::json!({"test_workload_identity":"authenticated_fixture", "recipient_key_digest": hex::encode(nyxid_machine::bootstrap::recipient_key_digest(&keypair.public_key_b64u().unwrap()).unwrap())}),
         recipient_public_key: keypair.public_key_b64u().unwrap(),
@@ -242,6 +244,25 @@ async fn lost_response_replays_one_sealed_delivery_and_stable_node_credentials()
     assert_eq!(first.sealed, second.sealed);
     let plaintext = nyxid_machine::bootstrap::open(&first.sealed, &keypair, &binding).unwrap();
     let secrets: Value = serde_json::from_slice(&plaintext).unwrap();
+    let machine = db
+        .collection::<ManagedMachine>(MACHINES)
+        .find_one(doc! {"_id":&binding.node_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        secrets["hosted_storage"]["original_pvc_uid"],
+        machine.pvc_uid.as_deref().unwrap(),
+        "sealed delivery must carry the controller-observed original volume"
+    );
+    assert!(
+        uuid::Uuid::parse_str(
+            secrets["hosted_storage"]["allocation_id"]
+                .as_str()
+                .expect("accepted-create allocation authority")
+        )
+        .is_ok()
+    );
     let auth = secrets["auth_token"].as_str().unwrap();
     let signing = secrets["signing_secret"].as_str().unwrap();
     let node = node_service::validate_auth_token(&db, auth).await.unwrap();
@@ -595,7 +616,7 @@ async fn sealed_bootstrap_carries_selected_browser_computer_capability_ceiling()
     db.collection::<mongodb::bson::Document>(MACHINES)
         .update_one(
             doc! {"_id":&binding.node_id},
-            doc! {"$set":{"capabilities":&capabilities}},
+            doc! {"$set":{"capabilities":&capabilities,"configuration.capabilities":&capabilities}},
         )
         .await
         .unwrap();
@@ -609,7 +630,204 @@ async fn sealed_bootstrap_carries_selected_browser_computer_capability_ceiling()
     .unwrap();
     let plaintext = nyxid_machine::bootstrap::open(&result.sealed, &keypair, &binding).unwrap();
     let payload: Value = serde_json::from_slice(&plaintext).unwrap();
-    assert_eq!(payload["capabilities"], serde_json::json!(capabilities));
+    assert_eq!(
+        payload["configuration"]["capabilities"],
+        serde_json::json!(capabilities)
+    );
+    assert_eq!(
+        payload["payload_version"],
+        nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION
+    );
+    let required: nyxid_machine::managed::BootstrapPayload =
+        serde_json::from_slice(&plaintext).unwrap();
+    required.validate().unwrap();
     assert_eq!(result.binding, binding);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn bootstrap_invalid_required_contract_has_no_credential_or_delivery_effect() {
+    for invalid in ["payload", "configuration", "ceiling"] {
+        let (db, keys, binding, keypair) = fixture().await;
+        let mut input = request(&binding, &keypair);
+        match invalid {
+            "payload" => input.payload_version += 1,
+            "configuration" => {
+                db.collection::<Document>(MACHINES)
+                    .update_one(
+                        doc! {"_id":&binding.node_id},
+                        doc! {"$set":{"configuration.version":999}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                db.collection::<Document>(MACHINES)
+                    .update_one(
+                        doc! {"_id":&binding.node_id},
+                        doc! {"$set":{"configuration.capabilities":["shell"]}},
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        assert!(
+            bootstrap(&db, &keys, &TestWorkloadIdentity, input)
+                .await
+                .is_err(),
+            "{invalid}"
+        );
+        assert_eq!(
+            db.collection::<Document>(DELIVERIES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let node = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id":&binding.node_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(node.auth_token_hash, "reserved-auth");
+        assert!(!node.is_active);
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn hosted_storage_initialization_is_bound_once_to_live_authenticated_daemon() {
+    use crate::services::node_owner_service::{self, NodeOwnerFence, ReplicaIdentity};
+    let (db, keys, binding, keypair) = fixture().await;
+    bootstrap(
+        &db,
+        &keys,
+        &TestWorkloadIdentity,
+        request(&binding, &keypair),
+    )
+    .await
+    .unwrap();
+    let replica = ReplicaIdentity::new("storage-test".into(), "http://127.0.0.1:1".into());
+    let owner = node_owner_service::claim(
+        &db,
+        &binding.node_id,
+        &replica,
+        &uuid::Uuid::new_v4().to_string(),
+        std::time::Duration::from_secs(120),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let fence = NodeOwnerFence::from_owner(&binding.node_id, &owner);
+    let a = uuid::Uuid::new_v4().to_string();
+    let b = uuid::Uuid::new_v4().to_string();
+    let (first, second) = tokio::join!(
+        claim_hosted_storage(&db, &binding, &a, &fence),
+        claim_hosted_storage(&db, &binding, &b, &fence)
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_ne!(
+        first.initialize, second.initialize,
+        "one allocation can authorize only one initializer daemon"
+    );
+    assert_eq!(first.storage, second.storage);
+    let (initializer, replacement) = if first.initialize { (&a, &b) } else { (&b, &a) };
+    assert!(
+        claim_hosted_storage(&db, &binding, initializer, &fence)
+            .await
+            .unwrap()
+            .initialize
+    );
+    assert!(
+        !claim_hosted_storage(&db, &binding, replacement, &fence)
+            .await
+            .unwrap()
+            .initialize
+    );
+    // Expired replay ciphertext is unrelated to an active Node's ability to
+    // recover the same retained volume on a later authenticated connection.
+    db.collection::<Document>(DELIVERIES)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    assert!(
+        !claim_hosted_storage(&db, &binding, &uuid::Uuid::new_v4().to_string(), &fence)
+            .await
+            .unwrap()
+            .initialize
+    );
+    let mut stale = fence.clone();
+    stale.connection_id = uuid::Uuid::new_v4().to_string();
+    assert!(
+        claim_hosted_storage(&db, &binding, initializer, &stale)
+            .await
+            .is_err()
+    );
+    let mut old = binding.clone();
+    old.credential_epoch += 1;
+    assert!(
+        claim_hosted_storage(&db, &old, initializer, &fence)
+            .await
+            .is_err()
+    );
+    assert!(
+        claim_hosted_storage(&db, &binding, "caller-not-a-daemon-uuid", &fence)
+            .await
+            .is_err()
+    );
+    let saved = db
+        .collection::<ManagedMachine>(MACHINES)
+        .find_one(doc! {"_id":&binding.node_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.hosted_storage_initializer_runtime_id.as_deref(),
+        Some(initializer.as_str())
+    );
+    assert_eq!(
+        saved.pvc_uid.as_deref(),
+        Some(first.storage.original_pvc_uid.as_str())
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sealed_storage_replay_cannot_substitute_original_volume() {
+    let (db, keys, binding, keypair) = fixture().await;
+    bootstrap(
+        &db,
+        &keys,
+        &TestWorkloadIdentity,
+        request(&binding, &keypair),
+    )
+    .await
+    .unwrap();
+    db.collection::<Document>(MACHINES)
+        .update_one(
+            doc! {"_id":&binding.node_id},
+            doc! {"$set":{"pvc_uid":uuid::Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        bootstrap(
+            &db,
+            &keys,
+            &TestWorkloadIdentity,
+            request(&binding, &keypair)
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        db.collection::<Document>(DELIVERIES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
     db.drop().await.unwrap();
 }

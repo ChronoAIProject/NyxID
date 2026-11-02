@@ -70,6 +70,72 @@ access. It contains no commands, paths, URLs, file contents or output. Pages use
 indexed cursor queries (50 rows by default, 100 maximum, a 3-second query limit)
 and batched job lookups. No additional machine execution authority is introduced.
 
+### Remote management presentation and retained history
+
+`GET /api/v1/remote-machines` (`machines[]`) and
+`GET /api/v1/remote-machines/{machine_id}` (`machine`) add an optional
+`presentation` object to the existing safe Machine response. Older servers may
+omit it; missing bound Nodes, never-reported profiles and completed deletions
+return `null`. Authenticate and select the ManagedMachine owner before joining
+its exact `node_id`/owner binding. List pages batch the Node and assigned-Agent
+lookups; this does not make inactive Nodes discoverable through generic Node or
+execution APIs.
+
+The presentation response has only these serialized fields:
+
+| Field | Type and meaning |
+|---|---|
+| `agent_version` | string or null; saved Node agent version |
+| `os`, `arch` | string or null; last reported platform, empty values become unknown |
+| `roots` | string array; last reported allowed roots |
+| `capabilities` | string array; last reported enabled `shell`, `files`, `browser`, `computer` |
+| `commands_isolated` | boolean or null; reported command isolation |
+| `browser_isolated` | boolean; reported browser isolation |
+| `separation_support` | boolean or null; verified separation-evidence support summary, absent evidence is unknown |
+| `owner_confirmation` | `all`, `changes`, `none`, or null; persisted owner policy, absent policy is unknown |
+| `allow_single_user_saved_logins` | boolean or null; persisted owner opt-in, absent policy is unknown |
+| `computer_mode` | existing reported ComputerMode string (`standard` or `unrestricted`) |
+| `cua_version` | string or null; reported driver version |
+| `connected` | boolean; true only with a live resolved owner connection and current authenticated configuration evidence |
+| `desktop_ready` | boolean; current evidence plus reported ready Computer/Browser display; independent of separation support |
+| `historical` | boolean; true when the presentation is a saved report without current configuration evidence |
+| `configuration_current` | boolean; same current-generation evidence gate as `machine_configuration.state == "applied"` |
+| `last_reported_at` | RFC3339 timestamp or null; existing authenticated configuration observation for the reported runtime, never a synthesized heartbeat/profile timestamp |
+
+Current evidence binds the configuration revision/digest, runtime generation,
+credential epoch, runtime identity and live connection identity, with an admitted
+Ready Machine. Paused, inactive and deleting Machines may show saved values but
+always have `connected=false`, `desktop_ready=false` and `historical=true`.
+A fresh generation cannot inherit an old report as applied. Runtime IDs,
+connection routing, raw profiles, credentials, leases and support diagnostics are
+not returned in this projection. Per-Agent grants remain on the existing Agent
+API; presentation is read-only.
+
+`GET /api/v1/machines/{node_id}/activity` retains its first-party human,
+personal-owner/org-admin and Agent-name ACLs. An inactive Node must have an exact
+retained ManagedMachine owner binding and machine profile. If the Node was
+removed, the retained ManagedMachine plus retained `machine_operation` audit data
+must still establish the binding. Missing owners, accepted owner erasure or
+missing retained data deny this expanded path. Paused/deleting/deleted records
+can return the same bounded safe metadata, filters and cursors; there is no
+reactivation, desktop/job permission or attachment-retention extension.
+
+### Saved login management
+
+Saved logins remain account-level, write-only website credentials. The safe
+listing response contains only the login identity, label, allowed origins,
+username hint, presence flags, confirmation policy and timestamps; it never
+contains credential values. `POST /api/v1/saved-logins` creates a login,
+`PUT /api/v1/saved-logins/{id}` performs a complete credential replacement, and
+`DELETE /api/v1/saved-logins/{id}` removes the login and its grants.
+
+There is no metadata-only PATCH or label/confirmation editor. Changing a label,
+allowed origins, confirmation policy or any credential uses the existing full
+replacement contract and its owner/org, erasure and exact-source protections.
+The withdrawal of the metadata editor does not delete or rewrite existing login
+records; it only removes the editor-specific route, model field and revision
+coupling.
+
 ## Decisions
 
 ### D1. Capabilities and terms
@@ -1786,3 +1852,43 @@ Externally authorized Remote Machine jobs use their existing source and machine
 grants instead of NyxBot chat consent. Signed gateway requests retain exact
 service declarations, streaming and billing attribution, with live source,
 grant, runtime and lease checks before dispatch.
+
+
+### Machine experience F04 membership-only initialization
+
+The rollout Settings editor uses the existing `PUT /assistant/nyxagent/agents/{id}/grants`
+with the strict, disjoint body `{"machine_membership":{"node_id":"<id>","assigned":true}}`.
+`assigned:false` removes only that membership. Mixing this form with replacement
+services, machines, account access, guest access, logins or capability fields is
+rejected. The legacy replacement body keeps its established semantics.
+
+The self-hosted setup page stamps `machine_assignment:"membership_only"` on both
+create and mint Choices, including links originally prepared in chat. The intent
+survives Choices replacement when mint omits it. Settings-origin New Agent uses
+the same optional field on the existing Agent creation endpoint. Untagged setup,
+pairing, generic Agent creation and NyxBot grants retain their compatibility
+behavior; hosted creation continues to initialize all-off authority.
+
+At the shared initialization boundary, a new or re-added tagged membership has
+zero tool capabilities, explicit empty assignment saved-login scope, and
+`legacy:false`, regardless of the acting person's capability-editing flag.
+Membership changes are applied against the live transaction row, preserving
+other machines, services, account access, global login grants and guest levels.
+An already-present membership retains its explicit Review and execution revision.
+Re-adding a removed assignment starts empty while retaining its mode and cleanup
+fences. Missing selection/support stays denied. Only the supported, live-flag,
+revision-bound Review flow can widen this policy; toggling a flag never does so.
+
+Tagged setup completion commits Specialist membership and `connected` together.
+The existing node capability consumer, setup GET and chat watcher share this
+completion boundary. The watcher waits for durable completion before its successful
+handoff and preserves setup identity and report provenance. Reconnection cannot
+re-add revoked membership; a duplicate legacy grant preserves the stored denial
+or explicit Review rather than restoring earlier tool/login authority.
+
+**Deployment order:** upgrade and drain every backend/API/background writer before
+shipping the tagged rollout UI. Old untagged clients cannot be distinguished from
+intentional legacy consumers. Unsupported servers must surface the new request's
+error, retain the UI draft, and never retry via legacy replacement semantics.
+Capability flags continue to govern Review, not membership availability. This is
+an implementation contract, not deployment or runtime-isolation certification.

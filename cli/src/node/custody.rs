@@ -2,7 +2,10 @@
 //! the worker's OS identity. Missing services/objects never establish denial.
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -14,6 +17,23 @@ use super::{config::NodeConfig, machine::process::Identity};
 
 const CADENCE: Duration = Duration::from_secs(60);
 const BOUND: Duration = Duration::from_secs(5);
+// A refresh includes observation, helper retirement, bounded synthetic-object
+// cleanup and final helper retirement: 20 + 2 + 10 + 2 = 34s. Together with the
+// 60s cadence this leaves 6s below the 100s evidence validity window.
+const ROUND_BOUND: Duration = Duration::from_secs(20);
+const REAP_BOUND: Duration = Duration::from_secs(2);
+const CLEANUP_BOUND: Duration = Duration::from_secs(10);
+const VALIDITY: Duration = Duration::from_secs(100);
+// Reserved scheduler-delay budget, not a guarantee about host scheduling.
+const SCHEDULING_ALLOWANCE: Duration = Duration::from_secs(5);
+const _: () = assert!(
+    CADENCE.as_secs()
+        + ROUND_BOUND.as_secs()
+        + CLEANUP_BOUND.as_secs()
+        + REAP_BOUND.as_secs() * 2
+        + SCHEDULING_ALLOWANCE.as_secs()
+        < VALIDITY.as_secs()
+);
 const REQUEST_LIMIT: u64 = 64 * 1024;
 const WARNING: &str = "Node credential custody is not verified: agent commands or browsers may access node tokens, signing secrets and stored credentials. Use a separated Linux supervisor with private node storage; install the node executable where every worker identity can execute it (e.g. /usr/local/bin); shared_legacy retains the owner's OS access.";
 
@@ -74,7 +94,10 @@ pub(crate) struct Unverified;
 
 struct Cached {
     status: Status,
+    // Evidence validity starts before the probe; completion is only used to
+    // let callers already waiting on that round share its result.
     at: Instant,
+    completed_at: Instant,
     identities: IdentityStamp,
 }
 
@@ -82,7 +105,11 @@ pub(crate) struct Custody {
     directory: PathBuf,
     cached: RwLock<Option<Cached>>,
     refresh: tokio::sync::Mutex<()>,
+    helper: ProbeHelper,
+    probe_stage: RwLock<&'static str>,
+    pending_probe_cleanup: Arc<tokio::sync::Mutex<Vec<KeyProbe>>>,
     monitoring: std::sync::atomic::AtomicBool,
+    refreshes: AtomicU64,
 }
 
 impl Custody {
@@ -95,7 +122,11 @@ impl Custody {
             directory: directory.into(),
             cached: RwLock::new(None),
             refresh: tokio::sync::Mutex::new(()),
+            helper: ProbeHelper::default(),
+            probe_stage: RwLock::new("idle"),
+            pending_probe_cleanup: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             monitoring: std::sync::atomic::AtomicBool::new(false),
+            refreshes: AtomicU64::new(0),
         }
     }
     /// Contexts share the supervisor's credential location, never its identity
@@ -111,10 +142,14 @@ impl Custody {
             .and_then(|cache| {
                 cache
                     .as_ref()
-                    .filter(|c| c.at.elapsed() <= CADENCE + BOUND * 8)
+                    .filter(|c| c.at.elapsed() <= VALIDITY)
                     .map(|c| c.status)
             })
             .unwrap_or_default()
+    }
+    #[cfg(test)]
+    fn refresh_count(&self) -> u64 {
+        self.refreshes.load(Ordering::Relaxed)
     }
     /// No I/O on execution: separated contexts consume the cached observation.
     /// Ordinary/shared-legacy jobs keep their existing owner-risk behavior.
@@ -125,6 +160,34 @@ impl Custody {
         Ok(())
     }
     pub(crate) async fn observe(&self, identities: &[Option<Identity>; 3]) {
+        self.observe_inner(identities, false).await;
+    }
+
+    /// Run one scheduled round even when the previous observation is younger
+    /// than the normal cache cadence.  The monitor owns the schedule; callers
+    /// performing ordinary refreshes continue to reuse a fresh observation.
+    pub(crate) async fn observe_scheduled(&self, identities: &[Option<Identity>; 3]) {
+        self.observe_inner(identities, true).await;
+    }
+
+    async fn observe_inner(&self, identities: &[Option<Identity>; 3], forced: bool) {
+        self.observe_with(
+            identities,
+            forced,
+            self.observe_uncached(identities),
+            ROUND_BOUND,
+        )
+        .await;
+    }
+
+    async fn observe_with(
+        &self,
+        identities: &[Option<Identity>; 3],
+        forced: bool,
+        probe: impl std::future::Future<Output = Result<Status>>,
+        round_bound: Duration,
+    ) {
+        let requested_at = Instant::now();
         let _refresh = self.refresh.lock().await;
         let stamp = identities
             .iter()
@@ -135,13 +198,37 @@ impl Custody {
             })
             .collect::<Vec<_>>();
         if self.cached.read().ok().is_some_and(|c| {
-            c.as_ref()
-                .is_some_and(|v| v.at.elapsed() < CADENCE && v.identities == stamp)
+            c.as_ref().is_some_and(|v| {
+                v.identities == stamp
+                    && ((!forced && v.at.elapsed() < CADENCE)
+                        || (forced && v.completed_at >= requested_at))
+            })
         }) {
             return;
         }
         // An identity change invalidates prior authority before any OS I/O.
         let started = Instant::now();
+        let prior_age_ms = self.cached.read().ok().and_then(|cached| {
+            cached
+                .as_ref()
+                .map(|value| value.at.elapsed().as_millis() as u64)
+        });
+        let identity_changed = self.cached.read().ok().is_some_and(|cached| {
+            cached
+                .as_ref()
+                .is_some_and(|value| value.identities != stamp)
+        });
+        tracing::debug!(
+            reason = "refresh_started",
+            producer_pid = std::process::id(),
+            probe_uid_gids = ?identities.each_ref().map(|identity| {
+                identity.as_ref().map(|identity| (identity.uid, identity.gid))
+            }),
+            forced,
+            identity_changed,
+            cache_age_ms = prior_age_ms.unwrap_or(0),
+            "credential custody refresh"
+        );
         if let Ok(mut cached) = self.cached.write()
             && cached
                 .as_ref()
@@ -149,7 +236,9 @@ impl Custody {
         {
             *cached = None;
         }
-        let status = self.observe_uncached(identities).await.unwrap_or_default();
+        let status = self
+            .observe_round(probe, round_bound, forced, started, identities)
+            .await;
         if !status.all_denied() {
             tracing::warn!("{WARNING}");
         }
@@ -157,16 +246,112 @@ impl Custody {
             *cached = Some(Cached {
                 status,
                 at: started,
+                completed_at: Instant::now(),
                 identities: stamp,
             });
         }
     }
+
+    async fn observe_round(
+        &self,
+        probe: impl std::future::Future<Output = Result<Status>>,
+        bound: Duration,
+        forced: bool,
+        started: Instant,
+        identities: &[Option<Identity>; 3],
+    ) -> Status {
+        // A failed retirement is still owned by this custody instance. Do not
+        // seed more objects until every prior obligation has been discharged.
+        let mut status = if self.pending_probe_cleanup.lock().await.is_empty() {
+            self.refreshes.fetch_add(1, Ordering::Relaxed);
+            match tokio::time::timeout(bound, probe).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        reason = "probe_failed",
+                        stage = *self.probe_stage.read().unwrap_or_else(|e| e.into_inner()),
+                        forced,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "credential custody refresh failed closed"
+                    );
+                    let _ = error;
+                    Status::default()
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        reason = "probe_round_timeout",
+                        stage = *self.probe_stage.read().unwrap_or_else(|e| e.into_inner()),
+                        forced,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "credential custody refresh timed out and failed closed"
+                    );
+                    Status::default()
+                }
+            }
+        } else {
+            Status::default()
+        };
+        if !status.all_denied() {
+            // Once failure/uncertainty is known, cleanup must not extend use
+            // of the preceding successful evidence.
+            if let Ok(mut cached) = self.cached.write() {
+                *cached = None;
+            }
+        }
+        // The round future may have been cancelled during helper I/O. Its
+        // child remains owned here, so reap it before deleting a seeded object.
+        let reaped = self.helper.stop().await;
+        if !reaped {
+            status = Status::default();
+        } else {
+            self.set_probe_stage("probe_cleanup");
+            if tokio::time::timeout(CLEANUP_BOUND, self.cleanup_pending_probes())
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    reason = "probe_cleanup_timeout",
+                    stage = "probe_cleanup",
+                    "credential custody cleanup remains pending"
+                );
+                status = Status::default();
+            }
+            if !self.helper.stop().await || !self.pending_probe_cleanup.lock().await.is_empty() {
+                status = Status::default();
+            }
+        }
+        self.set_probe_stage("idle");
+        tracing::debug!(
+            reason = "refresh_completed",
+            producer_pid = std::process::id(),
+            probe_uid_gids = ?identities.each_ref().map(|identity| {
+                identity.as_ref().map(|identity| (identity.uid, identity.gid))
+            }),
+            verified = status.all_denied(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "credential custody refresh"
+        );
+        status
+    }
+
+    fn set_probe_stage(&self, stage: &'static str) {
+        if let Ok(mut current) = self.probe_stage.write() {
+            *current = stage;
+        }
+    }
     async fn observe_uncached(&self, identities: &[Option<Identity>; 3]) -> Result<Status> {
-        let directory = super::storage::Directory::open(&self.directory)?;
-        let config = NodeConfig::load_in(&directory, &self.directory.join("config.toml"))?;
-        let paths = targets(&self.directory)?;
+        self.set_probe_stage("configuration");
+        let selected = self.directory.clone();
+        let (directory, config, paths) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let directory = super::storage::Directory::open(&selected)?;
+            let config = NodeConfig::load_in(&directory, &selected.join("config.toml"))?;
+            let paths = targets(&selected)?;
+            Ok((directory, config, paths))
+        })
+        .await??;
         let mut outcomes = [Observation::Unknown; 3];
         for (index, identity) in identities.iter().enumerate() {
+            let identity_class = ["command", "browser", "developer"][index];
             let Some(identity) = identity else { continue };
             if !Identity::resolve(Some(&identity.name))
                 .is_ok_and(|current| current.uid == identity.uid && current.gid == identity.gid)
@@ -190,19 +375,49 @@ impl Custody {
                     key: format!("object/v1/custody/{}", uuid::Uuid::new_v4()),
                     action: Action::Seed,
                 };
-                let seeded = helper(
-                    None,
-                    &Request {
-                        paths: vec![],
-                        keychain: Some(key.clone()),
-                    },
-                )
-                .await;
+                self.register_probe_cleanup(&key).await;
+                self.set_probe_stage("keychain_seed");
+                let seeded = self
+                    .helper
+                    .run(
+                        None,
+                        &Request {
+                            paths: vec![],
+                            keychain: Some(key.clone()),
+                        },
+                    )
+                    .await;
                 if seeded != Observation::Denied {
                     // Even failed/uncertain seeding attempts must try retirement.
-                    let mut retirement = key;
+                    let mut retirement = key.clone();
                     retirement.action = Action::Delete;
-                    let _ = helper(
+                    self.set_probe_stage("keychain_retire");
+                    let retired = self
+                        .helper
+                        .run(
+                            None,
+                            &Request {
+                                paths: vec![],
+                                keychain: Some(retirement),
+                            },
+                        )
+                        .await;
+                    if retired == Observation::Denied {
+                        self.retire_probe_cleanup(&key).await;
+                    }
+                    continue;
+                }
+                let mut read = key.clone();
+                read.action = Action::Read;
+                request.keychain = Some(read);
+                self.set_probe_stage("identity_probe");
+                outcomes[index] = self.helper.run(Some(identity), &request).await;
+                let mut retirement = key.clone();
+                retirement.action = Action::Delete;
+                self.set_probe_stage("keychain_retire");
+                let retired = self
+                    .helper
+                    .run(
                         None,
                         &Request {
                             paths: vec![],
@@ -210,31 +425,24 @@ impl Custody {
                         },
                     )
                     .await;
-                    continue;
-                }
-                let mut read = key.clone();
-                read.action = Action::Read;
-                request.keychain = Some(read);
-                outcomes[index] = helper(Some(identity), &request).await;
-                let mut retirement = key;
-                retirement.action = Action::Delete;
-                if helper(
-                    None,
-                    &Request {
-                        paths: vec![],
-                        keychain: Some(retirement),
-                    },
-                )
-                .await
-                    != Observation::Denied
-                {
+                if retired != Observation::Denied {
                     outcomes[index] = Observation::Unknown;
+                } else {
+                    self.retire_probe_cleanup(&key).await;
                 }
             } else if config.storage_backend == "file" {
-                outcomes[index] = helper(Some(identity), &request).await;
+                self.set_probe_stage("identity_probe");
+                outcomes[index] = self.helper.run(Some(identity), &request).await;
             }
+            tracing::debug!(
+                identity_class,
+                observation = ?outcomes[index],
+                "credential custody identity observation"
+            );
         }
-        directory.check_path(&self.directory)?;
+        self.set_probe_stage("configuration_recheck");
+        let selected = self.directory.clone();
+        tokio::task::spawn_blocking(move || directory.check_path(&selected)).await??;
         Ok(Status {
             command: outcomes[0],
             browser: outcomes[1],
@@ -250,17 +458,68 @@ impl Custody {
         {
             return;
         }
+        // Validity is measured from observation start. Starting a fresh
+        // 60-second delay here would charge the initial probe duration twice
+        // before the following observation can complete.
+        let first_tick = self
+            .cached
+            .read()
+            .ok()
+            .and_then(|cached| cached.as_ref().map(|cached| cached.at + CADENCE))
+            .unwrap_or_else(|| Instant::now() + CADENCE);
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
-            let mut cadence = tokio::time::interval(CADENCE);
+            let mut cadence =
+                tokio::time::interval_at(tokio::time::Instant::from_std(first_tick), CADENCE);
             cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            cadence.tick().await; // The construction observation already ran.
             loop {
                 cadence.tick().await;
                 let Some(custody) = weak.upgrade() else { break };
-                custody.observe(&identities).await;
+                custody.observe_scheduled(&identities).await;
             }
         });
+    }
+
+    async fn register_probe_cleanup(&self, key: &KeyProbe) {
+        let mut pending = self.pending_probe_cleanup.lock().await;
+        if !pending
+            .iter()
+            .any(|existing| existing.owner == key.owner && existing.key == key.key)
+        {
+            pending.push(key.clone());
+        }
+    }
+
+    async fn retire_probe_cleanup(&self, key: &KeyProbe) {
+        let mut pending = self.pending_probe_cleanup.lock().await;
+        pending.retain(|existing| existing.owner != key.owner || existing.key != key.key);
+    }
+
+    async fn cleanup_pending_probes(&self) {
+        // Keep each obligation registered until deletion is confirmed. A
+        // cancelled cleanup must not drop the rest of this snapshot.
+        let pending = self.pending_probe_cleanup.lock().await.clone();
+        for mut key in pending {
+            key.action = Action::Delete;
+            let result = self
+                .helper
+                .run(
+                    None,
+                    &Request {
+                        paths: vec![],
+                        keychain: Some(key.clone()),
+                    },
+                )
+                .await;
+            if result == Observation::Denied {
+                self.retire_probe_cleanup(&key).await;
+            } else {
+                tracing::warn!(
+                    reason = "probe_cleanup_pending",
+                    "credential custody probe cleanup deferred"
+                );
+            }
+        }
     }
 }
 
@@ -372,7 +631,30 @@ enum Action {
 }
 
 async fn helper(identity: Option<&Identity>, request: &Request) -> Observation {
-    async fn run(identity: Option<&Identity>, request: &Request) -> Result<Observation> {
+    ProbeHelper::default().run(identity, request).await
+}
+
+#[derive(Default)]
+struct ProbeHelper {
+    // Keep ownership outside the cancellable helper future. The enclosing
+    // round can therefore kill and reap it before retiring a synthetic key.
+    child: tokio::sync::Mutex<Option<tokio::process::Child>>,
+}
+
+impl ProbeHelper {
+    async fn run(&self, identity: Option<&Identity>, request: &Request) -> Observation {
+        let result = self.run_inner(identity, request).await;
+        if !self.stop().await {
+            return Observation::Unknown;
+        }
+        result.unwrap_or(Observation::Unknown)
+    }
+
+    async fn run_inner(
+        &self,
+        identity: Option<&Identity>,
+        request: &Request,
+    ) -> Result<Observation> {
         let mut command = Command::new(std::env::current_exe()?);
         #[cfg(not(test))]
         command.args(["node", "custody-probe"]);
@@ -424,7 +706,10 @@ async fn helper(identity: Option<&Identity>, request: &Request) -> Observation {
             bytes.len() as u64 <= REQUEST_LIMIT,
             "node_custody_request_limit"
         );
-        let mut child = command.spawn()?;
+        let mut active = self.child.lock().await;
+        ensure!(active.is_none(), "node_custody_helper_pending");
+        *active = Some(command.spawn()?);
+        let child = active.as_mut().expect("registered helper");
         let result = tokio::time::timeout(BOUND, async {
             let mut stdin = child.stdin.take().context("node_custody_stdin_unknown")?;
             stdin.write_all(&bytes).await?;
@@ -434,14 +719,31 @@ async fn helper(identity: Option<&Identity>, request: &Request) -> Observation {
         .await;
         match result {
             Ok(value) => value,
-            Err(_) => {
-                child.start_kill()?;
-                child.wait().await?;
-                Ok(Observation::Unknown)
-            }
+            Err(_) => Ok(Observation::Unknown),
         }
     }
-    run(identity, request).await.unwrap_or(Observation::Unknown)
+
+    async fn stop(&self) -> bool {
+        let mut active = self.child.lock().await;
+        let Some(child) = active.as_mut() else {
+            return true;
+        };
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            let _ = child.start_kill();
+        }
+        if !matches!(
+            tokio::time::timeout(REAP_BOUND, child.wait()).await,
+            Ok(Ok(_))
+        ) {
+            tracing::warn!(
+                reason = "probe_helper_retirement_pending",
+                "credential custody helper retirement remains pending"
+            );
+            return false;
+        }
+        active.take();
+        true
+    }
 }
 
 /// Internal shell-free helper. It never reads file contents, prints a path,
@@ -702,6 +1004,7 @@ mod tests {
                 developer: Observation::Denied,
             },
             at: Instant::now(),
+            completed_at: Instant::now(),
             identities: vec![],
         });
         custody.require(false).unwrap();
@@ -782,6 +1085,7 @@ mod tests {
         *custody.cached.write().unwrap() = Some(Cached {
             status: denied,
             at: Instant::now(),
+            completed_at: Instant::now(),
             identities: vec![],
         });
         for _ in 0..1000 {
@@ -791,6 +1095,217 @@ mod tests {
         custody.cached.write().unwrap().as_mut().unwrap().at = Instant::now() - CADENCE - BOUND * 9;
         assert!(custody.require(true).is_err());
         custody.require(false).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduled_refresh_does_not_skip_a_fresh_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        NodeConfig::new("wss://example.test".into(), "node".into(), "file".into())
+            .save(&directory.path().join("config.toml"))
+            .unwrap();
+        let custody = Custody::new(directory.path());
+        let denied = Status {
+            command: Observation::Denied,
+            browser: Observation::Denied,
+            developer: Observation::Denied,
+        };
+        *custody.cached.write().unwrap() = Some(Cached {
+            status: denied,
+            at: Instant::now() - CADENCE + Duration::from_secs(1),
+            completed_at: Instant::now(),
+            identities: vec![None, None, None],
+        });
+
+        // A normal caller reuses the fresh cache.
+        custody.observe(&[None, None, None]).await;
+        assert_eq!(custody.status(), denied);
+        assert_eq!(custody.refresh_count(), 0);
+
+        // The monitor's due tick must execute a new probe round instead of
+        // being discarded by the ordinary < CADENCE cache check. With no
+        // identities this fixture produces unknown evidence and therefore
+        // closes separated admission.
+        custody.observe_scheduled(&[None, None, None]).await;
+        assert_eq!(custody.status(), Status::default());
+        assert_eq!(custody.refresh_count(), 1);
+        assert!(custody.require(true).is_err());
+        custody.observe_scheduled(&[None, None, None]).await;
+        assert_eq!(custody.refresh_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn monitor_first_tick_uses_the_observation_start_time() {
+        let directory = tempfile::tempdir().unwrap();
+        NodeConfig::new("wss://example.test".into(), "node".into(), "file".into())
+            .save(&directory.path().join("config.toml"))
+            .unwrap();
+        let custody = Arc::new(Custody::new(directory.path()));
+        *custody.cached.write().unwrap() = Some(Cached {
+            status: Status::default(),
+            at: Instant::now() - CADENCE + Duration::from_millis(20),
+            completed_at: Instant::now(),
+            identities: vec![None, None, None],
+        });
+        custody.monitor([None, None, None]);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while custody.refresh_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the initial probe duration must not postpone the first due refresh");
+    }
+
+    #[tokio::test]
+    async fn concurrent_scheduled_refreshes_share_one_probe_round() {
+        let directory = tempfile::tempdir().unwrap();
+        NodeConfig::new("wss://example.test".into(), "node".into(), "file".into())
+            .save(&directory.path().join("config.toml"))
+            .unwrap();
+        let custody = Arc::new(Custody::new(directory.path()));
+        *custody.cached.write().unwrap() = Some(Cached {
+            status: Status::default(),
+            at: Instant::now() - CADENCE,
+            completed_at: Instant::now() - CADENCE,
+            identities: vec![None, None, None],
+        });
+
+        tokio::join!(
+            custody.observe_scheduled(&[None, None, None]),
+            custody.observe_scheduled(&[None, None, None]),
+        );
+
+        assert_eq!(custody.refresh_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_cleanup_keeps_every_retirement_obligation() {
+        let custody = Custody::new(Path::new("/unused"));
+        // Invalid probe identifiers stop in the helper protocol validator and
+        // never access a native credential store.
+        for key in ["invalid-probe-one", "invalid-probe-two"] {
+            custody
+                .register_probe_cleanup(&KeyProbe {
+                    owner: "public-fixture".into(),
+                    key: key.into(),
+                    action: Action::Seed,
+                })
+                .await;
+        }
+        let _ = tokio::time::timeout(Duration::ZERO, custody.cleanup_pending_probes()).await;
+        assert_eq!(custody.pending_probe_cleanup.lock().await.len(), 2);
+        assert!(custody.helper.stop().await);
+    }
+
+    #[tokio::test]
+    async fn round_timeout_reaps_its_helper_and_releases_refresh_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        NodeConfig::new("wss://example.test".into(), "node".into(), "file".into())
+            .save(&directory.path().join("config.toml"))
+            .unwrap();
+        let custody = Custody::new(directory.path());
+        *custody.cached.write().unwrap() = Some(Cached {
+            status: Status {
+                command: Observation::Denied,
+                browser: Observation::Denied,
+                developer: Observation::Denied,
+            },
+            at: Instant::now(),
+            completed_at: Instant::now(),
+            identities: vec![None, None, None],
+        });
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        *custody.helper.child.lock().await = Some(child);
+        custody.set_probe_stage("identity_probe");
+        let started = Instant::now();
+        custody
+            .observe_with(
+                &[None, None, None],
+                true,
+                std::future::pending(),
+                Duration::from_millis(5),
+            )
+            .await;
+        assert!(started.elapsed() < REAP_BOUND * 2);
+        assert_eq!(custody.status(), Status::default());
+        assert!(custody.require(true).is_err());
+        custody.require(false).unwrap();
+        assert!(custody.helper.child.lock().await.is_none());
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            custody.observe_scheduled(&[None, None, None]),
+        )
+        .await
+        .expect("a timed-out refresh must release the refresh lock");
+        assert_eq!(custody.refresh_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn identity_change_invalidates_success_before_the_new_probe() {
+        let custody = Custody::new(Path::new("/unused"));
+        *custody.cached.write().unwrap() = Some(Cached {
+            status: Status {
+                command: Observation::Denied,
+                browser: Observation::Denied,
+                developer: Observation::Denied,
+            },
+            at: Instant::now(),
+            completed_at: Instant::now(),
+            identities: vec![None, None, None],
+        });
+        let identities = [Some(Identity::resolve(None).unwrap()), None, None];
+        custody
+            .observe_with(
+                &identities,
+                false,
+                async {
+                    assert_eq!(custody.status(), Status::default());
+                    anyhow::bail!("private probe failure must not be logged")
+                },
+                ROUND_BOUND,
+            )
+            .await;
+        assert!(custody.require(true).is_err());
+        custody.require(false).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_retirement_prevents_seeding_another_probe_round() {
+        let custody = Custody::new(Path::new("/unused"));
+        custody
+            .register_probe_cleanup(&KeyProbe {
+                owner: "public-fixture".into(),
+                key: "invalid-probe-without-native-store-access".into(),
+                action: Action::Seed,
+            })
+            .await;
+        let probed = std::sync::atomic::AtomicBool::new(false);
+        custody
+            .observe_with(
+                &[None, None, None],
+                true,
+                async {
+                    probed.store(true, Ordering::Relaxed);
+                    Ok(Status::default())
+                },
+                ROUND_BOUND,
+            )
+            .await;
+        assert!(!probed.load(Ordering::Relaxed));
+        assert_eq!(custody.refresh_count(), 0);
+        assert_eq!(custody.pending_probe_cleanup.lock().await.len(), 1);
+        assert!(custody.helper.child.lock().await.is_none());
+        assert!(custody.require(true).is_err());
     }
 
     #[test]

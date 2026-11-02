@@ -1,6 +1,7 @@
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -16,7 +17,17 @@ import type {
 } from "@/schemas/machines";
 import type { NodeInfo } from "@/types/nodes";
 import { useAuthStore } from "@/stores/auth-store";
-import { RemoteMachineDetail } from "./remote-machine-detail";
+import {
+  acceptRemoteMachineIntent,
+  getRemoteMachineIntent,
+  observeAcceptedRemoteMachineIntent,
+  parseAcceptedRemoteMachineIntent,
+  remoteMachineAcceptedSnapshot,
+} from "@/lib/remote-machine-intent";
+import {
+  RemoteMachineDetail,
+  RemoteMachineTimeline,
+} from "./remote-machine-detail";
 import {
   remoteMachineOperationFixture,
   remoteMachinePaidQuoteFixture,
@@ -25,6 +36,24 @@ import {
 const fixture = vi.hoisted(() => ({
   machine: {
     node_id: "11111111-1111-4111-8111-111111111111",
+    name: "machine-one",
+    capabilities: ["files", "shell"],
+    separation_choice: "automatic",
+    separation_policy_version: "remote-machine-separation-v1",
+    machine_configuration: {
+      version: 2,
+      revision: 1,
+      digest: "a".repeat(64),
+      runtime_generation: 2,
+      state: "pending",
+      reason: "current_runtime_configuration_evidence_required",
+    },
+    specialist_id: null,
+    specialist_assignment_state: "none",
+    specialist_assignment_error: null,
+    free_slot: true,
+    runtime_run_id: null,
+    funded_until: null,
     policy_version: "remote-machine-mvp" as const,
     data_policy_version: "remote-machine-data" as const,
     profile: {
@@ -133,6 +162,10 @@ vi.mock("@/hooks/use-machines", () => ({
     isPending: false,
   }),
 }));
+vi.mock("@/hooks/use-nyxbot-agents", () => ({
+  useNyxBotAgents: () => ({ data: { agents: [] }, isPending: false }),
+  useSetNyxBotAgentGrants: () => ({ mutateAsync: vi.fn() }),
+}));
 vi.mock("@/hooks/use-nodes", () => ({
   useNode: () => ({
     data: fixture.node,
@@ -171,6 +204,10 @@ beforeEach(() => {
   fixture.action.mockReset();
   fixture.refetch.mockReset();
   fixture.operationRefetch.mockReset();
+  fixture.refetch.mockImplementation(async () => ({ data: fixture.machine }));
+  fixture.operationRefetch.mockImplementation(async () => ({
+    data: fixture.operation,
+  }));
   useAuthStore.setState({
     user: {
       id: "owner",
@@ -204,6 +241,9 @@ afterEach(() => {
   fixture.retryPending = false;
   fixture.machine.active_operation_id = null;
   fixture.machine.cleanup_state = "not_required";
+  fixture.machine.machine_configuration.state = "pending";
+  fixture.machine.machine_configuration.reason =
+    "current_runtime_configuration_evidence_required";
   for (const key of [
     "name",
     "capabilities",
@@ -282,8 +322,17 @@ it("reuses the same manual retry request after an unknown network result", async
   expect(await screen.findByText("Connection lost")).toBeInTheDocument();
   const first = fixture.retryDelete.mock.calls[0]?.[0];
   await userEvent.click(
-    screen.getByRole("button", { name: "Confirm retry result" }),
+    screen.getByRole("button", { name: "Check retry status" }),
   );
+  await waitFor(() => expect(fixture.operationRefetch).toHaveBeenCalled());
+  expect(fixture.retryDelete).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "Retry deletion" }));
+  await waitFor(() => expect(fixture.retryDelete).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(fixture.operationRefetch).toHaveBeenCalled());
+  if (fixture.retryDelete.mock.calls.length === 1)
+    await userEvent.click(
+      screen.getByRole("button", { name: "Retry deletion" }),
+    );
   await waitFor(() => expect(fixture.retryDelete).toHaveBeenCalledTimes(2));
   expect(fixture.retryDelete.mock.calls[1]?.[0]).toEqual(first);
 });
@@ -310,7 +359,7 @@ it("keeps resource, billing, authorization and unknown measurements distinct", (
   expect(screen.getByText("Resource state")).toBeInTheDocument();
   expect(screen.getByText("Authorization state")).toBeInTheDocument();
   expect(screen.getByText("Billing state")).toBeInTheDocument();
-  expect(screen.getByText("WSS status unknown")).toBeInTheDocument();
+  expect(screen.getByText(/Awaiting machine report/)).toBeInTheDocument();
   expect(
     screen.getByText(/Workspace usage is not reported/),
   ).toBeInTheDocument();
@@ -328,31 +377,19 @@ it("keeps resource, billing, authorization and unknown measurements distinct", (
 it("requires reviewed irreversible data loss acknowledgement before deletion", async () => {
   fixture.action.mockResolvedValue({ operation: { id: "op-delete" } });
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
-  await userEvent.click(
-    screen.getByRole("tab", { name: "Settings and rules" }),
-  );
   await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
   const dialog = within(screen.getByRole("dialog"));
-  const submit = screen.getByRole("button", { name: "Delete permanently" });
+  const submit = screen.getByRole("button", { name: "Delete machine" });
   expect(submit).toBeDisabled();
   expect(
-    dialog.getByText(/permanently removes the workspace/),
+    dialog.getByText(/permanently deletes the machine and its workspace/),
   ).toBeInTheDocument();
-  expect(dialog.getByText(/no snapshots or recovery/)).toBeInTheDocument();
+  expect(dialog.getByText(/cannot be undone/)).toBeInTheDocument();
   expect(
-    dialog.getByText(/Terminal job metadata remains for 30 days/),
+    dialog.getByText(/free slot is released after deletion is confirmed/),
   ).toBeInTheDocument();
-  expect(
-    dialog.getByText(/terminal operation history for 90 days/),
-  ).toBeInTheDocument();
-  expect(
-    dialog.getByText(
-      /resource cleanup remains pending until current Kubernetes observations/,
-    ),
-  ).toBeInTheDocument();
-  expect(
-    dialog.getByText(/temporary runtime data.*HOME.*\/tmp/),
-  ).toBeInTheDocument();
+  expect(dialog.queryByText(/Kubernetes|Sandbox|PVC/)).not.toBeInTheDocument();
+  expect(dialog.getByText(/Reviewed resource revision/)).not.toBeVisible();
   await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
   await userEvent.click(submit);
   await waitFor(() => expect(fixture.action).toHaveBeenCalled());
@@ -402,20 +439,17 @@ it("retries an unknown result with the identical reviewed body and idempotency k
   const view = render(
     <RemoteMachineDetail machineId={fixture.machine.node_id} />,
   );
-  await userEvent.click(
-    screen.getByRole("tab", { name: "Settings and rules" }),
-  );
   await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
   await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
-  await userEvent.click(
-    screen.getByRole("button", { name: "Delete permanently" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
   await screen.findByText("Network response unknown");
+  expect(screen.getByRole("button", { name: "Delete machine" })).toBeDisabled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Check request status" }),
+  );
   fixture.machine.revision = 6;
   view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
-  await userEvent.click(
-    screen.getByRole("button", { name: "Delete permanently" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
   await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(2));
   expect(fixture.action.mock.calls[1]?.[0]).toEqual(
     fixture.action.mock.calls[0]?.[0],
@@ -431,18 +465,11 @@ it("a revision conflict requires reload and review instead of an automatic new a
     }),
   );
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
-  await userEvent.click(
-    screen.getByRole("tab", { name: "Settings and rules" }),
-  );
   await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
   await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
-  await userEvent.click(
-    screen.getByRole("button", { name: "Delete permanently" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
   await screen.findByText("Machine revision changed");
-  expect(
-    screen.getByRole("button", { name: "Delete permanently" }),
-  ).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Delete machine" })).toBeDisabled();
   expect(fixture.action).toHaveBeenCalledTimes(1);
   await userEvent.click(
     screen.getByRole("button", { name: "Reload and review a new action" }),
@@ -466,11 +493,8 @@ it("deduplicates real notification events and preserves stable operation links",
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
   expect(screen.getAllByText("Cleanup remains pending")).toHaveLength(1);
   expect(
-    screen.getByRole("link", { name: "View operation op" }),
-  ).toHaveAttribute(
-    "href",
-    `/assistant/machines?machine=${fixture.machine.node_id}&operation=op`,
-  );
+    screen.getByRole("button", { name: "View operation op" }),
+  ).toBeEnabled();
 });
 
 it("does not describe a completed live operation as still awaiting acceptance", () => {
@@ -503,8 +527,8 @@ it("does not describe a completed live operation as still awaiting acceptance", 
     screen.getByRole("region", { name: "Current attention" }),
   );
   expect(
-    attention.getByText("Lifecycle operation completed"),
-  ).toBeInTheDocument();
+    attention.queryByText("Lifecycle operation completed"),
+  ).not.toBeInTheDocument();
   expect(
     attention.queryByText(/An accepted request is awaiting/),
   ).not.toBeInTheDocument();
@@ -574,67 +598,291 @@ vi.mock("@/components/machines/remote-machine-service-usage", () => ({
   ),
 }));
 
-it("explains native pause completion and fresh runtime resume without promising physical isolation", async () => {
+it("pauses through one concise confirmation without an extra acknowledgement", async () => {
   fixture.machine.resource_state = "ready";
+  fixture.action.mockResolvedValueOnce({ operation: { id: "original-pause" } });
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
   await userEvent.click(screen.getByRole("button", { name: "Pause machine" }));
   const dialog = within(screen.getByRole("dialog"));
+  expect(dialog.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(dialog.getByText(/workspace will be kept/)).toBeVisible();
   expect(
-    dialog.getByText(
-      /Pause stops the compute Pod and retains the same workspace/,
-    ),
-  ).toBeInTheDocument();
+    dialog.getByText(/Active tasks and running processes will stop/),
+  ).toBeVisible();
+  expect(dialog.getByText(/continue to occupy your free slot/)).toBeVisible();
+  await userEvent.click(dialog.getByRole("button", { name: "Pause machine" }));
+  await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(1));
+  expect(fixture.action.mock.calls[0]![0].body).toEqual({
+    action: "pause",
+    expected_revision: 5,
+  });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByText("Pausing your machine")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Pausing…" })).toBeDisabled();
   expect(
-    dialog.getByText(
-      /confirmed only after current Sandbox and Pod observations/,
-    ),
-  ).toBeInTheDocument();
-  expect(
-    dialog.getByText(/does not restore processes, memory or old jobs/),
-  ).toBeInTheDocument();
-  expect(dialog.getByText(/later top-up never resumes/)).toBeInTheDocument();
+    screen.getByRole("region", { name: "Operation progress" }),
+  ).toBeVisible();
 });
 
 it.each([
+  ["pause", "stopping", "ready", "Pausing…", "Pause machine"],
+  ["resume", "resuming", "paused", "Resuming…", "Resume machine"],
+] as const)("keeps failed %s feedback separate from current resource action eligibility", async (action, transitional, eligible, busyLabel, label) => {
+  Object.assign(fixture.machine, { resource_state: transitional, active_operation_id: "current-b", revision: 6 });
+  fixture.operation = { ...remoteMachineOperationFixture, id: "current-b", machine_id: fixture.machine.node_id, action, state: "failed", terminal_at: "2026-10-29T00:00:00Z", error_message: "Current operation failed" };
+  fixture.action.mockResolvedValueOnce({ operation: { id: "recovery" } });
+  const view = render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(screen.getByRole("region", { name: "Operation progress" })).toHaveTextContent("Current operation failed");
+  const button = screen.getByRole("button", { name: busyLabel });
+  expect(button).toBeDisabled();
+  await userEvent.click(button);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(fixture.action).not.toHaveBeenCalled();
+  fixture.machine.resource_state = eligible;
+  view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(screen.getByRole("button", { name: label })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: label }));
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: label }));
+  await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(1));
+  expect(fixture.action.mock.calls[0]![0].body).toMatchObject({ action, expected_revision: 6 });
+});
+
+it.each([
+  ["pause", "ready", "stopping", "Pause machine"],
+  ["resume", "paused", "resuming", "Resume machine"],
+] as const)("rechecks %s resource eligibility when an open confirmation submits", async (action, eligible, transitional, label) => {
+  fixture.machine.resource_state = eligible;
+  fixture.action.mockResolvedValueOnce({ operation: { id: "reviewed-operation" } });
+  const view = render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  await userEvent.click(screen.getByRole("button", { name: label }));
+  Object.assign(fixture.machine, { resource_state: transitional, revision: 6 });
+  view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  const confirm = within(screen.getByRole("dialog")).getByRole("button", { name: label });
+  fireEvent.submit(confirm.closest("form")!);
+  await act(async () => {});
+  expect(fixture.action).not.toHaveBeenCalled();
+  expect(confirm).toBeDisabled();
+  fixture.machine.resource_state = eligible;
+  view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(confirm).toBeEnabled();
+  await userEvent.click(confirm);
+  await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(1));
+  expect(fixture.action.mock.calls[0]![0].body).toMatchObject({ action, expected_revision: 5 });
+});
+
+it.each([
+  ["create", "provisioning", "ready", "Setting up your machine"],
+  ["pause", "stopping", "paused", "Pausing your machine"],
+  ["resume", "resuming", "ready", "Resuming your machine"],
+  ["delete", "deleting", "deleted", "Deleting your machine"],
+] as const)("waits for the actual resource after another client's current %s succeeds", (action, transitional, final, heading) => {
+  const machineId = fixture.machine.node_id;
+  const intent = getRemoteMachineIntent("owner", `${machineId}:pause`, { action: "pause", expected_revision: 4 });
+  acceptRemoteMachineIntent("owner", machineId, "pause", intent.idempotencyKey, "accepted-a");
+  observeAcceptedRemoteMachineIntent("owner", machineId, "accepted-a", 5);
+  Object.assign(fixture.machine, { resource_state: transitional, active_operation_id: "other-client-b", revision: 6 });
+  fixture.operation = { ...remoteMachineOperationFixture, id: "other-client-b", machine_id: machineId, action, state: "succeeded", terminal_at: "2026-10-29T00:00:00Z", deadline_at: "2099-01-01T00:00:00Z" };
+  const view = render(<RemoteMachineDetail machineId={machineId} />);
+  if (action === "resume" || action === "pause")
+    expect(screen.getByRole("button", { name: action === "resume" ? "Resuming…" : "Pausing…" })).toBeDisabled();
+  expect(screen.getByRole("region", { name: "Operation progress" })).toHaveTextContent(heading);
+  view.unmount();
+  const reopened = render(<RemoteMachineDetail machineId={machineId} />);
+  expect(screen.getByRole("region", { name: "Operation progress" })).toHaveTextContent(heading);
+  Object.assign(fixture.machine, { resource_state: final, revision: 7, cleanup_state: action === "delete" ? "complete" : "not_required" });
+  reopened.rerender(<RemoteMachineDetail machineId={machineId} />);
+  expect(screen.queryByRole("region", { name: "Operation progress" })).not.toBeInTheDocument();
+  if (action === "pause") expect(screen.getByRole("button", { name: "Resume machine" })).toBeEnabled();
+  if (action === "resume" || action === "create") expect(screen.getByRole("button", { name: "Pause machine" })).toBeEnabled();
+  expect(parseAcceptedRemoteMachineIntent(remoteMachineAcceptedSnapshot("owner", machineId))).toMatchObject({ operationId: "accepted-a", action: "pause", body: intent.body, idempotencyKey: intent.idempotencyKey, currentObservation: { operationId: "other-client-b", revision: 7 } });
+  expect(fixture.action).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["pause", "ready", "create", "succeeded", "Pausing your machine"],
+  ["resume", "paused", "pause", "succeeded", "Resuming your machine"],
+  ["resume", "paused", "resume", "failed", "Resuming your machine"],
+  ["delete", "ready", "resume", "failed", "Deleting your machine"],
+] as const)(
+  "keeps a new %s associated with its returned operation while the previous %s/%s %s read lags",
+  async (action, resource, previousAction, state, heading) => {
+    Object.assign(fixture.machine, {
+      resource_state: resource,
+      active_operation_id: "previous-operation",
+    });
+    fixture.operation = {
+      ...remoteMachineOperationFixture,
+      id: "previous-operation",
+      machine_id: fixture.machine.node_id,
+      action: previousAction,
+      state,
+      terminal_at: "2026-10-26T00:00:00Z",
+      deadline_at: "2020-01-01T00:00:00Z",
+      error_message: "Previous operation failure",
+    };
+    fixture.action.mockResolvedValueOnce({
+      operation: { id: "new-operation" },
+    });
+    const view = render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+    const label = action === "pause" ? "Pause machine" : action === "delete" ? "Delete machine" : "Resume machine";
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    if (action === "delete")
+      await userEvent.click(within(screen.getByRole("dialog")).getByRole("checkbox"));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: label }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    const progress = within(
+      screen.getByRole("region", { name: "Operation progress" }),
+    );
+    expect(progress.getByText(heading)).toBeVisible();
+    expect(
+      progress.queryByText("Previous operation failure"),
+    ).not.toBeInTheDocument();
+    expect(
+      progress.queryByText("Taking longer than usual"),
+    ).not.toBeInTheDocument();
+    expect(progress.getAllByLabelText("Confirmed")).toHaveLength(1);
+    expect(fixture.action.mock.calls[0]![0].body).toMatchObject({
+      action,
+      expected_revision: 5,
+    });
+    // Closing Settings, moving to Activity and a reload all destroy this view.
+    // The accepted response must outlive that component while reads still lag.
+    view.unmount();
+    render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+    const reopened = within(screen.getByRole("region", { name: "Operation progress" }));
+    expect(reopened.getByText(heading)).toBeVisible();
+    expect(reopened.queryByText("Previous operation failure")).not.toBeInTheDocument();
+    expect(reopened.queryByText("Taking longer than usual")).not.toBeInTheDocument();
+    expect(fixture.action).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each([
   ["pending", "Specialist assignment is pending"],
-  ["assigned", "Specialist assigned"],
-  ["permissions_required", "Specialist permissions need configuration"],
+  ["not_assigned", "Specialist is no longer assigned"],
   ["failed", "Specialist assignment could not be completed"],
 ])(
-  "shows hosted name and %s assignment with the existing permission controls",
+  "keeps %s assignment notices in the existing Specialist settings",
   (state, message) => {
     Object.assign(fixture.machine, {
       name: "research-box",
-      capabilities: ["shell", "files", "browser", "computer"],
       specialist_id: "specialist-1",
       specialist_assignment_state: state,
-      specialist_assignment_error: "specialist_assignment_unavailable",
     });
     render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
     expect(
-      screen.getByRole("heading", { name: "research-box" }),
-    ).toBeInTheDocument();
-    const capabilities = within(
-      screen.getByRole("group", { name: "Enabled capability badges" }),
-    );
-    for (const label of ["Commands", "Files", "Browser", "Computer"])
-      expect(capabilities.getByText(label)).toBeInTheDocument();
-    expect(screen.getByText(message)).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "Open specialist settings" }),
-    ).toHaveAttribute("href", "/assistant/automations");
-    expect(
-      screen.getByRole("button", { name: "Review agent access" }),
+      within(
+        screen.getByRole("region", { name: "Specialist access" }),
+      ).getByText(message),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText("specialist_assignment_unavailable"),
+      screen.queryByRole("button", { name: "Review agent access" }),
     ).not.toBeInTheDocument();
   },
 );
 
+it("keeps a ready free detail concise while retaining Activity and shared settings", () => {
+  Object.assign(fixture.machine, {
+    resource_state: "ready",
+    specialist_id: "specialist-1",
+    specialist_assignment_state: "assigned",
+    machine_configuration: {
+      ...fixture.machine.machine_configuration,
+      state: "applied",
+      reason: null,
+    },
+    active_operation_id: "operation-1",
+  });
+  fixture.operation = {
+    ...remoteMachineOperationFixture,
+    machine_id: fixture.machine.node_id,
+    state: "succeeded",
+    action: "create",
+  };
+  render(
+    <RemoteMachineDetail
+      machineId={fixture.machine.node_id}
+      onActivity={vi.fn()}
+    />,
+  );
+  for (const label of [
+    "Jobs",
+    "Confirmations",
+    "Billing",
+    "Review agent access",
+    "Check status",
+  ])
+    expect(
+      screen.queryByRole("button", { name: label }),
+    ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("link", { name: "Open specialist settings" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("Specialist assigned")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("region", { name: "create operation" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "View activity" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("link", { name: "Manage saved logins" }),
+  ).toBeInTheDocument();
+});
+
+it("retains paid Billing management without a free-slot claim", async () => {
+  Object.assign(fixture.machine, {
+    free_slot: false,
+    billing_state: "suspended",
+  });
+  const view = render(
+    <RemoteMachineDetail machineId={fixture.machine.node_id} />,
+  );
+  expect(
+    screen.queryByText("This machine uses your free slot."),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Billing" }));
+  expect(screen.getByText("Billing panel")).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  stoppedDelete();
+  fixture.operation = {
+    ...fixture.operation!,
+    delete_retry_stopped: false,
+  };
+  view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(
+    screen.queryByText(/Your free slot stays occupied until deletion/),
+  ).not.toBeInTheDocument();
+  Object.assign(fixture.machine, {
+    resource_state: "deleted",
+    cleanup_state: "complete",
+  });
+  view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(
+    screen.queryByText(/Your free slot is available only/),
+  ).not.toBeInTheDocument();
+});
+
+it("opens external confirmation deep links without a permanent confirmation button", () => {
+  render(
+    <RemoteMachineDetail
+      machineId={fixture.machine.node_id}
+      confirmationId="confirmation-1"
+    />,
+  );
+  expect(screen.getByText("Confirmation panel")).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "Confirmations" }),
+  ).not.toBeInTheDocument();
+});
+
 function desktopMachine(
   capabilities = ["shell", "files", "browser", "computer"],
-) {
+): NodeInfo {
   Object.assign(fixture.machine, {
     name: "browser-machine",
     capabilities,
@@ -647,14 +895,30 @@ function desktopMachine(
     name: "browser-machine",
     is_connected: true,
     owner: { id: "owner", kind: "user", display_name: "Owner" },
+    status: "active",
+    last_heartbeat_at: null,
+    connected_at: null,
+    metadata: null,
+    metrics: null,
+    binding_count: 0,
+    created_at: "2026-10-26T00:00:00Z",
     machine: {
+      version: 1,
+      roots: [],
+      os: "linux",
+      arch: "x86_64",
+      computer_mode: "standard",
+      cua_version: null,
+      computer_tools: [],
+      browser_isolated: false,
+      saved_login_ready: false,
       shell: capabilities.includes("shell"),
       files: capabilities.includes("files"),
       browser: capabilities.includes("browser"),
       computer: capabilities.includes("computer"),
       computer_ready: true,
     },
-  } as NodeInfo;
+  };
 }
 
 it.each([
@@ -668,7 +932,7 @@ it.each([
       <RemoteMachineDetail machineId={fixture.machine.node_id} node={node} />,
     );
     expect(
-      screen.getByRole("link", { name: "Watch / Take over desktop" }),
+      screen.getByRole("link", { name: "Open live desktop" }),
     ).toHaveAttribute(
       "href",
       `/assistant/machines/${fixture.machine.node_id}/desktop`,
@@ -680,7 +944,7 @@ it.each([
   ["Browser-only", ["browser"]],
   ["full", ["shell", "files", "browser", "computer"]],
 ])(
-  "keeps the %s owner desktop reachable with the existing unavailable-display warning",
+  "disables the %s owner desktop when its display is unavailable",
   (_label, capabilities) => {
     const node = desktopMachine(capabilities);
     render(
@@ -690,11 +954,9 @@ it.each([
       />,
     );
     expect(
-      screen.getByRole("link", { name: "Watch / Take over desktop" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("Computer permissions or display unavailable"),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Open live desktop" }),
+    ).toBeDisabled();
+    expect(screen.getByText(/Display unavailable/)).toBeInTheDocument();
   },
 );
 
@@ -707,14 +969,12 @@ it("disables hosted desktop navigation while the owner Node is disconnected", ()
     />,
   );
   expect(
-    screen.queryByRole("link", { name: "Watch / Take over desktop" }),
+    screen.queryByRole("link", { name: "Open live desktop" }),
   ).not.toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Watch / Take over desktop" }),
+    screen.getByRole("button", { name: "Open live desktop" }),
   ).toBeDisabled();
-  expect(
-    screen.getByText("Desktop unavailable while this machine is disconnected."),
-  ).toBeInTheDocument();
+  expect(screen.getByText(/Display unavailable/)).toBeInTheDocument();
 });
 
 it.each(["provisioning", "paused", "reconciling", "deleting"])(
@@ -726,16 +986,12 @@ it.each(["provisioning", "paused", "reconciling", "deleting"])(
       <RemoteMachineDetail machineId={fixture.machine.node_id} node={node} />,
     );
     expect(
-      screen.queryByRole("link", { name: "Watch / Take over desktop" }),
+      screen.queryByRole("link", { name: "Open live desktop" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Watch / Take over desktop" }),
+      screen.getByRole("button", { name: "Open live desktop" }),
     ).toBeDisabled();
-    expect(
-      screen.getByText(
-        "Desktop unavailable until this machine has an active runtime.",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Display unavailable/)).toBeInTheDocument();
   },
 );
 
@@ -748,10 +1004,10 @@ it.each(["pending", "revoked"])(
       <RemoteMachineDetail machineId={fixture.machine.node_id} node={node} />,
     );
     expect(
-      screen.queryByRole("link", { name: "Watch / Take over desktop" }),
+      screen.queryByRole("link", { name: "Open live desktop" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Watch / Take over desktop" }),
+      screen.getByRole("button", { name: "Open live desktop" }),
     ).toBeDisabled();
   },
 );
@@ -777,10 +1033,10 @@ it.each([
     <RemoteMachineDetail machineId={fixture.machine.node_id} node={node} />,
   );
   expect(
-    screen.queryByRole("link", { name: "Watch / Take over desktop" }),
+    screen.queryByRole("link", { name: "Open live desktop" }),
   ).not.toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "Watch / Take over desktop" }),
+    screen.queryByRole("button", { name: "Open live desktop" }),
   ).not.toBeInTheDocument();
 });
 
@@ -800,7 +1056,7 @@ it("removes the desktop entry when current owner authorization cannot be loaded"
   );
   expect(screen.getByText("Access revoked")).toBeInTheDocument();
   expect(
-    screen.queryByRole("link", { name: "Watch / Take over desktop" }),
+    screen.queryByRole("link", { name: "Open live desktop" }),
   ).not.toBeInTheDocument();
 });
 
@@ -829,9 +1085,11 @@ it.each([
     }
     expect(screen.queryByText("Shell and files")).not.toBeInTheDocument();
     await userEvent.click(
-      screen.getByRole("tab", { name: "Settings and rules" }),
+      screen.getByRole("button", { name: "Settings and rules" }),
     );
-    const policy = within(screen.getByRole("tabpanel"));
+    const policy = within(
+      screen.getByRole("dialog", { name: "Settings and rules" }),
+    );
     expect(
       policy.queryByText(
         /Shell and files only|profile has no desktop, browser/,
@@ -852,15 +1110,15 @@ it.each([
     ).toBeInTheDocument();
     expect(
       policy.getByText(
-        /All authorized clients share the Machine and workspace/,
+        /Sharing is set per Agent.*Shared legacy Agents and external clients share/,
       ),
     ).toBeInTheDocument();
     expect(
-      policy.getByText(/Authorized agents also share browser sessions/),
+      policy.getByText(/Shared legacy Agents also share browser sessions/),
     ).toBeInTheDocument();
     expect(
       policy.getByText(
-        /Only \/workspace persists.*browser profiles and downloads are temporary/,
+        /legacy \/workspace and separated workspaces are retained.*browser profiles and downloads are temporary/,
       ),
     ).toBeInTheDocument();
     expect(
@@ -879,14 +1137,18 @@ it.each([
 
 it("discloses unknown temporary capacity and disk pressure in detail and policy views", async () => {
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
-  expect(screen.getByText("No fixed capacity declared")).toBeInTheDocument();
+  expect(
+    screen.getAllByText("No fixed capacity declared")[0],
+  ).toBeInTheDocument();
   expect(
     screen.getByText(/Disk pressure can evict the Pod/),
   ).toBeInTheDocument();
   await userEvent.click(
-    screen.getByRole("tab", { name: "Settings and rules" }),
+    screen.getByRole("button", { name: "Settings and rules" }),
   );
-  expect(screen.getByText("No fixed capacity declared")).toBeInTheDocument();
+  expect(
+    screen.getAllByText("No fixed capacity declared")[0],
+  ).toBeInTheDocument();
 });
 
 it("shows the current profile with undeclared temporary capacity in both detail views", async () => {
@@ -902,7 +1164,9 @@ it("shows the current profile with undeclared temporary capacity in both detail 
   });
   try {
     render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
-    expect(screen.getByText("No fixed capacity declared")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("No fixed capacity declared")[0],
+    ).toBeInTheDocument();
     expect(
       screen.queryByText(/null GiB|undefined GiB|2 GiB temporary/),
     ).not.toBeInTheDocument();
@@ -912,16 +1176,18 @@ it("shows the current profile with undeclared temporary capacity in both detail 
       ),
     ).toBeInTheDocument();
     await userEvent.click(
-      screen.getByRole("tab", { name: "Settings and rules" }),
+      screen.getByRole("button", { name: "Settings and rules" }),
     );
-    expect(screen.getByText("No fixed capacity declared")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("No fixed capacity declared")[0],
+    ).toBeInTheDocument();
   } finally {
     fixture.machine.profile = oldProfile;
     fixture.machine.policy_version = oldPolicy;
   }
 });
 
-it("resumes a current free Machine with explicit saved policy acceptance", async () => {
+it("resumes a current free Machine without a paid-balance or extra policy checkbox", async () => {
   fixture.action.mockResolvedValue({ operation: { id: "op-legacy-resume" } });
   render(
     <RemoteMachineDetail
@@ -931,13 +1197,18 @@ it("resumes a current free Machine with explicit saved policy acceptance", async
   );
   await userEvent.click(screen.getByRole("button", { name: "Resume machine" }));
   const dialog = within(screen.getByRole("dialog"));
-  expect(dialog.getByText(/remote-machine-mvp/)).toBeInTheDocument();
+  expect(dialog.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(
+    dialog.getByText(/browser sessions will not be restored/),
+  ).toBeInTheDocument();
+  expect(
+    dialog.getByText(/Model and external API usage may be billed separately/),
+  ).toBeInTheDocument();
   expect(fixture.quote).toHaveBeenCalledWith({
     free_slot: true,
     machine_id: fixture.machine.node_id,
     profile_version: fixture.machine.profile.profile_version,
   });
-  await userEvent.click(dialog.getByRole("checkbox"));
   await userEvent.click(dialog.getByRole("button", { name: "Resume machine" }));
   await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(1));
   expect(fixture.action.mock.calls[0]![0].body).toMatchObject({
@@ -976,9 +1247,6 @@ it.each(["off", "loading", "account"])(
     expect(
       screen.getByRole("button", { name: "Resume machine" }),
     ).toBeDisabled();
-    await userEvent.click(
-      screen.getByRole("tab", { name: "Settings and rules" }),
-    );
     expect(
       screen.getByRole("button", { name: "Delete machine" }),
     ).toBeEnabled();
@@ -993,9 +1261,6 @@ it("keeps owner pause and delete actionable when the flag is OFF", async () => {
   });
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
   expect(screen.getByRole("button", { name: "Pause machine" })).toBeEnabled();
-  await userEvent.click(
-    screen.getByRole("tab", { name: "Settings and rules" }),
-  );
   expect(screen.getByRole("button", { name: "Delete machine" })).toBeEnabled();
   expect(fixture.quote).not.toHaveBeenCalled();
 });
@@ -1083,8 +1348,12 @@ it("labels an unknown retry outcome and retains its request when the revision ch
   view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
   fixture.retryDelete.mockResolvedValueOnce({ operation: fixture.operation });
   await userEvent.click(
-    screen.getByRole("button", { name: "Confirm retry result" }),
+    screen.getByRole("button", { name: "Check retry status" }),
   );
+  await waitFor(() => expect(fixture.operationRefetch).toHaveBeenCalled());
+  expect(fixture.retryDelete).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "Retry deletion" }));
+  await waitFor(() => expect(fixture.retryDelete).toHaveBeenCalledTimes(2));
   expect(fixture.retryDelete.mock.calls[1]?.[0]).toEqual(request);
 });
 
@@ -1130,7 +1399,7 @@ it("preserves deleted finality during supplemental cleanup without reopening ret
     screen.getByText(/Background supplemental cleanup/),
   ).toBeInTheDocument();
   expect(
-    screen.getByText(/original deletion remains successful/),
+    screen.getAllByText(/original deletion remains successful/)[0],
   ).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "Retry deletion" }),
@@ -1138,9 +1407,6 @@ it("preserves deleted finality during supplemental cleanup without reopening ret
   expect(
     screen.queryByText(/Automatic deletion attempts stopped/),
   ).not.toBeInTheDocument();
-  await userEvent.click(
-    screen.getByRole("tab", { name: "Settings and rules" }),
-  );
   expect(
     screen.queryByRole("button", { name: "Delete machine" }),
   ).not.toBeInTheDocument();
@@ -1181,17 +1447,11 @@ it("puts deletion in settings and reads the confirmation policy from Node detail
       node={fixture.node}
     />,
   );
-  expect(screen.getAllByRole("tab")).toHaveLength(7);
+  expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  expect(screen.getAllByText("Confirm changes")[0]).toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "Delete machine" }),
-  ).not.toBeInTheDocument();
-  await userEvent.click(
-    screen.getByRole("tab", { name: "Settings and rules" }),
-  );
-  expect(screen.getByText("Confirm changes")).toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: /Save/ }),
-  ).not.toBeInTheDocument();
+    screen.getByRole("button", { name: "Save machine settings" }),
+  ).toBeDisabled();
   expect(screen.getByRole("button", { name: "Delete machine" })).toBeEnabled();
 });
 
@@ -1234,8 +1494,12 @@ it("shows loaded event counts and event detail without replacing the active oper
       created_at: "2026-10-01T00:00:00Z",
     },
   ];
-  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
-  await userEvent.click(screen.getByRole("tab", { name: "Events" }));
+  render(
+    <RemoteMachineTimeline
+      machineId={fixture.machine.node_id}
+      onOperation={vi.fn()}
+    />,
+  );
   expect(screen.getByText("Loaded 1 event on this page")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Event details" }));
   expect(
@@ -1358,7 +1622,7 @@ it("shows confirmation-read failures without manufacturing a policy", async () =
   fixture.nodeError = new Error("Node detail unavailable");
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
   await userEvent.click(
-    screen.getByRole("tab", { name: "Settings and rules" }),
+    screen.getByRole("button", { name: "Settings and rules" }),
   );
   expect(
     screen.getByText(/Confirmation policy unavailable/),
@@ -1381,7 +1645,302 @@ it("recovers the identical unknown retry after remount even if the lifetime coun
   fixture.retryDelete.mockResolvedValueOnce({ operation: fixture.operation });
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
   await userEvent.click(
-    screen.getByRole("button", { name: "Confirm retry result" }),
+    screen.getByRole("button", { name: "Check retry status" }),
   );
+  await waitFor(() => expect(fixture.operationRefetch).toHaveBeenCalled());
+  if (fixture.retryDelete.mock.calls.length === 1)
+    await userEvent.click(
+      screen.getByRole("button", { name: "Retry deletion" }),
+    );
+  await waitFor(() => expect(fixture.retryDelete).toHaveBeenCalledTimes(2));
   expect(fixture.retryDelete.mock.calls[1]?.[0]).toEqual(first);
+});
+
+it("keeps the original lifecycle action identity after closing an unknown request and reopening", async () => {
+  fixture.action.mockRejectedValueOnce(new Error("Response lost"));
+  const view = render(
+    <RemoteMachineDetail machineId={fixture.machine.node_id} />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await screen.findByText("Response lost");
+  const original = fixture.action.mock.calls[0]![0];
+  view.unmount();
+  fixture.machine.revision = 9;
+  fixture.action.mockResolvedValueOnce({
+    operation: { id: "original-operation" },
+  });
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Check request status" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(2));
+  expect(fixture.action.mock.calls[1]![0]).toEqual(original);
+});
+const safePresentation = {
+  agent_version: "0.73.1",
+  os: "linux",
+  arch: "x86_64",
+  roots: ["/workspace"],
+  capabilities: ["shell", "files", "browser", "computer"],
+  commands_isolated: true,
+  browser_isolated: false,
+  separation_support: true,
+  owner_confirmation: "changes",
+  allow_single_user_saved_logins: false,
+  computer_mode: "standard",
+  cua_version: "0.30.4",
+  connected: true,
+  desktop_ready: true,
+  historical: false,
+  configuration_current: true,
+  last_reported_at: "2026-10-26T00:00:00Z",
+};
+it("renders the safe paused report after a reload without treating it as online or enabling writes", () => {
+  Object.assign(fixture.machine, {
+    presentation: { ...safePresentation, historical: true },
+  });
+  try {
+    render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+    expect(screen.getByRole("region", { name: "Version" })).toHaveTextContent(
+      "0.73.1",
+    );
+    expect(screen.getByText(/Last reported information/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open live desktop" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("combobox", { name: "Owner confirmation" }),
+    ).toBeDisabled();
+    expect(screen.queryByText(/Update automatically/)).not.toBeInTheDocument();
+  } finally {
+    Reflect.deleteProperty(fixture.machine, "presentation");
+  }
+});
+it.each([
+  [false, true],
+  [true, false],
+])(
+  "keeps separation support %s separate from actual display readiness %s",
+  (support, desktopReady) => {
+    Object.assign(fixture.machine, {
+      resource_state: "ready",
+      authorization_state: "active",
+      presentation: {
+        ...safePresentation,
+        separation_support: support,
+        desktop_ready: desktopReady,
+      },
+    });
+    try {
+      render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+      if (!support)
+        expect(
+          screen.getByText("Separation prerequisites not met"),
+        ).toBeInTheDocument();
+      if (desktopReady)
+        expect(
+          screen.getByRole("link", { name: "Open live desktop" }),
+        ).toBeInTheDocument();
+      else
+        expect(
+          screen.getByRole("button", { name: "Open live desktop" }),
+        ).toBeDisabled();
+    } finally {
+      Reflect.deleteProperty(fixture.machine, "presentation");
+    }
+  },
+);
+it("permits a new reviewed lifecycle action after the previous operation is terminal", () => {
+  Object.assign(fixture.machine, {
+    resource_state: "paused",
+    active_operation_id: "operation-1",
+  });
+  fixture.operation = {
+    ...remoteMachineOperationFixture,
+    id: "operation-1",
+    machine_id: fixture.machine.node_id,
+    action: "resume",
+    state: "failed",
+    terminal_at: "2026-10-26T00:00:00Z",
+  };
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(screen.getByRole("button", { name: "Delete machine" })).toBeEnabled();
+});
+it("keeps configuration revisions and generation diagnostics in Technical details", () => {
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  const diagnostic = screen
+    .getByText(/Current hosted configuration revision/)
+    .closest("details");
+  expect(diagnostic).not.toBeNull();
+  expect(diagnostic).not.toHaveAttribute("open");
+});
+
+it("keeps final deletion concise with diagnostics collapsed and no agent configuration controls", () => {
+  fixture.machine.resource_state = "deleted";
+  fixture.machine.cleanup_state = "complete";
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(
+    screen.queryByRole("button", { name: "Review agent access" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText(/Hosted configuration/)).not.toBeVisible();
+  expect(screen.getByRole("region", { name: "Machine deleted" })).toBeVisible();
+});
+
+it("recovers an unknown original delete after refresh even while backend deletion is active", async () => {
+  fixture.action.mockRejectedValueOnce(new Error("Delete reply lost"));
+  const view = render(
+    <RemoteMachineDetail machineId={fixture.machine.node_id} />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await screen.findByText("Delete reply lost");
+  const original = fixture.action.mock.calls[0]![0];
+  view.unmount();
+  Object.assign(fixture.machine, {
+    resource_state: "deleting",
+    revision: 8,
+    active_operation_id: "original-delete",
+  });
+  fixture.operation = {
+    ...remoteMachineOperationFixture,
+    id: "original-delete",
+    machine_id: fixture.machine.node_id,
+    action: "delete",
+  };
+  fixture.action.mockResolvedValueOnce({ operation: fixture.operation });
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Recover delete request" }),
+  );
+  expect(screen.getByRole("button", { name: "Delete machine" })).toBeDisabled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Check request status" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(2));
+  expect(fixture.action.mock.calls[1]![0]).toEqual(original);
+  expect(fixture.refetch.mock.invocationCallOrder[0]).toBeLessThan(
+    fixture.operationRefetch.mock.invocationCallOrder[0]!,
+  );
+  expect(fixture.operationRefetch.mock.invocationCallOrder[0]).toBeLessThan(
+    fixture.action.mock.invocationCallOrder[1]!,
+  );
+});
+
+it("keeps an unknown lifecycle request blocked if its live status read fails", async () => {
+  fixture.action.mockRejectedValueOnce(new Error("Reply lost"));
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
+  await screen.findByText("Reply lost");
+  fixture.refetch.mockResolvedValueOnce({ error: new Error("Not authorized") });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Check request status" }),
+  );
+  await screen.findByText(
+    /current machine and operation could not both be confirmed/,
+  );
+  expect(screen.getByRole("button", { name: "Delete machine" })).toBeDisabled();
+  expect(fixture.action).toHaveBeenCalledTimes(1);
+});
+
+it("allows closing a pending pause and does not repeat it when the drawer reopens", async () => {
+  fixture.machine.resource_state = "ready";
+  let resolve!: (value: unknown) => void;
+  fixture.action.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const view = render(
+    <RemoteMachineDetail machineId={fixture.machine.node_id} />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Pause machine" }));
+  await userEvent.dblClick(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Pause machine",
+    }),
+  );
+  expect(fixture.action).toHaveBeenCalledTimes(1);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Close · work continues" }),
+  );
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  view.unmount();
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Recover pause request" }),
+  );
+  expect(fixture.action).toHaveBeenCalledTimes(1);
+  expect(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Pause machine",
+    }),
+  ).toBeDisabled();
+  await act(async () => resolve({ operation: { id: "original-pause" } }));
+  expect(fixture.action).toHaveBeenCalledTimes(1);
+});
+
+it("retains an old owner's unresolved intent without accepting its late response for a new owner", async () => {
+  fixture.machine.resource_state = "ready";
+  let resolve!: (value: unknown) => void;
+  fixture.action.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  await userEvent.click(screen.getByRole("button", { name: "Pause machine" }));
+  await userEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Pause machine",
+    }),
+  );
+  const original = fixture.action.mock.calls[0]![0];
+  act(() =>
+    useAuthStore.setState({
+      user: {
+        id: "different-owner",
+        capabilities: { enabled_features: [] },
+      } as never,
+    }),
+  );
+  await act(async () => resolve({ operation: { id: "old-owner-operation" } }));
+  expect(screen.queryByText(/pause request accepted/)).not.toBeInTheDocument();
+  expect(
+    sessionStorage.getItem(
+      `nyxid:remote-machine-intent:owner:${encodeURIComponent(`${fixture.machine.node_id}:pause`)}`,
+    ),
+  ).toContain(original.idempotencyKey);
+  expect(
+    screen.queryByRole("button", { name: "Recover pause request" }),
+  ).not.toBeInTheDocument();
+});
+
+it("opens a newly selected confirmation deep link while the same Machine detail stays mounted", async () => {
+  const view = render(
+    <RemoteMachineDetail
+      machineId={fixture.machine.node_id}
+      confirmationId="confirmation-1"
+    />,
+  );
+  await userEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }),
+  );
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  view.rerender(
+    <RemoteMachineDetail
+      machineId={fixture.machine.node_id}
+      confirmationId="confirmation-2"
+    />,
+  );
+  expect(screen.getByText("Confirmation panel")).toBeVisible();
 });
