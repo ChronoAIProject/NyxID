@@ -762,12 +762,40 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | --- | --- | --- |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
-| `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
+| `allow_posts` | off, or the private-chat default below | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
 | agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Organization specialists are refused under the [organization-agent channel contract](../ORG_AGENTS.md) because their conversations are private member threads. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
 or `everyone`: anyone who messages the bot privately gets their own thread, as a
 guest.
+
+The linked channel also has `private_chat_posts` (absent/false by default).
+The owner can enable it in **Chats and who can talk**, through the human-only
+channel PATCH, or through NyxBot's `nyxid__update_channel_access`. New private
+customer chats then start with `allow_posts: true` when a verified message
+registers them. It does not open private-chat access, contact someone who has
+never messaged the bot, or enable groups, channels, topics, followed child
+threads, or synthetic custom-event threads. Posting still checks only each
+chat's `allow_posts`; an explicit per-chat off survives later inbound messages.
+
+`apply_to_existing: true` requires an explicit `private_chat_posts` value and
+applies that value to existing private chats on this link. Both enabling and
+disabling otherwise affect only new chats. Bulk application overrides individual
+private-chat choices and is transactional, capped at 1,000 changed chats;
+exceeding the cap changes nothing. The response and metadata-only
+`nyxbot_channel_access_updated` audit include `applied_count`. Guests and
+specialists cannot change this setting; NyxBot uses the same sensitive-action
+confirmation as per-chat permission changes. Organization links require the
+linking person's live org-admin authority.
+
+The default rides on the loaded channel; chat recording adds no DB reads.
+Gateway conversation probes cannot know the chat kind, so new probes capture
+an additive `private_chat_posts_pending` boolean without granting permission.
+The first verified chat registration consumes it atomically. Legacy placeholders
+without that marker stay off, and existing explicit permissions win. Old
+replicas ignore the additive channel field and continue creating chats with
+posting off; upgrade replicas before relying on the default for every customer.
+Reconnect continuity preserves the default alongside private-chat access.
 
 **Addressed messages.** Through the gateway, group admission is
 `mention_or_reply_to_bot` unless one of the bot's chats answers everything; then

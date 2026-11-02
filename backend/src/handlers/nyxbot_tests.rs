@@ -11,6 +11,8 @@ use axum::{Router, response::sse::Event, routing::post};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[path = "nyxbot_private_posts_tests.rs"]
+mod private_posts_tests;
 #[path = "nyxbot_transport_tests.rs"]
 mod transport_tests;
 
@@ -346,6 +348,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         source_conversation_id: None,
         agent_id: None,
         private_chats: None,
+        private_chat_posts: None,
         delivery_status: None,
         delivery_error: None,
         delivery_failed_at: None,
@@ -3327,6 +3330,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             source_conversation_id: None,
             agent_id: None,
             private_chats: None,
+            private_chat_posts: None,
             delivery_status: None,
             delivery_error: None,
             delivery_failed_at: None,

@@ -1069,7 +1069,7 @@ fn action_summary(name: &str, args: &Value) -> String {
         "link_channel_bot" => "Change which agent a channel bot reaches",
         "disconnect_channel_bot" => "Disconnect a channel bot",
         "update_channel_chat" => "Change who may talk in a channel chat",
-        "update_channel_access" => "Change who may chat privately with a channel bot",
+        "update_channel_access" => "Change private chat access and posting defaults",
         "stop_following_thread" => "Stop following a channel thread",
         "machine_pair" => "Pair a machine",
         "remember" => "Save a memory note",
@@ -1099,6 +1099,17 @@ fn action_summary(name: &str, args: &Value) -> String {
                 "{field} {}",
                 crate::services::assistant_nyxagent::identifier(value)
             ));
+        }
+    }
+    if name == "update_channel_access" {
+        if let Some(posts) = args["private_chat_posts"].as_bool() {
+            details.push(format!(
+                "new private chat posts {}",
+                if posts { "on" } else { "off" }
+            ));
+        }
+        if args["apply_to_existing"].as_bool() == Some(true) {
+            details.push("apply to existing private chats".into());
         }
     }
     for field in ["services", "machines", "logins"] {
@@ -2830,11 +2841,15 @@ async fn dispatch_channels(
             )
         }
         "update_channel_access" => (
-            Box::pin(super::nyxbot::chats::set_private_chats(
+            Box::pin(super::nyxbot::chats::update_access(
                 state,
                 owner,
                 text_arg(args, "channel_agent_id"),
-                text_arg(args, "private_chats"),
+                &crate::services::nyxbot_chat_settings_service::AccessSettings {
+                    private_chats: args["private_chats"].as_str().map(str::to_owned),
+                    private_chat_posts: args["private_chat_posts"].as_bool(),
+                    apply_to_existing: args["apply_to_existing"].as_bool().unwrap_or(false),
+                },
             ))
             .await?,
             false,

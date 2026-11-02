@@ -356,6 +356,20 @@ describe("NyxBot team, settings and channel schemas", () => {
       .follow_readiness).toBe("ready");
   });
 
+  it("defaults private chat posting off for older channel responses", () => {
+    const channel = {
+      id: "c", channel_bot_id: "bot", platform: "telegram", bot_label: "Bot",
+      transport: "gateway", status: "active", owner_linked: true, created_at: at,
+    };
+    expect(nyxAgentChannelAgentSchema.parse(channel).private_chat_posts).toBe(false);
+    for (const enabled of [false, true]) {
+      expect(nyxAgentChannelAgentSchema.parse({ ...channel, private_chat_posts: enabled })
+        .private_chat_posts).toBe(enabled);
+    }
+    expect(nyxAgentChannelAgentSchema.safeParse({ ...channel, private_chat_posts: "true" })
+      .success).toBe(false);
+  });
+
   it("keeps only https owner links", () => {
     const channel_agent = {
       id: "c",

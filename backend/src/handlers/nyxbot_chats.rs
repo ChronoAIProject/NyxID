@@ -348,8 +348,12 @@ pub(super) async fn record_chat_with_relay(
     threads
         .find_one_and_update(
             doc! {"channel_id": &row.id, "partition": partition},
-            doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
-            "created_at": now}, "$set": set},
+            crate::services::nyxbot_chat_settings_service::record_update(
+                row,
+                facts.kind == "private" && facts.thread_id.is_none(),
+                set,
+                now,
+            ),
         )
         .upsert(true)
         .return_document(mongodb::options::ReturnDocument::After)
@@ -1456,60 +1460,78 @@ pub(crate) async fn update_chat(
 }
 
 /// Who may talk to the agent in the bot's private chats.
+#[cfg(test)]
 pub(crate) async fn set_private_chats(
     state: &AppState,
     owner: &str,
     channel_id: &str,
     private_chats: &str,
 ) -> AppResult<Value> {
-    if !matches!(private_chats, "owner" | "everyone") {
-        return Err(AppError::ValidationError(
-            "private_chats must be owner or everyone".into(),
-        ));
-    }
+    update_access(
+        state,
+        owner,
+        channel_id,
+        &crate::services::nyxbot_chat_settings_service::AccessSettings {
+            private_chats: Some(private_chats.to_owned()),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+pub(crate) async fn update_access(
+    state: &AppState,
+    owner: &str,
+    channel_id: &str,
+    settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
+) -> AppResult<Value> {
+    settings.validate()?;
     let row = load_channel(state, owner, channel_id).await?;
-    // Narrowing to the owner stays available on any channel; only widening is fenced.
-    let mut filter = doc! {"_id": &row.id, "user_id": owner};
-    if private_chats == "everyone" {
+    if let Some(org) = row.bot_owner_id.as_deref()
+        && !super::manages_bot_owner(state, owner, org).await?
+    {
+        return Err(AppError::Forbidden("org_access_lost".into()));
+    }
+    if settings.private_chats.as_deref() == Some("everyone")
+        || settings.private_chat_posts == Some(true)
+    {
         crate::services::platform_bot_authority::require_personal_routes(
             &state.db,
             &row.channel_bot_id,
         )
         .await?;
-        filter.insert("status", doc! {"$in": ["pending", "active"]});
     }
-    let updated = state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .update_one(
-            filter,
-            doc! {"$set": {"private_chats": private_chats, "updated_at": bson::DateTime::now()}},
-        )
-        .await?;
-    if updated.matched_count != 1 {
-        return Err(AppError::Conflict("Channel authority changed".into()));
-    }
+    let applied =
+        crate::services::nyxbot_chat_settings_service::update(&state.db, &row, settings).await?;
     audit(
         state,
         owner,
         "nyxbot_channel_access_updated",
-        json!({"channel_agent_id": &row.id, "private_chats": private_chats}),
+        json!({"channel_agent_id":&row.id,
+        "private_chats":settings.private_chats,"private_chat_posts":settings.private_chat_posts,
+        "apply_to_existing":settings.apply_to_existing,"applied_count":applied}),
     )
     .await;
-    if private_chats == "everyone" {
-        super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None).await?;
+    let mut result = json!({"channel_agent_id":row.id,
+        "private_chats":settings.private_chats.as_deref().or(row.private_chats.as_deref()).unwrap_or("owner"),
+        "private_chat_posts":settings.private_chat_posts.or(row.private_chat_posts).unwrap_or(false),"applied_count":applied});
+    if let Some(access) = settings.private_chats.as_deref() {
+        if access == "everyone" {
+            super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None).await?;
+        }
+        result["guest_readiness"] = serde_json::to_value(
+            crate::services::assistant_service_execution::guest_readiness(
+                &state.db,
+                &state.encryption_keys,
+                owner,
+                row.agent_id.as_deref(),
+                None,
+            )
+            .await?,
+        )
+        .map_err(|_| AppError::Internal("Invalid readiness".into()))?;
     }
-    let readiness = crate::services::assistant_service_execution::guest_readiness(
-        &state.db,
-        &state.encryption_keys,
-        owner,
-        row.agent_id.as_deref(),
-        None,
-    )
-    .await?;
-    Ok(
-        json!({"channel_agent_id": row.id, "private_chats": private_chats, "guest_readiness":readiness}),
-    )
+    Ok(result)
 }
 
 /// Validate an automation destination with the same posting ACL as native tools.

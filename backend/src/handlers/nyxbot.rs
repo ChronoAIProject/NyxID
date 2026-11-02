@@ -290,6 +290,7 @@ pub struct ChannelAgentResponse {
     org_id: Option<String>,
     /// Who may talk to the agent in private chats: `owner` or `everyone`.
     private_chats: String,
+    private_chat_posts: bool,
     /// `ok` or `failing` once a message has been judged; `None` before.
     delivery_status: Option<String>,
     /// Stable code of the newest lost message (see `delivery_reason`).
@@ -320,6 +321,7 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
             agent_id: row.agent_id.clone(),
             org_id: row.bot_owner_id.clone(),
             private_chats: row.private_chats.clone().unwrap_or_else(|| "owner".into()),
+            private_chat_posts: row.private_chat_posts.unwrap_or(false),
             delivery_status: row.delivery_status.clone(),
             delivery_error: row.delivery_error.clone(),
             delivery_reason: row
@@ -694,6 +696,7 @@ async fn connect_inner(
         source_conversation_id: source_conversation_id.map(str::to_owned),
         agent_id: Some(agent.id.clone()),
         private_chats: None,
+        private_chat_posts: None,
         delivery_status: None,
         delivery_error: None,
         delivery_failed_at: None,
@@ -2679,6 +2682,9 @@ pub struct LinkRequest {
     agent_id: Option<String>,
     /// `owner` or `everyone`: who may talk to the agent in private chats.
     private_chats: Option<String>,
+    private_chat_posts: Option<bool>,
+    #[serde(default)]
+    apply_to_existing: bool,
 }
 
 pub async fn link_channel(
@@ -2690,14 +2696,23 @@ pub async fn link_channel(
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    if body.agent_id.is_none() && body.private_chats.is_none() {
+    if body.agent_id.is_none() && body.private_chats.is_none() && body.private_chat_posts.is_none()
+    {
         return Err(AppError::ValidationError(
-            "Nothing to change: pass agent_id or private_chats".into(),
+            "Nothing to change: pass agent_id, private_chats or private_chat_posts".into(),
         ));
     }
     let mut result = json!({"channel_agent_id": &id});
-    if let Some(access) = body.private_chats.as_deref() {
-        result = chats::set_private_chats(&state, &owner, &id, access).await?;
+    let settings = crate::services::nyxbot_chat_settings_service::AccessSettings {
+        private_chats: body.private_chats,
+        private_chat_posts: body.private_chat_posts,
+        apply_to_existing: body.apply_to_existing,
+    };
+    if settings.private_chats.is_some()
+        || settings.private_chat_posts.is_some()
+        || settings.apply_to_existing
+    {
+        result = chats::update_access(&state, &owner, &id, &settings).await?;
     }
     if let Some(agent_id) = body.agent_id.as_deref() {
         let agent = requested_agent(&state, &owner, Some(agent_id)).await?;
@@ -2974,8 +2989,7 @@ async fn thread_conversation(
     threads
         .update_one(
             doc! {"channel_id": &row.id, "partition": partition},
-            doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
-            "created_at": now}, "$set": {"updated_at": now}},
+            doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(row, now), "$set": {"updated_at": now}},
         )
         .upsert(true)
         .await?;
@@ -4075,8 +4089,7 @@ pub async fn put_conversation(
         .collection::<NyxbotThread>(THREADS)
         .update_one(
             doc! {"channel_id": &row.id, "partition": &conversation_id},
-            doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
-            "created_at": now}, "$set": {"updated_at": now}},
+            doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(&row, now), "$set": {"updated_at": now}},
         )
         .upsert(true)
         .await
@@ -4397,7 +4410,7 @@ async fn custom_event_thread(
             doc! {
                 "$setOnInsert": {"_id": Uuid::new_v4().to_string(), "created_at": now,
                     "channel_id": &channel.id, "user_id": &channel.user_id,
-                    "partition": partition, "kind": "private", "title": "Custom event",
+                    "partition": partition, "kind": "private", "title": "Custom event", "allow_posts": false,
                     "owner_chat": false, "agent_id": &channel.agent_id,
                     "relay_partition": &destination.relay_partition,
                     "platform_chat_id": &destination.platform_chat_id,
