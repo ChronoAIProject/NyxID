@@ -5834,7 +5834,11 @@ pub async fn conversation_history_page(
     if chat.guest || chat.turn_stopped || chat.turn_id.is_none() {
         return Err(AppError::AssistantTurnRequired);
     }
-    let thread = get(db, &chat.user_id, &chat.conversation_id).await?;
+    let thread = if chat.collaboration_thread {
+        super::collaboration_group_service::uploads::thread(db, chat).await?
+    } else {
+        get(db, &chat.user_id, &chat.conversation_id).await?
+    };
     if thread.guest_turn
         || thread.credential_api_key_id != chat.api_key_id
         || live_turn(&thread, Utc::now())

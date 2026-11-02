@@ -1074,8 +1074,24 @@ pub(crate) async fn wait_queued(
 }
 
 async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str) -> TurnError {
+    // Collaboration turns recheck live authority in a snapshot transaction;
+    // do that every 5 s (20 polls) and only the stored stop flag in between.
+    let mut polls: u32 = 0;
     loop {
-        match engine::stop_requested(&state.db, &row.user_id, &row.id, turn_id).await {
+        let stopped = if row.collaboration.is_some() {
+            let full = polls.is_multiple_of(20);
+            polls = polls.wrapping_add(1);
+            if full {
+                super::collaboration_group_service::runtime::stop_requested(&state.db, row, turn_id)
+                    .await
+            } else {
+                super::collaboration_group_service::runtime::stop_flag_set(&state.db, row, turn_id)
+                    .await
+            }
+        } else {
+            engine::stop_requested(&state.db, &row.user_id, &row.id, turn_id).await
+        };
+        match stopped {
             Ok(false) => tokio::time::sleep(Duration::from_millis(250)).await,
             Ok(true) => return TurnError::internal("cancelled", "stop"),
             Err(_) => return TurnError::internal("assistant_unavailable", "stop"),

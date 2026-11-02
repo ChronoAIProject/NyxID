@@ -332,6 +332,15 @@ async fn run_member(
         }
         Err(error) => return Err(error),
     };
+    // Refuse an unshared member before it waits for a pool slot or a busy
+    // thread, so the requester learns at once rather than after a retry.
+    if groups::members(&state.db, owner, group)
+        .await?
+        .iter()
+        .any(|m| m.id == agent_id && m.shared && !m.available)
+    {
+        return refuse_member(state, owner, group, agent_id).await;
+    }
     let thread = groups::member_thread(&state.db, owner, &group.id, agent_id).await?;
     let since = thread.as_ref().map_or(0, |row| row.group_seen_seq);
     let (transcript, newest) = groups::transcript_since(&state.db, owner, &group.id, since).await?;
