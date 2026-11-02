@@ -1079,7 +1079,7 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
     let mut polls: u32 = 0;
     loop {
         let stopped = if row.collaboration.is_some() {
-            let full = polls % 20 == 0;
+            let full = polls.is_multiple_of(20);
             polls = polls.wrapping_add(1);
             if full {
                 super::collaboration_group_service::runtime::stop_requested(&state.db, row, turn_id)
