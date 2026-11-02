@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import type { WorkspaceChatTarget } from "../../app/workspaceChatNavigation";
 import {
   agentSchema,
   type AssistantAgent,
 } from "../../features/agents/agentContracts";
 import { conversationSchema } from "../../features/assistant/assistantTypes";
-import { hookHarness } from "../../features/assistant/assistantHookTestHarness";
+import {
+  deferred,
+  hookHarness,
+} from "../../features/assistant/assistantHookTestHarness";
 import { groupSchema } from "../../features/groups/groupContracts";
 import { formatRelativeTimeFromMs } from "../../lib/time";
 import { lightColors } from "../../theme/mobileTheme";
@@ -15,7 +19,12 @@ import { sidebarSectionTitle } from "./workspaceSidebarStyles";
 import * as listHelpers from "./workspaceChatListModel";
 
 type Element = { type: unknown; props: Record<string, any> };
-type QueryOptions = { queryKey: unknown[]; enabled: boolean };
+type QueryOptions = {
+  queryKey: unknown[];
+  enabled: boolean;
+  staleTime?: number;
+  refetchInterval?: number | false;
+};
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 const conversationId = (value: number) =>
   `nyxa-${value.toString(16).padStart(32, "0")}`;
@@ -109,12 +118,31 @@ type SetupOptions = {
   agent?: Partial<AssistantAgent>;
   online?: boolean;
   chats?: ReturnType<typeof chatsFor>;
+  agentError?: boolean;
+  refetchAgents?: () => Promise<unknown>;
+  live?: boolean;
 };
 
 function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
   const selections: WorkspaceChatTarget[] = [];
   const creations: string[] = [];
   const historyQueries: QueryOptions[] = [];
+  const agentQueries: QueryOptions[] = [];
+  const agentRefreshes: unknown[] = [];
+  let epoch = 17;
+  let online = options.online !== false;
+  let onAppState: ((state: string) => void) | undefined;
+  const appState = {
+    currentState: "active",
+    addEventListener: (_: string, listener: (state: string) => void) => {
+      onAppState = listener;
+      return {
+        remove: () => {
+          onAppState = undefined;
+        },
+      };
+    },
+  };
   const liveAgents = agents.map((agent) => ({ ...agent }));
   const targetAgentId = current?.kind === "agent" ? current.agentId : undefined;
   if (targetAgentId && options.agent) {
@@ -148,14 +176,16 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     },
     "react-native": {
       ...Object.fromEntries(
-        ["ActivityIndicator", "Pressable", "ScrollView", "Text", "View"].map(
-          (name) => [name, name],
-        ),
+        [
+          "ActivityIndicator",
+          "Pressable",
+          "RefreshControl",
+          "ScrollView",
+          "Text",
+          "View",
+        ].map((name) => [name, name]),
       ),
-      AppState: {
-        currentState: "active",
-        addEventListener: () => ({ remove: () => {} }),
-      },
+      AppState: appState,
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "lucide-react-native": Object.fromEntries(
@@ -167,16 +197,27 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
         "MessageSquare",
         "Users",
         "Plus",
+        "RefreshCw",
       ].map((name) => [name, name]),
     ),
     "@tanstack/react-query": {
-      useQuery: ({ queryKey }: QueryOptions) => ({
-        data: queryKey.includes("agents") ? { agents: liveAgents } : groups,
-        isSuccess: true,
-        isPending: false,
-        isError: false,
-        refetch: async () => {},
-      }),
+      useQuery: (query: QueryOptions) => {
+        const { queryKey } = query;
+        if (queryKey.includes("agents")) agentQueries.push(query);
+        return {
+          data: queryKey.includes("agents") ? { agents: liveAgents } : groups,
+          isSuccess: !queryKey.includes("agents") || !options.agentError,
+          isPending: false,
+          isFetching: false,
+          isError: queryKey.includes("agents") && !!options.agentError,
+          refetch: async (args: unknown) => {
+            if (queryKey.includes("agents")) {
+              agentRefreshes.push(args);
+              await options.refetchAgents?.();
+            }
+          },
+        };
+      },
       useInfiniteQuery: (options: QueryOptions) => {
         historyQueries.push(options);
         const agentId = options.queryKey.at(-1);
@@ -209,17 +250,19 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
       },
     },
     "../../lib/time": { formatRelativeTimeFromMs },
-    "../../features/groups/useGroupsLive": { useGroupsLive: () => false },
+    "../../features/groups/useGroupsLive": {
+      useGroupsLive: () => options.live ?? false,
+    },
     "../../lib/api/assistantLiveTransport": {
       livePollInterval: (value: number) => value,
     },
     "../../hooks/useNetworkStatus": {
-      useNetworkStatus: () => ({ isConnected: options.online !== false }),
+      useNetworkStatus: () => ({ isConnected: online }),
     },
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/assistantApi": { assistantApi: {} },
     "../../lib/api/groupsApi": { groupsApi: {} },
-    "../../lib/auth/authEpoch": { getAuthEpoch: () => 17 },
+    "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
     "../../theme/designTokens": { fonts: {} },
     "./WorkspaceChatBrowser": { WorkspaceChatBrowser: "WorkspaceChatBrowser" },
@@ -299,6 +342,7 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     },
     selections,
     creations,
+    agentRefreshes,
     all,
     label,
     press,
@@ -308,7 +352,28 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     chatRows,
     groupRows,
     historyQuery,
+    agentQuery: () => {
+      harness.flush();
+      return agentQueries.at(-1)!;
+    },
     pressBrowserItem,
+    scroll: () => one((row) => row.type === "ScrollView"),
+    setVisible: (value: boolean) => {
+      props.visible = value;
+      harness.render();
+    },
+    setOnline: (value: boolean) => {
+      online = value;
+      harness.render();
+    },
+    setAppState: (value: string) => {
+      appState.currentState = value;
+      onAppState?.(value);
+      harness.flush();
+    },
+    changeAccount: () => {
+      epoch++;
+    },
     patchAgent: (id: string, patch: Partial<AssistantAgent>) => {
       const index = liveAgents.findIndex((row) => row.id === id);
       assert.ok(index >= 0);
@@ -317,6 +382,138 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     },
   };
 }
+
+test("cached agents refresh immediately on reopen, foreground and reconnect with a thirty-second polling fallback", async () => {
+  for (const live of [false, true]) {
+    const env = setup(undefined, { live });
+    // Use the screen's actual query policy with a real cache/observer. A fresh
+    // cache must not postpone synchronization when this native view resumes.
+    const client = new QueryClient({
+      defaultOptions: { queries: { staleTime: 60_000, gcTime: Infinity } },
+    });
+    let requests = 0;
+    const queryOptions = () => ({
+      ...env.agentQuery(),
+      queryKey: plain(env.agentQuery().queryKey),
+      queryFn: async () => ++requests,
+    });
+    client.setQueryData(queryOptions().queryKey, 0);
+    const observer = new QueryObserver(client, queryOptions());
+    const release = observer.subscribe(() => {});
+    try {
+      await observer.getCurrentQuery().promise;
+      assert.equal(requests, 1);
+      assert.equal(queryOptions().refetchInterval, 30_000);
+      for (const [pause, resume] of [
+        [() => env.setVisible(false), () => env.setVisible(true)],
+        [() => env.setAppState("background"), () => env.setAppState("active")],
+        [() => env.setOnline(false), () => env.setOnline(true)],
+      ]) {
+        const before = requests;
+        pause!();
+        observer.setOptions(queryOptions());
+        assert.equal(queryOptions().enabled, false);
+        assert.equal(queryOptions().refetchInterval, false);
+        await client.invalidateQueries({ queryKey: ["workspace", "agents"] });
+        assert.equal(requests, before);
+
+        // Even cache data updated while paused must be checked on resuming.
+        client.setQueryData(queryOptions().queryKey, before);
+        resume!();
+        observer.setOptions(queryOptions());
+        await observer.getCurrentQuery().promise;
+        assert.equal(requests, before + 1);
+        assert.equal(queryOptions().refetchInterval, 30_000);
+      }
+      const beforeEvent = requests;
+      await client.invalidateQueries({ queryKey: ["workspace", "agents"] });
+      assert.equal(requests, beforeEvent + 1);
+    } finally {
+      release();
+      client.clear();
+      env.harness.unmount();
+    }
+  }
+});
+
+test("agents can be refreshed from the section, pull gesture, and full browser without duplicate requests", async () => {
+  const pending = deferred<void>();
+  const env = setup(undefined, { refetchAgents: () => pending.promise });
+  const displayed = env.agentRows().map((row) => row.props.accessibilityLabel);
+  env.press("Refresh agents");
+  env.scroll().props.refreshControl.props.onRefresh();
+  assert.equal(env.agentRefreshes.length, 1);
+  assert.deepEqual(plain(env.agentRefreshes[0]), { cancelRefetch: false });
+  assert.equal(env.label("Refresh agents").props.accessibilityState.busy, true);
+  assert.equal(env.label("Refresh agents").props.disabled, true);
+  assert.equal(env.scroll().props.refreshControl.props.refreshing, true);
+  assert.deepEqual(
+    env.agentRows().map((row) => row.props.accessibilityLabel),
+    displayed,
+  );
+  env.more("View all agents (9)");
+  assert.equal(env.browser().refreshLabel, "Refresh agents");
+  assert.equal(env.browser().refreshing, true);
+  env.browser().onRefresh();
+  assert.equal(env.agentRefreshes.length, 1);
+  pending.resolve();
+  await env.harness.settle();
+  assert.equal(env.browser().refreshing, false);
+  env.browser().onRefresh();
+  await env.harness.settle();
+  assert.equal(env.agentRefreshes.length, 2);
+  env.harness.unmount();
+});
+
+test("refresh errors retain agents and expose retry in the full agent browser", async () => {
+  const options: SetupOptions = {};
+  const env = setup(undefined, options);
+  options.refetchAgents = async () => {
+    options.agentError = true;
+  };
+  env.more("View all agents (9)");
+  env.browser().onRefresh();
+  await env.harness.settle();
+  assert.equal(env.browser().items.length, 9);
+  const footer = elements(env.browser().footer);
+  assert.ok(
+    footer.some((row) => content(row).includes("Couldn’t refresh agents.")),
+  );
+  options.refetchAgents = async () => {
+    options.agentError = false;
+    env.patchAgent("agent-1", { display_name: "Freshly renamed" });
+  };
+  footer.find((row) => row.type === "Pressable")!.props.onPress();
+  await env.harness.settle();
+  assert.equal(
+    env.browser().items.find((row: { id: string }) => row.id === "agent-1")
+      .agent.display_name,
+    "Freshly renamed",
+  );
+  assert.equal(env.browser().footer, undefined);
+  env.harness.unmount();
+});
+
+test("saved refresh callbacks cannot request agents while hidden, offline, backgrounded, after account change, or unmounted", () => {
+  for (const transition of [
+    "hidden",
+    "offline",
+    "background",
+    "account",
+    "unmount",
+  ]) {
+    const env = setup();
+    const refresh = env.label("Refresh agents").props.onPress;
+    if (transition === "hidden") env.setVisible(false);
+    if (transition === "offline") env.setOnline(false);
+    if (transition === "background") env.setAppState("background");
+    if (transition === "account") env.changeAccount();
+    if (transition === "unmount") env.harness.unmount();
+    refresh();
+    assert.equal(env.agentRefreshes.length, 0, transition);
+    env.harness.unmount();
+  }
+});
 
 test("agent and group creation buttons stay separate from section disclosure", () => {
   const env = setup();
@@ -585,17 +782,18 @@ test("the agent-history browser keeps New chat separate from its saved history",
   }
 });
 
-test("past and view-only agents explain chat unavailability and offer another agent", () => {
+test("a browser already open for an agent that becomes unavailable offers another agent", () => {
   for (const unavailable of [
     { status: "destroyed" as const },
     { can_use: false },
   ]) {
     const env = setup(
       { kind: "agent", agentId: "agent-1" },
-      { agent: unavailable, history: "empty" },
+      { history: "empty" },
     );
     env.more("View all agents (9)");
     env.pressBrowserItem("agent-1");
+    env.patchAgent("agent-1", unavailable);
     const model = env.browser();
     assert.match(
       `${model.description} ${model.emptyText}`,
@@ -614,26 +812,120 @@ test("past and view-only agents explain chat unavailability and offer another ag
   }
 });
 
-test("a destroyed agent retains readable saved conversations without offering a new one", () => {
-  const env = setup(
-    { kind: "agent", agentId: "agent-1" },
-    { agent: { status: "destroyed" } },
-  );
+test("an agent deleted while browsing retains readable saved conversations without returning to the roster", () => {
+  const env = setup({ kind: "agent", agentId: "agent-1" });
+  env.more("View all agents (9)");
+  env.pressBrowserItem("agent-1");
+  env.patchAgent("agent-1", { status: "destroyed" });
   assert.equal(env.historyQuery().enabled, true);
+  assert.equal(
+    env
+      .agentRows()
+      .some((row) => /chats for Agent 1,/.test(row.props.accessibilityLabel)),
+    false,
+  );
   assert.equal(
     env
       .all()
       .some((row) => row.props.accessibilityLabel === "New chat with Agent 1"),
     false,
   );
-  env.more("View all agents (9)");
-  env.pressBrowserItem("agent-1");
   assert.equal(env.browser().primaryAction.label, "Choose another agent");
   const saved = chatsFor("agent-1")[0]!;
   env.pressBrowserItem(saved.id);
   assert.deepEqual(env.selections, [
     { kind: "agent", agentId: "agent-1", conversationId: saved.id },
   ]);
+  env.harness.unmount();
+});
+
+test("deleted agents stay out of the sidebar count and full roster while the current saved chat remains reachable", async () => {
+  const current = {
+    kind: "agent" as const,
+    agentId: "agent-1",
+    conversationId: chatsFor("agent-1")[0]!.id,
+  };
+  const options: SetupOptions = { agent: { status: "destroyed" } };
+  const env = setup(current, options);
+  env.patchAgent("agent-2", { status: "destroyed" });
+  assert.equal(content(env.label("Collapse agents")), "Agents7 total");
+  assert.equal(
+    env
+      .agentRows()
+      .some((row) =>
+        /chats for Agent [12],/.test(row.props.accessibilityLabel),
+      ),
+    false,
+  );
+  env.press("Open current chat");
+  assert.deepEqual(env.selections, [current]);
+  env.more("View all agents (7)");
+  assert.equal(env.browser().items.length, 7);
+  assert.equal(
+    env
+      .browser()
+      .items.some((row: { id: string }) =>
+        ["agent-1", "agent-2"].includes(row.id),
+      ),
+    false,
+  );
+  options.refetchAgents = async () =>
+    env.patchAgent("agent-3", { status: "destroyed" });
+  env.browser().onRefresh();
+  await env.harness.settle();
+  assert.equal(content(env.label("Collapse agents")), "Agents6 total");
+  assert.equal(env.browser().items.length, 6);
+  assert.equal(
+    env.browser().items.some((row: { id: string }) => row.id === "agent-3"),
+    false,
+  );
+  env.harness.unmount();
+});
+
+test("the picker offers no current-chat fallback for deleted or view-only agents", () => {
+  for (const unavailable of [
+    { status: "destroyed" as const },
+    { can_use: false },
+  ]) {
+    const env = setup(
+      {
+        kind: "agent",
+        agentId: "agent-1",
+        conversationId: chatsFor("agent-1")[0]!.id,
+      },
+      { mode: "picker", agent: unavailable },
+    );
+    assert.equal(
+      env
+        .all()
+        .some((row) => row.props.accessibilityLabel === "Open current chat"),
+      false,
+    );
+    assert.equal(
+      env
+        .agentRows()
+        .some((row) => /chats for Agent 1,/.test(row.props.accessibilityLabel)),
+      false,
+    );
+    env.harness.unmount();
+  }
+});
+
+test("a roster containing only deleted agents shows an empty state and no deleted choices", () => {
+  const env = setup();
+  for (const row of agents) env.patchAgent(row.id, { status: "destroyed" });
+  assert.equal(content(env.label("Collapse agents")), "Agents0 total");
+  assert.equal(env.agentRows().length, 0);
+  assert.ok(env.all().some((row) => content(row) === "No agents yet."));
+  assert.equal(
+    env
+      .all()
+      .some(
+        (row) =>
+          row.type === "Pressable" && /^View all agents/.test(content(row)),
+      ),
+    false,
+  );
   env.harness.unmount();
 });
 
@@ -969,6 +1261,53 @@ test("agent picker reuses the thread hierarchy without crew or creation sections
   env.harness.unmount();
 });
 
+test("sidebar counts distinguish the full roster, owner totals, and truncated preview after deletion", () => {
+  const env = setup();
+  for (const id of ["agent-3", "agent-4", "agent-5"])
+    env.patchAgent(id, {
+      owner_kind: "org",
+      owner_id: "chrono",
+      owner_name: "ChronoAI",
+    });
+  for (const id of ["agent-6", "agent-7", "agent-8"])
+    env.patchAgent(id, { status: "destroyed" });
+
+  assert.equal(content(env.label("Collapse agents")), "Agents6 total");
+  assert.equal(
+    env.label("Collapse agents").props.accessibilityValue.text,
+    "6 total",
+  );
+  assert.equal(
+    content(env.label("Personal, 3 of 3 agents shown")),
+    "Personal · 3",
+  );
+  assert.equal(
+    content(env.label("ChronoAI, 2 of 3 agents shown")),
+    "ChronoAI · 2 of 3",
+  );
+  assert.equal(env.agentRows().length, 5);
+  env.more("View all agents (6)");
+  assert.equal(env.browser().items.length, 6);
+
+  env.patchAgent("agent-5", { status: "destroyed" });
+  assert.equal(content(env.label("Collapse agents")), "Agents5 total");
+  assert.equal(
+    content(env.label("ChronoAI, 2 of 2 agents shown")),
+    "ChronoAI · 2",
+  );
+  assert.equal(env.agentRows().length, 5);
+  assert.equal(env.browser().items.length, 5);
+  env.press("Collapse agents");
+  assert.equal(content(env.label("Expand agents")), "Agents5 total");
+  assert.equal(
+    env
+      .all()
+      .some((row) => row.props.accessibilityLabel?.includes("agents shown")),
+    false,
+  );
+  env.harness.unmount();
+});
+
 test("sidebar owner sections and real channel badges keep personal agents before organizations", () => {
   const env = setup(
     { kind: "agent", agentId: "agent-7" },
@@ -992,7 +1331,10 @@ test("sidebar owner sections and real channel badges keep personal agents before
     .all()
     .filter((row) => row.type === "Text")
     .map(content);
-  assert.ok(texts.indexOf("Personal") < texts.indexOf("Product team"));
+  assert.deepEqual(
+    texts.filter((text) => /^(Personal|Product team) · /.test(text)),
+    ["Personal · 4 of 8", "Product team · 1"],
+  );
   assert.ok(texts.includes("Telegram"));
   assert.ok(
     env

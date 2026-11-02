@@ -7,18 +7,20 @@ import {
   type ReactNode,
 } from "react";
 import {
+  ActivityIndicator,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
-import { ChevronLeft, Search, X } from "lucide-react-native";
+import { ChevronLeft, RefreshCw, Search, X } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { fonts } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
@@ -36,6 +38,10 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   primaryAction,
   visible = true,
   onDismiss,
+  onRefresh,
+  refreshing = false,
+  refreshDisabled = false,
+  refreshLabel = `Refresh ${title.toLowerCase()}`,
   footer,
   emptyText = "Nothing here yet.",
 }: {
@@ -49,6 +55,10 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   onBack?: () => void;
   visible?: boolean;
   onDismiss?: () => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  refreshDisabled?: boolean;
+  refreshLabel?: string;
   primaryAction?: {
     label: string;
     accessibilityLabel: string;
@@ -65,6 +75,13 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   const onDismissRef = useRef(onDismiss);
   onDismissRef.current = onDismiss;
   const mountedRef = useRef(true);
+  const refreshRef = useRef({
+    onRefresh,
+    refreshing,
+    refreshDisabled,
+    visible,
+  });
+  refreshRef.current = { onRefresh, refreshing, refreshDisabled, visible };
   const dismissalPending = useRef(false);
   const previousVisibleRef = useRef(visible);
   if (previousVisibleRef.current !== visible) {
@@ -94,6 +111,20 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   const close = () => {
     Keyboard.dismiss();
     onClose();
+  };
+  const refreshBlocked = refreshing || refreshDisabled || !visible;
+  const refresh = () => {
+    const current = refreshRef.current;
+    if (
+      !mountedRef.current ||
+      !current.onRefresh ||
+      !current.visible ||
+      current.refreshing ||
+      current.refreshDisabled
+    )
+      return;
+    Keyboard.dismiss();
+    current.onRefresh();
   };
 
   return (
@@ -131,6 +162,28 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
               >
                 {title}
               </Text>
+              {onRefresh ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={refreshLabel}
+                  accessibilityState={{
+                    disabled: refreshBlocked,
+                    busy: refreshing,
+                  }}
+                  disabled={refreshBlocked}
+                  onPress={refresh}
+                  style={[
+                    styles.iconButton,
+                    { opacity: refreshBlocked ? 0.4 : 1 },
+                  ]}
+                >
+                  {refreshing ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <RefreshCw size={20} color={colors.textSecondary} />
+                  )}
+                </Pressable>
+              ) : null}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Close ${title}`}
@@ -228,6 +281,20 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="on-drag"
               contentContainerStyle={styles.list}
+              alwaysBounceVertical={onRefresh ? true : undefined}
+              refreshControl={
+                onRefresh ? (
+                  <RefreshControl
+                    accessibilityLabel={refreshLabel}
+                    enabled={!refreshBlocked}
+                    refreshing={refreshing}
+                    onRefresh={refresh}
+                    tintColor={colors.primary}
+                    colors={[colors.primary]}
+                    progressBackgroundColor={colors.card}
+                  />
+                ) : undefined
+              }
               ListEmptyComponent={
                 <View style={styles.empty}>
                   <Text
