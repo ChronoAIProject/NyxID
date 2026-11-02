@@ -182,6 +182,16 @@ pub(super) async fn enqueue_with_uploads_ready(
                 message.attachments=svc::assistant_upload_service::bind(db,actor,group_id,&message.id,uploads,session).await?;
                 db.collection::<GroupMessage>(MESSAGES).update_one(doc! {"_id":&message.id},doc! {"$set":{"attachments":bson::to_bson(&message.attachments).map_err(|e|AppError::Internal(e.to_string()))?}}).session(&mut *session).await?;
                 let mut authorities = BTreeMap::new();
+                // A recipient-picker edit does not make an unavailable mention
+                // disappear. Record its refusal without adding a recipient or
+                // changing the request's execution/attachment semantics.
+                for mentioned in svc::assistant_group_service::mentions(text, &roster) {
+                    if !selected.contains(&mentioned)
+                        && access.agent(&mentioned).and_then(AgentIdentity::authority).is_none()
+                    {
+                        append(db, &access.group, actor, REFUSAL, &id, Some(&mentioned), &[], session).await?;
+                    }
+                }
                 for agent in &selected {
                     if let Some(authority) = access.agent(agent).and_then(AgentIdentity::authority)
                     {

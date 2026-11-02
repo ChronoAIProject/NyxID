@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { messageTime } from "@/lib/assistant/message-time";
 import type {
   AssistantGroup,
@@ -65,6 +66,7 @@ vi.mock("@/components/assistant/nyxbot-group-forms", () => ({
 // recipients slot renders above the input.
 vi.mock("@/components/assistant/upload-composer", () => ({
   UploadComposer: (props: {
+    disabled?: boolean;
     mentions?: readonly { id: string; name: string; shared?: boolean }[];
     recipients?: ReactNode;
     onContentChange?: (content: string) => void;
@@ -77,6 +79,7 @@ vi.mock("@/components/assistant/upload-composer", () => ({
         {props.recipients}
         <textarea
           aria-label="Message"
+          disabled={props.disabled}
           value={text}
           onChange={(event) => {
             setText(event.target.value);
@@ -85,6 +88,7 @@ vi.mock("@/components/assistant/upload-composer", () => ({
         />
         <button
           type="button"
+          disabled={props.disabled}
           onClick={() =>
             void props.onSend(text, undefined).then(
               () => {
@@ -284,6 +288,12 @@ describe("group recipient pills", () => {
 });
 
 describe("delivered message recipients", () => {
+  it("attributes an unavailable-agent refusal to its display name", () => {
+    const message: AssistantGroupMessage = { id: "notice", seq: 1, role: "notice", text: "This agent cannot reply with your current access.", agent: { id: RESEARCHER, name: "researcher", display_name: "Office Agent", kind: "specialist" }, created_at: "2026-10-01T00:00:00Z" };
+    render(<GroupMessageRow groupId="group" message={message} names={[]} onOpenAgent={() => undefined} />);
+    expect(screen.getByRole("note")).toHaveTextContent("Office Agent: This agent cannot reply with your current access.");
+  });
+
   it("renders a member's tool image through the group attachment endpoint", () => {
     group = makeGroup([NYXBOT]);
     const message = {
@@ -472,4 +482,41 @@ it("attributes collaboration guest replies to the requester and owner-paid lane"
   const message: AssistantGroupMessage = { id: "reply", seq: 2, role: "agent", agent: { id: RESEARCHER, name: "Researcher", kind: "specialist" }, text: "Hello Bob", created_at: "2026-10-31T00:00:00Z", requester_user_id: "bob", execution_mode: "guest" };
   render(<GroupMessageRow groupId="collaboration" message={message} names={[]} participants={[{ id: "bob", display_name: "Bob" }]} onOpenAgent={() => undefined} />);
   expect(screen.getByText("For Bob · Guest reply (owner pays)")).toBeVisible();
+});
+
+describe("collaboration participant composer", () => {
+  beforeEach(() => {
+    groupLoaded = true;
+    groupError = null;
+    post.mockReset().mockResolvedValue({});
+    group = makeGroup([]);
+    group.members = [{ ...group.members[1]!, display_name: "Office Agent", unavailable: true, unavailable_reason: "not_shared_with_you", owner_name: "Share Ops" }];
+    group.collaboration = { version: 1, creator_user_id: "someone-else", membership_revision: 1, history_disclosure: "Public history", can_manage: false, your_request_ids: [], transfer_to_user_id: null, guest_access: [{ agent_id: RESEARCHER, enabled: false, revision: 1, can_enable: false, can_disable: false, can_request: true, lane: null }], proposals: [], invites: [] };
+  });
+  it("enables people-only chat without any usable agent and retains server display names", async () => {
+    render(<QueryClientProvider client={new QueryClient()}><NyxAgentGroupPage groupId={group.id} mock={false} /></QueryClientProvider>);
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
+    expect(screen.getByText("Everyone in the group · no agent reply")).toBeVisible();
+    expect(screen.getByRole("button", { name: /Office Agent/ })).toBeInTheDocument();
+    await type("Hello Shining");
+    await send();
+    expect(post).toHaveBeenCalledWith({ text: "Hello Shining", attachmentIds: [], recipientAgentIds: [] });
+  });
+  it("shows unavailable reasons and ask-owner in the recipient picker", async () => {
+    const client = new QueryClient();
+    render(<QueryClientProvider client={client}><NyxAgentGroupPage groupId={group.id} mock={false} /></QueryClientProvider>);
+    await userEvent.click(screen.getByRole("button", { name: "Add recipient" }));
+    expect(screen.getByText("Not shared with you — ask Share Ops to allow participants.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Ask Share Ops to allow participants" })).toBeVisible();
+    client.clear();
+  });
+  it("allows deliberately deselecting an available agent for a people-only post", async () => {
+    group.members = [{ ...group.members[0]!, unavailable: false }];
+    group.default_recipient_ids = [RESEARCHER];
+    render(<QueryClientProvider client={new QueryClient()}><NyxAgentGroupPage groupId={group.id} mock={false} /></QueryClientProvider>);
+    await userEvent.click(screen.getByRole("button", { name: "Remove recipient Office Agent" }));
+    await type("Just talking to people");
+    await send();
+    expect(post).toHaveBeenCalledWith({ text: "Just talking to people", attachmentIds: [], recipientAgentIds: [] });
+  });
 });

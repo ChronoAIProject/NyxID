@@ -41,6 +41,7 @@ pub enum Change {
         agent_id: String,
     },
     GuestAccess {
+        request_id: Option<String>,
         agent_id: String,
         enabled: bool,
         expected_revision: i64,
@@ -177,6 +178,7 @@ async fn insert_agent(
 ) -> AppResult<()> {
     db.collection::<model::AgentAccess>(model::AGENT_ACCESS)
         .insert_one(model::AgentAccess {
+            guest_request: None,
             id: Uuid::new_v4().to_string(),
             group_id: group.id.clone(),
             agent_id: agent_id.into(),
@@ -193,7 +195,7 @@ async fn insert_agent(
     Ok(())
 }
 
-async fn rate_limit(db: &Database, actor: &str) -> AppResult<()> {
+pub(super) async fn rate_limit(db: &Database, actor: &str) -> AppResult<()> {
     if !svc::coordination_service::RateWindowStore::admit(
         db,
         "collaboration_group_writes",
@@ -249,6 +251,19 @@ pub(super) async fn apply_ready(
     change: Change,
     delegation_approved: bool,
 ) -> AppResult<Mutation> {
+    let guest_audit = match &change {
+        Change::GuestAccess {
+            agent_id,
+            request_id,
+            enabled,
+            ..
+        } => Some((
+            agent_id.clone(),
+            request_id.clone().unwrap_or_default(),
+            *enabled,
+        )),
+        _ => None,
+    };
     let raw_token = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
     let hash = token_hash(&raw_token)?;
     let mut session = db.client().start_session().await?;
@@ -382,7 +397,7 @@ pub(super) async fn apply_ready(
                         changed = true;
                     }
                 }
-                Change::GuestAccess {agent_id,enabled,expected_revision:guest_revision} => {
+                Change::GuestAccess {agent_id,enabled,expected_revision:guest_revision,request_id} => {
                     if !group.member_agent_ids.contains(agent_id) { return Err(missing()); }
                     let agent = db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
                         .find_one(doc! {"_id":agent_id,"kind":"specialist","destroyed_at":null}).session(&mut *session).await?.ok_or_else(missing)?;
@@ -390,6 +405,9 @@ pub(super) async fn apply_ready(
                     // Organization specialists can never opt into guest publishing.
                     person(db,&agent.user_id,session).await?;
                     let previous = db.collection::<model::AgentAccess>(model::AGENT_ACCESS).find_one(doc! {"group_id":id,"agent_id":agent_id,"owner_id":&agent.user_id,"revision":guest_revision}).session(&mut *session).await?.ok_or_else(stale)?;
+                    if let Some(request_id) = request_id {
+                        guest_requests::validate_pending(&previous, &group, request_id)?;
+                    }
                     if *enabled && !identity::for_group(db,&group.user_id,group.clone(),session).await?.enabled_people.contains(actor) { return Err(missing()); }
                     if previous.guest_enabled != *enabled {
                         // REST is a first-party human decision. A native tool must
@@ -398,8 +416,15 @@ pub(super) async fn apply_ready(
                         if *enabled && !delegation_approved {
                             return Err(AppError::Forbidden("Enabling guest access requires the agent owner's approval".into()));
                         }
-                        if db.collection::<model::AgentAccess>(model::AGENT_ACCESS).update_one(doc! {"_id":previous.id,"revision":guest_revision},doc! {"$set":{"guest_enabled":enabled,"consenting_owner_id":if *enabled {bson::Bson::String(actor.into())} else {bson::Bson::Null},"updated_at":bson::DateTime::now()},"$inc":{"revision":1}}).session(&mut *session).await?.matched_count != 1 { return Err(stale()); }
+                        if db.collection::<model::AgentAccess>(model::AGENT_ACCESS).update_one(doc! {"_id":&previous.id,"revision":guest_revision},doc! {"$set":{"guest_enabled":enabled,"consenting_owner_id":if *enabled {bson::Bson::String(actor.into())} else {bson::Bson::Null},"updated_at":bson::DateTime::now()},"$inc":{"revision":1}}).session(&mut *session).await?.matched_count != 1 { return Err(stale()); }
                         invalidate(db,id,session).await?;
+                    }
+                    // Direct policy changes do not revive a terminal or expired request.
+                    if guest_requests::pending(&previous, &group).is_some() {
+                        db.collection::<bson::Document>(model::AGENT_ACCESS).update_one(
+                            doc! {"_id": &previous.id},
+                            doc! {"$set": {"guest_request.status": if *enabled {"approved"} else {"cancelled"}}}
+                        ).session(&mut *session).await?;
                     }
                 }
                 Change::Rename {name:title} => { group.name = name(title)?; }
@@ -425,6 +450,17 @@ pub(super) async fn apply_ready(
         transactions::transaction_result(result)
     })}).await.map_err(transactions::map_transaction_error)?;
     audit(db, actor, id, "membership_updated").await;
+    if let Some((agent, request, enabled)) = guest_audit {
+        guest_requests::audit_request(
+            db,
+            actor,
+            id,
+            &agent,
+            &request,
+            if enabled { "enabled" } else { "disabled" },
+        )
+        .await;
+    }
     Ok(Mutation {
         group,
         invite: invite.map(|invite| IssuedInvite {

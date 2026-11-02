@@ -1,4 +1,7 @@
 import { useState } from "react";
+import { Switch } from "@/components/ui/switch";
+import { GroupAgentAccessRequest } from "./group-agent-access";
+import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
 import { useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -400,39 +403,31 @@ export function CollaborationSettings({
                     {guest?.lane === "guest"
                       ? "Your requests use guest access and bill the agent owner."
                       : agent.unavailable
-                        ? "Ask this agent’s owner to share it with you."
+                        ? groupAgentUnavailableReason(agent)
                         : "Your requests use your access and billing rules."}
                   </p>
-                  <p>Guest replies: {guest?.enabled ? "On" : "Off"}</p>
-                  {guest &&
-                  (guest.enabled ? guest.can_disable : guest.can_enable) ? (
-                    <Button
-                      size="sm"
-                      disabled={mutation.isPending}
-                      onClick={() =>
-                        guest.enabled
-                          ? void apply({
-                              action: "guest_access",
-                              agent_id: agent.id,
-                              enabled: false,
-                              guest_revision: guest.revision,
-                            })
-                          : setConfirm({
+                  {agent.owner_name ? <p className="text-muted-foreground">Owner: {agent.owner_name}</p> : null}
+                  {guest?.can_enable ? (
+                    <label className="flex items-center gap-2">
+                      <Switch
+                        aria-label={`Participants can use ${agentTitle(agent)}`}
+                        checked={guest.enabled}
+                        disabled={mutation.isPending}
+                        onCheckedChange={(enabled) => enabled
+                          ? setConfirm({
                               text: "Allow current and future participants without use rights to talk to this agent as guests? They use your guest service policy and you pay. They cannot approve actions or use your private account tools.",
-                              change: {
-                                action: "guest_access",
-                                agent_id: agent.id,
-                                enabled: true,
-                                guest_revision: guest.revision,
-                              },
+                              change: { action: "guest_access", agent_id: agent.id, enabled: true, guest_revision: guest.revision },
                             })
-                      }
-                    >
-                      {guest.enabled
-                        ? "Disable guest replies"
-                        : "Enable guest replies"}
+                          : void apply({ action: "guest_access", agent_id: agent.id, enabled: false, guest_revision: guest.revision })}
+                      />
+                      Participants can use this agent
+                    </label>
+                  ) : guest?.enabled && guest.can_disable ? (
+                    <Button size="sm" disabled={mutation.isPending} onClick={() => void apply({ action: "guest_access", agent_id: agent.id, enabled: false, guest_revision: guest.revision })}>
+                      Disable participant access
                     </Button>
                   ) : null}
+                  <GroupAgentAccessRequest group={group} member={agent} />
                   {policy.can_manage && group.lead_agent_id !== agent.id ? (
                     <Button
                       size="sm"

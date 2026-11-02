@@ -2807,6 +2807,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::assistant_group::post_message),
         )
         .route(
+            "/nyxagent/groups/{id}/agents/{agent_id}/guest-requests",
+            post(handlers::collaboration_group::request_guest_access),
+        )
+        .route(
+            "/nyxagent/groups/{id}/agents/{agent_id}/guest-requests/{request_id}",
+            delete(handlers::collaboration_group::cancel_guest_request),
+        )
+        .route(
             "/nyxagent/agents/{id}/group-access",
             get(handlers::collaboration_group::owned_guest_groups),
         )

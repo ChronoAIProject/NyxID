@@ -446,6 +446,14 @@ describe("group schemas", () => {
     ).toThrow();
   });
 
+  it("retains server member names and unavailable reasons without a viewer agent inventory", () => {
+    const agent = { ...group.members[1], display_name: "Office Agent", unavailable: true, unavailable_reason: "not_shared_with_you", owner_name: "Share Ops" };
+    const page = assistantGroupMessagesSchema.parse({ group: { ...group, members: [agent] }, messages: [{ id: "m", seq: 1, role: "notice", agent, text: "Ask the owner", created_at: at }] });
+    expect(page.group.members[0]).toMatchObject(agent);
+    expect(page.messages[0]?.agent?.display_name).toBe("Office Agent");
+    expect(assistantGroupPostedSchema.parse({ message: { id: "p", seq: 2, role: "user", text: "People only", created_at: at, recipient_agent_ids: [] }, addressed_agent_ids: [], request_id: null }).addressed_agent_ids).toEqual([]);
+  });
+
   it("parses the accepted post response", () => {
     expect(
       assistantGroupPostedSchema.parse({

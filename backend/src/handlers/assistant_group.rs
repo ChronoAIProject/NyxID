@@ -35,6 +35,7 @@ pub struct GroupMemberResponse {
     pub(crate) kind: AgentKind,
     pub(crate) destroyed: bool,
     pub(crate) unavailable: bool,
+    pub(crate) unavailable_reason: Option<&'static str>,
     pub(crate) shared: bool,
     pub(crate) owner_name: Option<String>,
     pub(crate) conversation_id: Option<String>,
@@ -144,6 +145,7 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
         members: members
             .iter()
             .map(|agent| GroupMemberResponse {
+                unavailable_reason: None,
                 id: agent.id.clone(),
                 name: agent.name.clone(),
                 display_name: agent.display_name.clone(),
