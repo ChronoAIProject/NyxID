@@ -208,7 +208,9 @@ impl Admission {
                     "Shared service authority changed".into(),
                 ));
             }
-            if service.user_id == self.chat.user_id {
+            if service.user_id == self.chat.user_id
+                && !shared_platform_model(&self.chat, &service, &self.operation_identity, target)
+            {
                 self.shared_permit
                     .as_ref()
                     .ok_or_else(|| AppError::Forbidden("Connection consent required".into()))?

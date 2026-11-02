@@ -10,6 +10,9 @@ use crate::{
 };
 use std::{collections::BTreeMap, sync::atomic::Ordering};
 
+#[path = "turn_tests.rs"]
+mod turn_tests;
+
 async fn setup(name: &str) -> (Fixture, AssistantAgent, AssistantGroup) {
     let f = Fixture::new(name).await;
     enable(&f).await;
