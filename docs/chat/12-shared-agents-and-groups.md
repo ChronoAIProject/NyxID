@@ -440,9 +440,12 @@ resolution as well as in discovery. A key allowlist alone is insufficient.
 NyxAgent's bounded model-transport exception remains available as the actor;
 it must never select an owner's unshared inference connection. Actor-owned
 model credentials also require the applicable explicit connection consent;
-an eligible platform model can bootstrap the first turn. A model bootstrap
-consent uses the existing bounded stateless-model turn scope, not a blanket
-provider grant, and excludes stateful provider actions.
+an eligible recipient-bound platform model bootstraps stateless inference
+without a personal-connection consent card, because it delegates no personal
+credential. Live platform ACL, exact connection, normal approvals and caller
+billing still apply. BYOK model calls require explicit connection consent in
+the existing bounded stateless-model scope; stateful provider actions and other
+service calls retain their exact consent requirements.
 
 ## 7. Billing and audit attribution
 
@@ -914,8 +917,10 @@ available to their authorized humans. None of these routes converts legacy
 personal crews or org groups.
 
 Only successful final text and explicitly chat-deliverable tool images are
-published. Guest images, inspection-only images, tool traces and exact cards
-remain private. Published image joins survive hidden-thread cleanup and follow
+published as replies. Failed turns publish a deduplicated notice containing only
+the public agent name and normalized error code; failed drafts, account details
+and upstream diagnostics are never published. Guest images, inspection-only
+images, tool traces and exact cards remain private. Published image joins survive hidden-thread cleanup and follow
 group deletion and upload retention. Uploads stay private while drafts; published
 uploads require current participation, and model reads additionally bind the
 original request. Hidden-thread keys, cards, consents, resources and checkpoints

@@ -111,6 +111,26 @@ pub const COLLECTION: &str = "assistant_service_execution";
 pub const ACK_HEADER: &str = "x-nyxid-acknowledgement-id";
 const MAX_EVIDENCE: usize = 32;
 
+/// Stateless model bootstrap uses NyxID's platform credential and the acting
+/// person's billing lane. It delegates no personal account. Keep BYOK,
+/// stateful inference, tools and every other transport behind exact consent.
+fn shared_platform_model(
+    chat: &acks::ChatAuthority,
+    service: &UserService,
+    operation: &Value,
+    target: Option<&super::proxy_service::ProxyTarget>,
+) -> bool {
+    service.user_id == chat.user_id
+        && super::platform_key_service::binding(service) == "platform"
+        && operation["kind"] == "raw_inference"
+        && operation["transport"].is_null()
+        && target.is_some_and(|target| {
+            target.service.inference.is_some()
+                && service.catalog_service_id.as_deref() == Some(target.service.id.as_str())
+                && super::proxy_service::uses_server_held_master(target)
+        })
+}
+
 fn digest(value: Value) -> String {
     mcp_service::canonical_sha256(value)
 }
@@ -360,11 +380,13 @@ async fn check_inner(
             return Err(AppError::Forbidden("Use the person's exact selected connection; choose a new connection before changing accounts".into()));
         }
         let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
+        let needs_connection_consent = service.user_id == chat.user_id
+            && !shared_platform_model(chat, &service, operation, target);
         if pool {
             super::shared_agent_transport::require_ready(db).await?;
             pools::pin_shared_pool(db, chat, connection_id, &binding, operation).await?;
         }
-        if service.user_id == chat.user_id
+        if needs_connection_consent
             && let Some(refusal) =
                 super::shared_agent_consent::prompt(db, chat, access, &service, &binding, operation)
                     .await?
@@ -392,7 +414,7 @@ async fn check_inner(
                 });
             }
         }
-        let permit = if service.user_id == chat.user_id {
+        let permit = if needs_connection_consent {
             match super::shared_agent_consent::authorize(
                 db, chat, access, &service, &binding, operation,
             )
