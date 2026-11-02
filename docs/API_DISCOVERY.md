@@ -663,6 +663,8 @@ connection named CMA does not activate these adapters.
 | --- | --- | --- |
 | `POST /api/v1/agents` | `GET /api/v1/agent-lifecycle/{id}` | `succeeded`: agent ready |
 | `POST /api/v1/responses` | `GET /api/v1/responses/{response_id}` | `completed`: response complete |
+| `POST /api/v2/responses` | `GET /api/v2/responses/{response_id}` | `completed`: response complete |
+| `POST /api/v2/agents/{agent_id}/responses` | `GET /api/v2/responses/{response_id}` | `completed`: response complete |
 | `POST /api/v1/agents/{id}/input` | `GET /api/v1/agents/{id}` | agent status, then ready after observed activity |
 | `POST /api/v1/agui/run` | `GET /api/v1/agents/{id}` | agent status, then ready after observed activity |
 
@@ -675,12 +677,32 @@ completion cannot be confirmed from that status endpoint; the watch can time
 out rather than inventing a completed response. Prefer Responses operations
 when per-request completion is required.
 
+V2 Responses identify the agent through `conversation.id`, including in SSE
+`response.created` and `response.completed` frames. The response ID identifies
+the work being tracked; it is never used as the agent's browser destination.
+The lifecycle receipt returns an operation ID; only a subsequent lifecycle
+observation's `agent_id` identifies the agent. CMA supplies the browser
+destination separately as optional `callback_url` on the receipt/status/response
+object (inside `response` for SSE). NyxID stores a validated HTTP(S) URL and
+projects it as `cma_url` in history. Missing fields preserve the last valid
+callback; explicit null or invalid values clear it. History never constructs a
+link from an agent ID or catalog homepage. Old producers and old stored rows
+without a callback show status without a link. Rendering history reads only
+stored metadata, without credentials, catalog lookups, or calls to CMA.
+
+The callback is a browser link, not a webhook or polling target. It must be at
+most 2,048 UTF-8 bytes and contain no userinfo, query, fragment, literal
+whitespace, controls, or backslash. Relative URLs and cloud metadata hosts are
+rejected. Valid URLs preserve CMA's configured hostname, port, and route.
+See the [CMA producer handoff](plans/2026-10-27-cma-callback-url-contract.md)
+for required CMA response surfaces and `CHRONO_SERVER_PUBLIC_URL` configuration.
+
 These adapters use the existing authenticated async-watch executor, two-hour
 deadline, quotas, billing and live authority checks. They add no user-controlled
 polling URL or new cancellation API. Guest calls retain their ordinary tool
 response without registering a CMA watch. Card metadata allows only bounded
-identifiers and known status/phase values, and history excludes encrypted
-results. CMA watch metadata has a 30-day TTL; result encryption and the four-hour
-payload deadline remain the same as other watches. The
+identifiers, validated browser links, and known status/phase values; history
+excludes encrypted results. CMA watch metadata has a 30-day TTL; result encryption
+and the four-hour payload deadline remain the same as other watches. The
 [frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
 placement and refresh behavior.

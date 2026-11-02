@@ -3,6 +3,8 @@ const channelErrors: Record<string, string> = {
     "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator.",
   gateway_permission_required:
     "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration.",
+  gateway_configuration_required:
+    "The channel gateway needs administrator configuration. Ask an administrator to check the active cmaeg service and its URL.",
   gateway_unavailable:
     "The channel gateway is temporarily unavailable. Try again shortly.",
   setup_interrupted:
@@ -37,4 +39,14 @@ export function nyxBotChannelError(code: string): string {
   return Object.hasOwn(channelErrors, code)
     ? channelErrors[code]!
     : "This connection failed.";
+}
+
+/** Mutation responses may contain a stable gateway code or ordinary NyxID guidance. */
+export function nyxBotChannelMutationError(message: string): string {
+  const gatewayCode = /^(?:Validation error: )?(gateway_[a-z_]+)$/.exec(message)?.[1];
+  if (gatewayCode) return nyxBotChannelError(gatewayCode);
+  if (Object.hasOwn(channelErrors, message)) {
+    return nyxBotChannelError(message);
+  }
+  return message;
 }

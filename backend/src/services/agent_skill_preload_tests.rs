@@ -69,6 +69,7 @@ impl Registry {
             created_by: "user".into(),
             model: "nyxagent/channel".into(),
             owner_model_route: None,
+            guest_model_notices: Default::default(),
             access_mode_override: None,
             home_conversation_id: None,
             memory: vec![],

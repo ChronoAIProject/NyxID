@@ -13,13 +13,14 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 
-export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submitting = false, submitLabel = "Save Machine permissions", disabled = false, allowedNodeIds, allowedServiceIds }: {
+export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submitting = false, submitLabel = "Save Machine permissions", disabled = false, optional = false, allowedNodeIds, allowedServiceIds }: {
   readonly initial?: MachineGrantSelection;
   readonly onSubmit: (value: MachineGrantSelection) => Promise<void>;
-  readonly onSelectionChange?: () => void;
+  readonly onSelectionChange?: (hasSelection: boolean) => void;
   readonly submitting?: boolean;
   readonly submitLabel?: string;
   readonly disabled?: boolean;
+  readonly optional?: boolean;
   readonly allowedNodeIds?: readonly string[];
   readonly allowedServiceIds?: readonly string[];
 }) {
@@ -38,17 +39,19 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
   const availableServices = (services.data ?? []).filter((service) => service.is_active && (service.credential_source.type === "personal" || service.credential_source.allowed) && (!allowedServiceIds || allowedServiceIds.includes(service.id)));
   const unavailable = Object.keys(assignments).filter((nodeId) => !inventory.some((node) => node.id === nodeId));
   function setAssignments(value: MachineGrantSelection["assignments"]) {
-    onSelectionChange?.();
+    onSelectionChange?.(Object.keys(value).length > 0);
     form.setValue("assignments", value);
   }
   function update(nodeId: string, value: MachineGrantSelection["assignments"][string]) {
     setAssignments({ ...assignments, [nodeId]: value });
   }
+  const hasSelection = Object.keys(assignments).length > 0;
+  const showGrantControls = !optional || hasSelection;
   const busy = submitting || disabled || nodes.isLoading || Boolean(nodes.error);
   return <Form {...form}>
     <form className="space-y-4" onSubmit={form.handleSubmit(onSubmit)}>
       <p className="text-12 text-muted-foreground">Permissions apply to this real OAuth client or parent Key. All its valid connections share the grant; parent Key login credentials share its task view. This does not authorize paid resource management.</p>
-      <div className="space-y-2 rounded-lg border border-warning/40 bg-warning/5 p-3 text-12" role="note" aria-label="Shell access and credentials">
+      {showGrantControls && <><div className="space-y-2 rounded-lg border border-warning/40 bg-warning/5 p-3 text-12" role="note" aria-label="Shell access and credentials">
         <p>Shared OS and workspace: file roots constrain file tools and working directories, not what shell commands can access. Clients are not secret-isolated.</p>
         <p>On a self-hosted Node, non-isolated shell can access Node tokens, signing secrets and stored credentials under the command user’s OS permissions. Use the container or deploy with <code>--separate-users</code> to separate command access from Node identity.</p>
         <p>On managed Machines, Node identity protection depends on verified supervisor and command-user separation and protected mounts. This does not isolate clients or their workspace secrets.</p>
@@ -57,9 +60,9 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
         <p>Browser, desktop and saved-login tools are excluded. Excluding these tools does not protect their underlying files from shell access.</p>
       </div>
       <label className="flex items-start gap-2 text-12">
-        <Checkbox checked={form.watch("legacy_warning_acknowledged") === true} disabled={busy} onCheckedChange={(checked) => { onSelectionChange?.(); form.setValue("legacy_warning_acknowledged", checked === true); }} />
+        <Checkbox checked={form.watch("legacy_warning_acknowledged") === true} disabled={busy} onCheckedChange={(checked) => { onSelectionChange?.(hasSelection); form.setValue("legacy_warning_acknowledged", checked === true); }} />
         I explicitly allow shared legacy access and acknowledge access to node tokens, signing secrets and stored credentials.
-      </label>
+      </label></>}
       {nodes.isLoading && <p role="status">Loading owned Machines…</p>}
       {nodes.error && <ErrorBanner message="Could not load owned Machines." onRetry={() => void nodes.refetch()} />}
       {!nodes.isLoading && !nodes.error && inventory.length === 0 && <p className="text-12 text-muted-foreground">No eligible personal Machines are available. Add a Machine in Assistant → Machines first.</p>}
@@ -85,9 +88,9 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
           </>}
         </fieldset>;
       })}
-      <div className="space-y-1.5"><Label htmlFor={`${id}-expires`}>Grant expires (UTC)</Label><Input id={`${id}-expires`} type="datetime-local" disabled={busy} value={expiry?.slice(0, 16) ?? ""} onChange={(event) => { onSelectionChange?.(); form.setValue("expires_at", event.target.value ? `${event.target.value}:00.000Z` : ""); }} /><p className="text-11 text-muted-foreground">Default 30 days. Expiry stops new work and renewal; it does not delete the Machine or paused workspace. Authentication or funding may end earlier.</p></div>
+      {showGrantControls && <><div className="space-y-1.5"><Label htmlFor={`${id}-expires`}>Grant expires (UTC)</Label><Input id={`${id}-expires`} type="datetime-local" disabled={busy} value={expiry?.slice(0, 16) ?? ""} onChange={(event) => { onSelectionChange?.(hasSelection); form.setValue("expires_at", event.target.value ? `${event.target.value}:00.000Z` : ""); }} /><p className="text-11 text-muted-foreground">Default 30 days. Expiry stops new work and renewal; it does not delete the Machine or paused workspace. Authentication or funding may end earlier.</p></div>
       <FormSubmitErrors />
-      <Button type="submit" disabled={busy || unavailable.length > 0} isLoading={submitting}>{submitLabel}</Button>
+      <Button type="submit" disabled={busy || unavailable.length > 0} isLoading={submitting}>{submitLabel}</Button></>}
     </form>
   </Form>;
 }

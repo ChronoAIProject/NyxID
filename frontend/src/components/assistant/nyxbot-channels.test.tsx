@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { assistantAgentSchema, nyxAgentChannelAgentSchema, type AssistantAgent } from "@/schemas/assistant-nyxagent";
 import { ChannelBotsManager } from "./nyxbot-channels";
+import { ApiError } from "@/lib/api-client";
 
 const data = vi.hoisted(() => ({
   channels: [] as unknown[], bots: [] as unknown[],
@@ -83,6 +84,46 @@ it("reconnects a failed row to its selected agent and shows returned owner instr
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled();
 });
 
+it.each([
+  ["gateway_not_authenticated", "could not authenticate NyxBot"],
+  ["gateway_permission_required", "has not authorized NyxBot"],
+  ["gateway_configuration_required", "check the active cmaeg service and its URL"],
+  ["gateway_unavailable", "temporarily unavailable"],
+].flatMap(([code, guidance]) => [
+  ["connect", code, guidance], ["reconnect", code, guidance],
+]))("explains a rejected %s mutation with %s", async (action, code, guidance) => {
+  const target = agent("first");
+  data.channels = action === "reconnect" ? [connection("failed")] : [];
+  data.bots = [{ id: "bot", label: "Receipts", platform: "lark" }];
+  data.connect.mockRejectedValueOnce(new ApiError(400, {
+    error: "validation_error", error_code: 1008, message: `Validation error: ${code}`,
+  }));
+  render(<ChannelBotsManager agents={[target]} agent={target} />);
+  await userEvent.setup().click(screen.getByRole("button", {
+    name: action === "reconnect" ? "Reconnect" : "Connect Receipts to first",
+  }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(guidance!);
+  expect(screen.getByRole("alert")).not.toHaveTextContent(code!);
+  expect(data.connect).toHaveBeenCalledWith({ botId: "bot", agentId: "first" });
+  expect(screen.queryByRole("region", { name: "Owner link" })).not.toBeInTheDocument();
+});
+
+it.each([
+  ["Choose an active bot before connecting.", "Choose an active bot before connecting."],
+  ["Validation error: Choose an active bot before connecting.", "Validation error: Choose an active bot before connecting."],
+  ["Validation error: gateway_future_code", "This connection failed."],
+  ["Validation error: gateway_unavailable is only an example.", "Validation error: gateway_unavailable is only an example."],
+])("preserves ordinary mutation guidance and safely handles %s", async (message, expected) => {
+  const target = agent("first");
+  data.channels = [connection("failed")];
+  data.connect.mockRejectedValueOnce(new ApiError(400, {
+    error: "validation_error", error_code: 1008, message,
+  }));
+  render(<ChannelBotsManager agents={[target]} />);
+  await userEvent.setup().click(screen.getByRole("button", { name: "Reconnect" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(expected);
+});
+
 it.each(["failed", "pending", "active"])("changing the agent on a %s row uses the correct mutation", async (status) => {
   data.channels = [connection(status)];
   render(<ChannelBotsManager agents={[agent("first"), agent("second")]} />);
@@ -134,6 +175,7 @@ it("does not offer organization specialists when relinking connected bots", asyn
 it.each([
   ["gateway_not_authenticated", "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator."],
   ["gateway_permission_required", "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration."],
+  ["gateway_configuration_required", "The channel gateway needs administrator configuration. Ask an administrator to check the active cmaeg service and its URL."],
   ["gateway_unavailable", "The channel gateway is temporarily unavailable. Try again shortly."],
   ["setup_interrupted", "This connection changed while it was being set up. Reconnect to try again."],
   ["gateway_provider_not_registered", "The Agent Event Gateway has not registered NyxBot as a provider yet (operator step). Telegram bots cannot use NyxBot until it is."],

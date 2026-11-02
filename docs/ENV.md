@@ -50,6 +50,7 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 |----------|---------|-------------|
 | `PORT` | `3001` | HTTP listen port |
 | `BASE_URL` | `http://localhost:3001` | Canonical backend base URL (default JWT issuer/audience); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
+| `CHRONO_PROBE_URL` | *(unset)* | Optional trusted internal chrono-probe HTTP(S) origin; connected-service monitoring also requires the default-off `services:monitoring` flag for the acting person. Unset or invalid configuration returns `monitoring_not_configured` (404). No path, credentials, query or fragment. See [Service monitoring](SERVICE_MONITORING.md). |
 | `BASE_URL_ALIASES` | *(empty)* | Comma-separated HTTPS API origins accepted during migration; no paths, credentials, query or fragment. Adds JWT issuer/audience verification overlap and equivalent resource, DPoP, webhook and hosted-asset origins. Minted URLs use `BASE_URL`. |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `FRONTEND_URL_ALIASES` | *(empty)* | Comma-separated HTTPS frontend origins additionally trusted by CORS, CSRF, social `return_to`, login approvals and voice. Does not add JWT issuers/audiences. |

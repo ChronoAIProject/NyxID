@@ -197,6 +197,8 @@ pub struct AppConfig {
     pub port: u16,
     /// Base URL for the backend (e.g. https://auth.nyxid.dev)
     pub base_url: String,
+    /// Operator-configured chrono-probe origin; unset disables monitoring integration.
+    pub chrono_probe_url: Option<String>,
     pub domain_aliases: domain_aliases::DomainAliases,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
@@ -1100,6 +1102,7 @@ impl AppConfig {
             jwt_issuer: env::var("JWT_ISSUER").unwrap_or_else(|_| base_url.clone()),
 
             base_url,
+            chrono_probe_url: env::var("CHRONO_PROBE_URL").ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()),
             domain_aliases: domain_aliases::DomainAliases::from_env(),
             jwt_access_ttl_secs: env::var("JWT_ACCESS_TTL_SECS")
                 .ok()
@@ -1943,6 +1946,7 @@ mod tests {
             auth_device_eight_char_codes: true,
             resource_request_proof_enabled: false,
             base_url: base_url.to_string(),
+            chrono_probe_url: None,
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],

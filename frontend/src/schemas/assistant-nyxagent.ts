@@ -1,3 +1,4 @@
+import { collaborationGroupSchema, collaborationDecisionSchema } from "./collaboration-group";
 import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
@@ -147,6 +148,7 @@ export const nyxAgentRecoverySchema = z.object({
 });
 export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
 const nyxAgentFailureReasonSchema = z.object({
+  model_route: z.object({ reason: z.string(), unknown_fields: z.array(z.string()) }).nullish(),
   source: z.string(),
   stage: z.string(),
   code: z.string(),
@@ -444,7 +446,20 @@ export type AssistantAgentRequest = z.infer<typeof assistantAgentRequestSchema>;
 export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
+export const guestReadinessSchema = z.object({
+  status: z.enum(["ready", "setting_up", "not_ready"]),
+  reason: z.string().nullish(),
+  fix: z.string().nullish(),
+});
+export type GuestReadiness = z.infer<typeof guestReadinessSchema>;
+export const guestReadinessSettingsSchema = guestReadinessSchema.extend({
+  conversation_overrides: z.array(z.string()).default([]),
+  conversation_overrides_truncated: z.boolean().default(false),
+});
+
+
 export const assistantAgentSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
   share_role: z.enum(["manager", "user"]).nullable().optional(),
   owner_id: z.string().optional(),
   owner_name: z.string().nullable().optional(),
@@ -650,6 +665,7 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
   follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
   id: z.string(),
   channel_bot_id: z.string(),
@@ -700,6 +716,7 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
   parent_chat_id: z.string().nullable().optional(),
   has_thread_history: z.boolean().optional(),
   threads: z.enum(["follow", "off"]).catch("off").optional(),
@@ -769,6 +786,10 @@ export const assistantGroupMemberSchema = z.object({
   name: z.string(),
   kind: assistantAgentKindSchema,
   destroyed: z.boolean().default(false),
+  unavailable: z.boolean().optional(),
+  shared: z.boolean().optional(),
+  owner_name: z.string().nullable().optional(),
+  conversation_id: z.string().nullable().optional(),
   working: z.boolean().default(false),
 });
 export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
@@ -776,6 +797,7 @@ export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
 export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string() });
 
 export const assistantGroupSchema = z.object({
+  collaboration: collaborationGroupSchema.optional(),
   owner: z.object({ type: z.enum(["personal", "org"]), id: z.string(), name: z.string() }).optional(),
   participants: z.array(groupPersonSchema).optional(),
   your_role: z.enum(["creator", "admin", "participant"]).optional(),
@@ -795,6 +817,8 @@ export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
 export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
 
 export const assistantGroupMessageSchema = z.object({
+  requester_user_id: z.string().optional(),
+  execution_mode: z.enum(["owner", "org_member", "shared", "guest"]).optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullable().optional(), updated_at: z.string().optional() }).nullable().optional(),
   activities: z.array(nyxAgentTurnActivitySchema).optional(),
   author: groupPersonSchema.optional(),
@@ -832,6 +856,7 @@ export const assistantGroupPendingActionSchema = z.object({
 export type AssistantGroupPendingAction = z.infer<typeof assistantGroupPendingActionSchema>;
 
 export const assistantGroupMessagesSchema = z.object({
+  collaboration_decisions: z.array(collaborationDecisionSchema).optional(),
   group: assistantGroupSchema,
   pending_actions: z.array(assistantGroupPendingActionSchema).default([]),
   /** Ascending by `seq`. */
@@ -849,6 +874,7 @@ export type AssistantGroupPosted = z.infer<typeof assistantGroupPostedSchema>;
 
 /** "New group" and group settings: a name and its agents. */
 export const assistantGroupFormSchema = z.object({
+  collaboration: z.boolean().optional(),
   org: z.string().optional(),
   participant_user_ids: z.array(z.string()).max(16).optional(),
   lead_agent_id: z.string().optional(),

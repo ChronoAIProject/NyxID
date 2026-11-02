@@ -487,7 +487,14 @@ pub struct TurnMetadataResponse {
 }
 
 #[derive(Serialize)]
+pub struct ModelRouteDiagnosticResponse {
+    reason: String,
+    unknown_fields: Vec<String>,
+}
+
+#[derive(Serialize)]
 pub struct TurnFailureReasonResponse {
+    model_route: Option<ModelRouteDiagnosticResponse>,
     source: String,
     stage: String,
     code: String,
@@ -560,6 +567,10 @@ impl From<AssistantMessage> for MessageResponse {
             error_detail: row.error_detail.map(ErrorDetailResponse::from),
             turn_metadata: row.turn_metadata.map(|data| TurnMetadataResponse {
                 failure_reason: data.failure_reason.map(|reason| TurnFailureReasonResponse {
+                    model_route: reason.model_route.map(|d| ModelRouteDiagnosticResponse {
+                        reason: d.reason,
+                        unknown_fields: d.unknown_fields,
+                    }),
                     source: reason.source,
                     stage: reason.stage,
                     code: reason.code,
@@ -600,6 +611,23 @@ impl From<AssistantMessage> for MessageResponse {
 async fn attach_automations(
     db: &mongodb::Database,
     user_id: &str,
+    conversation_id: &str,
+    messages: &mut [MessageResponse],
+) {
+    if let Err(error) = try_attach_automations(db, user_id, messages).await {
+        tracing::warn!(
+            %error,
+            user_id,
+            conversation_id,
+            message_count = messages.len(),
+            "Could not attach automation names to history"
+        );
+    }
+}
+
+async fn try_attach_automations(
+    db: &mongodb::Database,
+    user_id: &str,
     messages: &mut [MessageResponse],
 ) -> AppResult<()> {
     use futures::TryStreamExt;
@@ -613,13 +641,13 @@ async fn attach_automations(
     if keys.is_empty() {
         return Ok(());
     }
-    // (run id, trigger id, turn id)
-    let runs: Vec<(String, String, Option<String>)> = db
+    // (run id, trigger id, turn id, snapshotted label)
+    let runs: Vec<(String, String, Option<String>, Option<String>)> = db
         .collection::<Document>(crate::models::trigger_run::COLLECTION_NAME)
         .find(doc! {"user_id": user_id, "$or": [
             {"_id": {"$in": &keys}}, {"turn_id": {"$in": &keys}},
         ]})
-        .projection(doc! {"_id": 1, "trigger_id": 1, "turn_id": 1})
+        .projection(doc! {"_id": 1, "trigger_id": 1, "turn_id": 1, "label": 1})
         .await?
         .try_collect::<Vec<_>>()
         .await?
@@ -629,6 +657,10 @@ async fn attach_automations(
                 run.get_str("_id").ok()?.to_owned(),
                 run.get_str("trigger_id").ok()?.to_owned(),
                 run.get_str("turn_id").ok().map(str::to_owned),
+                run.get_str("label")
+                    .ok()
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned),
             ))
         })
         .collect();
@@ -637,30 +669,33 @@ async fn attach_automations(
     }
     let trigger_ids: Vec<&str> = runs
         .iter()
-        .map(|(_, trigger, _)| trigger.as_str())
+        .map(|(_, trigger, _, _)| trigger.as_str())
         .collect();
-    let labels: HashMap<String, String> = db
-        .collection::<Document>(crate::models::trigger::COLLECTION_NAME)
-        .find(doc! {"_id": {"$in": trigger_ids}, "user_id": user_id})
-        .projection(doc! {"_id": 1, "label": 1})
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?
-        .into_iter()
-        .filter_map(|t| {
-            Some((
-                t.get_str("_id").ok()?.to_owned(),
-                t.get_str("label").ok()?.to_owned(),
-            ))
-        })
-        .collect();
+    let labels: HashMap<String, String> = if trigger_ids.is_empty() {
+        HashMap::new()
+    } else {
+        db.collection::<Document>(crate::models::trigger::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": trigger_ids}, "user_id": user_id})
+            .projection(doc! {"_id": 1, "label": 1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .filter_map(|t| {
+                Some((
+                    t.get_str("_id").ok()?.to_owned(),
+                    t.get_str("label").ok()?.to_owned(),
+                ))
+            })
+            .collect()
+    };
     for message in messages.iter_mut().filter(|m| m.origin == trigger_origin) {
-        let Some((run_id, trigger_id, _)) = runs.iter().find(|(run, _, turn)| {
+        let Some((run_id, trigger_id, _, snapshot)) = runs.iter().find(|(run, _, turn, _)| {
             *run == message.turn_id || turn.as_deref() == Some(message.turn_id.as_str())
         }) else {
             continue;
         };
-        let Some(label) = labels.get(trigger_id) else {
+        let Some(label) = labels.get(trigger_id).or(snapshot.as_ref()) else {
             continue;
         };
         message.automation = Some(AutomationRunResponse {
@@ -808,6 +843,7 @@ pub struct CmaOperationResponse {
     monitor_name: String,
     created_at: DateTime<Utc>,
     checked_at: Option<DateTime<Utc>>,
+    cma_url: Option<String>,
 }
 #[derive(Serialize)]
 pub struct ChatApprovalResponse {
@@ -901,8 +937,8 @@ pub async fn history(
     .await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
-    let cma_operations = crate::services::cma_operation::cards(&state.db, &user_id, &id)
-        .await?
+    let cma_rows = crate::services::cma_operation::cards(&state.db, &user_id, &id).await?;
+    let cma_operations = cma_rows
         .into_iter()
         .filter_map(|row| {
             let cma = row.cma?;
@@ -918,6 +954,7 @@ pub async fn history(
                 })
                 .unwrap_or_else(|| "NyxBot".into());
             Some(CmaOperationResponse {
+                cma_url: crate::services::cma_operation::card_url(&cma),
                 id: row.id,
                 turn_id: row.turn_id,
                 kind: cma.kind,
@@ -968,7 +1005,7 @@ pub async fn history(
     for message in &mut messages {
         message.recovery = recovery.get(&message.id).cloned().map(Into::into);
     }
-    Box::pin(attach_automations(&state.db, &user_id, &mut messages)).await?;
+    Box::pin(attach_automations(&state.db, &user_id, &id, &mut messages)).await;
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let feedback =
         crate::services::assistant_feedback_service::states_for_messages(&state.db, &user_id, &ids)
@@ -2014,7 +2051,10 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                 Ok(LiveEvent::OrgGroup { id, user_id: owner }) if owner == user_id => {
                     // The channel routes candidates; authority is live again at delivery,
                     // including the first delivery after subscribing.
-                    if crate::services::org_group_service::get(&state.db,&user_id,&id,None).await.is_err() { continue; }
+                    let eligible=if crate::services::collaboration_group_service::marked(&state.db,&id).await.unwrap_or(false) {
+                        crate::services::collaboration_group_service::get(&state.db,&user_id,&id).await.is_ok()
+                    } else {crate::services::org_group_service::get(&state.db,&user_id,&id,None).await.is_ok()};
+                    if !eligible {continue;}
                     ("group", json!({"type":"group","id":id}))
                 }
                 Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {

@@ -9,10 +9,12 @@ export function AssistantCopyButton({
   text,
   partial = false,
   afterDate = false,
+  foreground,
 }: {
   text: string;
   partial?: boolean;
   afterDate?: boolean;
+  foreground?: string;
 }) {
   const { colors } = useTheme();
   const [copiedText, setCopiedText] = useState<string>();
@@ -79,9 +81,9 @@ export function AssistantCopyButton({
         importantForAccessibility="no-hide-descendants"
       >
         {copied ? (
-          <Check size={16} color={colors.textMuted} />
+          <Check size={16} color={foreground ?? colors.textMuted} />
         ) : (
-          <Copy size={16} color={colors.textMuted} />
+          <Copy size={16} color={foreground ?? colors.textMuted} />
         )}
       </View>
     </Pressable>

@@ -142,7 +142,7 @@ test("custom connections stay independent even when their proxy slugs match a ca
   assert.equal(result.added[0]?.iconSlug, null);
 });
 
-test("metadata reflects real owners and credentials and platform URLs stay private", () => {
+test("metadata reflects the owners and credentials of manual connections", () => {
   const noAuth = deriveConnectorItems(
     [{ ...connection, credential_type: "none" }],
     [],
@@ -153,8 +153,6 @@ test("metadata reflects real owners and credentials and platform URLs stay priva
     ...connection,
     id: "org-key",
     credential_type: "api_key",
-    auto_connected: true,
-    endpoint_url: "https://platform-internal.example",
     credential_source: {
       type: "org",
       org_id: "org",
@@ -172,9 +170,26 @@ test("metadata reflects real owners and credentials and platform URLs stay priva
     result.added[0]?.description,
     "Connected through the NyxID proxy.",
   );
-  const platform = deriveConnectorItems([org], []).added[0]!;
-  assert.equal(platform.description, "Connected through the NyxID proxy.");
-  assert.ok(!platform.description.includes("platform-internal"));
+});
+
+test("automatic connections stay out of Added, management and Discover", () => {
+  const automatic = { ...connection, id: "automatic", auto_connected: true };
+  const customAutomatic = { ...automatic, id: "automatic-custom", catalog_service_slug: null };
+  for (const is_active of [true, false]) {
+    const result = deriveConnectorItems([{ ...automatic, is_active }, customAutomatic], [catalog]);
+    assert.deepEqual(result.added, []);
+    assert.deepEqual(result.available, []);
+  }
+  const mixed = deriveConnectorItems(
+    [automatic, { ...connection, is_active: false }],
+    [catalog],
+  );
+  assert.deepEqual(mixed.added[0]?.manageKeyIds, [connection.id]);
+  assert.deepEqual(mixed.added[0]?.connections, [{ ...connection, is_active: false }]);
+  assert.equal(mixed.added[0]?.meta, "oauth2");
+  assert.equal(mixed.added[0]?.summary, "Personal · OAuth · 1 connection");
+  assert.equal(mixed.added[0]?.status, "Disabled");
+  assert.deepEqual(mixed.available, []);
 });
 
 test("missing catalog still preserves Added while catalog-only cards are available", () => {

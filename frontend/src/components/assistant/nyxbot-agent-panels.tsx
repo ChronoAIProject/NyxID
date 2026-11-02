@@ -113,6 +113,7 @@ export function ThreadHeader({
   name,
   handle,
   kind,
+  loading = false,
   agentId,
   destroyed,
   channelPlatform,
@@ -122,7 +123,7 @@ export function ThreadHeader({
   titleKey,
   onRenameTitle,
 }: {
-  /** The thread's title, shown after the agent in the expanded header. */
+  /** The thread's title, shown above the agent in the expanded header. */
   readonly title?: string;
   /** Resets an open rename when another thread is shown. */
   readonly titleKey?: string;
@@ -133,6 +134,7 @@ export function ThreadHeader({
   /** "@handle", shown when a display name hides it. */
   readonly handle?: string;
   readonly kind: AssistantAgentKind;
+  readonly loading?: boolean;
   /** Picks the specialist's avatar tint. */
   readonly agentId?: string;
   readonly destroyed: boolean;
@@ -159,7 +161,11 @@ export function ThreadHeader({
       ) : null}
       <HeaderBar>
         <HeaderItem className="shrink-0">
-          <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size={compact ? "sm" : handle ? "xl" : "md"} />
+          {loading ? (
+            <span aria-hidden="true" className={cn("block rounded-full bg-overlay", compact ? "h-5 w-5" : "h-6 w-6")} />
+          ) : (
+            <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size={compact ? "sm" : handle ? "xl" : "md"} />
+          )}
         </HeaderItem>
         <HeaderItem className={cn("min-w-0", !compact && "self-start")}>
           {compact ? (
@@ -171,7 +177,7 @@ export function ThreadHeader({
               <div className="flex h-7 min-w-0 items-center gap-2">
                 <h2 className="truncate text-13 font-semibold text-foreground">{name}</h2>
                 <span className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-                  <AgentKindBadge kind={kind} />
+                  {loading ? null : <AgentKindBadge kind={kind} />}
                   {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
                 </span>
               </div>

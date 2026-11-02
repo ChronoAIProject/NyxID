@@ -96,15 +96,15 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
           <StatusBadge variant={riskVariant} label={`${riskLabel} risk`} />
         ) : null}
       </View>
-      <Text style={styles.title}>{summary}</Text>
+      <Text style={styles.title} numberOfLines={2}>{item.title}</Text>
       <Text style={styles.secondary}>
-        {item.title}
-        {channel ? ` · via ${channel}` : ""}
+        {summary}
       </Text>
       {requester ? (
         <Text style={styles.meta}>Requested by {requester}</Text>
       ) : null}
       <Text style={styles.meta}>
+        {channel ? `via ${channel} · ` : ""}
         {decidedAt
           ? `Decided ${decidedAt}`
           : requestedAt
@@ -151,8 +151,7 @@ const createStyles = (c: ThemeColors) =>
       gap: spacing.xs,
     },
     title: {
-      // DESIGN.md mobile-card primary text: text-[13px] font-semibold.
-      ...typeScale.bodyStrong,
+      ...typeScale.title,
       color: c.textPrimary,
     },
     secondary: {

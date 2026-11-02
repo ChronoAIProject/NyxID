@@ -128,6 +128,7 @@ test("pending card shows the complete operation, requester and service, and open
   );
   assert.ok(summary);
   assert.equal(summary.props.numberOfLines, undefined);
+  assert.ok(textContent(tree).indexOf("Cloudflare") < textContent(tree).indexOf(request.summary));
   assert.match(textContent(tree), /Cloudflare/);
   assert.match(textContent(tree), /Requested by AuricBot · nyx_key_abcd/);
   assert.deepEqual(badgeLabels(tree), ["Org · Chrono", "Per-request"]);
@@ -193,7 +194,8 @@ test("history shows actual decision channel and decision time without attributin
     });
     const text = textContent(tree);
     assert.ok(text.includes(request.summary));
-    assert.ok(text.includes(`Cloudflare · via ${label}`));
+    assert.ok(text.indexOf("Cloudflare") < text.indexOf(request.summary));
+    assert.ok(text.includes(`via ${label}`));
     assert.ok(text.includes(`Decided ${displayTime(decided_at)}`));
     assert.ok(text.includes("Requested by AuricBot · nyx_key_abcd"));
     assert.ok(!text.includes("You approved"));

@@ -4,6 +4,7 @@ use super::*;
 /// Credential preparation can await external services; it does not admit egress.
 pub(crate) struct HttpEgressGuard<'a> {
     attachment: Option<AttachmentEgress<'a>>,
+    model_request: Option<&'a crate::services::assistant_model_observer::ModelRequest>,
     authority: EgressAuthority<'a>,
 }
 
@@ -21,6 +22,7 @@ enum EgressAuthority<'a> {
         phase: crate::models::lark_base_write::WriteState,
     },
     AttachmentOnly,
+    ModelObservationOnly,
     Managed(
         &'a OwnedHttpEgressGuard,
         &'a crate::services::proxy_service::ProxyTarget,
@@ -81,9 +83,11 @@ impl OwnedHttpEgressGuard {
             &str,
             Option<&acks::ChatAuthority>,
         ),
-    ) -> Self {
+    ) -> AppResult<Self> {
         let authority = if let Some(admission) = admission {
-            Some(OwnedEgressAuthority::Assistant(Box::new(admission.clone())))
+            let mut detached = admission.clone();
+            detached.shared_detached = admission.shared_execution()?;
+            Some(OwnedEgressAuthority::Assistant(Box::new(detached)))
         } else if let Some(ingress) = ingress {
             if let Some(job) = ingress.assistant_job_id() {
                 Some(OwnedEgressAuthority::AssistantCatalogJob {
@@ -103,7 +107,7 @@ impl OwnedHttpEgressGuard {
                 .2
                 .map(|chat| OwnedEgressAuthority::AssistantCatalog(Box::new(chat.clone())))
         };
-        Self {
+        Ok(Self {
             db: db.clone(),
             keys,
             authority,
@@ -111,6 +115,15 @@ impl OwnedHttpEgressGuard {
             resource_owner: context.1.to_owned(),
             method: operation.0.to_owned(),
             path: operation.1.to_owned(),
+        })
+    }
+
+    pub(crate) fn shared_execution(
+        &self,
+    ) -> Option<&crate::models::assistant_sharing::SharedExecution> {
+        match &self.authority {
+            Some(OwnedEgressAuthority::Assistant(admission)) => admission.shared_detached.as_ref(),
+            _ => None,
         }
     }
 
@@ -120,6 +133,7 @@ impl OwnedHttpEgressGuard {
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
             attachment: None,
+            model_request: None,
             authority: EgressAuthority::Managed(self, target),
         }
     }
@@ -142,6 +156,8 @@ impl OwnedHttpEgressGuard {
                 .await?
                 .ok_or_else(|| AppError::NotFound("Managed service unavailable".into()))?;
             crate::services::telnyx_platform_service::validate_catalog(&current)?;
+            // The exact connection's owner must remain eligible for its catalog
+            // credential. The recipient's audience grant is an additional ceiling.
             let actor =
                 crate::services::proxy_service::EffectiveActor::from_user_id(&self.resource_owner);
             let authorized = crate::services::proxy_service::authorize_master_credential(
@@ -158,6 +174,14 @@ impl OwnedHttpEgressGuard {
                 return Err(AppError::Conflict(
                     "Managed service execution changed".into(),
                 ));
+            }
+            if let Some(shared) = self.shared_execution() {
+                crate::services::proxy_service::authorize_master_credential(
+                    &self.db,
+                    &current,
+                    &crate::services::proxy_service::EffectiveActor::from_user_id(&shared.actor),
+                )
+                .await?;
             }
             let credential = zeroize::Zeroizing::new(authorized.decrypt(&self.keys).await?);
             if credential.as_slice() != target.credential.as_bytes() {
@@ -192,6 +216,14 @@ impl OwnedHttpEgressGuard {
             }
             crate::services::proxy_service::authorize_master_credential(&self.db, &latest, &actor)
                 .await?;
+            if let Some(shared) = self.shared_execution() {
+                crate::services::proxy_service::authorize_master_credential(
+                    &self.db,
+                    &latest,
+                    &crate::services::proxy_service::EffectiveActor::from_user_id(&shared.actor),
+                )
+                .await?;
+            }
             let base = match &self.authority {
                 Some(OwnedEgressAuthority::Assistant(admission)) => Some(
                     admission
@@ -212,6 +244,7 @@ impl OwnedHttpEgressGuard {
                 Some(OwnedEgressAuthority::ExternalJob { job, declared }) => {
                     Some(HttpEgressGuard {
                         attachment: None,
+                        model_request: None,
                         authority: EgressAuthority::ExternalJob {
                             db: &self.db,
                             job,
@@ -222,6 +255,7 @@ impl OwnedHttpEgressGuard {
                 Some(OwnedEgressAuthority::AssistantCatalogJob { job, catalog }) => {
                     Some(HttpEgressGuard {
                         attachment: None,
+                        model_request: None,
                         authority: EgressAuthority::AssistantCatalogJob {
                             db: &self.db,
                             job,
@@ -249,6 +283,7 @@ impl Admission {
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
             attachment: None,
+            model_request: None,
             authority: EgressAuthority::Assistant(AssistantEgressGuard {
                 admission: self,
                 db,
@@ -263,6 +298,15 @@ impl Admission {
     }
 }
 impl<'a> HttpEgressGuard<'a> {
+    pub(crate) fn shared_stream(
+        &self,
+    ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {
+        match &self.authority {
+            EgressAuthority::Assistant(guard) => guard.admission.shared_stream(&guard.method),
+            _ => Ok(None),
+        }
+    }
+
     pub(super) fn for_lark(
         guard: &'a super::LarkManagedGuard<'a>,
         row: &'a crate::models::lark_base_write::LarkBaseWrite,
@@ -270,6 +314,7 @@ impl<'a> HttpEgressGuard<'a> {
     ) -> Self {
         Self {
             attachment: None,
+            model_request: None,
             authority: EgressAuthority::Lark { guard, row, phase },
         }
     }
@@ -284,6 +329,7 @@ impl<'a> HttpEgressGuard<'a> {
         let mut guard = base.unwrap_or(Self {
             authority: EgressAuthority::AttachmentOnly,
             attachment: None,
+            model_request: None,
         });
         guard.attachment = Some(AttachmentEgress {
             db,
@@ -310,6 +356,7 @@ impl<'a> HttpEgressGuard<'a> {
         if let Some(job) = ingress.assistant_job_id() {
             return Some(Self {
                 attachment: None,
+                model_request: None,
                 authority: EgressAuthority::AssistantCatalogJob {
                     db,
                     job,
@@ -319,12 +366,35 @@ impl<'a> HttpEgressGuard<'a> {
         }
         Some(Self {
             attachment: None,
+            model_request: None,
             authority: EgressAuthority::ExternalJob {
                 db,
                 job: ingress.external_job_id()?,
                 declared: &ingress.declared_id,
             },
         })
+    }
+
+    /// Catalog model routes can have no saved connection/admission guard.
+    /// Their existing authority checks still run in the proxy; retain the
+    /// dispatch observation at the actual send for these routes too.
+    pub(crate) fn model_observation_only(
+        request: Option<&'a crate::services::assistant_model_observer::ModelRequest>,
+    ) -> Option<Self> {
+        Some(Self {
+            attachment: None,
+            model_request: Some(request?),
+            authority: EgressAuthority::ModelObservationOnly,
+        })
+    }
+
+    /// Attach only at final model dispatch, after funding admission.
+    pub(crate) fn observed(
+        mut self,
+        request: Option<&'a crate::services::assistant_model_observer::ModelRequest>,
+    ) -> Self {
+        self.model_request = request;
+        self
     }
 
     pub(crate) fn projected(mut self, projection: &'a HttpProjection) -> Self {
@@ -348,7 +418,7 @@ impl<'a> HttpEgressGuard<'a> {
                 EgressAuthority::Lark { guard, row, phase } => {
                     guard.revalidate_effect(row, *phase).await
                 }
-                EgressAuthority::AttachmentOnly => Ok(()),
+                EgressAuthority::AttachmentOnly | EgressAuthority::ModelObservationOnly => Ok(()),
                 EgressAuthority::Managed(guard, target) => guard.revalidate(target).await,
                 EgressAuthority::Assistant(guard) => guard.revalidate_inner().await,
                 EgressAuthority::ExternalJob { db, job, declared } => {
@@ -370,6 +440,9 @@ impl<'a> HttpEgressGuard<'a> {
                     attachment.binding,
                 )
                 .await?;
+            }
+            if let Some(request) = self.model_request {
+                request.dispatched().await?;
             }
             Ok(())
         })
@@ -402,6 +475,27 @@ impl AssistantEgressGuard<'_> {
         }
         self.admission
             .revalidate(self.db, &self.admission.connection, Some(self.target))
-            .await
+            .await?;
+        // Credential resolution above can await KMS or refresh. Keep readiness
+        // and the durable stream fence at the last pre-dispatch boundary too.
+        if is_shared_chat(&self.admission.chat)
+            && (self.method == "CONNECT"
+                || matches!(
+                    self.admission.operation_identity["transport"].as_str(),
+                    Some("websocket" | "connect")
+                ))
+        {
+            if self.route.flatten().is_some() {
+                return Err(AppError::Forbidden(
+                    "Shared streams require server transport".into(),
+                ));
+            }
+            let binding = self
+                .admission
+                .shared_stream(&self.method)?
+                .ok_or_else(|| AppError::Forbidden("Shared stream admission required".into()))?;
+            crate::services::shared_agent_transport::revalidate(self.db, &binding).await?;
+        }
+        Ok(())
     }
 }

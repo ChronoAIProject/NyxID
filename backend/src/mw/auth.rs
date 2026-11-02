@@ -698,6 +698,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
             | ["nyxbot", "responses", _]
             | ["nyxbot", "responses", _, "events"]
             | ["users", "me", "oauth-consent-requests", _]
+            | ["keys", _, "monitoring"]
             | ["api-keys", _, "machine-grant"]
             | ["users", "me", "consents", _, "machine-grant"]
     ) {
@@ -857,6 +858,70 @@ pub(crate) async fn api_key_auth_user(
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) -> Result<AuthUser, AppError> {
+    api_key_auth_user_inner(db, key, credential_id, ip_address, user_agent, false).await
+}
+
+/// Server-only authentication for one leased watch. Never reachable from a
+/// bearer/header; it does not grant a synthetic turn or ordinary execution.
+pub(crate) async fn api_key_auth_user_for_watch(
+    db: &mongodb::Database,
+    key: &crate::models::api_key::ApiKey,
+    watch: &crate::models::async_service_operation::AsyncServiceOperation,
+) -> Result<AuthUser, AppError> {
+    let shared_resume = if let Some(binding) = &watch.shared_execution {
+        if binding.actor != watch.user_id
+            || binding.agent != watch.agent_id
+            || binding.conversation != watch.conversation_id
+            || binding.key != watch.api_key_id
+            || binding.turn != watch.turn_id
+            || binding.connection != watch.service_id
+            || key.id != binding.key
+            || key.user_id != binding.actor
+            || !crate::services::async_service_operation::owns_lease(db, watch).await?
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        crate::services::shared_agent_transport::revalidate_watch(db, watch).await?;
+        true
+    } else {
+        false
+    };
+    api_key_auth_user_inner(db, key, None, None, None, shared_resume).await
+}
+
+/// Only voice's exact private-thread loader can use an idle key. This never
+/// enters the HTTP/MCP authentication paths or supplies a live turn.
+pub(crate) async fn api_key_auth_user_for_voice(
+    db: &mongodb::Database,
+    thread: &crate::models::assistant_conversation::AssistantConversation,
+) -> Result<AuthUser, AppError> {
+    if thread.shared_agent_thread {
+        crate::services::shared_agent_transport::require_ready(db).await?;
+    }
+    let key = crate::services::key_service::get_api_key(
+        db,
+        &thread.user_id,
+        &thread.credential_api_key_id,
+    )
+    .await?;
+    let auth =
+        api_key_auth_user_inner(db, &key, None, None, None, thread.shared_agent_thread).await?;
+    if auth.assistant_chat.as_ref().is_none_or(|chat| {
+        chat.conversation_id != thread.id || chat.user_id != thread.user_id || chat.guest
+    }) {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    Ok(auth)
+}
+
+async fn api_key_auth_user_inner(
+    db: &mongodb::Database,
+    key: &crate::models::api_key::ApiKey,
+    credential_id: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    shared_resume: bool,
+) -> Result<AuthUser, AppError> {
     crate::services::key_service::require_ordinary_purpose(key.purpose)?;
     if !key.is_active || key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
         return Err(AppError::Unauthorized(
@@ -894,9 +959,10 @@ pub(crate) async fn api_key_auth_user(
     } else {
         None
     };
-    if org_agent_access
-        .as_ref()
-        .is_some_and(|a| a.shared().is_some())
+    if !shared_resume
+        && org_agent_access
+            .as_ref()
+            .is_some_and(|a| a.shared().is_some())
         && assistant_chat
             .as_ref()
             .is_none_or(|c| !c.turn_live || c.turn_stopped)
@@ -2412,6 +2478,7 @@ mod tests {
         let headers = HeaderMap::new();
         let denied_paths = [
             "/api/v1/admin/users",
+            "/api/v1/keys/service-id/monitoring",
             "/api/v1/ssh/service-id",
             "/api/v1/ssh/service-id/terminal",
             "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",

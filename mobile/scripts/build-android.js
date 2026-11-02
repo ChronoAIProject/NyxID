@@ -72,6 +72,9 @@ function run(cmd, opts = {}) {
 }
 
 console.log(`[build-android] APP_ENV=${APP_ENV}`);
+console.log(`[build-android] API URL:         ${r.apiBaseUrl}`);
+console.log(`[build-android] Frontend URL:    ${r.frontendUrl}`);
+console.log(`[build-android] Legal URL:       ${r.legalBaseUrl}`);
 console.log(`[build-android] Android package: ${r.androidPackage}`);
 console.log(`[build-android] versionCode:     ${r.androidVersionCode}`);
 console.log(`[build-android] Keystore:        ${keystoreAbs}`);

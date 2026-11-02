@@ -961,6 +961,21 @@ Handles both standard and streaming proxy responses:
 7. If the response is SSE/streaming (`text/event-stream`), use the streaming path
 8. Otherwise, collect the full response and send a single `proxy_response`
 
+HTTP write preconditions (`If-Match` and `If-Unmodified-Since`) pass through the
+backend's shared header policy for both direct and node-routed requests. The node
+executor does not apply a second header allowlist; no node upgrade is required
+for these headers. Older backend replicas still strip them until upgraded.
+Authentication, cookies, hop-by-hop and infrastructure identity headers remain
+excluded from caller passthrough. Downstream 409 and 428 responses retain their
+status and body.
+
+Exact assistant approvals bind these precondition values with the other semantic
+request headers. Changing a revision, or removing its condition, requires a new
+exact approval; an approved conditional write must not become an unconditional
+overwrite. Catalog/credential execution-authority digests remain unchanged.
+Durable operations require these headers to be declared by the endpoint and
+covered by the grant's header constraints, like the existing read preconditions.
+
 **Streaming path:**
 
 ```rust

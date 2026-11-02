@@ -75,6 +75,7 @@ import {
   Notice,
 } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
+import { chatBubbleColors, userBubbleCorners } from "../../theme/chatAppearance";
 import { fonts, radius } from "../../theme/designTokens";
 import { useAssistant } from "./useAssistant";
 import { NyxBotHome } from "./NyxBotHome";
@@ -153,7 +154,8 @@ export function AssistantScreen({
 }: AssistantScreenProps) {
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const linkHost = useContext(AssistantLinkContext);
-  const { colors } = useTheme();
+  const { colors, mode, lightBubblePalette } = useTheme();
+  const bubble = chatBubbleColors(mode, lightBubblePalette);
   const chatColumn = useChatColumn();
   const transcriptEdges = useScrollEdges();
   const adoptedId = useRef<string | undefined>(undefined);
@@ -759,8 +761,7 @@ export function AssistantScreen({
           styles.message,
           isUser && styles.userMessage,
           isUser && {
-            backgroundColor: colors.card,
-            borderColor: colors.border,
+            backgroundColor: bubble.background,
           },
         ]}
       >
@@ -768,17 +769,17 @@ export function AssistantScreen({
           <Notice message="Messages between these pages haven't loaded yet. Load missing messages to restore them." />
         ) : null}
         {resetHere ? (
-          <Label muted accessibilityLabel="Conversation context reset">
+          <Label muted accessibilityLabel="Conversation context reset" style={isUser && { color: bubble.foreground }}>
             {contextResetCopy(conversation?.context_reset_reason)}
           </Label>
         ) : null}
         {attribution ? (
-          <Label muted style={styles.messageLabel}>
+          <Label muted style={[styles.messageLabel, isUser && { color: bubble.foreground }]}>
             {attribution}
           </Label>
         ) : null}
         {isUser && item.steering ? (
-          <Label muted>
+          <Label style={{ color: bubble.foreground }}>
             Steering ·{" "}
             {steeringNotice(item.steering.code, item.steering.outcome)}
           </Label>
@@ -787,7 +788,7 @@ export function AssistantScreen({
           item.text ? (
             <Text
               selectable
-              style={[styles.messageText, { color: colors.textPrimary }]}
+              style={[styles.messageText, { color: bubble.foreground }]}
             >
               {item.text}
             </Text>
@@ -879,6 +880,7 @@ export function AssistantScreen({
               key={attachment.id}
               attachment={attachment}
               conversationId={assistant.conversationId}
+              captionColor={isUser ? bubble.foreground : undefined}
             />
           ))}
         {!isUser ? (
@@ -914,6 +916,7 @@ export function AssistantScreen({
           text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
           timestamp={item.created_at}
           user={isUser}
+          foreground={isUser ? bubble.foreground : undefined}
         />
       </View>
     );
@@ -1166,12 +1169,11 @@ export function AssistantScreen({
                       styles.message,
                       styles.userMessage,
                       {
-                        backgroundColor: colors.card,
-                        borderColor: colors.border,
+                        backgroundColor: bubble.background,
                       },
                     ]}
                   >
-                    <Label muted style={styles.messageLabel}>
+                    <Label style={[styles.messageLabel, { color: bubble.foreground }]}>
                       Sending…
                     </Label>
                     {assistant.inputText ? (
@@ -1179,7 +1181,7 @@ export function AssistantScreen({
                         selectable
                         style={[
                           styles.messageText,
-                          { color: colors.textPrimary },
+                          { color: bubble.foreground },
                         ]}
                       >
                         {assistant.inputText}
@@ -1189,6 +1191,7 @@ export function AssistantScreen({
                       <AssistantAttachmentView
                         key={attachment.id}
                         attachment={attachment}
+                        captionColor={bubble.foreground}
                         conversationId={
                           assistant.conversationId ??
                           assistant.live?.conversationId
@@ -1748,11 +1751,7 @@ const styles = StyleSheet.create({
   message: { gap: 8, paddingVertical: 10 },
   userMessage: {
     padding: 14,
-    borderWidth: 1,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-    borderBottomRightRadius: 3,
-    borderBottomLeftRadius: 12,
+    ...userBubbleCorners,
     marginLeft: 38,
     alignSelf: "flex-end",
   },

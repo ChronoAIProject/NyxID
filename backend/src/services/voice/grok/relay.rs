@@ -128,6 +128,7 @@ impl Grok {
             .max(0)
     }
     pub(super) async fn pump(&mut self) -> AppResult<()> {
+        super::super::shared::revalidate(&self.state.db, &self.call).await?;
         if let Some(line) = self.arbiter.take_next() {
             let current = super::super::session::refresh(&self.state.db, &self.call).await?;
             if current.end_requested || chrono::Utc::now() >= current.deadline {
@@ -144,11 +145,13 @@ impl Grok {
                 }
                 None => json!({"type":"response.create"}),
             };
+            super::super::shared::revalidate(&self.state.db, &self.call).await?;
             openai::send(&mut self.socket, event).await?;
         }
         Ok(())
     }
     pub async fn send(&mut self, event: Value) -> AppResult<()> {
+        super::super::shared::revalidate(&self.state.db, &self.call).await?;
         match event["type"].as_str() {
             Some("session.commentary.append") => self
                 .arbiter
@@ -163,6 +166,7 @@ impl Grok {
                 if !self.utterances.contains_key(id) {
                     return Err(AppError::VoiceProviderUnavailable);
                 }
+                super::super::shared::revalidate(&self.state.db, &self.call).await?;
                 openai::send(&mut self.socket,json!({"type":"conversation.item.create","item":{"type":"message","role":"system",
                     "content":[{"type":"input_text","text":format!("NyxID utterance_id for the preceding user's input: {id}. Use only this ID when delegating that utterance.")}]}})).await?;
                 self.arbiter.respond();
@@ -176,6 +180,7 @@ impl Grok {
             Some("session.input_audio.mute" | "session.input_audio.unmute") => {
                 self.muted = event["type"] == "session.input_audio.mute";
                 self.current_input = None;
+                super::super::shared::revalidate(&self.state.db, &self.call).await?;
                 openai::send(&mut self.socket, json!({"type":"input_audio_buffer.clear"})).await?;
                 self.events.push_back(json!({"type":if self.muted {"session.input_audio.muted"} else {"session.input_audio.unmuted"},
                     "client_event_id":event["event_id"]}));
@@ -186,6 +191,7 @@ impl Grok {
     }
     async fn receipt(&mut self, id: &str, receipt: Value) -> AppResult<()> {
         if self.arbiter.unresolved.remove(id) {
+            super::super::shared::revalidate(&self.state.db, &self.call).await?;
             openai::send(
                 &mut self.socket,
                 json!({"type":"conversation.item.create","item":{
@@ -200,6 +206,7 @@ impl Grok {
 
 impl Grok {
     pub(super) async fn client(&mut self, input: ClientInput) -> AppResult<()> {
+        super::super::shared::revalidate(&self.state.db, &self.call).await?;
         match input {
             ClientInput::Begin if !self.muted => {
                 if self.current_input.is_some()
@@ -245,15 +252,18 @@ impl Grok {
                 {
                     return Err(AppError::RateLimited);
                 }
+                super::super::shared::revalidate(&self.state.db, &self.call).await?;
                 openai::send(&mut self.socket,json!({"type":"input_audio_buffer.append","audio":base64::engine::general_purpose::STANDARD.encode(bytes)})).await?;
             }
             ClientInput::Commit => {
                 if let Some(input) = self.current_input.take() {
                     if input.samples < 2400 || input.voiced < 240 {
+                        super::super::shared::revalidate(&self.state.db, &self.call).await?;
                         openai::send(&mut self.socket, json!({"type":"input_audio_buffer.clear"}))
                             .await?;
                     } else {
                         self.commits.push_back(input);
+                        super::super::shared::revalidate(&self.state.db, &self.call).await?;
                         openai::send(
                             &mut self.socket,
                             json!({"type":"input_audio_buffer.commit"}),
@@ -285,6 +295,7 @@ impl Grok {
         Ok(())
     }
     pub(super) async fn provider(&mut self, event: Value) -> AppResult<()> {
+        super::super::shared::revalidate(&self.state.db, &self.call).await?;
         match event["type"].as_str().unwrap_or_default() {
             "input_audio_buffer.committed" => {
                 let id = field(&event, "item_id")?;
@@ -415,6 +426,7 @@ impl Grok {
                     return Err(AppError::VoiceProviderUnavailable);
                 }
                 for chunk in bytes.chunks(1920) {
+                    super::super::shared::revalidate(&self.state.db, &self.call).await?;
                     speech.end = speech.end.max(now) + (chunk.len() as i64 / 48);
                     if speech.end - now > 5000 {
                         return Err(AppError::VoiceProviderUnavailable);
@@ -573,6 +585,7 @@ impl Grok {
         // Never cancel on speech_started/VAD, and never cancel backend work here.
         if let Some(id) = &self.arbiter.active {
             self.arbiter.cancelled.insert(id.clone());
+            super::super::shared::revalidate(&self.state.db, &self.call).await?;
             openai::send(
                 &mut self.socket,
                 json!({"type":"response.cancel","response_id":id}),
@@ -581,6 +594,7 @@ impl Grok {
         }
         if let Some((item, start, end)) = &self.last_playback {
             let played = (self.arbiter.playback_ms.min(*end) - start).max(0);
+            super::super::shared::revalidate(&self.state.db, &self.call).await?;
             openai::send(
                 &mut self.socket,
                 json!({"type":"conversation.item.truncate","item_id":item,

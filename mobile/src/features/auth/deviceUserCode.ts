@@ -3,6 +3,7 @@ import {
   NYXID_API_BASE_URL,
   NYXID_APP_SCHEME,
   NYXID_FRONTEND_URL,
+  NYXID_LEGACY_FRONTEND_URL,
   NYXID_UNIVERSAL_LINK_HOST,
 } from "../../lib/env";
 
@@ -18,7 +19,7 @@ export type AuthDeviceQrTrustPolicy = {
 };
 
 function defaultWebOrigins(): string[] {
-  const origins = [NYXID_FRONTEND_URL, NYXID_API_BASE_URL];
+  const origins = [NYXID_FRONTEND_URL, NYXID_API_BASE_URL, NYXID_LEGACY_FRONTEND_URL];
   if (NYXID_UNIVERSAL_LINK_HOST) {
     origins.push(`https://${NYXID_UNIVERSAL_LINK_HOST}`);
     if (IS_DEV_BUILD) origins.push(`http://${NYXID_UNIVERSAL_LINK_HOST}`);

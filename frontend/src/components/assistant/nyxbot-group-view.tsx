@@ -1,3 +1,5 @@
+import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
+import { collaborationApi } from "@/hooks/use-collaboration-groups";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
@@ -33,6 +35,7 @@ import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { AccessModeSwitcher } from "@/components/assistant/nyxbot-access-controls";
 import { Button } from "@/components/ui/button";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
@@ -46,9 +49,12 @@ import {
   withDisplayName,
   workingLabel,
 } from "@/lib/assistant/nyxbot-labels";
-import { mentionSegments } from "@/lib/assistant/nyxbot-mentions";
+import { mentionSegments, mentionTokens } from "@/lib/assistant/nyxbot-mentions";
+import { SharedConsentCards } from "./shared-agent-controls";
 import {
   NO_RECIPIENT_EDITS,
+  memberMention,
+  mentionedIds,
   resolveRecipients,
   withAdded,
   withDraft,
@@ -127,12 +133,14 @@ export function GroupMessageRow({
   message,
   names,
   members = [],
+  participants = [],
   onOpenAgent,
 }: {
   readonly groupId: string;
   readonly message: AssistantGroupMessage;
   readonly names: readonly string[];
   readonly members?: readonly AssistantGroupMember[];
+  readonly participants?: readonly { id: string; display_name: string }[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
   const feedback = useReplyFeedback({
@@ -140,6 +148,7 @@ export function GroupMessageRow({
     parentId: groupId,
     messageId: message.id,
     initialVote: message.feedback?.vote,
+    initialComment: message.feedback?.comment,
   });
   if (message.role === "notice") {
     return (
@@ -162,10 +171,10 @@ export function GroupMessageRow({
   if (message.role === "user") {
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
-        <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
-          {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
+        <UserMessageBubble className="max-w-[78%]">
+          {message.author ? <p className="mb-1 text-11 font-medium">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
-            <p className="mb-1 text-11 text-muted-foreground">
+            <p className="mb-1 text-11">
               {recipientLine(message.recipient_agent_ids, members)}
             </p>
           ) : null}
@@ -184,7 +193,7 @@ export function GroupMessageRow({
               }}
             />
           ))}
-        </div>
+        </UserMessageBubble>
         <div className="flex items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
@@ -220,6 +229,7 @@ export function GroupMessageRow({
             <span className="text-10 text-text-tertiary">Personal agent</span>
           ) : null}
           <MessageTime value={message.created_at} />
+          {message.requester_user_id ? <span className="text-11 text-text-tertiary">For {participants.find((p) => p.id === message.requester_user_id)?.display_name ?? "participant"}{message.execution_mode === "guest" ? " · Guest reply (owner pays)" : ""}</span> : null}
         </div>
         <div className="px-px text-foreground">
           {message.activities
@@ -383,6 +393,7 @@ function GroupTranscript({
               groupId={group.id}
               names={names}
               members={group.members}
+              participants={group.participants}
               onOpenAgent={onOpenAgent}
             />
           ))}
@@ -424,10 +435,10 @@ function MemberButton({
         <button
           type="button"
           onClick={onOpen}
-          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
+          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : member.unavailable ? " (unavailable)" : member.shared ? " (shared agent)" : ""} — agent details`}
           className={cn(
             "relative rounded-full transition-opacity hover:opacity-80",
-            member.destroyed && "opacity-50",
+            (member.destroyed || member.unavailable) && "opacity-50",
           )}
         >
           <AgentAvatar agent={member} size={size} />
@@ -442,6 +453,7 @@ function MemberButton({
       <TooltipContent side="bottom" className="text-11">
         <p className="font-medium">{agentTitle(member)}</p>
         {handle ? <p className="text-text-tertiary">{handle}</p> : null}
+        {member.unavailable ? <p>Unavailable</p> : member.shared ? <p>Shared agent{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -452,22 +464,22 @@ function GroupHeader({
   onOpenAgent,
   onOpenSettings,
 }: {
-  readonly group: AssistantGroup;
+  readonly group?: AssistantGroup;
   readonly onOpenAgent: (agentId: string) => void;
   readonly onOpenSettings: () => void;
 }) {
-  const lead = group.members.find(
+  const lead = group?.members.find(
     (member) => member.id === group.lead_agent_id,
   );
-  const working = group.working_agent_ids.length;
+  const working = group?.working_agent_ids.length ?? 0;
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <ThreadPanels>
       <div className="space-y-1.5">
         <HeaderBar>
-          <HeaderItem className="min-w-0">
+          <HeaderItem className="flex h-7 min-w-0 items-center">
             <h2 className={cn("truncate font-semibold text-foreground", compact ? "text-11" : "text-13")}>
-              {group.name}
+              {group?.name ?? "Loading group…"}
             </h2>
           </HeaderItem>
           <HeaderItem
@@ -476,7 +488,7 @@ function GroupHeader({
             className={cn("flex shrink-0 items-center", compact ? "gap-0.5" : "gap-1")}
           >
             <TooltipProvider delayDuration={200}>
-              {group.members.map((member) => (
+              {group?.members.map((member) => (
                 <MemberButton
                   key={member.id}
                   member={member}
@@ -495,7 +507,7 @@ function GroupHeader({
               {working} working
             </HeaderItem>
           ) : null}
-          <HeaderItem className="ml-auto">
+          {group ? <HeaderItem className="ml-auto">
             <Button
               size="sm"
               variant="ghost"
@@ -507,11 +519,11 @@ function GroupHeader({
               <Settings2 aria-hidden="true" />
               <span className={compact ? "sr-only" : undefined}>Settings</span>
             </Button>
-          </HeaderItem>
+          </HeaderItem> : null}
         </HeaderBar>
         {compact ? null : (
           <p className="text-11 text-text-tertiary">
-            {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.
+            {group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
           </p>
         )}
       </div>
@@ -647,7 +659,7 @@ export function GroupRecipientPills({
   readonly onRemove: (id: string) => void;
   readonly onAdd: (id: string) => void;
 }) {
-  const live = members.filter((member) => !member.destroyed);
+  const live = members.filter((member) => !member.destroyed && !member.unavailable);
   const others = live.filter((member) => !recipientIds.includes(member.id));
   return (
     <div
@@ -669,7 +681,7 @@ export function GroupRecipientPills({
                 aria-label={`Remove recipient ${agentTitle(member)}`}
                 onClick={() => onRemove(id)}
               >
-                {agentTitle(member)} ×
+                {agentTitle(member)}{member.shared ? ` · Shared agent${member.owner_name ? ` · ${member.owner_name}` : ""}` : ""} ×
               </Button>,
             ]
           : [];
@@ -695,7 +707,7 @@ export function GroupRecipientPills({
           <DropdownMenuContent align="start">
             {others.map((member) => (
               <DropdownMenuItem key={member.id} onSelect={() => onAdd(member.id)}>
-                {agentTitle(member)}
+                {agentTitle(member)}{member.shared ? " · Shared agent" : ""}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
@@ -777,18 +789,21 @@ export function NyxAgentGroupPage({
   }
 
   const mentions = (group?.members ?? [])
-    .filter((member) => !member.destroyed)
+    .filter((member) => !member.destroyed && !member.unavailable)
     .map((member) => ({
       id: member.id,
-      name: member.name,
+      name: memberMention(member, group?.members ?? []),
       kind: member.kind,
-      display_name: withDisplayName(member, agents.data?.agents).display_name,
+      display_name: withDisplayName(member, agents.data?.agents).display_name || member.name,
+      shared: member.shared,
+      owner_name: member.owner_name,
     }));
 
   return (
     <AssistantShell
       resizableContent
       title={group?.name ?? "Group"}
+      contentTitle
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
@@ -802,13 +817,15 @@ export function NyxAgentGroupPage({
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         <AssistantErrorNotice message={transcript.error ? `Could not open this group. ${transcript.error.message}` : requestError?.owner === user?.id ? requestError?.message : undefined} />
+        {group || !transcript.error ? (
+          <GroupHeader
+            group={group}
+            onOpenAgent={setDetailsAgentId}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+        ) : null}
         {group ? (
           <>
-            <GroupHeader
-              group={group}
-              onOpenAgent={setDetailsAgentId}
-              onOpenSettings={() => setSettingsOpen(true)}
-            />
             <AssistantLinkModalHost>
               <GroupTranscript
                 group={group}
@@ -819,7 +836,7 @@ export function NyxAgentGroupPage({
                 bottomInset={composerHeight}
               />
             </AssistantLinkModalHost>
-            {settingsOpen ? (
+            {settingsOpen && group.collaboration ? <CollaborationSettings group={group} agents={agents.data?.agents ?? []} onClose={() => setSettingsOpen(false)} onLeft={() => {setSettingsOpen(false); goTo();}} /> : settingsOpen ? (
               <GroupSettingsDialog
                 group={group}
                 agents={agents.data?.agents ?? []}
@@ -853,6 +870,14 @@ export function NyxAgentGroupPage({
           onDeleted={() => setDetailsAgentId(undefined)}
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          {(group?.members ?? []).filter((member) => member.shared && !member.unavailable && member.conversation_id).map((member) => (
+            <SharedConsentCards key={member.id} agentId={member.id} conversationId={member.conversation_id!} />
+          ))}
+          {group?.collaboration ? <CollaborationCards group={group} decisions={transcript.data?.collaboration_decisions ?? []} /> : null}
+          {group?.collaboration?.your_request_ids.length ? <div className="mx-auto flex max-w-3xl justify-end px-4"><Button size="sm" onClick={async () => {
+            try {for (const request of group.collaboration!.your_request_ids) await collaborationApi.cancel(group.id, request); await transcript.refetch();}
+            catch (cause) {reportError(cause,"Could not stop your group work.");}
+          }}>Stop my work</Button></div> : null}
           <GroupPendingActions
             actions={
               transcript.error ? [] : (transcript.data?.pending_actions ?? [])
@@ -913,12 +938,26 @@ export function NyxAgentGroupPage({
                 throw error;
               }
               try {
+                const members = group?.members ?? [];
+                const tokens = mentionTokens(text);
+                const ambiguous = tokens.some(({ name }) =>
+                  !members.some((member) => member.id.toLowerCase() === name.toLowerCase())
+                  && members.filter((member) => member.name.toLowerCase() === name.toLowerCase()).length > 1,
+                );
+                // Bind the displayed selection (including sticky defaults) to
+                // exact IDs. Preserve stale mentions for the server's refusal;
+                // never replace an unavailable target with the lead.
+                const exactRecipients = mentionedIds(text, members.map((member) => ({
+                  ...member, destroyed: false, unavailable: false,
+                })));
                 await transcript.post.mutateAsync({
                   text,
                   attachmentIds: uploads?.attachmentIds ?? [],
                   ...(recipients.edited
                     ? { recipientAgentIds: recipients.ids }
-                    : {}),
+                    : !ambiguous
+                      ? { recipientAgentIds: exactRecipients.length ? exactRecipients : recipients.ids }
+                      : {}),
                 });
                 setRecipientSelection(NO_RECIPIENT_EDITS);
               } catch (error) {

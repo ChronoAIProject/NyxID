@@ -184,7 +184,7 @@ pub(crate) async fn reserve(
     let mut release = new_release(state, row, Some(record.to_string())).await?;
     release.binding_id = format!("bnd_{}", record.simple());
     let db = state.db.clone();
-    let native_discord = row.platform == "discord" && row.gateway_source.is_some();
+    let native_source = row.gateway_source.is_some();
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let work:AppResult<_>=Box::pin(async {
@@ -192,7 +192,7 @@ pub(crate) async fn reserve(
             if db.collection::<Document>(CHANNELS).update_one(fence,doc! {"$set":{"gateway_setup_release_id":&release.id,"binding_id":&release.binding_id}})
                 .session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             db.collection::<Release>(RELEASES).insert_one(&release).session(&mut *session).await?;
-            if native_discord {
+            if native_source {
                 // Old ingress readers also block on this known unresolved
                 // release state. Old cleanup workers never claim review rows.
                 let mut guard = release.clone();
@@ -204,7 +204,7 @@ pub(crate) async fn reserve(
                 guard.agent_api_key_id.clear();
                 guard.route_api_key_id.clear();
                 guard.binding_id.clear();
-                guard.last_error = Some("native_discord_draining".into());
+                guard.last_error = Some("native_source_draining".into());
                 let mut guard = bson::to_document(&guard).map_err(|_|conflict())?;
                 guard.insert("native_drain_for", &release.id);
                 guard.insert("native_binding_id", &release.binding_id);
@@ -766,11 +766,11 @@ fn remote_identity(release: &Release, body: &Value) -> Observation {
     let version = body["version"].as_i64().filter(|v| *v > 0);
     let channel = body["channel_id"].as_str().filter(|v| valid_channel_id(v));
     if release.gateway_channel_id.is_none()
-        && !release
+        && release
             .record_id
             .as_ref()
             .and_then(|id| Uuid::parse_str(id).ok())
-            .is_some_and(|id| release.binding_id == format!("bnd_{}", id.simple()))
+            .is_none_or(|id| release.binding_id != format!("bnd_{}", id.simple()))
     {
         return Observation::Malformed;
     }

@@ -58,15 +58,14 @@ pub fn validate_preferences(p: &VoicePreferences) -> AppResult<()> {
 pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantConversation> {
     let row = super::assistant_nyxagent::get(db, user, id).await?;
     private_thread(&row)?;
+    if row.shared_agent_thread {
+        super::shared_agent_transport::require_ready(db).await?;
+        crate::mw::auth::api_key_auth_user_for_voice(db, &row).await?;
+    }
     Ok(row)
 }
 
 pub(crate) fn private_thread(row: &AssistantConversation) -> AppResult<()> {
-    if row.shared_agent_thread {
-        return Err(AppError::Forbidden(
-            "Shared agents support text conversations; voice sessions are unavailable".into(),
-        ));
-    }
     if row.channel.is_some() || row.group_id.is_some() || row.automation_thread || row.guest_turn {
         return Err(AppError::Forbidden(
             "Voice requires a private owner thread".into(),
@@ -491,7 +490,10 @@ pub(crate) async fn claim(
     private_thread(&visible)?;
     if row.id != visible.id
         && (request.task_conversation_id.as_deref() != Some(&row.id)
-            || !row.automation_thread
+            || !(row.automation_thread
+                || row.shared_agent_thread
+                    && visible.shared_agent_thread
+                    && row.voice_parent_conversation_id.as_deref() == Some(visible.id.as_str()))
             || row.agent_id != visible.agent_id
             || row.agent_owner_id != visible.agent_owner_id)
     {

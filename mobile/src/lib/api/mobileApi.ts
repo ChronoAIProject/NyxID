@@ -1,4 +1,5 @@
 import { ApiError } from "./ApiError";
+import { buildApiUrl } from "./baseUrl";
 import {
   approveAuthDeviceRequest,
   denyAuthDeviceRequest,
@@ -65,17 +66,6 @@ type RegisterWithPasswordResponse = {
 
 type SocialProvider = "google" | "github" | "apple";
 
-function getApiBaseUrl(): string {
-  const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:3001/api/v1";
-  const normalized = rawBaseUrl.replace(/\/+$/, "");
-
-  if (normalized.endsWith("/mobile")) {
-    return normalized.slice(0, -"/mobile".length);
-  }
-
-  return normalized;
-}
-
 export const mobileApi = {
   previewAuthDevice: previewAuthDeviceRequest,
   approveAuthDevice: approveAuthDeviceRequest,
@@ -114,7 +104,7 @@ export const mobileApi = {
   },
   getSocialAuthorizeUrl(provider: SocialProvider, redirectUri: string): string {
     const encodedRedirectUri = encodeURIComponent(redirectUri);
-    return `${getApiBaseUrl()}/auth/social/${provider}?client=mobile&redirect_uri=${encodedRedirectUri}`;
+    return buildApiUrl(`/auth/social/${provider}?client=mobile&redirect_uri=${encodedRedirectUri}`);
   },
   async getChallenges(page = 1, perPage = 20): Promise<PageResponse<ChallengeDetail>> {
     return listChallengesRequest(page, perPage);

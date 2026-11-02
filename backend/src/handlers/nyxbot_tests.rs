@@ -25,6 +25,8 @@ mod release_tests;
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
 
+#[path = "nyxbot_custom_event_tests.rs"]
+mod custom_event_tests;
 #[path = "nyxbot_guest_model_tests.rs"]
 mod guest_model_tests;
 
@@ -77,27 +79,79 @@ pub(super) fn relay_callback_completed(channel_id: &str, message_id: &str) {
     }
 }
 
-async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+fn setup<'a>(
+    name: &'a str,
+) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
+    Box::pin(setup_impl(name))
+}
+
+async fn setup_impl(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     setup_with_reply(name, "Here is your answer").await
 }
-async fn setup_with_reply(
+
+fn setup_with_reply<'a>(
+    name: &'a str,
+    reply: &'static str,
+) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
+    Box::pin(setup_with_reply_impl(name, reply))
+}
+
+async fn setup_with_reply_impl(
     name: &str,
     reply: &'static str,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
-    let db = connect_transaction_test_database(name).await;
-    engine::ensure_indexes(&db).await.unwrap();
-    db.collection(USERS)
-        .insert_one(test_user(OWNER, UserType::Person))
-        .await
-        .unwrap();
+    let db = Box::pin(connect_transaction_test_database(name)).await;
+    Box::pin(engine::ensure_indexes(&db)).await.unwrap();
+    Box::pin(async {
+        db.collection(USERS)
+            .insert_one(test_user(OWNER, UserType::Person))
+            .await
+            .unwrap();
+    })
+    .await;
+    let state = test_app_state(db.clone());
+    let callbacks = Router::new()
+        .route(
+            "/api/v1/proxy/s/{slug}/{*path}",
+            axum::routing::any(guest_model_tests::model_callback),
+        )
+        .layer(axum::Extension(
+            crate::handlers::assistant_nyxagent::SERVER_TURN_POLICY,
+        ))
+        .with_state(state.clone());
+    let setup_db = db.clone();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     let upstream = Router::new().route(
         "/v1/responses",
-        post(move |Json(body): Json<Value>| {
+        post(move |headers: HeaderMap, Json(body): Json<Value>| {
             let sink = sink.clone();
+            let callbacks = callbacks.clone();
+            let db = setup_db.clone();
             async move {
-                sink.lock().await.push(body);
+                // General channel tests mock the conversation engine. Visitor
+                // initialization now needs a real, authenticated model admission;
+                // exercise it without counting the hidden turn as user input.
+                use tower::ServiceExt;
+                let hidden = if body["input"] == crate::services::assistant_guest_model_setup::INSTRUCTION {
+                    let raw = headers["authorization"].to_str().unwrap().strip_prefix("Bearer ").unwrap();
+                    let (_, key, _) = key_service::validate_api_key(&db, raw).await.unwrap();
+                    db.collection::<AssistantConversation>(CONVERSATIONS)
+                        .find_one(doc!{"credential_api_key_id":&key.id,"guest_model_setup":true}).await.unwrap().is_some()
+                } else {false};
+                if hidden {
+                    assert_eq!(body["input"], crate::services::assistant_guest_model_setup::INSTRUCTION);
+                    let response = callbacks.oneshot(axum::http::Request::builder().method("POST")
+                        .uri("/api/v1/proxy/s/fixture-model/responses")
+                        .header("authorization", headers["authorization"].clone())
+                        .header("content-type", "application/json").header("accept", "*/*")
+                        .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                    assert_eq!(status, StatusCode::OK, "setup model callback: {}", String::from_utf8_lossy(&bytes));
+                } else {
+                    sink.lock().await.push(body);
+                }
                 let session = format!("conv_{}", Uuid::new_v4().simple());
                 let response = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
                 let stream = async_stream::stream! {
@@ -117,6 +171,10 @@ async fn setup_with_reply(
     let upstream=upstream.route("/v1/capabilities",axum::routing::get(||async {
         Json(json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":10,"max_image_bytes":20971520,"max_total_bytes":20971520,"content_types":["image/png","image/jpeg"]}}))
     }));
+    let upstream = upstream.route(
+        "/fixture-model/responses",
+        post(|| async { Json(json!({"id":"fixture-model-response","output":[]})) }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -132,11 +190,32 @@ async fn setup_with_reply(
     row.forward_access_token = true;
     row.inject_delegation_token = false;
     row.credential_encrypted.clear();
-    db.collection::<DownstreamService>(SERVICES)
-        .insert_one(row)
+    Box::pin(async {
+        db.collection::<DownstreamService>(SERVICES)
+            .insert_one(row)
+            .await
+            .unwrap();
+    })
+    .await;
+    let mut model = crate::models::downstream_service::test_helpers::dummy_service();
+    model.id = Uuid::new_v4().to_string();
+    model.slug = "fixture-model".into();
+    model.base_url = format!("http://{address}/fixture-model");
+    model.service_category = "internal".into();
+    model.auth_method = "bearer".into();
+    model.requires_user_credential = false;
+    model.credential_encrypted = state
+        .encryption_keys
+        .encrypt(b"fixture-model-key")
         .await
         .unwrap();
-    (test_app_state(db), calls, server)
+    model.inference =
+        Some(serde_json::from_value(json!({"wire_protocol":"openai_responses"})).unwrap());
+    db.collection::<DownstreamService>(SERVICES)
+        .insert_one(model)
+        .await
+        .unwrap();
+    (state, calls, server)
 }
 
 async fn key(state: &AppState, name: &str) -> key_service::CreatedApiKey {
@@ -159,6 +238,50 @@ async fn key(state: &AppState, name: &str) -> key_service::CreatedApiKey {
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn guest_setup_2092_closed_private_chat_settings_do_not_start_billed_setup() {
+    let (state, calls, server) = setup("guest_setup_closed_private").await;
+    let (channel, _) = channel(&state, "direct").await;
+    let chat = chats::record_chat(
+        &state,
+        &channel,
+        "private-owner",
+        &chats::ChatFacts {
+            kind: "private",
+            chat_id: "owner-chat".into(),
+            thread_id: None,
+            owner: true,
+            title: Some("Owner".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    chats::update_chat(
+        &state,
+        OWNER,
+        &chat.id,
+        &chats::ChatSettings {
+            allow_posts: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
+            .count_documents(doc! {"kind":crate::services::assistant_guest_model_setup::KIND})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
 }
 
 /// An active channel as `connect` leaves it, without the gateway round trip.
@@ -1422,6 +1545,7 @@ fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
         partition: PARTITION.into(),
         event_id: event_id.into(),
         relay_message_id: None,
+        custom_binding_id: None,
         event_context_ciphertext: None,
         status: "completed".into(),
         conversation_id: None,
@@ -1573,6 +1697,7 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
         partition: PARTITION.into(),
         event_id: arrived.clone(),
         relay_message_id: None,
+        custom_binding_id: None,
         event_context_ciphertext: None,
         status: "completed".into(),
         conversation_id: None,
@@ -6461,4 +6586,155 @@ async fn channel_http_links_refuse_org_specialists_with_typed_guidance() {
         assert_eq!(body["details"]["hint"], ORGANIZATION_AGENT_CHANNEL_HINT);
     }
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn hosted_watch_reports_gateway_configuration_separately_from_outage() {
+    for status in [None, Some(401), Some(403), Some(503)] {
+        let (mut state, _, upstream) = setup("nyxbot_watch_gateway_failure").await;
+        state.config.jwt_issuer = "https://nyxid.test".into();
+        let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+            .await
+            .unwrap();
+        let home = crate::services::assistant_team_service::home_thread(
+            &state.db,
+            &state.encryption_keys,
+            &agent,
+        )
+        .await
+        .unwrap();
+        // Without a configured creation manager this selects the real manual
+        // Telegram flow, whose completed bot must use the same platform.
+        let (value, _) = setup_link_tool(
+            &state,
+            OWNER,
+            &home.id,
+            "telegram",
+            None,
+            &agent,
+            LEGACY_PROVENANCE,
+        )
+        .await
+        .unwrap();
+        let link = hosted_setup_link(&state, &value).await;
+        assert_eq!(link.platform, "telegram");
+        let watch = state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .find_one(doc! {"connect_link_id": &link.id, "status": "pending"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(watch.platform.as_deref(), Some("telegram"));
+        let gateway = wiremock::MockServer::start().await;
+        if let Some(status) = status {
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = Uuid::new_v4().to_string();
+            service.slug = "cmaeg".into();
+            service.base_url = gateway.uri();
+            service.requires_user_credential = false;
+            state
+                .db
+                .collection::<DownstreamService>(SERVICES)
+                .insert_one(service)
+                .await
+                .unwrap();
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(status)
+                        .set_body_string("PRIVATE-UPSTREAM-SENTINEL"),
+                )
+                .mount(&gateway)
+                .await;
+        }
+        let bot = bot_doc("telegram", "Saved specialist bot");
+        let bot_id = bot.get_str("_id").unwrap().to_owned();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(bot)
+            .await
+            .unwrap();
+        complete_hosted_setup(&state, &link.id, &bot_id).await;
+        channel_bot_watch(&state, &watch).await.unwrap();
+        let watch_posts = gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "POST" && request.url.path() == "/channels")
+            .count();
+        assert_eq!(
+            watch_posts,
+            usize::from(status.is_some()),
+            "configured cases must reach the actual gateway status fixture"
+        );
+        let expected = match status {
+            None => "gateway_configuration_required",
+            Some(401) => "gateway_not_authenticated",
+            Some(403) => "gateway_permission_required",
+            _ => "gateway_unavailable",
+        };
+        let saved = state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .find_one(doc! {"_id": &watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, "failed");
+        assert_eq!(saved.last_error.as_deref(), Some(expected));
+        let event = wait_for_event(&state, &home.id, expected).await;
+        assert!(!event.contains("SENTINEL"));
+        assert!(event.contains(gateway_error_guidance(expected)));
+        let tool_error = connect_tool(&state, OWNER, &home.id, &bot_id, &agent)
+            .await
+            .unwrap_err();
+        assert!(matches!(&tool_error, AppError::ValidationError(message)
+            if message == &format!("{expected}: {}", gateway_error_guidance(expected))));
+        assert!(!tool_error.to_string().contains("SENTINEL"));
+        let tool_posts = gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "POST" && request.url.path() == "/channels")
+            .count();
+        assert_eq!(
+            tool_posts,
+            watch_posts + usize::from(status.is_some()),
+            "the direct tool must independently reach the configured gateway fixture"
+        );
+        assert_eq!(
+            gateway.received_requests().await.unwrap().is_empty(),
+            status.is_none()
+        );
+        // CLI/mobile consume this same HTTP envelope; the MCP tool above also
+        // retains the bounded code alongside guidance, without upstream prose.
+        let error = match connect(&state, OWNER, Some(&home.id), &bot_id, &agent).await {
+            Err(error) => error,
+            Ok(_) => panic!("gateway rejection must fail the HTTP connection"),
+        };
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let envelope: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(envelope["error"], "validation_error");
+        assert_eq!(
+            envelope["message"],
+            format!(
+                "Validation error: {expected}: {}",
+                gateway_error_guidance(expected)
+            )
+        );
+        assert!(!envelope.to_string().contains("SENTINEL"));
+        let http_posts = gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "POST" && r.url.path() == "/channels")
+            .count();
+        assert_eq!(http_posts, tool_posts + usize::from(status.is_some()));
+        upstream.abort();
+    }
 }

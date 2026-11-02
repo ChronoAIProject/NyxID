@@ -45,6 +45,7 @@ pub fn producer(
         identity: Some(identity),
         skills: Some(skills),
         channel: None,
+        model_setup: false,
         #[cfg(test)]
         dispatch_boundary: None,
     })
@@ -58,8 +59,23 @@ pub(crate) fn channel(
         state,
         identity: None,
         channel: Some(session),
+        model_setup: false,
         // Phone-channel sessions are guest turns and never preload private skills.
         skills: None,
+        #[cfg(test)]
+        dispatch_boundary: None,
+    })
+}
+
+/// A system setup is an independently admitted owner turn. It must not inherit
+/// a guest call session's delivery/lifetime fence or any public producer authority.
+pub(crate) fn model_setup(state: AppState) -> Arc<dyn NyxAgentEgress> {
+    Arc::new(Egress {
+        state,
+        identity: None,
+        skills: None,
+        channel: None,
+        model_setup: true,
         #[cfg(test)]
         dispatch_boundary: None,
     })
@@ -81,6 +97,7 @@ pub(crate) fn channel_at_dispatch_boundary(
         state,
         identity: None,
         channel: Some(session),
+        model_setup: false,
         dispatch_boundary: Some(boundary),
         skills: None,
     })
@@ -90,6 +107,7 @@ struct Egress {
     state: AppState,
     identity: Option<Arc<dyn ManagerIdentityProducer>>,
     channel: Option<crate::models::channel_adapter::CallSession>,
+    model_setup: bool,
     #[cfg(test)]
     dispatch_boundary: Option<Arc<DispatchBoundary>>,
     skills: Option<Arc<dyn super::agent_skill_preload::ContextProvider>>,
@@ -158,6 +176,9 @@ impl NyxAgentEgress for Egress {
         credential: &RuntimeCredential,
         request: NyxAgentRequest,
     ) -> AppResult<Response> {
+        if self.model_setup && !matches!(authority, NyxAgentExecutionContext::Owner { .. }) {
+            return Err(AppError::AssistantTurnRequired);
+        }
         // Public authority never enters owner resolution or ordinary approvals.
         let (user_id, turn, platform_origin) = match authority {
             NyxAgentExecutionContext::Public(context) => {
@@ -176,10 +197,10 @@ impl NyxAgentEgress for Egress {
             } => (user_id, turn, platform_origin),
         };
         let mut request = request;
-        if self.channel.is_some() && request.idempotency_key.is_empty() {
+        if (self.channel.is_some() || self.model_setup) && request.idempotency_key.is_empty() {
             request.idempotency_key = format!("{}:metadata:{}", turn.turn_id, uuid::Uuid::new_v4());
         }
-        if self.channel.is_none() && platform_origin.is_none() {
+        if self.channel.is_none() && !self.model_setup && platform_origin.is_none() {
             return Err(AppError::AssistantTurnRequired);
         }
         validate_operation(&request)?;
@@ -198,7 +219,9 @@ impl NyxAgentEgress for Egress {
         {
             return Err(AppError::Unauthorized("Invalid turn credential".into()));
         }
-        let row = if let Some(session) = &self.channel {
+        let row = if self.model_setup {
+            self.fence_model_setup(user_id, turn, credential).await?
+        } else if let Some(session) = &self.channel {
             self.fence_channel(user_id, turn, credential, session)
                 .await?
         } else {
@@ -359,7 +382,11 @@ impl NyxAgentEgress for Egress {
         let metered = state.billing.open(&context).await?;
         // Revalidate after target/policy/billing awaits and immediately before
         // marking dispatch. Platform fencing always joins a real transaction.
-        let dispatch_fence = if let Some(session) = &self.channel {
+        let dispatch_fence = if self.model_setup {
+            self.fence_model_setup(user_id, turn, credential)
+                .await
+                .map(|_| ())
+        } else if let Some(session) = &self.channel {
             self.fence_channel(user_id, turn, credential, session)
                 .await
                 .map(|_| ())
@@ -417,9 +444,18 @@ impl NyxAgentEgress for Egress {
             boundary.entered.add_permits(1);
             boundary.release.acquire().await.unwrap().forget();
         }
-        if let Some(session) = &self.channel
-            && let Err(error) = self.fence_channel(user_id, turn, credential, session).await
-        {
+        let final_fence = if self.model_setup {
+            self.fence_model_setup(user_id, turn, credential)
+                .await
+                .map(|_| ())
+        } else if let Some(session) = &self.channel {
+            self.fence_channel(user_id, turn, credential, session)
+                .await
+                .map(|_| ())
+        } else {
+            Ok(())
+        };
+        if let Err(error) = final_fence {
             // The forwarded marker precedes this await, but transport has not
             // begun. Persist zero usage so recovery releases the admitted hold.
             state
@@ -567,6 +603,22 @@ impl NyxAgentEgress for Egress {
 }
 
 impl Egress {
+    async fn fence_model_setup(
+        &self,
+        user_id: &str,
+        turn: &TurnRef,
+        credential: &RuntimeCredential,
+    ) -> AppResult<AssistantConversation> {
+        super::assistant_guest_model_setup::fence_dispatch(
+            &self.state.db,
+            user_id,
+            &turn.conversation_id,
+            &turn.turn_id,
+            &credential.api_key_id,
+        )
+        .await
+    }
+
     async fn fence_channel(
         &self,
         user_id: &str,

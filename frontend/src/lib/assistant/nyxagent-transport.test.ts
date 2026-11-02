@@ -25,7 +25,7 @@ const afterReset = "2026-09-17T00:00:02Z";
 
 it.each([
   ["turn_lost", "interrupted"], ["assistant_unavailable", "could not complete"],
-  ["guest_model_route_required", "isn't available to guests yet"],
+  ["guest_model_route_required", "can't answer right now"],
   ["internal_error", "NyxBot hit an internal error on this turn. Check which actions completed before retrying."],
   ["first_byte_timeout", "did not start"], ["invalid_stream", "ended unexpectedly"],
   ["output_too_large", "response limit"], ["nyxid_error", "authorize"],
@@ -193,6 +193,7 @@ describe("NyxAgent server-backed transport", () => {
       id: "watch-1", turn_id: "turn", kind: "cma_response", operation_id: "resp_agt_test_1",
       agent_id: "agt_test", idempotency_key: "request-1", status: "in_progress", phase: null,
       state: "waiting", reason: null, monitor_name: "NyxBot", created_at: start, checked_at: afterReset,
+      cma_url: "https://bot.chrono-ai.fun/agents/agt_test",
     }];
     globalThis.__nyxidAssistantHttpMock = () => json(page);
     const transport = new NyxAgentTransport();
@@ -2499,4 +2500,11 @@ it.each([
   const reloaded = new NyxAgentTransport();
   await reloaded.history(id);
   expect(reloaded.session(id).messages[1]?.errorDetail?.failureReason).toEqual(failure);
+});
+
+it.each([undefined, "no_admission", "shared_chat", "method_override", "pool", "handle_present", "future_reason", "connection_not_platform", "route_mismatch", "unknown_field"])("does not invent an owner notice for %s", (reason) => {
+  expect(storedError("guest_model_route_required", undefined, reason)).toBe("This assistant can't answer right now. Please try again later.");
+});
+it.each(["model_route_unavailable", "model_connection_unavailable", "credits_unavailable", "setup_timeout", "setup_capacity"])("renders setup failure wording for %s", (reason) => {
+  expect(storedError("guest_model_route_required", undefined, reason)).toBe("Visitor setup could not finish. The owner has been notified. Please try again later.");
 });

@@ -1,3 +1,4 @@
+import { GuestReadiness } from "./guest-readiness";
 import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
 import { ChevronRight, Megaphone, User, Users } from "lucide-react";
@@ -12,6 +13,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
+  useGuestReadiness,
   useNyxBotChannelChats,
   useSetNyxBotPrivateChats,
   useUpdateNyxBotChannelChat,
@@ -88,6 +90,13 @@ function ChatRow({
   readonly botAgentName: string;
   readonly onError: (message: string | undefined) => void;
 }) {
+  const agentId = chat.agent_id ?? channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
+  const agentReadiness = useGuestReadiness(agentId, true);
+  const scoped = Boolean(chat.conversation_id && (
+    agentReadiness.data?.conversation_overrides_truncated ||
+    agentReadiness.data?.conversation_overrides.includes(chat.conversation_id)
+  ));
+  const chatReadiness = useGuestReadiness(agentId, scoped, chat.conversation_id ?? undefined);
   const update = useUpdateNyxBotChannelChat();
   const [notice, setNotice] = useState<string>();
   const title = channelChatTitle(chat.kind, chat.title, channel.platform);
@@ -195,6 +204,7 @@ function ChatRow({
           onCheckedChange={(allow_posts) => void change({ allow_posts })}
         />
       </div>
+      <GuestReadiness readiness={scoped ? chatReadiness.data : agentReadiness.data} />
       {group && chat.follow_guidance ? <p className="text-11 text-muted-foreground">{chat.follow_guidance}</p> : null}
       {group && (chat.thread_capabilities?.thread_follow || chat.has_thread_history || (chat.followed_thread_count ?? 0) > 0) ? <ChannelThreads chat={chat} /> : null}
       {notice ? <p className="text-11 text-muted-foreground">{notice}</p> : null}
@@ -219,6 +229,8 @@ export function ChannelChats({
   const [shown, setShown] = useState(CHATS_SHOWN);
   const [error, setError] = useState<string>();
   const chats = useNyxBotChannelChats(channel.id, open);
+  const agentId = channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
+  const readiness = useGuestReadiness(agentId, open);
   const access = useSetNyxBotPrivateChats();
   const rows = chats.data ?? [];
   const roots = rows.filter((chat) => !chat.parent_chat_id || !rows.some((parent) => parent.id === chat.parent_chat_id));
@@ -268,6 +280,7 @@ export function ChannelChats({
             to the bot there. In groups it answers when mentioned or replied to unless set to
             every message.
           </p>
+          <GuestReadiness readiness={readiness.data} />
           {error ? (
             <p role="alert" className="text-11 text-destructive">
               {error}

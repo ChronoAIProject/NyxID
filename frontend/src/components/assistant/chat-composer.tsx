@@ -161,6 +161,8 @@ export interface ComposerMention {
   readonly name: string;
   readonly kind: AssistantAgentKind;
   readonly display_name?: string | null;
+  readonly shared?: boolean;
+  readonly owner_name?: string | null;
 }
 
 interface ChatComposerProps {
@@ -1192,7 +1194,7 @@ function DraftedChatComposer({
                                 ) : null}
                               </span>
                               <span className="shrink-0 text-10 text-text-tertiary">
-                                {option.agent.kind === "nyxbot"
+                                {option.agent.shared ? `Shared agent${option.agent.owner_name ? ` · ${option.agent.owner_name}` : ""}` : option.agent.kind === "nyxbot"
                                   ? "Personal agent"
                                   : "Specialist"}
                               </span>

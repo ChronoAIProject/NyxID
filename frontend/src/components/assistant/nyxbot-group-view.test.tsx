@@ -10,6 +10,12 @@ import type {
 
 const post = vi.fn();
 let group: AssistantGroup;
+let groupLoaded = true;
+let groupError: Error | null = null;
+let shownMentions: readonly { id: string; name: string; shared?: boolean }[] = [];
+vi.mock("./shared-agent-controls", () => ({
+  SharedConsentCards: ({ agentId, conversationId }: { agentId: string; conversationId: string }) => <div data-testid="shared-consents">{agentId}:{conversationId}</div>,
+}));
 
 vi.mock("@/components/assistant/blocks/tool-image", () => ({
   ToolImage: ({ image }: { image: { endpoint: string; label: string } }) => (
@@ -30,15 +36,15 @@ vi.mock("@/hooks/use-approvals", () => ({
 }));
 vi.mock("@/hooks/use-nyxbot-groups", () => ({
   useNyxBotGroupMessages: () => ({
-    data: { group, messages: [], pending_actions: [], before_seq: null },
-    error: null,
+    data: groupLoaded ? { group, messages: [], pending_actions: [], before_seq: null } : undefined,
+    error: groupError,
     post: { mutateAsync: post, isPending: false },
     refetch: vi.fn(),
     loadOlder: vi.fn(),
   }),
 }));
 vi.mock("@/components/assistant/assistant-shell", () => ({
-  AssistantShell: ({ children }: { children: ReactNode }) => <>{children}</>,
+  AssistantShell: ({ children, contentTitle }: { children: ReactNode; contentTitle?: boolean }) => <main data-content-title={Boolean(contentTitle)}>{children}</main>,
 }));
 vi.mock("@/components/assistant/assistant-link-modals", () => ({
   AssistantLinkModalHost: ({ children }: { children: ReactNode }) => (
@@ -59,10 +65,12 @@ vi.mock("@/components/assistant/nyxbot-group-forms", () => ({
 // recipients slot renders above the input.
 vi.mock("@/components/assistant/upload-composer", () => ({
   UploadComposer: (props: {
+    mentions?: readonly { id: string; name: string; shared?: boolean }[];
     recipients?: ReactNode;
     onContentChange?: (content: string) => void;
     onSend: (text: string, uploads?: unknown) => Promise<void>;
   }) => {
+    shownMentions = props.mentions ?? [];
     const [text, setText] = useState("");
     return (
       <div>
@@ -141,9 +149,36 @@ async function send() {
 
 describe("group recipient pills", () => {
   beforeEach(() => {
+    groupLoaded = true;
+    groupError = null;
     post.mockReset();
     post.mockResolvedValue({});
     group = makeGroup([NYXBOT]);
+  });
+
+  it("replaces the loading group header with recovery when loading fails", () => {
+    groupLoaded = false;
+    groupError = new Error("Group is unavailable");
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not open this group");
+    expect(screen.getByRole("button", { name: "Back to home" })).toBeVisible();
+    expect(screen.queryByText("Loading group…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading members…")).not.toBeInTheDocument();
+  });
+
+  it("keeps one group header while its identity loads", () => {
+    groupLoaded = false;
+    const view = render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
+    const panels = view.container.querySelector("[data-chat-thread-panels]");
+    expect(panels).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Loading group…" })).toBeVisible();
+    groupLoaded = true;
+    view.rerender(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(view.container.querySelectorAll("[data-chat-thread-panels]")).toHaveLength(1);
+    expect(view.container.querySelector("[data-chat-thread-panels]")).toBe(panels);
+    expect(screen.getByRole("heading", { name: "Launch" })).toBeVisible();
+    expect(screen.getByRole("main")).toHaveAttribute("data-content-title", "true");
   });
 
   it("seeds the pills from the group's default recipients on load", () => {
@@ -164,13 +199,14 @@ describe("group recipient pills", () => {
     expect(pills()).toEqual(["researcher", "writer"]);
   });
 
-  it("sends typed mentions without explicit ids, like the server routes them", async () => {
+  it("binds typed mentions to exact recipient ids", async () => {
     render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
     await type("@researcher go");
     await send();
     expect(post).toHaveBeenCalledWith({
       text: "@researcher go",
       attachmentIds: [],
+      recipientAgentIds: [RESEARCHER],
     });
   });
 
@@ -206,6 +242,7 @@ describe("group recipient pills", () => {
     expect(post).toHaveBeenCalledWith({
       text: "@researcher do X",
       attachmentIds: [],
+      recipientAgentIds: [RESEARCHER],
     });
   });
 
@@ -232,7 +269,7 @@ describe("group recipient pills", () => {
     expect(pills()).toEqual(["NyxBot"]);
     await type("next");
     await send();
-    expect(post).toHaveBeenLastCalledWith({ text: "next", attachmentIds: [] });
+    expect(post).toHaveBeenLastCalledWith({ text: "next", attachmentIds: [], recipientAgentIds: [NYXBOT] });
   });
 
   it("refuses to send an emptied selection instead of falling back to the lead", async () => {
@@ -286,6 +323,7 @@ describe("delivered message recipients", () => {
     expect(
       screen.getByText("to researcher, retired, a removed agent"),
     ).toBeInTheDocument();
+    expect(screen.getByText("to researcher, retired, a removed agent").parentElement).toHaveClass("bg-chat-bubble", "text-chat-bubble-foreground");
     expect(screen.queryByText(new RegExp(RESEARCHER))).toBeNull();
   });
 });
@@ -366,4 +404,72 @@ describe("group message body copy integration", () => {
     render(row("agent", "<function_calls>hidden</function_calls>"));
     expect(screen.queryByRole("button", { name: "Copy message" })).not.toBeInTheDocument();
   });
+});
+
+describe("shared crew members", () => {
+  beforeEach(() => {
+    groupLoaded = true; groupError = null; post.mockReset(); post.mockResolvedValue({});
+    group = makeGroup([RESEARCHER]);
+    group.members[1] = { ...group.members[1]!, shared: true, owner_name: "Publisher", conversation_id: "shared-thread" };
+  });
+  it("shows shared picker entries, pills and consent cards for the member thread", () => {
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(shownMentions.find((m) => m.id === RESEARCHER)).toMatchObject({ shared: true, name: "researcher" });
+    expect(pills()).toEqual(["researcher · Shared agent · Publisher"]);
+    expect(screen.getByTestId("shared-consents")).toHaveTextContent(`${RESEARCHER}:shared-thread`);
+  });
+  it("binds a plain-text send to the displayed sticky shared recipient", async () => {
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    await type("carry on");
+    await send();
+    expect(post).toHaveBeenCalledWith({ text: "carry on", attachmentIds: [], recipientAgentIds: [RESEARCHER] });
+  });
+  it("keeps unavailable members visible but removes mentions, recipients and consent cards", () => {
+    group.members[1] = { ...group.members[1]!, unavailable: true };
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(screen.getByRole("button", { name: /researcher \(unavailable\)/ })).toBeVisible();
+    expect(shownMentions.some((m) => m.id === RESEARCHER)).toBe(false);
+    expect(pills()).toEqual([]);
+    expect(screen.queryByTestId("shared-consents")).not.toBeInTheDocument();
+  });
+  it("inserts exact member IDs for colliding names and routes that UUID", async () => {
+    group.members[2] = { ...group.members[2]!, name: "researcher" };
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(shownMentions.find((m) => m.id === RESEARCHER)?.name).toBe(RESEARCHER);
+    await type(`@${RESEARCHER} hello`);
+    expect(pills()).toEqual(["researcher · Shared agent · Publisher"]);
+    await send();
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ text: `@${RESEARCHER} hello`, recipientAgentIds: [RESEARCHER] }));
+  });
+  it("sends an unavailable UUID to the server for refusal instead of addressing the lead", async () => {
+    group.default_recipient_ids = [NYXBOT];
+    group.members[1] = { ...group.members[1]!, unavailable: true };
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    await type(`@${RESEARCHER} hello`);
+    await send();
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ recipientAgentIds: [RESEARCHER] }));
+  });
+  it("preserves a destroyed member's UUID and displays the specific refusal", async () => {
+    group.default_recipient_ids = [NYXBOT];
+    post.mockRejectedValue(new Error("retired was destroyed and can't be messaged"));
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    expect(shownMentions.some((member) => member.id === GONE)).toBe(false);
+    await type(`@${GONE} hello`);
+    await send();
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ recipientAgentIds: [GONE] }));
+    expect(await screen.findByText("retired was destroyed and can't be messaged")).toBeVisible();
+  });
+  it("leaves ambiguous bare handles for server validation even alongside an exact UUID", async () => {
+    group.members[2] = { ...group.members[2]!, name: "researcher" };
+    render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    await type(`@${NYXBOT} and @researcher hello`);
+    await send();
+    expect(post).toHaveBeenCalledWith({ text: `@${NYXBOT} and @researcher hello`, attachmentIds: [] });
+  });
+});
+
+it("attributes collaboration guest replies to the requester and owner-paid lane", () => {
+  const message: AssistantGroupMessage = { id: "reply", seq: 2, role: "agent", agent: { id: RESEARCHER, name: "Researcher", kind: "specialist" }, text: "Hello Bob", created_at: "2026-10-31T00:00:00Z", requester_user_id: "bob", execution_mode: "guest" };
+  render(<GroupMessageRow groupId="collaboration" message={message} names={[]} participants={[{ id: "bob", display_name: "Bob" }]} onOpenAgent={() => undefined} />);
+  expect(screen.getByText("For Bob · Guest reply (owner pays)")).toBeVisible();
 });

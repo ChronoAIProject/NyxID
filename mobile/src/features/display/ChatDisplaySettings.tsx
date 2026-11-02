@@ -9,6 +9,7 @@ import {
 } from "./chatLayout";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
+import { ChatBubbleSettings } from "./ChatBubbleSettings";
 
 export function ChatDisplaySettings() {
   const { colors } = useTheme();
@@ -107,6 +108,7 @@ export function ChatDisplaySettings() {
       >
         <Text style={{ color: colors.textPrimary }}>Reset chat layout</Text>
       </Pressable>
+      <ChatBubbleSettings />
     </View>
   );
 }

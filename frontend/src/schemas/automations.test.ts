@@ -5,7 +5,32 @@ import {
   automationPreferencesSchema,
   automationRequest,
   scheduleSchema,
+  runSchema,
 } from "./automations";
+
+it("reads optional metadata-only run failures without breaking legacy history", () => {
+  const run = {
+    id: "run",
+    scheduled_at: "2026-10-31T00:00:00Z",
+    started_at: null,
+    finished_at: null,
+    outcome: "failed",
+    reason: "assistant_unavailable",
+    thread_id: null,
+    duration_ms: null,
+  };
+  expect(runSchema.parse(run).failure_reason).toBeUndefined();
+  const failure = {
+    source: "nyxid",
+    stage: "model_proxy",
+    code: "api_key_scope_forbidden",
+    http_status: 403,
+    nyxid_error_code: 9000,
+  };
+  expect(
+    runSchema.parse({ ...run, failure_reason: failure }).failure_reason,
+  ).toEqual(failure);
+});
 
 describe("automation forms", () => {
   const valid = () => ({

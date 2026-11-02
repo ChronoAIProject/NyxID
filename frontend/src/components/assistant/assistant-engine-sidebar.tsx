@@ -1,5 +1,7 @@
+import { readGroupInvite, clearGroupInvite } from "@/lib/collaboration-invite";
+import { GroupInviteDialog } from "./collaboration-group-controls";
 import { useConnectionDown } from "@/hooks/use-connection-down";
-import { useState, useSyncExternalStore, type ComponentProps } from "react";
+import { useEffect, useState, useSyncExternalStore, type ComponentProps } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -45,6 +47,13 @@ export function AssistantEngineSidebar({
   const [creatingAgent, setCreatingAgent] = useState<"personal" | "org">();
   const orgAgentsEnabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   const [creatingGroup, setCreatingGroup] = useState(false);
+  const [inviteToken, setInviteToken] = useState(readGroupInvite);
+  useEffect(() => {
+    const change = () => setInviteToken(readGroupInvite());
+    window.addEventListener("hashchange", change);
+    return () => window.removeEventListener("hashchange", change);
+  }, []);
+  const closeInvite = () => { clearGroupInvite(); setInviteToken(null); };
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const openThread = search.draft ? undefined : search.c;
   const openGroup = onChatRoute ? search.g : undefined;
@@ -180,6 +189,7 @@ export function AssistantEngineSidebar({
           if (id === props.activeConversationId) props.onNewChat();
         }}
       />
+      {inviteToken && nyxagentEnabled ? <GroupInviteDialog token={inviteToken} onClose={closeInvite} onJoined={(group) => {closeInvite(); goTo({ g: group.id });}} /> : null}
       {creatingGroup ? (
         <NewGroupDialog
           agents={agents.data?.agents ?? []}

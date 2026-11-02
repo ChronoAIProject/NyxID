@@ -18,7 +18,11 @@ pub fn connection_binding<'a>(
                 .find_one(doc! {"_id": &service.endpoint_id, "user_id": &service.user_id})
                 .await?
                 .ok_or_else(|| AppError::NotFound("Service destination unavailable".into()))?;
-        let credential = if let Some(key) = &service.api_key_id {
+        // Switching to a platform key deliberately retains the saved BYOK key.
+        // That inactive credential must not block or invalidate the selected
+        // platform route when it is subsequently deleted or rotated.
+        let platform = crate::services::platform_key_service::binding(&service) == "platform";
+        let credential = if let Some(key) = service.api_key_id.as_ref().filter(|_| !platform) {
             let key = db
                 .collection::<UserApiKey>("user_api_keys")
                 .find_one(doc! {"_id": key, "user_id": &service.user_id})
@@ -111,6 +115,9 @@ pub fn connection_binding<'a>(
         "allowed":allowed,"all_services":key.allow_all_services,"nodes":nodes,"mode":mode});
         let mut service = serde_json::to_value(service)
             .map_err(|_| AppError::Internal("Connection projection failed".into()))?;
+        if platform {
+            service["api_key_id"] = Value::Null;
+        }
         let mut endpoint = serde_json::to_value(endpoint)
             .map_err(|_| AppError::Internal("Connection projection failed".into()))?;
         let mut catalog = catalog;

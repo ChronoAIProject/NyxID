@@ -1223,3 +1223,81 @@ async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
     assert!(!record(&f, &queued.id).await.media.unwrap().interrupted);
     assert!(!record(&f, &bound.id).await.media.unwrap().interrupted);
 }
+
+#[tokio::test]
+async fn guest_setup_2092_queue_admission_rechecks_audience_and_source_transactionally() {
+    let f = fixture("guest_setup_queue_authority").await;
+    let event = source(&f, "waiting-visitor").await;
+    let origin = event.delivery.as_ref().unwrap().origin.clone();
+    let mut guest = row(&f).await;
+    guest.guest_turn = true;
+    guest.channel = Some(origin);
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id":&f.channel.id},
+            doc! {"$set":{"private_chats":"everyone"}},
+        )
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>(EVENTS).update_one(
+        doc!{"_id":&event.id},doc!{"$set":{"delivery.guest":true,"delivery.sender_id":"visitor","delivery.addressed":true,
+            "guest_setup_payload":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]}}}
+    ).await.unwrap();
+    let check = || {
+        let context = (f.state.db.clone(), event.id.clone(), guest.clone());
+        async move {
+            crate::services::transaction_service::run_db_only(
+                &context.0,
+                &context,
+                |session, (db, id, guest)| {
+                    Box::pin(async move {
+                        delivery::validate_guest_setup_in_session(db, session, id, guest).await
+                    })
+                },
+            )
+            .await
+        }
+    };
+    check().await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id":&f.channel.id},
+            doc! {"$set":{"private_chats":"owner"}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(check().await, Err(AppError::Forbidden(_))));
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id":&f.channel.id},
+            doc! {"$set":{"private_chats":"everyone","route_api_key_id":"replaced"}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(check().await, Err(AppError::Forbidden(_))));
+    f.state.db.collection::<bson::Document>(CHANNELS).update_one(
+        doc!{"_id":&f.channel.id},doc!{"$set":{"private_chats":"everyone","route_api_key_id":&f.channel.route_api_key_id}}
+    ).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("api_keys")
+        .update_one(
+            doc! {"_id":&f.channel.route_api_key_id},
+            doc! {"$set":{"is_active":false}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(check().await, Err(AppError::Forbidden(_))));
+    let saved = record(&f, &event.id).await;
+    assert!(
+        saved.turn_id.is_none(),
+        "revoked waits never bind or execute a turn"
+    );
+    assert_eq!(saved.status, "running");
+}

@@ -33,7 +33,7 @@ export function ChannelConnectLinkPage() {
   return (
     <ChannelConnectionShell
       platform={data?.platform ?? "telegram"}
-      platformName={data?.platform}
+      platformName={data?.platform === "telegram-new" || data?.platform === "telegram" ? "Telegram" : data?.platform}
       complete={data?.status === "completed"}
       email={user?.email}
     >

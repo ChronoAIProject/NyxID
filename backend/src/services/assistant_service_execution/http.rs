@@ -288,6 +288,9 @@ async fn check_http_projected_inner(
     {
         return Err(AppError::AssistantTurnRequired);
     }
+    if is_shared_auth(auth) {
+        require_shared_context(auth)?;
+    }
     let Some(chat) = auth.assistant_chat.as_deref() else {
         return Ok(Decision {
             refusal: None,
@@ -298,8 +301,7 @@ async fn check_http_projected_inner(
     let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
     let generation = !method_override
         && super::request_identity::legacy_model_generation(target, method, path, body);
-    // Separate route identity from admission: Codex metadata remains legacy for
-    // owners, including approval, exact selection and fallback classification.
+    // Model transport uses the same closed shape for owner admission and guest binding.
     let model_route = (generation && pool.is_none())
         .then(|| super::request_identity::model_route_operation(target, method, path, query, body))
         .flatten()
@@ -308,17 +310,114 @@ async fn check_http_projected_inner(
             route
         });
     let mut operation = http_operation(target, method, path, query, body);
+    if crate::services::assistant_guest_model_setup::is_setup(&state.db, &chat.conversation_id)
+        .await?
+    {
+        let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        if model_route.is_none()
+            || request
+                .get("tools")
+                .is_some_and(|tools| !tools.as_array().is_some_and(|items| items.is_empty()))
+        {
+            return Err(AppError::Forbidden(
+                "Visitor setup only admits model generation without tools".into(),
+            ));
+        }
+    }
     bind_headers(&mut operation, &projection.headers(target, headers));
+    if is_shared_chat(chat)
+        && crate::services::telnyx_platform_service::contract(&target.service).is_some()
+    {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        operation["transport"] = json!("managed");
+    }
+    let stream = method == "CONNECT"
+        || headers
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    if stream && is_shared_chat(chat) {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        operation["transport"] = json!(if method == "CONNECT" {
+            "connect"
+        } else {
+            "websocket"
+        });
+        let access = chat
+            .org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .expect("shared");
+        let connection = id
+            .and_then(|id| access.connections().get(id))
+            .ok_or_else(crate::services::shared_agent_service::missing)?;
+        // A CONNECT rule, like a WebSocket handshake rule, cannot constrain
+        // subsequent opaque traffic to the reviewed HTTP operation.
+        if crate::services::agent_operation_scope_service::is_scoped(
+            &auth.assistant_operation_scopes,
+            &connection.id,
+            connection.catalog_service_id.as_deref(),
+        ) {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Shared streams require unrestricted agent operation authority".into(),
+            ));
+        }
+        crate::services::shared_agent_transport::require_stream_policy(
+            &state.db,
+            &chat.user_id,
+            connection,
+            &target.service,
+        )
+        .await?;
+        if id
+            .and_then(|id| access.connections().get(id))
+            .is_some_and(|s| s.user_id == access.owner())
+            && id.and_then(|id| access.level(id))
+                != Some(crate::models::assistant_agent::GuestAccess::All)
+        {
+            return Err(AppError::Forbidden(
+                "Shared streams require explicit full service access".into(),
+            ));
+        }
+    }
     let stateless = operation["kind"] == "inference";
     let guest_inference = chat.guest && target.service.inference.is_some();
+    let shape_failure = if method_override {
+        Some(super::model_diagnostic::Reason::MethodOverride.into())
+    } else if pool.is_some() {
+        Some(super::model_diagnostic::Reason::Pool.into())
+    } else if !generation {
+        Some(super::model_diagnostic::Reason::RequestShape.into())
+    } else {
+        super::request_identity::model_shape(
+            path,
+            &serde_json::from_slice(body).unwrap_or(Value::Null),
+        )
+        .err()
+    };
     if guest_inference {
         if !chat.turn_live {
-            return Err(AppError::GuestModelRouteRequired);
+            return super::model_diagnostic::refuse(
+                &state.db,
+                chat,
+                super::model_diagnostic::Reason::NoAdmission,
+            )
+            .await;
+        }
+        if let Some(reason) = shape_failure {
+            return super::model_diagnostic::refuse(&state.db, chat, reason).await;
         }
         operation = model_route
             .clone()
             .ok_or(AppError::GuestModelRouteRequired)?;
         super::guest_model::require(&state.db, chat, id, target, &mut operation).await?;
+    } else if chat.turn_live && target.service.inference.is_some() && !stateless {
+        super::model_diagnostic::record(
+            &state.db,
+            chat,
+            shape_failure.unwrap_or_else(|| super::model_diagnostic::Reason::RequestShape.into()),
+        )
+        .await?;
     }
     let Some(id) = id else {
         if !chat.guest
@@ -450,7 +549,9 @@ async fn check_http_projected_inner(
             }
         }
     }
-    let read = matches!(method, "GET" | "HEAD" | "OPTIONS") && !method_override;
+    let read = matches!(method, "GET" | "HEAD" | "OPTIONS")
+        && !method_override
+        && !(stream && is_shared_chat(chat));
     let destructive = method == "DELETE" || method_override;
     let summary = if raw_inference {
         format!(

@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+#[cfg(test)]
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -79,6 +81,14 @@ pub const REMOTE_MACHINES_FLAG_KEY: &str = "experimental:remote-machines";
 const REMOTE_MACHINES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: REMOTE_MACHINES_FLAG_KEY,
     description: "Enable hosted Remote Machine creation, resume/rekey and administrative runtime-rate writes for the acting person; existing management and accounting continue when off.",
+    default_enabled: false,
+};
+
+/// Acting-person rollout for connected-service health and readiness monitoring.
+pub const SERVICE_MONITORING_FLAG_KEY: &str = "services:monitoring";
+const SERVICE_MONITORING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SERVICE_MONITORING_FLAG_KEY,
+    description: "Enable connected-service monitoring status, configuration and explicit checks through chrono-probe for the acting person.",
     default_enabled: false,
 };
 
@@ -291,6 +301,10 @@ pub const NYXBOT_GATEWAY_FLAGS: &[(&str, &str)] = &[
     ("aurinko", "nyxbot:gateway-aurinko"),
 ];
 
+/// Independent CMA custom-event channels use the same default-off gateway
+/// rollout family, but have no chat platform to key their flag to.
+pub const NYXBOT_CUSTOM_EVENT_GATEWAY_FLAG_KEY: &str = "nyxbot:gateway-custom-event";
+
 const fn nyxbot_gateway_flag(key: &'static str, description: &'static str) -> FeatureFlagDef {
     FeatureFlagDef {
         key,
@@ -299,7 +313,7 @@ const fn nyxbot_gateway_flag(key: &'static str, description: &'static str) -> Fe
     }
 }
 
-const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
+const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
     nyxbot_gateway_flag(
         "nyxbot:gateway-lark",
         "NyxBot reaches personal and linked org Lark bots through the Agent Event Gateway once the gateway takes Lark (text only there); flag off returns them to NyxID's relay.",
@@ -318,7 +332,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-whatsapp",
-        "NyxBot reaches personal and linked org WhatsApp bots through the Agent Event Gateway once the gateway verifies WhatsApp; flag off returns them to NyxID's relay.",
+        "NyxBot can use native WhatsApp on the Agent Event Gateway for dedicated-app BYO bots after credential and callback verification. Managed Embedded Signup remains on the relay. Turning the flag off requires restoring and verifying the Meta relay callback.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-x",
@@ -327,6 +341,10 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
     nyxbot_gateway_flag(
         "nyxbot:gateway-aurinko",
         "NyxBot reaches personal and linked org email (Aurinko) bots through the Agent Event Gateway once the gateway supports them; flag off returns them to NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        NYXBOT_CUSTOM_EVENT_GATEWAY_FLAG_KEY,
+        "Allow owner-managed CMA custom-event channels to invoke an existing NyxBot or specialist.",
     ),
 ];
 
@@ -359,6 +377,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     REMOTE_MACHINES_FLAG,
+    SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -368,6 +387,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_GATEWAY_FLAG_DEFS[4],
     NYXBOT_GATEWAY_FLAG_DEFS[5],
     NYXBOT_GATEWAY_FLAG_DEFS[6],
+    NYXBOT_GATEWAY_FLAG_DEFS[7],
 ];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
@@ -401,6 +421,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     REMOTE_MACHINES_FLAG,
+    SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -410,6 +431,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_GATEWAY_FLAG_DEFS[4],
     NYXBOT_GATEWAY_FLAG_DEFS[5],
     NYXBOT_GATEWAY_FLAG_DEFS[6],
+    NYXBOT_GATEWAY_FLAG_DEFS[7],
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",
@@ -425,6 +447,7 @@ pub fn find_flag(key: &str) -> Option<&'static FeatureFlagDef> {
 /// A resolved definition. Built-in definitions have no runtime creator.
 #[derive(Clone, Debug)]
 pub struct FlagDefinition {
+    pub created_at: Option<chrono::DateTime<Utc>>,
     pub id: Option<String>,
     pub key: String,
     pub description: String,
@@ -435,6 +458,7 @@ pub struct FlagDefinition {
 impl From<&FeatureFlagDef> for FlagDefinition {
     fn from(def: &FeatureFlagDef) -> Self {
         Self {
+            created_at: None,
             id: None,
             key: def.key.to_owned(),
             description: def.description.to_owned(),
@@ -447,6 +471,7 @@ impl From<&FeatureFlagDef> for FlagDefinition {
 impl From<FeatureFlagDefinition> for FlagDefinition {
     fn from(def: FeatureFlagDefinition) -> Self {
         Self {
+            created_at: Some(def.created_at),
             id: Some(def.id),
             key: def.flag_key,
             description: def.description,
@@ -497,6 +522,7 @@ pub fn validate_flag_key(key: &str) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn create_definition(
     db: &mongodb::Database,
     key: &str,
@@ -552,6 +578,7 @@ pub enum FlagTarget {
 }
 
 impl FlagTarget {
+    #[cfg(test)]
     pub fn kind(&self) -> FlagTargetKind {
         match self {
             Self::Global => FlagTargetKind::Global,
@@ -563,6 +590,7 @@ impl FlagTarget {
 
     /// Storage key: `None` for global/org scope, role string for role scope,
     /// user id for user scope.
+    #[cfg(test)]
     pub fn key(&self) -> Option<String> {
         match self {
             Self::Global | Self::Org => None,
@@ -1240,6 +1268,7 @@ pub async fn search_rollout_targets(
 
 /// The org-row upsert behind [`set_platform_org_override`]. Gates live on the
 /// caller.
+#[cfg(test)]
 async fn upsert_override_row(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1299,6 +1328,7 @@ async fn upsert_override_row(
 /// Upsert a platform-level override (staff-controlled). Only `Global` and
 /// personal `User` targets are valid — org/role scopes require an org, and are
 /// rejected here.
+#[cfg(test)]
 pub async fn set_platform_override(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1379,6 +1409,7 @@ pub async fn set_platform_override(
 }
 
 /// Clear a platform-level override. Returns the removed row when present.
+#[cfg(test)]
 pub async fn clear_platform_override(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1405,6 +1436,7 @@ pub async fn clear_platform_override(
 /// Upsert an org-wide override on behalf of platform staff — rollout targeting
 /// for one org cohort. The target must be an existing org account (404
 /// otherwise).
+#[cfg(test)]
 pub async fn set_platform_org_override(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1435,6 +1467,7 @@ pub async fn set_platform_org_override(
 
 /// Clear an org-wide override on behalf of platform staff. Returns the removed
 /// row when present (idempotent otherwise).
+#[cfg(test)]
 pub async fn clear_platform_org_override(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1454,7 +1487,7 @@ pub async fn clear_platform_org_override(
     Ok(row)
 }
 
-async fn ensure_org_exists(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
+pub(crate) async fn ensure_org_exists(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     let is_org = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": org_user_id })
@@ -1540,6 +1573,14 @@ pub async fn fetch_override_org_display(
 // Metadata (admin-authored documentation)
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub(crate) fn has_metadata(row: &FeatureFlagMetadata) -> bool {
+    row.description.is_some()
+        || row.owner.is_some()
+        || row.group.is_some()
+        || !row.tags.is_empty()
+        || row.sunset
+}
+
 /// Upper bound on an admin-written flag description.
 pub const MAX_FLAG_DESCRIPTION_LEN: usize = 512;
 /// Upper bound on an admin-written flag owner (a person, team, or contact).
@@ -1547,7 +1588,7 @@ pub const MAX_FLAG_OWNER_LEN: usize = 128;
 
 /// Trim a free-text metadata field, treating blank input as "cleared", and
 /// enforce its length budget.
-fn normalize_metadata_field(
+pub(crate) fn normalize_metadata_field(
     value: Option<&str>,
     max_len: usize,
     field: &str,
@@ -1584,7 +1625,7 @@ pub async fn list_metadata(
         .filter(|row| {
             keys.get(&row.flag_key)
                 .is_some_and(|id| id == &row.definition_id)
-                && (row.description.is_some() || row.owner.is_some())
+                && has_metadata(row)
         })
         .map(|row| (row.flag_key.clone(), row))
         .collect())
@@ -1596,6 +1637,7 @@ pub async fn list_metadata(
 /// blank or absent value clears that field. Clearing both fields deletes the
 /// row entirely (the flag falls back to its code-declared description with no
 /// owner) and returns `None`.
+#[cfg(test)]
 pub async fn set_metadata(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1652,6 +1694,7 @@ pub async fn set_metadata(
 
 /// Sparse metadata update. Keep empty rows internally so a concurrent disjoint
 /// write cannot be deleted by cleanup after the update.
+#[cfg(test)]
 pub async fn patch_metadata(
     db: &mongodb::Database,
     flag_key: &str,
@@ -1700,7 +1743,7 @@ pub async fn patch_metadata(
             .return_document(ReturnDocument::After)
             .await?
     };
-    Ok(row.filter(|row| row.description.is_some() || row.owner.is_some()))
+    Ok(row.filter(has_metadata))
 }
 
 /// Cascade helper: drop every override for an org (used when the org is deleted).
@@ -2643,6 +2686,9 @@ mod tests {
         overrides.insert_one(stale).await.unwrap();
         metadata
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 id: Uuid::new_v4().to_string(),
                 flag_key: "example_ui".into(),
                 definition_id: Some(runtime_id.clone()),
@@ -2718,6 +2764,9 @@ mod tests {
             .unwrap();
         metadata
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 id: Uuid::new_v4().to_string(),
                 flag_key: key.into(),
                 definition_id: None,
@@ -2907,6 +2956,7 @@ mod tests {
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:remote-machines",
+                "services:monitoring",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
                 "nyxbot:gateway-lark",
@@ -2916,6 +2966,7 @@ mod tests {
                 "nyxbot:gateway-whatsapp",
                 "nyxbot:gateway-x",
                 "nyxbot:gateway-aurinko",
+                "nyxbot:gateway-custom-event",
             ]
         );
         assert!(
@@ -3292,6 +3343,54 @@ mod tests {
         db.drop().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn service_monitoring_is_default_off_and_follows_live_actor_overrides() {
+        let db = crate::test_utils::connect_transaction_test_database("monitoring_flag").await;
+        let flag = SERVICE_MONITORING_FLAG_KEY;
+        assert!(!find_flag(flag).unwrap().default_enabled);
+        let person = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        for (id, kind) in [(&person, UserType::Person), (&org, UserType::Org)] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, kind))
+                .await
+                .unwrap();
+        }
+        db.collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                &person,
+                OrgRole::Member,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
+        set_platform_org_override(&db, &org, flag, true, &person)
+            .await
+            .unwrap();
+        assert!(personal_flag_enabled(&db, &person, flag).await.unwrap());
+        let other = Uuid::new_v4().to_string();
+        assert!(!personal_flag_enabled(&db, &other, flag).await.unwrap());
+        set_platform_override(&db, flag, &FlagTarget::User(person.clone()), false, &person)
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
+        clear_platform_override(&db, flag, &FlagTarget::User(person.clone()))
+            .await
+            .unwrap();
+        assert!(personal_flag_enabled(&db, &person, flag).await.unwrap());
+        db.collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"org_user_id": &org, "member_user_id": &person},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(!personal_flag_enabled(&db, &person, flag).await.unwrap());
+        db.drop().await.unwrap();
+    }
+
     #[test]
     fn metadata_fields_normalize_and_bound() {
         assert_eq!(normalize_metadata_field(None, 10, "owner").unwrap(), None);
@@ -3421,6 +3520,9 @@ mod tests {
         // registry must never surface as if the flag still existed.
         db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION)
             .insert_one(FeatureFlagMetadata {
+                group: None,
+                tags: vec![],
+                sunset: false,
                 definition_id: None,
                 id: Uuid::new_v4().to_string(),
                 flag_key: "retired_flag".to_string(),

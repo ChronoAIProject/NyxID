@@ -3195,3 +3195,528 @@ async fn nyxbot_multipart_scheduler_recovers_rate_limits_and_crashes_without_rep
         f.state.db.drop().await.unwrap();
     }
 }
+
+async fn shared_post_fixture(
+    platform: &str,
+) -> (Fixture, MockServer, acks::ChatAuthority, String, String) {
+    use crate::models::assistant_sharing::{ShareRole, ShareSubject};
+    use crate::services::assistant_team_service as team;
+    use crate::services::{feature_flag_service as flags, shared_agent_service as sharing};
+    let (f, server) = image_fixture(platform, "direct").await;
+    crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+    sharing::ensure_indexes(&f.state.db).await.unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        sharing::FLAG,
+        &flags::FlagTarget::Global,
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let publisher = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection("users")
+        .insert_one(crate::test_utils::test_user(
+            &publisher,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let (agent, _) = team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &publisher,
+        team::CreateRequest {
+            name: "shared-publisher".into(),
+            description: "Specialist".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            machines: None,
+            logins: None,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let user = f
+        .state
+        .db
+        .collection::<crate::models::user::User>("users")
+        .find_one(doc! {"_id":OWNER})
+        .await
+        .unwrap()
+        .unwrap();
+    sharing::update(
+        &f.state.db,
+        &publisher,
+        &agent.id,
+        sharing::SharingUpdate {
+            expected_version: 0,
+            enabled: true,
+            audience: vec![sharing::Audience {
+                subject_kind: ShareSubject::Person,
+                subject_id: format!("email:{}", user.email),
+                role: ShareRole::User,
+            }],
+            shared_access: Default::default(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, OWNER, &agent)
+        .await
+        .unwrap();
+    let row = crate::services::assistant_authority_tests::pin_assignment(
+        &f.state.db,
+        OWNER,
+        &row.id,
+        None,
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, OWNER, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    (f, server, chat, publisher, agent.id)
+}
+
+#[tokio::test]
+async fn shared_transports_channel_posts_only_to_actor_allowed_chats_and_stop_after_revocation() {
+    use crate::services::shared_agent_service as sharing;
+    let (f, server, chat, publisher, agent_id) = shared_post_fixture("telegram").await;
+    let target = thread(&f).await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(100))
+                .set_body_json(json!({"ok":true,"result":{"message_id":900}})),
+        )
+        .mount(&server)
+        .await;
+    assert_eq!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Allowed", false)
+            .await
+            .unwrap()["text"],
+        "sent"
+    );
+    assert!(
+        chats::post_current_turn(
+            &f.state,
+            &chat,
+            &Uuid::new_v4().to_string(),
+            "Other person's destination",
+            false
+        )
+        .await
+        .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"_id":&target.id}, doc! {"$set":{"allow_posts":false}})
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Not allowed", false)
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"_id":&target.id}, doc! {"$set":{"allow_posts":true}})
+        .await
+        .unwrap();
+    // A recipient-owned chat record cannot donate the publisher's bot authority.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.channel.channel_bot_id},
+            doc! {"$set":{"user_id":&publisher}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Publisher bot", false)
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.channel.channel_bot_id},
+            doc! {"$set":{"user_id":OWNER}},
+        )
+        .await
+        .unwrap();
+    let revoke = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while server.received_requests().await.unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        sharing::update(
+            &f.state.db,
+            &publisher,
+            &agent_id,
+            sharing::SharingUpdate {
+                expected_version: 1,
+                enabled: false,
+                audience: vec![],
+                shared_access: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    };
+    let text = "multi part text ".repeat(900);
+    let (result, ()) = tokio::join!(
+        chats::post_current_turn(&f.state, &chat, &target.id, &text, false),
+        revoke
+    );
+    assert!(result.is_err() || result.unwrap()["text"] != "sent");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "no next part after revocation"
+    );
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Revoked", false)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+struct PostRevokingKeys {
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    inner: crate::crypto::local_key_provider::LocalKeyProvider,
+    db: mongodb::Database,
+    collection: &'static str,
+    filter: bson::Document,
+    update: bson::Document,
+}
+impl std::fmt::Debug for PostRevokingKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PostRevokingKeys")
+    }
+}
+#[async_trait::async_trait]
+impl crate::crypto::key_provider::KeyProvider for PostRevokingKeys {
+    async fn wrap_dek(&self, bytes: &[u8]) -> AppResult<crate::crypto::key_provider::WrappedKey> {
+        self.inner.wrap_dek(bytes).await
+    }
+    async fn unwrap_dek(
+        &self,
+        wrapped: &crate::crypto::key_provider::WrappedKey,
+    ) -> AppResult<zeroize::Zeroizing<Vec<u8>>> {
+        self.db
+            .collection::<bson::Document>(self.collection)
+            .update_one(self.filter.clone(), self.update.clone())
+            .await?;
+        self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.unwrap_dek(wrapped).await
+    }
+    fn current_key_id(&self) -> u8 {
+        self.inner.current_key_id()
+    }
+    fn has_key_id(&self, id: u8) -> bool {
+        self.inner.has_key_id(id)
+    }
+    fn has_previous_key(&self) -> bool {
+        self.inner.has_previous_key()
+    }
+}
+
+#[tokio::test]
+async fn shared_transports_security_posts_revalidate_after_credential_await() {
+    for change in ["posts", "share", "behavior", "bot_owner", "route_key"] {
+        let (mut f, server, chat, publisher, agent_id) = shared_post_fixture("telegram").await;
+        let thread = thread(&f).await;
+        let target = chats::prepare_post(&f.state, OWNER, &thread.id, None)
+            .await
+            .unwrap();
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        let (collection, filter, update) = match change {
+            "posts" => (
+                THREADS,
+                doc! {"_id":&thread.id},
+                doc! {"$set":{"allow_posts":false}},
+            ),
+            "share" => (
+                "assistant_agent_sharing",
+                doc! {"_id":&agent_id},
+                doc! {"$inc":{"revision":1}},
+            ),
+            "behavior" => (
+                "assistant_agents",
+                doc! {"_id":&agent_id},
+                doc! {"$set":{"description":"Changed behavior"}},
+            ),
+            "route_key" => (
+                crate::models::api_key::COLLECTION_NAME,
+                doc! {"_id":&target.channel.route_api_key_id},
+                doc! {"$set":{"is_active":false}},
+            ),
+            _ => (
+                crate::models::channel_bot::COLLECTION_NAME,
+                doc! {"_id":&target.bot.id},
+                doc! {"$set":{"user_id":&publisher}},
+            ),
+        };
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        f.state.encryption_keys =
+            std::sync::Arc::new(crate::crypto::aes::EncryptionKeys::with_provider(
+                std::sync::Arc::new(PostRevokingKeys {
+                    fired: fired.clone(),
+                    inner: crate::crypto::local_key_provider::LocalKeyProvider::from_config(
+                        &f.state.config,
+                    ),
+                    db: f.state.db.clone(),
+                    collection,
+                    filter,
+                    update,
+                }),
+            ));
+        let result = chats::send_post_with_fence(
+            &f.state,
+            &target,
+            crate::services::channel_platform::OutboundReply {
+                text: Some("Do not deliver".into()),
+                metadata: None,
+                attachments: vec![],
+                reply_to_platform_message_id: None,
+            },
+            Some(&chat),
+        )
+        .await;
+        assert!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            "{change}: reached credential await"
+        );
+        assert!(result.is_err(), "{change}: revoked send must be refused");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "{change}: no platform effect after KMS revocation"
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shared_transports_security_media_rechecks_between_upload_and_message() {
+    let (f, server, chat, _, _) = shared_post_fixture("lark").await;
+    let thread = thread(&f).await;
+    let target = chats::prepare_post(&f.state, OWNER, &thread.id, None)
+        .await
+        .unwrap();
+    let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = arrived.clone();
+    Mock::given(path("/open-apis/im/v1/images"))
+        .respond_with(move |_: &wiremock::Request| {
+            signal.notify_one();
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(250))
+                .set_body_json(json!({"code":0,"data":{"image_key":"uploaded"}}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/open-apis/im/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"data":{"message_id":"must-not-send"}})),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let revoke = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived.notified())
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(THREADS)
+            .update_one(doc! {"_id":&thread.id}, doc! {"$set":{"allow_posts":false}})
+            .await
+            .unwrap();
+    };
+    let outbound = crate::services::channel_platform::OutboundReply {
+        text: None,
+        metadata: None,
+        reply_to_platform_message_id: None,
+        attachments: vec![crate::services::channel_platform::MaterializedAttachment {
+            kind: crate::services::channel_platform::MediaKind::Image,
+            bytes: bytes::Bytes::from_static(b"image"),
+            filename: Some("image.png".into()),
+            mime_type: Some("image/png".into()),
+            caption: None,
+        }],
+    };
+    let (result, ()) = tokio::join!(
+        chats::send_post_with_fence(&f.state, &target, outbound, Some(&chat)),
+        revoke
+    );
+    assert!(
+        result.is_err(),
+        "revoked upload must not lead to a message send"
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/open-apis/im/v1/messages")
+            .count(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+#[tokio::test]
+async fn shared_transports_security_posts_reject_org_bots_even_for_live_admin() {
+    let (f, server, chat, _, _) = shared_post_fixture("telegram").await;
+    let target = thread(&f).await;
+    let org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection("users")
+        .insert_one(crate::test_utils::test_user(
+            &org,
+            crate::models::user::UserType::Org,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection("org_memberships")
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            OWNER,
+            crate::models::org_membership::OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.channel.channel_bot_id},
+            doc! {"$set":{"user_id":&org}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(
+            &f.state,
+            &chat,
+            &target.id,
+            "No org posting authority",
+            false
+        )
+        .await
+        .is_err()
+    );
+    // Moving the route to the org does not broaden a personal shared key either.
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(doc! {"_id":&f.channel.id}, doc! {"$set":{"user_id":&org}})
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "No org route authority", false)
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_transports_security_posts_reject_stripped_shared_context_and_direct_relay() {
+    let (f, server, chat, _, _) = shared_post_fixture("telegram").await;
+    let thread = thread(&f).await;
+    let target = chats::prepare_post(&f.state, OWNER, &thread.id, None)
+        .await
+        .unwrap();
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    for tool in [
+        "channel_bot_setup_link",
+        "connect_channel_bot",
+        "link_channel_bot",
+        "update_channel_access",
+        "update_channel_chat",
+        "disconnect_channel_bot",
+    ] {
+        let (refusal, failed) = crate::handlers::assistant_team::execute_tool(
+            &f.state,
+            &chat,
+            &format!("nyxid__{tool}"),
+            &json!({}),
+        )
+        .await;
+        assert!(failed, "shared tool {tool} must remain excluded");
+        assert_eq!(refusal["error"], "shared_agent_scope");
+    }
+    let mut stripped = chat.clone();
+    stripped.org_agent_access = None;
+    assert!(!chats::post_turn_is_live(&f.state, &stripped).await.unwrap());
+    let key = crate::services::key_service::get_api_key(&f.state.db, OWNER, &chat.api_key_id)
+        .await
+        .unwrap();
+    let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+        .await
+        .unwrap();
+    let result = crate::handlers::channel_relay::deliver_prepared_initiated_message(
+        &f.state,
+        &HeaderMap::new(),
+        &auth,
+        &target.conversation,
+        &target.bot,
+        crate::services::channel_platform::OutboundReply {
+            text: Some("No direct relay".into()),
+            metadata: None,
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+        },
+        target.adapter.as_ref(),
+    )
+    .await;
+    assert!(result.is_err());
+    // Generic reply cannot treat a conversation key as the channel route key.
+    let reply = crate::handlers::channel_relay::AsyncReplyRequest {
+        thread_reply: false,
+        message_id: f.event.relay_message_id.clone().unwrap(),
+        reply: crate::handlers::channel_relay::AsyncReplyBody {
+            text: Some("No direct reply".into()),
+            metadata: None,
+            attachments: vec![],
+        },
+    };
+    assert!(
+        crate::handlers::channel_relay::resolve_reply_request_context(
+            &f.state,
+            &HeaderMap::new(),
+            Some(&auth),
+            &reply
+        )
+        .await
+        .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    f.state.db.drop().await.unwrap();
+}

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ChatWidthControl, ComposerHeightControl } from "@/components/assistant/chat-width-control";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { useResolvedTheme } from "@/hooks/use-theme";
 import {
   CONTRAST_CHECKS,
@@ -307,6 +308,21 @@ function ColorEditor() {
             </Button>
           )}
         </div>
+
+        <section
+          aria-label="Chat appearance preview"
+          className="space-y-3 rounded-xl border p-4"
+          style={{ backgroundColor: color("background"), color: color("foreground"), borderColor: color("border") }}
+        >
+          <p className="text-12 font-medium">Chat preview · {editMode}</p>
+          <UserMessageBubble
+            className="ml-auto w-fit max-w-[85%]"
+            style={{ backgroundColor: color("chat-bubble"), color: color("chat-bubble-foreground") }}
+          >
+            Show me the services I have connected.
+          </UserMessageBubble>
+          <p className="text-12 leading-relaxed">You can manage your connected services in Plugins.</p>
+        </section>
 
         <ul className="grid gap-x-8 gap-y-2 sm:grid-cols-2" aria-label={`${editMode} theme colors`}>
           {EDITABLE_COLORS.map(({ key, label }) => {

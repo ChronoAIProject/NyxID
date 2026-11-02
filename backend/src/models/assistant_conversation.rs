@@ -272,6 +272,17 @@ pub struct ToolProgress {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelRouteDiagnostic {
+    pub reason: String,
+    #[serde(default)]
+    pub unknown_fields: Vec<String>,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRefusal {
     #[serde(default)]
     pub http_status: Option<u16>,
@@ -309,6 +320,8 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     /// Bounded resource handles issued in this turn.
@@ -328,6 +341,8 @@ pub struct ActiveTurn {
     pub model_attribution_uncertain: bool,
     #[serde(default)]
     pub model_refusal: Option<ModelRefusal>,
+    #[serde(default)]
+    pub model_route_diagnostic: Option<ModelRouteDiagnostic>,
     #[serde(default)]
     pub model_stream_fault: Option<ModelStreamFault>,
     #[serde(default)]
@@ -478,6 +493,11 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
+    /// Server-created, tool-free visitor model initialization. Never client input.
+    #[serde(default)]
+    pub guest_model_setup: bool,
     /// Invocation conversations always enforce live execution independently of the legacy rollout.
     #[serde(default)]
     pub invocation_controlled: bool,

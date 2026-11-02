@@ -31,6 +31,7 @@ import {
   ChevronsUpDown,
   FileText,
   MoreHorizontal,
+  MessageSquare,
   PencilLine,
   Plus,
   Settings2,
@@ -888,6 +889,8 @@ export function AssistantSidebar({
   if (rail) {
     return (
       <SidebarRail
+        conversations={conversations}
+        onNewChat={onNewChat}
         agents={agents}
         groups={groups}
         activeView={activeView}
@@ -1204,9 +1207,11 @@ function RailItem({ label, children }: { readonly label: string; readonly childr
 
 /**
  * The hidden sidebar: Workspace destinations as icons, then every agent as
- * an avatar (hover lists its chats) and every crew, with the account last.
+ * an avatar (click lists its chats) and every crew, with the account last.
  */
 function SidebarRail({
+  conversations,
+  onNewChat,
   agents,
   groups,
   activeView,
@@ -1215,6 +1220,8 @@ function SidebarRail({
   accountOpen,
   onSelect,
 }: {
+  readonly conversations: readonly Conversation[];
+  readonly onNewChat: () => void;
   readonly agents?: SidebarAgents;
   readonly groups?: SidebarGroups;
   readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines";
@@ -1276,6 +1283,14 @@ function SidebarRail({
             </Link>
           </RailItem>
           {agents ? <CreateAgentMenu agents={agents} onNewCrew={groups?.onNewGroup} compact /> : null}
+          {!agents ? (
+            <>
+              <RailItem label="New chat">
+                <button type="button" aria-label="New chat" onClick={onNewChat} className={RAIL_BUTTON}><Plus className="h-4 w-4" /></button>
+              </RailItem>
+              <LegacyRailChats conversations={conversations} activeConversationId={activeConversationId} onSelect={onSelect} />
+            </>
+          ) : null}
           {liveAgents.length ? <div className="h-2 shrink-0" aria-hidden="true" /> : null}
           {agents
             ? liveAgents.map((agent) => (
@@ -1323,6 +1338,32 @@ function SidebarRail({
         </div>
       </div>
     </TooltipProvider>
+  );
+}
+
+function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
+  readonly conversations: readonly Conversation[];
+  readonly activeConversationId: string | undefined;
+  readonly onSelect: (conversationId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button type="button" aria-label="Previous chats" title="Previous chats" className={RAIL_BUTTON}><MessageSquare className="h-4 w-4" /></button>
+      </PopoverTrigger>
+      <PopoverContent side="right" align="start" className="w-72 p-2">
+        <p className="px-2 py-1 text-12 font-medium">Previous chats</p>
+        <ul aria-label="Previous chats" className="max-h-80 space-y-0.5 overflow-y-auto">
+          {conversations.map((chat) => (
+            <li key={chat.id}>
+              <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-12 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
+            </li>
+          ))}
+        </ul>
+        {!conversations.length ? <p className="px-2 py-1.5 text-11 text-text-tertiary">No chats yet.</p> : null}
+      </PopoverContent>
+    </Popover>
   );
 }
 

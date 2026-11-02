@@ -12,6 +12,7 @@ struct AsyncFixture {
     service: String,
     output: Arc<std::sync::Mutex<Value>>,
     phase: Arc<std::sync::Mutex<String>>,
+    callback: Arc<std::sync::Mutex<Value>>,
     status_gate: Arc<tokio::sync::Semaphore>,
 }
 impl Drop for AsyncFixture {
@@ -35,6 +36,8 @@ impl AsyncFixture {
         let phase = Arc::new(std::sync::Mutex::new("succeeded".to_owned()));
         let result_body = output.clone();
         let status_phase = phase.clone();
+        let callback = Arc::new(std::sync::Mutex::new(Value::Null));
+        let status_callback = callback.clone();
         let upstream = Router::new().route(
             "/{*path}",
             any(move |uri: axum::http::Uri| {
@@ -42,6 +45,7 @@ impl AsyncFixture {
                 let gate = gate.clone();
                 let result_body = result_body.lock().unwrap().clone();
                 let status_phase = status_phase.lock().unwrap().clone();
+                let callback = status_callback.lock().unwrap().clone();
                 async move {
                     let _permit = if uri
                         .path()
@@ -54,9 +58,11 @@ impl AsyncFixture {
                     };
                     Json(match uri.path() {
                         "/api/v1/agents" => json!({"id":"lifecycle-1","status":"queued"}),
-                        "/api/v1/agent-lifecycle/lifecycle-1" => json!({"id":"lifecycle-1","status":status_phase,"agent_id":"agt_coffee","phase":"agent_startup"}),
+                        "/api/v1/agent-lifecycle/lifecycle-1" => json!({"id":"lifecycle-1","status":status_phase,"agent_id":"agt_coffee","phase":"agent_startup","callback_url":callback}),
                         "/api/v1/agents/agt_coffee/input" => json!({"queued":true}),
-                        "/api/v1/agents/agt_coffee" => json!({"id":"agt_coffee","status":status_phase}),
+                        "/api/v1/agents/agt_coffee" => json!({"id":"agt_coffee","status":status_phase,"callback_url":callback}),
+                        "/api/v2/agents/agt_coffee/responses" => json!({"id":"resp_command","status":"queued","conversation":{"id":"agt_coffee"},"callback_url":callback}),
+                        "/api/v2/responses/resp_command" => json!({"id":"resp_command","status":status_phase,"conversation":{"id":"agt_coffee"},"callback_url":callback}),
                         "/executions" => json!({
                             "operation_id": if distinct_operations {
                                 format!("op-{}", uuid::Uuid::new_v4())
@@ -124,6 +130,7 @@ impl AsyncFixture {
             service,
             output,
             phase,
+            callback,
             status_gate,
         }
     }
@@ -173,6 +180,17 @@ impl AsyncFixture {
             .unwrap()
             .unwrap()
     }
+    async fn history(&self) -> Value {
+        let Json(page) = crate::handlers::assistant_nyxagent::history(
+            State(self.f.state.clone()),
+            crate::test_utils::test_auth_user(&self.f.owner),
+            axum::extract::Path(self.f.row.id.clone()),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        serde_json::to_value(page).unwrap()
+    }
 }
 
 async fn cma_fixture() -> AsyncFixture {
@@ -188,7 +206,12 @@ async fn cma_fixture() -> AsyncFixture {
         .unwrap();
     let catalog_id = instance.catalog_service_id.unwrap();
     db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .update_one(doc! {"_id":&catalog_id}, doc! {"$set":{"slug":"cma"}})
+        .update_one(
+            doc! {"_id":&catalog_id},
+            // Agent-input tests track two independent watches simultaneously.
+            // Both need a polling slot to observe the same activity transition.
+            doc! {"$set":{"slug":"cma","homepage_url":"https://cma.example/agent-manager","concurrency_policy.default_limit":2}},
+        )
         .await
         .unwrap();
     let endpoints = db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
@@ -233,6 +256,25 @@ async fn cma_fixture() -> AsyncFixture {
             "GET",
             "/api/v1/agents/{id}",
             json!([{"name":"id","in":"path","required":true,"schema":{"type":"string"}}]),
+            None,
+        ),
+        (
+            "post_v2_agent_response",
+            "POST",
+            "/api/v2/agents/{agent_id}/responses",
+            json!([
+                {"name":"agent_id","in":"path","required":true,"schema":{"type":"string"}},
+                {"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string"}},
+            ]),
+            Some(
+                json!({"type":"object","properties":{"input":{"type":"string"},"stream":{"type":"boolean"}},"required":["input","stream"]}),
+            ),
+        ),
+        (
+            "get_v2_response",
+            "GET",
+            "/api/v2/responses/{response_id}",
+            json!([{"name":"response_id","in":"path","required":true,"schema":{"type":"string"}}]),
             None,
         ),
     ] {
@@ -294,6 +336,10 @@ async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_me
         Some("running")
     );
     assert!(running.cma.as_ref().unwrap().checked_at.is_some());
+    // A real agent ID and catalog homepage are insufficient without a callback.
+    assert!(a.history().await["cma_operations"][0]["cma_url"].is_null());
+    let callback = "https://staging-cma.example:8443/agents/agt_coffee";
+    *a.callback.lock().unwrap() = json!(callback);
     *a.phase.lock().unwrap() = "succeeded".into();
     a.due().await;
     async_operations::sweep(&a.f.state).await.unwrap();
@@ -319,6 +365,78 @@ async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_me
             .await
             .unwrap()
             .is_empty()
+    );
+    assert_eq!(
+        finished.cma.as_ref().unwrap().callback_url.as_deref(),
+        Some(callback)
+    );
+    assert_eq!(a.history().await["cma_operations"][0]["cma_url"], callback);
+}
+
+#[tokio::test]
+async fn cma_v2_response_tracks_its_receipt_and_nested_agent_after_the_turn_ends() {
+    let a = cma_fixture().await;
+    let callback = "http://localhost:8080/agents/agt_coffee";
+    *a.callback.lock().unwrap() = json!(callback);
+    *a.phase.lock().unwrap() = "in_progress".into();
+    let auth = authenticate(&a.f).await;
+    let response = direct_call(
+        &a.f,
+        &auth,
+        "sandbox__post_v2_agent_response",
+        json!({"agent_id":"agt_coffee","input":"private task","stream":true,"Idempotency-Key":"v2-input"}),
+    ).await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let watch = a.watch().await;
+    assert_eq!(watch.operation_id.as_deref(), Some("resp_command"));
+    assert_eq!(
+        watch.cma.as_ref().unwrap().callback_url.as_deref(),
+        Some(callback)
+    );
+    assert_eq!(
+        watch.cma.as_ref().unwrap().agent_id.as_deref(),
+        Some("agt_coffee")
+    );
+    engine::finish_turn(
+        &a.f.state.db,
+        &a.f.row,
+        &a.f.row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Submitted".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    a.due().await;
+    async_operations::sweep(&a.f.state).await.unwrap();
+    assert_eq!(a.watch().await.state, "waiting");
+    assert_eq!(a.history().await["cma_operations"][0]["cma_url"], callback);
+    *a.callback.lock().unwrap() = Value::Null;
+    *a.phase.lock().unwrap() = "completed".into();
+    a.due().await;
+    async_operations::sweep(&a.f.state).await.unwrap();
+    let finished = a.watch().await;
+    assert_eq!(finished.reason.as_deref(), Some("completed"));
+    assert!(finished.cma.as_ref().unwrap().callback_url.is_none());
+    assert!(a.history().await["cma_operations"][0]["cma_url"].is_null());
+    assert_eq!(
+        finished.cma.as_ref().unwrap().status.as_deref(),
+        Some("completed")
+    );
+    assert!(
+        a.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path == "/api/v2/responses/resp_command")
     );
 }
 

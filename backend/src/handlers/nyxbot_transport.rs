@@ -151,7 +151,7 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
         channels
             .update_one(doc! {"_id": &row.id, "transport": "direct"}, {
                 let mut set = doc! {"gateway_fallback_at":bson::DateTime::now()};
-                if row.platform == "discord" {
+                if row.gateway_source.is_some() {
                     set.insert("gateway_native_activation", code);
                 }
                 doc! {"$set":set}
@@ -210,10 +210,37 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
     if let Err(code) = ready_to_swap(state, row, false).await {
         return Err(discard(code).await);
     }
+    if matches!(
+        row.gateway_source.as_ref(),
+        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+    ) {
+        let bot = match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
+            Ok(bot) => bot,
+            Err(_) => return Err(discard("bot_unavailable").await),
+        };
+        let relay_url = channel_bot_service::webhook_url(&state.config.base_url, &bot);
+        if crate::services::whatsapp_native::begin_restore(&state.db, &bot)
+            .await
+            .is_err()
+        {
+            return Err(discard("native_whatsapp_relay_restore_pending").await);
+        }
+        if crate::services::whatsapp_native::restore_relay(
+            &state.db,
+            &state.encryption_keys,
+            &bot,
+            &relay_url,
+        )
+        .await
+        .is_err()
+        {
+            return Err(discard("native_whatsapp_relay_callback_unverified").await);
+        }
+    }
     let mut fence = fence;
     fence.insert("pending_route_api_key_id", &next.id);
     let mut set = doc! {"transport":"direct","gateway_no_progress":false,"route_api_key_id":&next.id,"updated_at":bson::DateTime::now()};
-    if row.platform == "discord" && row.gateway_source.is_some() {
+    if row.gateway_source.is_some() {
         set.insert("gateway_native_activation", "relay_draining");
     }
     let update = doc! {"$set": set,

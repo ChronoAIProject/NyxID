@@ -1,4 +1,5 @@
 import { ChannelActivities, LatestActivity } from "@/components/channels/channel-activities";
+import { WhatsappNativeSection } from "@/components/channels/whatsapp-native";
 import { useChannelActivities } from "@/hooks/use-channel-activities";
 import type { ChannelActivityDescriptor, ChannelActivityItem } from "@/types/channels";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
@@ -1291,6 +1292,7 @@ export function ChannelBotDetailPage() {
       })()}
 
       {/* Conversation Routes */}
+      {bot.platform === "whatsapp" && <WhatsappNativeSection botId={bot.id} />}
       <ConversationsSection
         platform={bot.platform}
         botId={botId}

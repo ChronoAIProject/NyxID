@@ -680,6 +680,8 @@ fn constrained_headers(
                 | "if-range"
                 | "if-none-match"
                 | "if-modified-since"
+                | "if-match"
+                | "if-unmodified-since"
                 | "http-referer"
                 | "x-title"
         ) || ["x-openclaw-", "x-amz-", "x-goog-", "x-openrouter-"]
@@ -1808,6 +1810,27 @@ mod tests {
             constrained_headers(&endpoint, &undeclared_operation_header),
             Err(AppError::DurableGrantMismatch(_))
         ));
+    }
+
+    #[test]
+    fn precondition_2113_durable_grants_require_declared_constrained_headers() {
+        for name in ["if-match", "if-unmodified-since"] {
+            let mut endpoint = endpoint();
+            let mut headers = HeaderMap::new();
+            headers.insert(name, "revision-one".parse().unwrap());
+            assert!(constrained_headers(&endpoint, &headers).is_err());
+            endpoint.parameters = Some(json!([{"name":name, "in":"header", "required":true}]));
+            let actual = constrained_headers(&endpoint, &headers).unwrap();
+            assert!(validate_parameter_constraints(&BTreeMap::new(), &actual, "header").is_err());
+            let constraints = BTreeMap::from([(name.into(), exact(json!("revision-one")))]);
+            assert!(validate_parameter_constraints(&constraints, &actual, "header").is_ok());
+            headers.insert(name, "revision-two".parse().unwrap());
+            let changed = constrained_headers(&endpoint, &headers).unwrap();
+            assert!(validate_parameter_constraints(&constraints, &changed, "header").is_err());
+            assert!(
+                validate_parameter_constraints(&constraints, &BTreeMap::new(), "header").is_err()
+            );
+        }
     }
 
     #[test]

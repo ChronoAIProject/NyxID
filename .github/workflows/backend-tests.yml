@@ -35,7 +35,9 @@ jobs:
   build:
     name: Build test archive
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # A cold combined build can spend nearly an hour compiling before the
+    # archive and inventory are packaged and uploaded.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
       - name: Prepare backend memory reserve

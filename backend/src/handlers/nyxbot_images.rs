@@ -775,6 +775,13 @@ pub fn event_anchor(
     event: &crate::models::nyxbot_channel::NyxbotEvent,
     delivery: &crate::models::nyxbot_channel::ChannelTurnDelivery,
 ) -> ImageAnchor {
+    // A custom CMA source has no platform message to reply to. Its event ID
+    // is a CloudEvent identity, never a relay message ID; treating it as one
+    // could address an unrelated chat message or leak an image to the wrong
+    // destination. The provider reports the existing media-unavailable path.
+    if event.custom_binding_id.is_some() {
+        return ImageAnchor::NoAnchor;
+    }
     if delivery.state == "replay" {
         return ImageAnchor::NoAnchor;
     }

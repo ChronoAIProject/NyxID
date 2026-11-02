@@ -1,4 +1,4 @@
-//! Owner callbacks keep pre-extension admission, even with Codex telemetry.
+//! Admitted model rounds are reads even with Codex telemetry (#2004).
 use super::*;
 use crate::models::usage_meter::{CredentialClass, UsageMeterRow, UsageStatus};
 
@@ -10,12 +10,12 @@ enum Route {
 }
 
 #[tokio::test]
-async fn owner_1995_platform_metadata_keeps_legacy_admission_and_body() {
+async fn owner_1995_platform_metadata_has_stateless_admission_and_body() {
     Box::pin(owner_pipeline(Route::Platform, false)).await;
 }
 
 #[tokio::test]
-async fn owner_1995_byok_metadata_keeps_legacy_admission_and_body() {
+async fn owner_1995_byok_metadata_has_stateless_admission_and_body() {
     Box::pin(owner_pipeline(Route::Byok, false)).await;
 }
 
@@ -30,7 +30,7 @@ async fn owner_1995_metadata_model_callbacks_survive_steering_and_continuation()
 }
 
 #[tokio::test]
-async fn owner_1995_metadata_preserves_required_default_and_explicit_deny_policy() {
+async fn owner_1995_metadata_preserves_explicit_and_explicit_deny_policy() {
     use crate::models::service_approval_config::{ApprovalEffect, ApprovalVerb};
     use crate::services::{approval_service, operation_descriptor};
     let f = Box::pin(direct_fixture("owner_1995_approval_default")).await;
@@ -53,7 +53,7 @@ async fn owner_1995_metadata_preserves_required_default_and_explicit_deny_policy
         false,
         false,
     );
-    assert_eq!(descriptor.verb, ApprovalVerb::Write);
+    assert_eq!(descriptor.verb, ApprovalVerb::Read);
     for auto_connected in [false, true] {
         let policy = approval_service::resolve_org_aware_approval(
             &f.state.db,
@@ -65,10 +65,7 @@ async fn owner_1995_metadata_preserves_required_default_and_explicit_deny_policy
         )
         .await
         .unwrap();
-        assert_eq!(
-            policy.required, !auto_connected,
-            "legacy writes-only versus platform default"
-        );
+        assert!(!policy.required, "stateless reads need no default approval");
     }
     approval_service::set_service_approval_config(
         &f.state.db,
@@ -99,15 +96,15 @@ async fn owner_1995_metadata_preserves_required_default_and_explicit_deny_policy
 }
 
 fn generation(input: &str) -> Value {
-    json!({"model":"gpt-5.6-sol","store":false,"stream":false,"input":input,
-        "instructions":"Owner model round","tools":[],"tool_choice":"auto",
-        "parallel_tool_calls":true,"include":["reasoning.encrypted_content"],
-        "reasoning":{"effort":"low"},"prompt_cache_key":Uuid::new_v4().to_string(),
-        "client_metadata":{"root_turn_id":Uuid::new_v4().to_string(),
-            "session_id":Uuid::new_v4().to_string(),"thread_id":Uuid::new_v4().to_string(),
-            "turn_id":Uuid::new_v4().to_string(),"x-codex-installation-id":"test-installation",
-            "x-codex-turn-metadata":"{\"sandbox_mode\":\"read-only\"}",
-            "x-codex-window-id":Uuid::new_v4().to_string()}})
+    let mut body: Value = serde_json::from_str(include_str!(
+        "../../specs/assistant/codex/0.165.0-chat.json"
+    ))
+    .unwrap();
+    // Keep the captured runtime contract; append synthetic evolving turn input.
+    body["input"].as_array_mut().unwrap().push(json!({
+        "role":"user","content":[{"type":"input_text","text":input}]
+    }));
+    body
 }
 
 async fn byok_connection(
@@ -156,7 +153,22 @@ async fn byok_connection(
 }
 
 async fn owner_pipeline(route: Route, continue_and_steer: bool) {
+    for mode in ["nyxmode", "ask_every_time", "autopilot"] {
+        Box::pin(owner_pipeline_mode(route, continue_and_steer, mode)).await;
+    }
+}
+
+async fn owner_pipeline_mode(route: Route, continue_and_steer: bool, mode: &str) {
     let mut f = Box::pin(direct_fixture("owner_1995_model_transport")).await;
+    f.state
+        .db
+        .collection::<bson::Document>("assistant_agents")
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"access_mode_override":mode}},
+        )
+        .await
+        .unwrap();
     f.state.billing = Arc::new(crate::billing_integration_tests::billing_service(
         &f.state.db,
         Arc::new(crate::billing_integration_tests::FakeLago::default()),
@@ -263,7 +275,7 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
     }
     // Platform defaults work without a global preference. BYOK retains the
     // fixture's existing owner approval exemption; required policies are
-    // covered separately by the exact-body approval regression.
+    // covered separately by the explicit-policy regression.
     if platform {
         f.state
             .db
@@ -454,7 +466,7 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
         }));
         let next: Value = serde_json::from_slice(&sent[1]).unwrap();
         assert!(
-            next["input"]
+            next["input"].as_array().unwrap().last().unwrap()["content"][0]["text"]
                 .as_str()
                 .unwrap()
                 .contains("Use the new direction")
@@ -462,8 +474,8 @@ async fn owner_pipeline(route: Route, continue_and_steer: bool) {
         assert_eq!(calls.lock().await[1]["conversation"], SESSION);
     }
     assert_eq!(f.state.db.collection::<bson::Document>("assistant_service_execution")
-        .count_documents(doc!{"conversation_id":&row.id,"kind":{"$in":["model_consent","selection","card_binding","unavailable_bucket"]}})
-        .await.unwrap(),0,"no new model consent, selection, card or fallback bucket");
+        .count_documents(doc!{"conversation_id":&row.id,"kind":{"$in":["selection","card_binding","unavailable_bucket"]}})
+        .await.unwrap(),0,"no new selection, card or fallback bucket");
     assert_eq!(
         f.state
             .db

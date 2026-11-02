@@ -1072,6 +1072,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::admin_feature_flags::patch_feature_flag_metadata),
         )
         .route(
+            "/feature-flags/{flag_key}/history",
+            get(handlers::admin_feature_flags::list_feature_flag_history),
+        )
+        .route(
             "/users",
             get(handlers::admin::list_users).post(handlers::admin::create_user),
         )
@@ -1749,7 +1753,25 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_history::get_history),
         )
         .route("/", post(handlers::keys::create_key))
-        .route("/{key_id}", delete(handlers::keys::delete_key));
+        .route("/{key_id}", delete(handlers::keys::delete_key))
+        .merge(
+            Router::new()
+                .route(
+                    "/{key_id}/monitoring",
+                    get(handlers::monitoring::get)
+                        .put(handlers::monitoring::save)
+                        .delete(handlers::monitoring::clear),
+                )
+                .route(
+                    "/{key_id}/monitoring/validate",
+                    post(handlers::monitoring::validate),
+                )
+                .route(
+                    "/{key_id}/monitoring/probe",
+                    post(handlers::monitoring::probe),
+                )
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        );
 
     let service_preference_reads = Router::new()
         .route(
@@ -2006,6 +2028,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/cancel", post(handlers::cli_pairings::cancel_pairing));
 
     let channel_bot_routes = Router::new()
+        .route(
+            "/{id}/native-whatsapp/relay-verify-token",
+            post(handlers::channel_whatsapp_native::rollback::replace),
+        )
+        .route(
+            "/{id}/native-whatsapp",
+            get(handlers::channel_whatsapp_native::get).put(handlers::channel_whatsapp_native::put),
+        )
         .route(
             "/{id}/activities",
             get(handlers::channel_activities::bot_activities),
@@ -2580,6 +2610,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::catalog),
         )
         .route(
+            "/nyxagent/agents/{id}/guest-readiness",
+            get(handlers::assistant_team::guest_readiness),
+        )
+        .route(
             "/nyxagent/agents/{id}/consents",
             get(handlers::assistant_sharing::consents),
         )
@@ -2714,6 +2748,19 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
         .route(
+            "/nyxagent/custom-event-bindings",
+            get(handlers::nyxbot_event_bindings::list)
+                .post(handlers::nyxbot_event_bindings::create),
+        )
+        .route(
+            "/nyxagent/custom-event-bindings/{id}",
+            get(handlers::nyxbot_event_bindings::get),
+        )
+        .route(
+            "/nyxagent/custom-event-bindings/{id}/revoke",
+            post(handlers::nyxbot_event_bindings::revoke),
+        )
+        .route(
             "/nyxagent/groups",
             get(handlers::assistant_group::list_groups)
                 .post(handlers::assistant_group::create_group),
@@ -2728,6 +2775,55 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/groups/{id}/messages",
             get(handlers::assistant_group::list_messages)
                 .post(handlers::assistant_group::post_message),
+        )
+        .route(
+            "/nyxagent/agents/{id}/group-access",
+            get(handlers::collaboration_group::owned_guest_groups),
+        )
+        .route(
+            "/nyxagent/collaboration",
+            get(handlers::collaboration_group::availability),
+        )
+        .route(
+            "/nyxagent/groups/{id}/invites",
+            post(handlers::collaboration_group::invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/invites/{invite}",
+            delete(handlers::collaboration_group::cancel_invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/participants/{person}",
+            post(handlers::collaboration_group::quick_add)
+                .delete(handlers::collaboration_group::remove_participant),
+        )
+        .route(
+            "/nyxagent/groups/{id}/leave",
+            post(handlers::collaboration_group::leave),
+        )
+        .route(
+            "/nyxagent/groups/{id}/agents/{agent}/guest-access",
+            put(handlers::collaboration_group::guest_access),
+        )
+        .route(
+            "/nyxagent/groups/{id}/membership",
+            post(handlers::collaboration_group::membership),
+        )
+        .route(
+            "/nyxagent/group-invites/preview",
+            post(handlers::collaboration_group::preview_invite),
+        )
+        .route(
+            "/nyxagent/group-invites/accept",
+            post(handlers::collaboration_group::accept_invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/requests/{request}/cancel",
+            post(handlers::collaboration_group::cancel),
+        )
+        .route(
+            "/nyxagent/groups/{id}/decisions/{decision}",
+            post(handlers::collaboration_group::decide),
         )
         .route(
             "/nyxagent/channels/{id}",
@@ -3137,6 +3233,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/channel-bots/telegram-new/requests/{id}/launch",
             post(handlers::telegram_new::launch),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}/creation-link",
+            post(handlers::telegram_new::creation_link),
         )
         .route(
             "/channel-bots/telegram-new/requests/{id}/connect",

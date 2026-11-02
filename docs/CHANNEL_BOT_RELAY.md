@@ -2459,3 +2459,74 @@ owner isolation and applies existing upload retention. Unsupported binary media
 is retained without fabricated extracted text. Aggregate downloaded bytes are
 bounded by the configured limit and 20 MiB; all new and retry-carried attachments
 count against the ten-file turn limit.
+
+### Dedicated-app native WhatsApp gateway preparation
+
+The default-off `nyxbot:gateway-whatsapp` rollout has a separate native setup
+for BYO bots with a dedicated Meta app. The bot settings page collects **Meta
+App ID** and **WABA ID** separately; the Phone Number ID remains the bot's
+`platform_bot_id`. The legacy `app_id` field continues to mean WABA ID. Saving
+these native settings does not rotate credentials, change the Verify Token,
+move a route or activate gateway intake. Managed Embedded Signup bots share
+an app and are ineligible; they remain on the relay.
+
+Native preparation and callback verification are described in
+[the gateway contract](CHANNEL_EVENT_GATEWAY.md#native-whatsapp-dedicated-byo-apps-track-2-checkpoint).
+Enrollment and intake integration use the shared native migration foundation:
+source identity, capability discovery, provider recovery, preparation, duplicate
+admission and native delivery status are common with other native sources. A
+native migration must preserve relay receipts and atomic message admission.
+Flag-off must wait for verified restoration of Meta's relay callback; changing
+a NyxID flag alone cannot restore that external callback. Pending rollback
+offers **Generate replacement Verify Token** to the owner or an org admin with
+write access, using a first-party human session. It shows a fresh token once
+beside the relay callback URL and immediately invalidates the old token. Only
+the hash is stored, and the metadata audit records the immediate invalidation.
+NyxID normally points this dedicated Meta app to CMA and back using the app
+access token. If the Graph write fails during rollback, point Meta's callback
+back to that URL with the new token; issuing it does not move the bot or
+confirm callback restoration. If Meta accepted a native activation but NyxID's
+proof or local fence then fails, NyxID fences `awaiting_relay` and attempts
+the same verified relay restoration before retiring the provisional CMA
+channel; an unresolved restore remains owner-visible for this recovery flow.
+The shared foundation
+must fence mixed-replica intake before native activation; old replicas do not
+understand the additive native settings alone. Absent native settings and the default-off flag leave
+legacy private-message admission, receipts and send outcome hooks unchanged.
+Native activation and rollback verify the phone's effective Meta callback in
+phone override → WABA override → application order, ignoring empty strings.
+The winning URL must match; lower-priority URLs may differ. An active messages
+app subscription is always required, with an exact callback match when the
+application wins. App subscription evidence uses the app token; the phone and
+conditional WABA consistency read use the WhatsApp system token. See the
+gateway contract for malformed-response handling and the WABA cross-check.
+Long native replies are
+split losslessly at WhatsApp's 4,096-character limit; media and groups remain
+explicitly unavailable.
+
+Relay WhatsApp explicitly ignores group-addressed messages, including numeric
+group IDs. A group participant's `from` ID is never a private reply destination
+for group content. Native groups stay disabled. Native media sends/receives
+and templates are unavailable until a separate bridge is implemented. The
+integration must wire explicit unavailable-media feedback and display native
+delivery status from CMA Activity, not NyxID adapter hooks or
+local receipt rows. Free-form replies retain WhatsApp's 24-hour window.
+
+### Guest model setup status
+
+Open channel Chats settings fetch `status`, `reason`, and `fix` from the dedicated
+owner-only agent guest-readiness endpoint, with a conversation-specific check
+only for a different profile/route. Ordinary channel/chat lists do no readiness
+work. Audience-setting writes retain optional `guest_readiness`; NyxBot's list
+tool memoizes by agent and checks only channels open to visitors. Enabling private chats or group members for everyone does
+not bypass model readiness or guest service grants. The same model admission
+and safe setup refusal apply to relay and gateway transports. Guest model and
+service usage remain attributed to the agent owner.
+
+A setup-caused refusal tells the visitor that the owner has not finished setup
+and has been notified. NyxID queues a metadata-only, 24-hour deduplicated owner
+notice. It appears as fixed text in the agent home and is sent only to verified
+owner private chats on bots linked to that exact agent with posting available,
+never to another agent's bot, the guest's reply channel or group. Non-setup or
+unknown refusal reasons never claim an owner was notified. Existing channel send journals and uncertain-send barriers apply.
+See `docs/chat/08-nyxagent-engine.md` for diagnostics and readiness semantics.

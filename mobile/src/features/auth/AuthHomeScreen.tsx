@@ -657,16 +657,19 @@ export function AuthHomeScreen({ navigation }: Props) {
             {loginError === "WAITLIST" ? (
               <>
                 <Text style={styles.errorText}>
-                  Registration is invite-only.{" "}
-                  <Text
-                    style={styles.errorLink}
-                    onPress={() =>
-                      void Linking.openURL("https://nyx.chrono-ai.fun")
-                    }
-                  >
-                    Join the waitlist
-                  </Text>{" "}
-                  to get access.
+                  Registration is invite-only.
+                  {NYXID_FRONTEND_URL ? (
+                    <>
+                      {" "}
+                      <Text
+                        style={styles.errorLink}
+                        onPress={() => void Linking.openURL(NYXID_FRONTEND_URL)}
+                      >
+                        Join the waitlist
+                      </Text>
+                      {" "}to get access.
+                    </>
+                  ) : null}
                 </Text>
               </>
             ) : (

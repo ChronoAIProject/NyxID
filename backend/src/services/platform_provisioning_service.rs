@@ -774,6 +774,9 @@ async fn rebuild_request(
         manager_revision: Some(proof.child_revision),
         auto_connect: false,
         start_update_id: Some(proof.start_update_id),
+        creation_context: None,
+        prompt_delivery: None,
+        prompt_update_boundary: None,
         connection_attempts: 0,
         next_connection_attempt_at: None,
         connection_error: None,
@@ -1276,6 +1279,34 @@ mod tests {
                 .unwrap()
                 .telegram_user_id,
             Some(700)
+        );
+        assert!(service.creation_link(&f.owner, &request.id).await.is_err());
+        let sent = f.server.received_requests().await.unwrap();
+        assert!(sent.iter().any(|request| {
+            request.url.path().ends_with("/sendMessage")
+                && request.body_json::<serde_json::Value>().unwrap()["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("update Telegram to the latest version"))
+        }));
+        let mut projection = service.get(&f.owner, &request.id).await.unwrap();
+        projection.auto_connect = true;
+        projection.creation_context =
+            Some(crate::models::telegram_bot_request::CreationContext::Standalone);
+        assert!(
+            !crate::handlers::telegram_new::projected_request(&f.state, projection)
+                .await
+                .unwrap()
+                .can_open_creation_form
+        );
+        assert!(
+            f.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| {
+                    !String::from_utf8_lossy(&request.body).contains("Open the same creation form")
+                })
         );
         f.state.db.drop().await.unwrap();
     }

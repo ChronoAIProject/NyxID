@@ -29,6 +29,11 @@ const {
 
 vi.mock("@/hooks/use-admin-feature-flags", () => ({
   useAdminFeatureFlags: mockUseFlags,
+  useFeatureFlagHistory: () => ({
+    data: undefined,
+    isLoading: false,
+    error: null,
+  }),
   useCreateFeatureFlag: () => ({
     mutateAsync: mockCreateFlag,
     isPending: false,
@@ -180,7 +185,14 @@ describe("AdminFeatureFlagsPage", () => {
 
     render(<AdminFeatureFlagsPage />);
     expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
-    expect(screen.getByText("Default: Disabled")).toBeInTheDocument();
+    const row = screen.getByTestId("flag-experimental:ai-assistant");
+    expect(within(row).getByText("On globally")).toHaveAttribute(
+      "title",
+      "Global · Enabled",
+    );
+    expect(
+      within(row).getByRole("cell", { name: "Disabled" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("No feature flags")).not.toBeInTheDocument();
   });
 
@@ -882,16 +894,15 @@ it("retains failed rollout changes and newer edits while consuming only the revi
   });
   const view = render(<AdminFeatureFlagsPage />);
   for (const flag of flags) fireEvent.click(screen.getByText(flag.key));
-  const globals = screen
-    .getAllByText("All users (rollout / killswitch)")
-    .map((label) => label.parentElement!);
+  const globals = screen.getAllByLabelText("All users (rollout / killswitch)");
   // Scope buttons are deliberately exercised during the pending write as well:
   // a newer draft must survive even when input reaches the page programmatically.
   async function selectScope(index: number, name: string) {
-    fireEvent.pointerDown(
-      within(globals[index]!).getByRole("combobox", { hidden: true }),
-      { button: 0, ctrlKey: false, pointerType: "mouse" },
-    );
+    fireEvent.pointerDown(globals[index]!, {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
     fireEvent.click(await screen.findByRole("option", { name, hidden: true }));
   }
   await selectScope(0, "Enabled");
@@ -1011,4 +1022,126 @@ it("keeps another creator's flags read-only when the API denies editing", () => 
     screen.queryByLabelText("Search users by email"),
   ).not.toBeInTheDocument();
   expect(screen.getByText("Create feature flag")).toBeInTheDocument();
+});
+
+describe("feature flag organization", () => {
+  function loadFlags() {
+    mockUseFlags.mockReturnValue({
+      data: {
+        flags: [
+          {
+            ...flagFixture(),
+            key: "assistant:voice",
+            group: "Assistant",
+            tags: ["voice"],
+            sunset: false,
+          },
+          {
+            ...flagFixture(),
+            key: "nyxbot:slack",
+            group: "Channels",
+            tags: ["channels"],
+            sunset: false,
+          },
+          {
+            ...flagFixture(),
+            key: "experimental:legacy",
+            group: "Assistant",
+            tags: ["legacy"],
+            sunset: true,
+            global_override: true,
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    });
+  }
+  it("hides sunset flags by default and keeps their live overrides in Sunset and All", () => {
+    loadFlags();
+    render(<AdminFeatureFlagsPage />);
+    expect(screen.getByTestId("flag-experimental:legacy")).not.toBeVisible();
+    expect(
+      screen.getByText("1 sunset flag hidden", { exact: false }),
+    ).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /^Sunset/ }));
+    expect(screen.getByTestId("flag-experimental:legacy")).toBeVisible();
+    expect(screen.getByTestId("flag-assistant:voice")).not.toBeVisible();
+    expect(
+      within(screen.getByTestId("flag-experimental:legacy")).getByTitle(
+        "Global · Enabled",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /^All flags/ }));
+    expect(screen.getByTestId("flag-assistant:voice")).toBeVisible();
+    expect(screen.getByTestId("flag-experimental:legacy")).toBeVisible();
+    expect(mockSetFlag).not.toHaveBeenCalled();
+  });
+  it("combines group and tag filtering and searches organization fields", () => {
+    loadFlags();
+    render(<AdminFeatureFlagsPage />);
+    fireEvent.change(screen.getByLabelText("Filter by tag"), {
+      target: { value: "voice" },
+    });
+    expect(screen.getByTestId("flag-assistant:voice")).toBeVisible();
+    expect(screen.getByTestId("flag-nyxbot:slack")).not.toBeVisible();
+    fireEvent.change(screen.getByLabelText("Filter by group"), {
+      target: { value: "Channels" },
+    });
+    expect(screen.getByText("No matching flags")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    fireEvent.change(screen.getByLabelText("Search feature flags"), {
+      target: { value: "Channels" },
+    });
+    expect(screen.getByTestId("flag-nyxbot:slack")).toBeVisible();
+    expect(screen.getByTestId("flag-assistant:voice")).not.toBeVisible();
+  });
+  it("preserves organization drafts across filtering and regrouping", () => {
+    loadFlags();
+    render(<AdminFeatureFlagsPage />);
+    fireEvent.click(screen.getByText("assistant:voice"));
+    const card = screen.getByTestId("flag-assistant:voice");
+    fireEvent.change(within(card).getByLabelText("Group"), {
+      target: { value: "New group" },
+    });
+    fireEvent.change(screen.getByLabelText("Filter by tag"), {
+      target: { value: "channels" },
+    });
+    fireEvent.change(screen.getByLabelText("Group flags by"), {
+      target: { value: "owner" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(within(card).getByLabelText("Group")).toHaveValue("New group");
+    expect(
+      within(card).getByRole("button", { name: "Save organization" }),
+    ).toBeEnabled();
+  });
+  it("reviews organization changes and sends only edited fields with a tag precondition", async () => {
+    loadFlags();
+    render(<AdminFeatureFlagsPage />);
+    fireEvent.click(screen.getByText("assistant:voice"));
+    const card = screen.getByTestId("flag-assistant:voice");
+    fireEvent.change(within(card).getByLabelText("Tags"), {
+      target: { value: "voice, Beta, voice" },
+    });
+    fireEvent.click(
+      within(card).getByRole("switch", { name: "Mark for sunset" }),
+    );
+    fireEvent.click(
+      within(card).getByRole("button", { name: "Save organization" }),
+    );
+    expect(mockSetMeta).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm changes" }));
+    await waitFor(() =>
+      expect(mockSetMeta).toHaveBeenCalledWith({
+        flagKey: "assistant:voice",
+        body: {
+          tags: ["beta", "voice"],
+          expected_tags: ["voice"],
+          sunset: true,
+        },
+      }),
+    );
+    expect(mockSetFlag).not.toHaveBeenCalled();
+  });
 });

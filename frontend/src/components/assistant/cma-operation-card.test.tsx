@@ -13,7 +13,7 @@ const operation: CmaOperation = {
 describe("CMA delegation card", () => {
   it("shows live execution identity and updates the same card when the job completes", () => {
     const { rerender } = render(<CmaOperationCard operation={operation} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Running");
+    expect(screen.getByRole("status")).toHaveTextContent("Working");
     expect(screen.getByText("agt_coffee")).toBeInTheDocument();
     expect(screen.getByText("coffee-site-20261022")).toBeInTheDocument();
     expect(screen.getByText("testtest")).toBeInTheDocument();
@@ -26,7 +26,7 @@ describe("CMA delegation card", () => {
 
   it("distinguishes provisioning readiness from completed work", () => {
     render(<CmaOperationCard operation={{ ...operation, kind: "cma_provisioning", status: "succeeded", reason: "completed", state: "queued" }} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Agent ready");
+    expect(screen.getByRole("status")).toHaveTextContent("Ready");
     expect(screen.queryByText("Completed")).not.toBeInTheDocument();
     expect(within(screen.getByRole("list", { name: "CMA progress" })).getByText("Agent ready")).toBeInTheDocument();
   });
@@ -55,7 +55,7 @@ describe("CMA delegation card", () => {
 
   it("keeps tracking an accepted agent input while the agent is initially ready", () => {
     render(<CmaOperationCard operation={{ ...operation, kind: "cma_agent", operation_id: null, status: "ready" }} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Agent ready");
+    expect(screen.getByRole("status")).toHaveTextContent("Ready");
     expect(screen.getByText(/Tracking progress/)).toBeInTheDocument();
     expect(screen.queryByText("Completed")).not.toBeInTheDocument();
     expect(within(screen.getByRole("list", { name: "CMA progress" })).getByText("Submitted").querySelector("svg")).toBeInTheDocument();
@@ -66,5 +66,68 @@ describe("CMA delegation card", () => {
     render(<CmaOperationCard operation={{ ...operation, status: "completed", state: "ready", reason: "result_unavailable" }} />);
     expect(screen.getByRole("status")).toHaveTextContent("Completed");
     expect(screen.getByText("CMA finished, but its final result is unavailable here.")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["starting", "Starting"],
+    ["working", "Working"],
+    ["ready", "Ready"],
+    ["failed", "Needs attention"],
+    ["stopped", "Stopped"],
+    ["deleted", "Deleted"],
+  ])("matches CMA's agent label for %s", (status, label) => {
+    render(<CmaOperationCard operation={{ ...operation, kind: "cma_agent", status }} />);
+    expect(screen.getByRole("status")).toHaveTextContent(label);
+  });
+
+  it.each([
+    "https://cma.example/agents/agt_coffee",
+    "https://staging.example:8443/agents/agt_coffee",
+    "http://localhost:8080/agents/agt_coffee",
+  ])("links prominently to CMA's supplied callback: %s", (cmaUrl) => {
+    render(<CmaOperationCard operation={{ ...operation, cma_url: cmaUrl }} />);
+    const link = screen.getByRole("link", { name: /View in CMA/ });
+    expect(link).toHaveAttribute("href", cmaUrl);
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it.each([
+    null, undefined, "", "/agents/agt_coffee", "//example.com/agents/agt_coffee",
+    "javascript:alert(1)", "data:text/html,secret",
+    "https://user:secret@example.com/agents/agt_coffee",
+    "https://example.com/agents/agt_coffee?token=secret", "https://example.com/agents/agt_coffee#secret",
+    "https://example.com/agents/agt_coffee?", "https://example.com/agents/agt_coffee#",
+    " https://example.com/agents/agt_coffee", "https://example.com/agents/agt_\ncoffee",
+    "https://example.com/agents/agt_\\coffee", "http://metadata.google.internal/secret",
+    `https://example.com/${"a".repeat(2048)}`,
+  ])(
+    "does not render an unavailable or unsafe CMA destination: %s", (cmaUrl) => {
+      render(<CmaOperationCard operation={{ ...operation, cma_url: cmaUrl }} />);
+      expect(screen.queryByRole("link", { name: /View in CMA/ })).not.toBeInTheDocument();
+    },
+  );
+
+  it("updates link availability without changing the observed status", () => {
+    const { rerender } = render(<CmaOperationCard operation={{ ...operation, cma_url: null }} />);
+    expect(screen.queryByRole("link", { name: /View in CMA/ })).not.toBeInTheDocument();
+    rerender(<CmaOperationCard operation={{ ...operation, cma_url: "https://cma.example/agents/agt_coffee" }} />);
+    expect(screen.getByRole("link", { name: /View in CMA/ })).toBeInTheDocument();
+    rerender(<CmaOperationCard operation={{ ...operation, cma_url: null }} />);
+    expect(screen.queryByRole("link", { name: /View in CMA/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Working");
+  });
+
+  it("shows the check date so a historical status cannot look like today's check", () => {
+    render(<CmaOperationCard operation={operation} />);
+    expect(screen.getByText(/^Checked /)).toHaveTextContent(
+      new Date(operation.checked_at!).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }),
+    );
+  });
+
+  it.each(["ready", "succeeded", "unknown"])("does not present a response status of %s as completed work", (status) => {
+    render(<CmaOperationCard operation={{ ...operation, status }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Status unavailable");
+    expect(screen.queryByText("Completed")).not.toBeInTheDocument();
   });
 });

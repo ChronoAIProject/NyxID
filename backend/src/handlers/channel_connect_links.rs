@@ -521,7 +521,8 @@ pub async fn telegram_start(
             Ok((
                 headers(),
                 Json(telegram_new::LaunchResponse {
-                    request: request.into(),
+                    request: crate::handlers::telegram_new::projected_request(&state, request)
+                        .await?,
                     launch_url,
                 }),
             ))

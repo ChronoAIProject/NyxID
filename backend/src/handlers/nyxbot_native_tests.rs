@@ -1,4 +1,27 @@
 use super::*;
+
+fn enable_thread_follow<'a>(state: &'a AppState) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        let collection = state
+            .db
+            .collection::<bson::Document>("feature_flag_overrides");
+        let flag = doc! {
+            "_id": Uuid::new_v4().to_string(),
+            "org_user_id": bson::Bson::Null,
+            "flag_key": feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+            "target_kind": "user",
+            "target_key": OWNER,
+            "enabled": true,
+            "updated_by": "test",
+            "created_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now(),
+        };
+        Box::pin(async move {
+            collection.insert_one(flag).await.unwrap();
+        })
+        .await;
+    })
+}
 use crate::{
     models::{
         nyxbot_channel::GatewaySource,
@@ -7,7 +30,13 @@ use crate::{
     services::nyxbot_response_recovery as recovery,
 };
 
-async fn native_channel(state: &AppState) -> (NyxbotChannel, String) {
+fn native_channel<'a>(
+    state: &'a AppState,
+) -> futures::future::BoxFuture<'a, (NyxbotChannel, String)> {
+    Box::pin(native_channel_impl(state))
+}
+
+async fn native_channel_impl(state: &AppState) -> (NyxbotChannel, String) {
     let (mut row, key) = channel(state, "gateway").await;
     row.platform = "discord".into();
     row.gateway_bot_id = Some("100".into());
@@ -680,16 +709,18 @@ async fn native_discord_authenticated_reply_evidence_is_bound_and_fail_closed() 
 
 #[tokio::test]
 async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions() {
+    Box::pin(native_discord_follow_reuses_members_expiry_stop_and_other_mentions_impl()).await;
+}
+
+async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_impl() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{path, path_regex},
     };
     let (state, calls, upstream) = setup("native_discord_follow").await;
     let (row, key) = native_channel(&state).await;
-    state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {"_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
-        "flag_key":feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,"target_kind":"user","target_key":OWNER,"enabled":true,
-        "updated_by":"test","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
-    let http = MockServer::start().await;
+    enable_thread_follow(&state).await;
+    let http = Box::pin(MockServer::start()).await;
     crate::services::nyxbot_gateway_source::TEST_DISCORD_BASES
         .lock()
         .unwrap()
@@ -1243,136 +1274,141 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
 
 #[tokio::test]
 async fn native_async_reply_thread_mode_and_delivery_receipts_are_source_bound() {
+    Box::pin(native_async_reply_thread_mode_and_delivery_receipts_are_source_bound_impl()).await;
+}
+
+async fn native_async_reply_thread_mode_and_delivery_receipts_are_source_bound_impl() {
+    for native_thread in [false, true] {
+        Box::pin(native_async_reply_thread_mode_and_delivery_receipts_iteration(native_thread))
+            .await;
+    }
+}
+
+async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_thread: bool) {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
-    for native_thread in [false, true] {
-        let (state, _, upstream) = setup("native_async_thread_receipts").await;
-        let (row, key) = native_channel(&state).await;
-        state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {
-            "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
-            "flag_key":feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
-            "target_kind":"user","target_key":OWNER,"enabled":true,
-            "updated_by":"test","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
-        }).await.unwrap();
-        let discord = MockServer::start().await;
-        crate::services::nyxbot_gateway_source::TEST_DISCORD_BASES
-            .lock()
-            .unwrap()
-            .insert(row.channel_bot_id.clone(), discord.uri());
-        thread_follow::TEST_ADAPTERS.lock().unwrap().insert(
-            row.channel_bot_id.clone(),
-            Arc::new(
-                crate::services::channel_adapters::discord::DiscordAdapter::media_test_adapter(
-                    &discord.uri(),
-                ),
+    let (state, _, upstream) = setup("native_async_thread_receipts").await;
+    let (row, key) = native_channel(&state).await;
+    enable_thread_follow(&state).await;
+    let discord = Box::pin(MockServer::start()).await;
+    crate::services::nyxbot_gateway_source::TEST_DISCORD_BASES
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), discord.uri());
+    thread_follow::TEST_ADAPTERS.lock().unwrap().insert(
+        row.channel_bot_id.clone(),
+        Arc::new(
+            crate::services::channel_adapters::discord::DiscordAdapter::media_test_adapter(
+                &discord.uri(),
             ),
-        );
-        let _guard = NativeDiscordFixtureGuard(row.channel_bot_id.clone());
-        let channel = if native_thread {
-            json!({"id":"201","type":11,"parent_id":"200","guild_id":"300","thread_metadata":{"archived":false,"locked":false}})
-        } else {
-            json!({"id":"201","type":0,"guild_id":"300"})
-        };
-        Mock::given(path("/channels/201"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(channel))
-            .mount(&discord)
-            .await;
-        Mock::given(path("/channels/201/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-            .mount(&discord)
-            .await;
-        Mock::given(path("/channels/201/messages/801")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        ),
+    );
+    let _guard = NativeDiscordFixtureGuard(row.channel_bot_id.clone());
+    let channel = if native_thread {
+        json!({"id":"201","type":11,"parent_id":"200","guild_id":"300","thread_metadata":{"archived":false,"locked":false}})
+    } else {
+        json!({"id":"201","type":0,"guild_id":"300"})
+    };
+    Mock::given(path("/channels/201"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(channel))
+        .mount(&discord)
+        .await;
+    Mock::given(path("/channels/201/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&discord)
+        .await;
+    Mock::given(path("/channels/201/messages/801")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id":"801","channel_id":"201","type":0,"author":{"id":"7","bot":false},
             "content":"Hello","mentions":[{"id":"100"}],"mention_roles":[],"mention_everyone":false,"attachments":[],
         }))).mount(&discord).await;
-        let mut request = native_event(&row, "801", "Hello");
-        request["event_context"]["activity"]["conversation"] = json!({"kind":"group","id":"201","thread_id":if native_thread {Some("201")} else {None}});
-        request["event_context"]["activity"]["kind"]["mentions_bot"] = json!(true);
-        let response = respond(&state, &key, &request, "801").await;
-        let id = response.headers()["x-cma-response-id"]
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert!(body_text(response).await.contains("Here is your answer"));
-        let stored = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
-        let event = state
-            .db
-            .collection::<NyxbotEvent>(EVENTS)
-            .find_one(doc! {"_id":&stored.event_key})
-            .await
-            .unwrap()
-            .unwrap();
-        let origin = &event.delivery.as_ref().unwrap().origin;
-        assert!(
-            origin.thread.is_some(),
-            "both native threads and local reply chains are followed"
-        );
-        let gateway = MockServer::start().await;
-        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
-        service.id = Uuid::new_v4().to_string();
-        service.slug = GATEWAY_SLUG.into();
-        service.base_url = gateway.uri();
-        state
-            .db
-            .collection::<DownstreamService>(SERVICES)
-            .insert_one(service)
-            .await
-            .unwrap();
-        for (receipt, expected) in [
-            (
-                json!({"delivery":{"outcome":"confirmed"}}),
-                "reply_confirmed",
-            ),
-            (
-                json!({"delivery":{"outcome":"rejected","reason":"test"}}),
-                "reply_rejected",
-            ),
-            (
-                json!({"delivery":{"outcome":"unsupported"}}),
-                "reply_unsupported",
-            ),
-            (
-                json!({"delivery":{"outcome":"rate_limited","retry_after":1}}),
-                "reply_rate_limited",
-            ),
-            (
-                json!({"delivery":{"outcome":"unknown","reason":"test"}}),
-                "reply_unknown",
-            ),
-            (json!({}), "reply_unknown"),
-        ] {
-            gateway.reset().await;
-            Mock::given(method("POST"))
-                .and(path("/events/opaque-native-ref/replies"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(receipt))
-                .expect(1)
-                .mount(&gateway)
-                .await;
-            let result = native_responses::send_update(
-                &state,
-                &row,
-                origin,
-                stored.conversation_id.as_deref().unwrap(),
-                "Update",
-            )
+    let mut request = native_event(&row, "801", "Hello");
+    request["event_context"]["activity"]["conversation"] =
+        json!({"kind":"group","id":"201","thread_id":if native_thread {Some("201")} else {None}});
+    request["event_context"]["activity"]["kind"]["mentions_bot"] = json!(true);
+    let response = respond(&state, &key, &request, "801").await;
+    let id = response.headers()["x-cma-response-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(body_text(response).await.contains("Here is your answer"));
+    let stored = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
+    let event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&stored.event_key})
+        .await
+        .unwrap()
+        .unwrap();
+    let origin = &event.delivery.as_ref().unwrap().origin;
+    assert!(
+        origin.thread.is_some(),
+        "both native threads and local reply chains are followed"
+    );
+    let gateway = Box::pin(MockServer::start()).await;
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.id = Uuid::new_v4().to_string();
+    service.slug = GATEWAY_SLUG.into();
+    service.base_url = gateway.uri();
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(service)
+        .await
+        .unwrap();
+    for (receipt, expected) in [
+        (
+            json!({"delivery":{"outcome":"confirmed"}}),
+            "reply_confirmed",
+        ),
+        (
+            json!({"delivery":{"outcome":"rejected","reason":"test"}}),
+            "reply_rejected",
+        ),
+        (
+            json!({"delivery":{"outcome":"unsupported"}}),
+            "reply_unsupported",
+        ),
+        (
+            json!({"delivery":{"outcome":"rate_limited","retry_after":1}}),
+            "reply_rate_limited",
+        ),
+        (
+            json!({"delivery":{"outcome":"unknown","reason":"test"}}),
+            "reply_unknown",
+        ),
+        (json!({}), "reply_unknown"),
+    ] {
+        gateway.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/events/opaque-native-ref/replies"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(receipt))
+            .expect(1)
+            .mount(&gateway)
             .await;
-            assert_eq!(result.is_ok(), expected == "reply_confirmed", "{expected}");
-            let requests = gateway.received_requests().await.unwrap();
-            assert_eq!(
-                requests.len(),
-                1,
-                "no automatic retry of an uncertain receipt"
-            );
-            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-            assert_eq!(
-                body.get("thread_reply"),
-                native_thread.then_some(&Value::Bool(true))
-            );
-            let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
-            assert_eq!(saved.gateway_native_delivery.as_deref(), Some(expected));
-        }
-        upstream.abort();
+        let result = native_responses::send_update(
+            &state,
+            &row,
+            origin,
+            stored.conversation_id.as_deref().unwrap(),
+            "Update",
+        )
+        .await;
+        assert_eq!(result.is_ok(), expected == "reply_confirmed", "{expected}");
+        let requests = gateway.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "no automatic retry of an uncertain receipt"
+        );
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            body.get("thread_reply"),
+            native_thread.then_some(&Value::Bool(true))
+        );
+        let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(saved.gateway_native_delivery.as_deref(), Some(expected));
     }
+    upstream.abort();
 }

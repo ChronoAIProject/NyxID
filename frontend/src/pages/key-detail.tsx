@@ -1,3 +1,5 @@
+import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
+import { ServiceMonitoring } from "@/components/dashboard/service-monitoring";
 import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { useOwnershipTransferAuthorization } from "@/hooks/use-ownership-transfers";
 import { ServiceHistory, ServiceAuthorshipFooter } from "@/components/dashboard/service-history";
@@ -2421,6 +2423,7 @@ export function KeyDetailPage() {
 }
 
 function KeyDetailView({ keyId }: { readonly keyId: string }) {
+  const monitoringEnabled = useAuthStore((state) => userHasFeature(state.user, FEATURE_FLAG.SERVICE_MONITORING));
   const navigate = useNavigate();
   const identity = useAuthStore((state) => state.user?.id);
   const search = useSearch({ strict: false }) as {
@@ -2723,6 +2726,9 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
 
       {keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
 
+      {monitoringEnabled && tab === "overview" && keyInfo.service_type === "http" && (source?.type !== "org" || source.allowed) && (
+        <ServiceMonitoring key={`${identity}:${keyInfo.id}`} serviceId={keyInfo.id} />
+      )}
       <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
         <Tabs

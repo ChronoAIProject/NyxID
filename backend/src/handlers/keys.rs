@@ -5917,3 +5917,7 @@ mod tests {
         assert!(req.target_org_id.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "keys_update_regression_tests.rs"]
+mod update_regression_tests;

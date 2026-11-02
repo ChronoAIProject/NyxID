@@ -164,6 +164,8 @@ pub async fn run_metadata_in_session(
                 vec![doc! {"$set": {
                     "attempts": {"$add": [{"$ifNull": ["$attempts", 0]}, i64::from(turn.engine_attempts)]},
                     "capacity_wait_ms": {"$add": [{"$ifNull": ["$capacity_wait_ms", 0]}, data.capacity_wait_ms.unwrap_or(0) as i64]},
+                    "failure_reason": {"$literal": bson::to_bson(&data.failure_reason)
+                        .map_err(|e| crate::errors::AppError::Internal(e.to_string()))?},
                 }}],
             )
             .session(session)

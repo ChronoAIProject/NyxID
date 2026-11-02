@@ -1,6 +1,7 @@
-import { Check, CircleAlert, Clock3, Radio, Workflow } from "lucide-react";
+import { Check, CircleAlert, Clock3, ExternalLink, Radio, Workflow } from "lucide-react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { CmaGlyph } from "@/components/service-icons/cma";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { isCmaOperationPending, type CmaOperation } from "@/schemas/cma-operation";
 
@@ -12,30 +13,33 @@ function presentation(operation: CmaOperation) {
   if (["submission_uncertain", "submission_failed"].includes(reason ?? "")) {
     return { label: "Submission unconfirmed", tone: "warning" };
   }
-  if (reason?.startsWith("result_") && ["completed", "succeeded", "ready"].includes(status ?? "")) {
-    return { label: kind === "cma_response" ? "Completed" : "Agent ready", tone: "success" };
-  }
   if (reason === "operation_failed" || ["failed", "incomplete", "cancelled", "stopped", "deleted"].includes(status ?? "")) {
-    return { label: status === "incomplete" ? "Incomplete" : status === "cancelled" || status === "stopped" ? "Stopped" : "Failed", tone: "error" };
+    const label = status === "incomplete" ? "Incomplete"
+      : status === "cancelled" || status === "stopped" ? "Stopped"
+      : status === "deleted" ? "Deleted"
+      : kind === "cma_response" ? "Failed" : "Needs attention";
+    return { label, tone: ["cancelled", "stopped", "deleted"].includes(status ?? "") ? "muted" : "error" };
   }
-  if (reason && reason !== "completed") {
+  const succeeded = status === (kind === "cma_response" ? "completed" : kind === "cma_provisioning" ? "succeeded" : "ready");
+  if (reason && reason !== "completed" && !(reason.startsWith("result_") && succeeded)) {
     return { label: "Status unavailable", tone: "warning" };
   }
-  if (status === "completed" || reason === "completed") {
-    return { label: kind === "cma_response" ? "Completed" : "Agent ready", tone: "success" };
+  if (succeeded) {
+    return { label: kind === "cma_response" ? "Completed" : "Ready", tone: kind === "cma_agent" && isCmaOperationPending(operation) ? "neutral" : "success" };
   }
-  if (status === "ready" && kind === "cma_agent" && isCmaOperationPending(operation)) {
-    return { label: "Agent ready", tone: "active" };
+  if (reason === "completed" || ["completed", "succeeded", "ready"].includes(status ?? "")) {
+    return { label: "Status unavailable", tone: "warning" };
   }
-  if (status === "succeeded" || status === "ready") return { label: "Agent ready", tone: "success" };
   if (["waiting_approval", "connection_required", "awaiting_connection", "waiting_for_connection"].includes(status ?? "")) {
     return { label: status === "waiting_approval" ? "Needs approval" : "Needs connection", tone: "warning" };
   }
-  if (status === "paused") return { label: "Paused", tone: "warning" };
+  if (status === "paused") return { label: "Paused", tone: "muted" };
   if (state === "submitting") return { label: "Submitting", tone: "active" };
   if (!status) return { label: "Awaiting status", tone: "active" };
   if (status === "queued") return { label: "Queued", tone: "active" };
-  return { label: kind === "cma_provisioning" ? "Provisioning" : "Running", tone: "active" };
+  if (["starting", "provisioning"].includes(status)) return { label: "Starting", tone: "active" };
+  if (["working", "running", "in_progress"].includes(status)) return { label: kind === "cma_provisioning" ? "Starting" : "Working", tone: "active" };
+  return { label: "Status unavailable", tone: "warning" };
 }
 
 const tones: Record<string, string> = {
@@ -44,7 +48,24 @@ const tones: Record<string, string> = {
   warning: "border-amber-300/25 bg-amber-300/10 text-amber-200",
   error: "border-rose-300/25 bg-rose-300/10 text-rose-200",
   muted: "border-white/15 bg-white/5 text-zinc-300",
+  neutral: "border-border bg-muted text-muted-foreground",
 };
+
+function safeCmaUrl(value: string | null | undefined): string | undefined {
+  if (!value || new TextEncoder().encode(value).length > 2048
+    || !/^https?:\/\//.test(value) || /[\s\\]/u.test(value)
+    || [...value].some((char) => char.charCodeAt(0) < 32 || (char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159))) return undefined;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+    return ["https:", "http:"].includes(url.protocol) && Boolean(host) && !url.username && !url.password
+      && !value.includes("?") && !value.includes("#")
+      && !["metadata.google.internal", "169.254.169.254", "fd00:ec2::254", "100.100.100.200", "168.63.129.16"].includes(host)
+      ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 const phases: Record<string, string> = {
   sandbox_creation: "Creating sandbox",
@@ -65,6 +86,7 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
     { label: operation.kind === "cma_response" ? "Result ready" : "Agent ready", done: complete },
   ];
   const lastChecked = operation.checked_at ? new Date(operation.checked_at) : null;
+  const cmaUrl = safeCmaUrl(operation.cma_url);
   return (
     <section
       aria-label="CMA delegation"
@@ -102,12 +124,17 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
         {tone === "warning" && !pending && <p className="mt-3 flex items-start gap-1.5 text-11 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
         {tone === "success" && operation.reason?.startsWith("result_") && <p className="mt-3 text-11 text-zinc-400">CMA finished, but its final result is unavailable here.</p>}
         {operation.state === "cancelled" && <p className="mt-3 text-11 text-zinc-400">Tracking ended. CMA may still be running.</p>}
+        {cmaUrl && <Button asChild variant="primary" className="mt-4 w-full">
+          <a href={cmaUrl} target="_blank" rel="noopener noreferrer">
+            View in CMA <ExternalLink aria-hidden className="size-3" />
+          </a>
+        </Button>}
         <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-white/[0.08] pt-3 text-10 text-zinc-400">
           <span className="inline-flex min-w-0 flex-1 items-center gap-2">
             <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-violet-400/15 text-violet-300"><Radio aria-hidden className="size-3" /></span>
             <span className="break-words"><span className="font-medium text-zinc-200">{operation.monitor_name}</span> · {pending ? "Tracking progress" : "Status recorded"}</span>
           </span>
-          {lastChecked && Number.isFinite(lastChecked.getTime()) && <span className="inline-flex items-center gap-1"><Clock3 aria-hidden className="size-3" /><time dateTime={operation.checked_at!} title={lastChecked.toLocaleString()}>Checked {lastChecked.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></span>}
+          {lastChecked && Number.isFinite(lastChecked.getTime()) && <span className="inline-flex items-center gap-1"><Clock3 aria-hidden className="size-3" /><time dateTime={operation.checked_at!} title={lastChecked.toLocaleString()}>Checked {lastChecked.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })} · {lastChecked.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></span>}
         </div>
       </div>
     </section>

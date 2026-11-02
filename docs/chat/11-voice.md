@@ -1791,3 +1791,16 @@ rechecked during implementation; this document records the observed contract.
 [oa-transcription]: https://developers.openai.com/api/docs/guides/realtime-transcription
 [oa-transcription-model]: https://developers.openai.com/api/docs/models/gpt-live-transcribe
 [oa-realtime-events]: https://developers.openai.com/api/reference/resources/realtime/server-events
+
+
+### Private shared-agent voice
+
+Shared-agent recipients can start voice in their own private thread once the
+shared transport readiness gate is satisfied. Voice binds the exact connection,
+settings and recipient consent to the durable session. Allow once starts one
+session; Always is revalidated against live share, behavior, connection and
+approval policy. Revocation closes running sessions; every provider command and
+relayed audio effect checks the binding again. Provider WebRTC calls are closed
+by the live session monitor. The recipient pays duration, tokens and delegated
+task usage. Hidden tasks are private children, never automation authority, and
+cannot use machines or saved logins. See [Shared agents §12](12-shared-agents-and-groups.md#12-phased-implementation-after-review).

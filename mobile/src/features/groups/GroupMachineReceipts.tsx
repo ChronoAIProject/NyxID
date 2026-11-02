@@ -6,9 +6,11 @@ import type { GroupMessage } from "./groupContracts";
 export function GroupMachineReceipts({
   message,
   groupId,
+  foreground,
 }: {
   message: GroupMessage;
   groupId?: string;
+  foreground?: string;
 }) {
   return (
     <>
@@ -34,6 +36,7 @@ export function GroupMachineReceipts({
             key={a.id}
             attachment={a}
             groupId={groupId}
+            captionColor={foreground}
           />
         ))}
     </>

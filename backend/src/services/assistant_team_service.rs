@@ -96,7 +96,7 @@ pub async fn in_progress(
         .collection::<bson::Document>(CONVERSATIONS)
         .find(
             doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},
-            "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
+            "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
         )
         .projection(doc! {"title": 1, "active_turn.turn_id": 1, "active_turn.question": 1, "active_turn.question_key": 1})
         .limit(5)
@@ -212,6 +212,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         created_by: "user".into(),
         model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
         owner_model_route: None,
+        guest_model_notices: Default::default(),
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
@@ -525,15 +526,24 @@ pub async fn agent_for_conversation(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<AssistantAgent> {
+    if row.collaboration.is_some() {
+        return Box::pin(super::collaboration_group_service::runtime::agent_for_thread(db, row))
+            .await;
+    }
     match row.agent_id.as_deref() {
         Some(id) => {
             let mut agent = agent(db, &row.user_id, id).await?;
             let access =
                 super::org_agent_service::resolve_agent_access(db, &row.user_id, &agent).await?;
             if let Some(shared) = access.as_ref().and_then(|a| a.shared()) {
-                if row.group_id.is_some() || row.automation_thread || row.platform_thread.is_some()
-                {
-                    return Err(super::shared_agent_service::missing());
+                super::assistant_group_service::check_shared_surface(row)?;
+                if row.group_id.is_some() {
+                    super::org_group_service::check_thread_participation(
+                        db,
+                        row,
+                        access.as_ref().expect("shared access"),
+                    )
+                    .await?;
                 }
                 agent.memory = shared.team_memory().to_vec();
                 agent.memory.extend(
@@ -562,12 +572,12 @@ pub async fn agent_for_conversation(
 /// the agent's, and never listed as threads.
 pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
-        doc! {"user_id": actor, "group_id": bson::Bson::Null,
+        doc! {"user_id": actor, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
             "voice_parent_conversation_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
-        doc! {"user_id": actor, "agent_id": &agent.id, "group_id": bson::Bson::Null,
+        doc! {"user_id": actor, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
         "voice_parent_conversation_id": bson::Bson::Null}
     }
 }
@@ -645,6 +655,7 @@ pub(crate) async fn create_thread_for_with_access(
         session,
         snapshot,
         learning_epoch,
+        None,
     ))
     .await
 }
@@ -657,7 +668,33 @@ pub(crate) async fn create_automation_thread(
     title: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    create_thread_with_kind(db, keys, actor, agent, title, true, session, None, None).await
+    create_thread_with_kind(
+        db, keys, actor, agent, title, true, session, None, None, None,
+    )
+    .await
+}
+
+pub(crate) async fn create_collaboration_thread(
+    db: &Database,
+    keys: &EncryptionKeys,
+    actor: &str,
+    agent: &AssistantAgent,
+    binding: crate::models::assistant_group_collaboration::ExecutionBinding,
+    session: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    Box::pin(create_thread_with_kind(
+        db,
+        keys,
+        actor,
+        agent,
+        "Group execution",
+        false,
+        session,
+        None,
+        None,
+        Some(binding),
+    ))
+    .await
 }
 
 /// Create a private voice execution context linked to its visible call thread.
@@ -670,7 +707,16 @@ pub(crate) async fn create_voice_task_thread(
     parent_conversation_id: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    let mut row = create_automation_thread(db, keys, actor, agent, title, session).await?;
+    let access = super::org_agent_service::resolve_agent_access(db, actor, agent).await?;
+    // A shared voice task is a private child, never automation authority. The
+    // parent marker hides it from ordinary lists; no group admission is changed.
+    let mut row = if access.as_ref().is_some_and(|a| a.shared().is_some()) {
+        super::shared_agent_transport::require_ready(db).await?;
+        create_thread_for_with_access(db, keys, actor, agent, title, session, access.as_ref())
+            .await?
+    } else {
+        create_automation_thread(db, keys, actor, agent, title, session).await?
+    };
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &row.id, "user_id": actor},
@@ -693,10 +739,12 @@ async fn create_thread_with_kind(
     session: &mut ClientSession,
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
     learning_epoch: Option<i64>,
+    collaboration: Option<crate::models::assistant_group_collaboration::ExecutionBinding>,
 ) -> AppResult<AssistantConversation> {
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        collaboration: collaboration.clone(),
         owner_model_route: None,
         invocation_controlled: false,
         credential_invocation_id: None,
@@ -732,6 +780,7 @@ async fn create_thread_with_kind(
         agent_id: Some(agent.id.clone()),
         automation_thread,
         voice_parent_conversation_id: None,
+        guest_model_setup: false,
         shared_agent_thread: false,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
@@ -742,12 +791,18 @@ async fn create_thread_with_kind(
         group_id: None,
         group_request_id: None,
         group_seen_seq: 0,
-        guest_turn: false,
+        guest_turn: collaboration.as_ref().is_some_and(|b| {
+            b.authority.lane == crate::models::assistant_group_collaboration::Lane::Guest
+        }),
         reply_channel: None,
         deliver_also: Vec::new(),
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     collection.insert_one(&row).session(&mut *session).await?;
+    if let Some(binding) = &row.collaboration {
+        super::collaboration_group_service::runtime::attach_slot(db, binding, &row.id, session)
+            .await?;
+    }
     let authority = Box::pin(credentials::authority_with_access(
         db, &row, session, snapshot,
     ))
@@ -764,6 +819,9 @@ async fn create_thread_with_kind(
     )
     .await?;
     row.credential_api_key_id = credential.api_key_id.clone();
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::bind_key(db, &row, session).await?;
+    }
     collection
         .update_one(
             doc! {"_id": &row.id},
@@ -771,7 +829,11 @@ async fn create_thread_with_kind(
         )
         .session(&mut *session)
         .await?;
-    if !automation_thread && row.platform_thread.is_none() && actor == agent.user_id {
+    if row.collaboration.is_none()
+        && !automation_thread
+        && row.platform_thread.is_none()
+        && actor == agent.user_id
+    {
         db.collection::<AssistantAgent>(AGENTS)
             .update_one(
                 doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
@@ -873,6 +935,7 @@ pub async fn home_thread_for(
                 session,
                 None,
                 learning_epoch,
+                None,
             )
             .await;
             transactions::transaction_result(operation)
@@ -1238,6 +1301,7 @@ async fn create_specialist_inner(
         created_by: request.created_by.into(),
         model,
         owner_model_route: None,
+        guest_model_notices: Default::default(),
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
@@ -1323,6 +1387,7 @@ async fn create_specialist_inner(
                     &agent.name,
                     false,
                     session,
+                    None,
                     None,
                     None,
                 )
@@ -1506,6 +1571,7 @@ pub async fn update_agent(
             .ok_or_else(not_found)?
     };
     if !shared_manager {
+        super::assistant_guest_model_setup::backoff::reset(db, actor, id, None).await?;
         super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
     }
     Ok(updated)
@@ -1607,6 +1673,7 @@ pub async fn set_agent_policy(
         updated.access_mode_override,
     )
     .await;
+    super::assistant_guest_model_setup::backoff::reset(db, &actor.user_id, id, None).await?;
     super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
     if current.access_mode_override != updated.access_mode_override {
         super::assistant_acknowledgement_service::retire_full_access_confirmations(
@@ -1765,7 +1832,9 @@ pub(crate) async fn sync_thread_authority(
 ) -> AppResult<()> {
     let policy = super::shared_agent_service::policy(db, agent).await?;
     for row in rows {
-        let authority = if row.shared_agent_thread {
+        let authority = if row.guest_model_setup {
+            KeyAuthority::ModelSetup(agent.user_id.clone())
+        } else if row.shared_agent_thread {
             let grants = crate::models::assistant_agent::AgentGrants {
                 service_ids: agent
                     .grants
@@ -2159,14 +2228,17 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     // Remove membership from every person's private groups without reading their transcripts.
     let group_owners = db
         .collection::<bson::Document>(crate::models::assistant_group::COLLECTION_NAME)
-        .distinct("user_id", doc! {"member_agent_ids": &agent.id})
+        .distinct(
+            "user_id",
+            doc! {"member_agent_ids": &agent.id, "collaboration":null},
+        )
         .await?;
     for person in group_owners.iter().filter_map(bson::Bson::as_str) {
         super::assistant_group_service::remove_agent(db, person, &agent.id).await?;
     }
     let rows: Vec<AssistantConversation> = db
         .collection(CONVERSATIONS)
-        .find(doc! {"agent_id": &agent.id, "shared_agent_thread": {"$ne": true}})
+        .find(doc! {"agent_id": &agent.id, "shared_agent_thread": {"$ne": true}, "collaboration":null})
         .await?
         .try_collect()
         .await?;
@@ -2582,7 +2654,7 @@ async fn last_reply(
 pub async fn running_agents(db: &Database, owner: &str) -> AppResult<HashSet<String>> {
     let rows: Vec<AssistantConversation> = db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"user_id": owner, "active_turn.turn_id": {"$exists": true}})
+        .find(doc! {"collaboration": null, "user_id": owner, "active_turn.turn_id": {"$exists": true}})
         .limit(200)
         .await?
         .try_collect()
@@ -2646,7 +2718,7 @@ pub async fn summaries(
             db.collection::<AssistantConversation>(CONVERSATIONS)
                 .find_one(
                     doc! {"user_id": owner, "agent_id": &agent.id, "channel": bson::Bson::Null,
-                    "group_id": bson::Bson::Null, "automation_thread": {"$ne": true}},
+                    "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null, "automation_thread": {"$ne": true}},
                 )
                 .sort(doc! {"created_at": 1})
                 .await?
@@ -2751,7 +2823,7 @@ pub async fn read(
     } else {
         db.collection::<AssistantConversation>(CONVERSATIONS)
             .find_one(
-                doc! {"user_id": owner, "agent_id": &agent.id, "group_id": bson::Bson::Null,
+                doc! {"user_id": owner, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null,
                 "channel": bson::Bson::Null, "automation_thread": {"$ne": true}},
             )
             .sort(doc! {"created_at": 1})
@@ -2804,7 +2876,7 @@ pub async fn direct_chats_note(
     let ids: Vec<&str> = names.keys().copied().collect();
     let threads: Vec<bson::Document> = db
         .collection::<bson::Document>(CONVERSATIONS)
-        .find(doc! {"user_id": owner, "agent_id": {"$in": &ids}})
+        .find(doc! {"collaboration": null, "user_id": owner, "agent_id": {"$in": &ids}})
         .projection(doc! {"agent_id": 1})
         .limit(500)
         .await?
@@ -2975,6 +3047,7 @@ pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<Assista
     // NyxBot threads parked at the streak cap wait for a user message; they
     // never crowd out threads that can still wake.
     let mut filter = doc! {
+        "collaboration": null,
         "pending_events.created_at": {"$exists": true},
         "$or": [
             {"role": "subagent"},

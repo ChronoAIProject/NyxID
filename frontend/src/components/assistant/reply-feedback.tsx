@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { Check, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, MessageSquare, ThumbsDown, ThumbsUp } from "lucide-react";
 import { toast } from "sonner";
 import type {
   AssistantFeedbackVote,
@@ -26,6 +26,23 @@ const FEEDBACK_REASONS: Readonly<Record<AssistantFeedbackVote, readonly string[]
   down: ["Not useful", "Not accurate", "Bad response", "Hard to understand"],
 };
 
+function feedbackDetails(comment: string, vote: AssistantFeedbackVote) {
+  const separator = comment.indexOf(" — ");
+  const prefix = separator < 0 ? comment : comment.slice(0, separator);
+  const reasons = prefix.split(", ");
+  const known = Object.values(FEEDBACK_REASONS).flat();
+  if (!reasons.every((reason) => known.includes(reason))) {
+    return { chosen: [], note: comment, comment };
+  }
+  const chosen = reasons.filter((reason) => FEEDBACK_REASONS[vote].includes(reason));
+  const note = separator < 0 ? "" : comment.slice(separator + 3);
+  return {
+    chosen,
+    note,
+    comment: chosen.length === reasons.length ? comment : feedbackComment(chosen, note),
+  };
+}
+
 /**
  * The stored comment: the chosen reasons, then the reader's own words
  * (`Not accurate, Bad response — wrong date`).
@@ -34,11 +51,6 @@ function feedbackComment(reasons: readonly string[], note: string): string {
   const tags = reasons.join(", ");
   const text = note.trim();
   return tags && text ? `${tags} — ${text}` : tags || text;
-}
-
-/** Room left for the reader's words once every reason is chosen. */
-function noteLimit(vote: AssistantFeedbackVote): number {
-  return COMMENT_LIMIT - FEEDBACK_REASONS[vote].join(", ").length - " — ".length;
 }
 
 /** Helpful and Not helpful, for a reply's action line. */
@@ -64,6 +76,11 @@ export function ReplyFeedbackVotes({ feedback }: { readonly feedback: ReplyFeedb
           </button>
         );
       })}
+      {feedback.vote ? (
+        <button type="button" aria-label={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} title={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} disabled={feedback.pending} onClick={feedback.edit} className="rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50">
+          <MessageSquare className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -82,10 +99,11 @@ export function ReplyFeedbackFollowUp({ feedback }: { readonly feedback: ReplyFe
           if (!open) feedback.close();
         }}
       >
-        {vote ? (
+        {vote && feedback.formOpen ? (
           <FeedbackDetails
             key={vote}
             vote={vote}
+            initialComment={feedback.comment}
             pending={feedback.pending}
             onSend={feedback.send}
             onClose={feedback.close}
@@ -103,26 +121,30 @@ export function ReplyFeedbackFollowUp({ feedback }: { readonly feedback: ReplyFe
 
 function FeedbackDetails({
   vote,
+  initialComment,
   pending,
   onSend,
   onClose,
 }: {
   readonly vote: AssistantFeedbackVote;
+  readonly initialComment: string;
   readonly pending: boolean;
   readonly onSend: (comment: string) => Promise<boolean>;
   readonly onClose: () => void;
 }) {
   const fieldId = useId();
-  const [chosen, setChosen] = useState<readonly string[]>([]);
-  const [note, setNote] = useState("");
+  const [initial] = useState(() => feedbackDetails(initialComment, vote));
+  const [chosen, setChosen] = useState<readonly string[]>(initial.chosen);
+  const [note, setNote] = useState(initial.note);
   const [submitting, setSubmitting] = useState(false);
   const [failed, setFailed] = useState(false);
   const options = FEEDBACK_REASONS[vote];
+  const unchanged = note === initial.note && chosen.length === initial.chosen.length && chosen.every((reason) => initial.chosen.includes(reason));
+  const comment = unchanged ? initial.comment : feedbackComment(options.filter((reason) => chosen.includes(reason)), note);
   const submit = async () => {
+    if (pending || submitting || comment.length > COMMENT_LIMIT) return;
     setSubmitting(true);
-    const saved = await onSend(
-      feedbackComment(options.filter((reason) => chosen.includes(reason)), note),
-    );
+    const saved = await onSend(comment);
     setSubmitting(false);
     setFailed(!saved);
     if (saved) toast.success("Thanks for the feedback.");
@@ -170,7 +192,7 @@ function FeedbackDetails({
         <Textarea
           id={fieldId}
           value={note}
-          maxLength={noteLimit(vote)}
+          maxLength={COMMENT_LIMIT}
           onChange={(event) => setNote(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !pending && !submitting) {
@@ -198,7 +220,7 @@ function FeedbackDetails({
         <Button
           type="button"
           variant="primary"
-          disabled={pending}
+          disabled={pending || comment.length > COMMENT_LIMIT}
           isLoading={submitting}
           onClick={() => void submit()}
         >

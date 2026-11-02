@@ -94,6 +94,8 @@ nyxid-permissions = { path = "../permissions" }
 nyxid-machine-updater = { path = "../machine-updater" }
 http = "1.4"
 http-body-util = "0.1"
+hyper = { version = "1", features = ["http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 httpdate = "1"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
 # Feature unification picks up BOTH `ring` (via google-cloud-kms ->

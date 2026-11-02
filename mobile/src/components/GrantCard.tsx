@@ -66,7 +66,7 @@ export function GrantCard({
           iconUrl={iconUrl}
           size="sm"
         />
-        <Text style={styles.title} numberOfLines={1}>
+        <Text style={styles.title} numberOfLines={2}>
           {grant.service_name}
         </Text>
         <Pressable
@@ -118,8 +118,7 @@ const createStyles = (c: ThemeColors) =>
     },
     title: {
       flex: 1,
-      // DESIGN.md mobile-card primary text: text-[13px] font-semibold.
-      ...typeScale.bodyStrong,
+      ...typeScale.title,
       color: c.textPrimary,
     },
     secondary: {

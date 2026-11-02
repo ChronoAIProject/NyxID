@@ -42,6 +42,9 @@ pub struct CmaOperation {
     pub seen_working: bool,
     pub kind: CmaOperationKind,
     pub agent_id: Option<String>,
+    /// CMA-supplied browser destination, never a webhook or polling target.
+    #[serde(default)]
+    pub callback_url: Option<String>,
     pub idempotency_key: Option<String>,
     pub status: Option<String>,
     pub phase: Option<String>,
@@ -76,6 +79,8 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]

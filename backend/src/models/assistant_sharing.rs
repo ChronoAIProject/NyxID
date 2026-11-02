@@ -6,6 +6,28 @@ use serde::{Deserialize, Serialize};
 
 use super::assistant_agent::{GuestAccess, MemoryNote};
 
+/// Immutable execution provenance, never a reusable ACL. Only server admission
+/// writes this value; every resume resolves fresh sharing and connection rights.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SharedExecution {
+    #[serde(default)]
+    pub voice: bool,
+    #[serde(default)]
+    pub model: bool,
+    pub actor: String,
+    pub owner: String,
+    pub agent: String,
+    pub conversation: String,
+    pub key: String,
+    pub turn: String,
+    pub connection: String,
+    pub revision: i64,
+    pub behavior: String,
+    pub binding: String,
+    pub consent_id: Option<String>,
+    pub consent_claim: Option<String>,
+}
+
 pub const COLLECTION_NAME: &str = "assistant_agent_sharing";
 pub const SHARES_COLLECTION_NAME: &str = "assistant_agent_shares";
 pub const NOTES_COLLECTION_NAME: &str = "assistant_agent_private_notes";

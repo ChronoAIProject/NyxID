@@ -58,6 +58,8 @@ pub mod codes {
     pub const SUBSCRIPTION_CHECK_FAILED: &str = "subscription_check_failed";
     /// An authenticated delivery arrived for a bot whose subscription is not recorded.
     pub const UNREGISTERED: &str = "unregistered";
+    /// Meta delivered a signed relay message while native WhatsApp owned intake.
+    pub const NATIVE_RELAY_CONFLICT: &str = "native_gateway_relay_conflict";
     /// Unexpected internal error.
     pub const INTERNAL: &str = "internal";
 }
@@ -205,6 +207,10 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
             subscription_action,
             format!("The {name} webhook subscription is missing or incomplete. Register it again."),
         ),
+        codes::NATIVE_RELAY_CONFLICT => advice(
+            "verify",
+            "Meta delivered a relay callback while native WhatsApp gateway intake was active. NyxID kept native intake authoritative; verify the dedicated app callback and gateway status.".into(),
+        ),
         codes::RATE_LIMITED if outbound => advice(
             "wait_rate_limit",
             format!("{name} rate-limited the last reply. Later replies resume automatically."),
@@ -233,6 +239,9 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
         && let Some(found) = for_code(code, facts, false)
     {
         return found;
+    }
+    if facts.failure_reason == Some(codes::NATIVE_RELAY_CONFLICT) {
+        return for_code(codes::NATIVE_RELAY_CONFLICT, facts, false).expect("mapped code");
     }
     if facts.gateway {
         return advice(

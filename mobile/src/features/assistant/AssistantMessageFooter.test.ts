@@ -153,6 +153,15 @@ test("human footer keeps time-before-Copy order with the same compact spacing", 
   assert.equal(x.h.value().props.children[1].props.hitSlop.left, 4);
   x.h.unmount();
 });
+test("user bubble dates and copy icons use the supplied foreground", () => {
+  const x = setup({ text: "Hello", timestamp: "2026-10-27T01:00:00Z", user: true, foreground: "#FFFFFF" });
+  const date = x.all().find((node) => node.type === "Text");
+  assert.ok(date);
+  assert.equal(Object.assign({}, ...[date.props.style].flat()).color, "#FFFFFF");
+  assert.equal(x.all().find((node) => node.type === "Copy")?.props.color, "#FFFFFF");
+  x.h.unmount();
+});
+
 test("message-time parity: local calendar day/month/year, locale and full daylight-saving time labels", () => {
   const now = Date.parse("2026-10-28T04:00:00Z");
   const short = (value: string, timeZone: string, locale = "en-US") =>

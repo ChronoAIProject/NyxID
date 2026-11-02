@@ -94,7 +94,12 @@ test("every chat runs with Full access: services and account tools need no cards
   await expect(page.getByText("Your agent keys are ready to manage.")).toBeVisible();
   await settled(page);
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
-  await expect(page.locator("header").getByText("Full access", { exact: true })).toHaveCount(0);
+  const threadHeader = page.locator("[data-chat-thread-panels]");
+  const sidebarHeader = page.getByRole("navigation", { name: "Agents and conversations" });
+  await expect(threadHeader).toBeVisible();
+  await expect(sidebarHeader).toBeVisible();
+  await expect(threadHeader.getByText("Full access", { exact: true })).toHaveCount(0);
+  await expect(sidebarHeader.getByText("Full access", { exact: true })).toHaveCount(0);
   expect(modeWrites).toEqual([]);
 });
 
@@ -750,7 +755,8 @@ test("conversation index previews and navigates messages outside the rendered wi
   expect(await page.locator("[data-chat-message-index]").count()).toBeLessThan(30);
   async function expectRailFitsAboveComposer() {
     const bounds = (await rail.boundingBox())!;
-    const composer = (await page.locator("[data-composer-surface]").boundingBox())!;
+    // Tall editors overlay the transcript beyond the dock's capped reservation.
+    const composer = (await page.locator("[data-composer-dock]").boundingBox())!;
     const transcriptBounds = (await transcript.boundingBox())!;
     expect(bounds.y).toBeCloseTo(transcriptBounds.y, 0);
     expect(bounds.y + bounds.height).toBeCloseTo(composer.y, 0);

@@ -685,6 +685,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
         },
     );
     let message = GroupMessage {
+        collaboration: None,
         activities: vec![],
         org_group: false,
         author_user_id: None,

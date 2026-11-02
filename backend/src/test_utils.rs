@@ -1860,6 +1860,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         auth_device_eight_char_codes: false,
         resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
+        chrono_probe_url: None,
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],
         csrf_trusted_origins: vec![],
@@ -2142,7 +2143,10 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
 
 /// Build an `AppState` with a caller-provided config for pure handler tests.
 pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .redirect(crate::services::telegram_new_api::app_redirect_policy())
+        .build()
+        .unwrap();
     let jwt_keys = cached_test_jwt_keys();
     let billing = Arc::new(crate::services::billing::BillingService::new(
         db.clone(),

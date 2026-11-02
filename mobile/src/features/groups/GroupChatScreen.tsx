@@ -41,6 +41,7 @@ import { agentsApi } from "../../lib/api/agentsApi";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useTheme } from "../../theme/ThemeContext";
+import { chatBubbleColors, userBubbleCorners } from "../../theme/chatAppearance";
 import { fonts, radius } from "../../theme/designTokens";
 import { AssistantPendingUploads } from "../assistant/AssistantPendingUploads";
 import {
@@ -880,7 +881,8 @@ function GroupMessage({
   onOpenAgent?: (id: string) => void;
   onDisclosure: () => void;
 }) {
-  const { colors } = useTheme();
+  const { mode, lightBubblePalette } = useTheme();
+  const bubble = chatBubbleColors(mode, lightBubblePalette);
   const user = message.role === "user";
   if (message.role === "notice")
     return (
@@ -901,13 +903,8 @@ function GroupMessage({
       style={[
         styles.message,
         user && {
-          backgroundColor: colors.card,
-          borderColor: colors.border,
-          borderWidth: 1,
-          borderTopLeftRadius: 12,
-          borderTopRightRadius: 12,
-          borderBottomRightRadius: 3,
-          borderBottomLeftRadius: 12,
+          backgroundColor: bubble.background,
+          ...userBubbleCorners,
           marginLeft: 38,
           alignSelf: "flex-end",
         },
@@ -924,7 +921,7 @@ function GroupMessage({
           {message.agent ? (
             <AgentAvatar agent={message.agent} size="sm" />
           ) : null}
-          <Label muted style={styles.small}>
+          <Label muted style={[styles.small, user && { color: bubble.foreground }]}>
             {user
               ? (message.author?.display_name ?? "You")
               : message.agent
@@ -934,7 +931,7 @@ function GroupMessage({
         </View>
       </Pressable>
       {user && !!message.recipient_agent_ids?.length && (
-        <Label muted style={styles.small}>
+        <Label style={[styles.small, { color: bubble.foreground }]}>
           to{" "}
           {message.recipient_agent_ids
             .map((id) => {
@@ -946,8 +943,8 @@ function GroupMessage({
       )}
       {user ? (
         <>
-          <Label selectable>{message.text}</Label>
-          <GroupMachineReceipts groupId={group?.id} message={message} />
+          <Label selectable style={{ color: bubble.foreground }}>{message.text}</Label>
+          <GroupMachineReceipts groupId={group?.id} message={message} foreground={bubble.foreground} />
         </>
       ) : (
         <AssistantReplyBody
@@ -972,6 +969,7 @@ function GroupMessage({
         }
         timestamp={message.created_at}
         user={user}
+        foreground={user ? bubble.foreground : undefined}
       />
     </View>
   );

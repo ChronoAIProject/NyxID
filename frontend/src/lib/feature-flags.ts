@@ -23,6 +23,7 @@ export const FEATURE_FLAG = {
   INVITATION_CODE: "auth:invitation-code",
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",
+  SERVICE_MONITORING: "services:monitoring",
   REMOTE_MACHINES: "experimental:remote-machines",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
   DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
