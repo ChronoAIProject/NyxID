@@ -1,4 +1,4 @@
-//! Durable native-provider responses. Reads never recreate or resubmit work.
+//! Durable provider responses. Reads never recreate or resubmit model/tool work.
 use crate::{
     crypto::aes::EncryptionKeys,
     errors::{AppError, AppResult},
@@ -14,10 +14,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
 
+pub const RELAY_READINESS: &str = "nyxbot:relay-response-recovery-v1";
 pub const RETENTION_HOURS: i64 = 24;
 pub const MEDIA_UNAVAILABLE: &str = "Attachments are unavailable on this native gateway connection. Please send the information as text or upload it in NyxID.";
 const MAX_TEXT_CHARS: usize = 32_000;
-const MAX_PAYLOAD_BYTES: usize = 768 * 1024;
+// Relay turns retain the engine's complete answer, including multipart text.
+// Snapshot + terminal + item frames repeat it; keep the encrypted document
+// below MongoDB's 16 MiB document limit. Native output keeps its existing cap.
+const MAX_PAYLOAD_BYTES: usize = 15 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Payload {
@@ -75,9 +79,12 @@ impl Payload {
         true
     }
     pub fn finish(&mut self, text: Option<&str>, failed: bool) {
+        let text = text.map(|text| text.chars().take(MAX_TEXT_CHARS).collect::<String>());
+        self.finish_text(text.as_deref(), failed);
+    }
+    fn finish_text(&mut self, text: Option<&str>, failed: bool) {
         self.progress();
         if let Some(text) = text.filter(|s| !s.trim().is_empty()) {
-            let text: String = text.chars().take(MAX_TEXT_CHARS).collect();
             let item = json!({"id":format!("msg_{}",self.snapshot["id"].as_str().unwrap_or_default()),
                 "type":"message","role":"assistant","status":"completed",
                 "content":[{"type":"output_text","text":text}]});
@@ -170,10 +177,9 @@ pub async fn finish(
         .find_one(doc! {"_id":&row.event_key})
         .await?;
     let text = text.map(|text| {
-        if event
-            .as_ref()
-            .is_some_and(|event| event.source_media_declared.unwrap_or(0) > 0)
-            && !text.contains(MEDIA_UNAVAILABLE)
+        if event.as_ref().is_some_and(|event| {
+            event.relay_message_id.is_none() && event.source_media_declared.unwrap_or(0) > 0
+        }) && !text.contains(MEDIA_UNAVAILABLE)
         {
             let prefix: String = text.chars().take(MAX_TEXT_CHARS - 512).collect();
             format!("{prefix}\n\n{MEDIA_UNAVAILABLE}")
@@ -181,7 +187,14 @@ pub async fn finish(
             text.to_owned()
         }
     });
-    body.finish(text.as_deref(), failed);
+    if event
+        .as_ref()
+        .is_some_and(|event| event.relay_message_id.is_some())
+    {
+        body.finish_text(text.as_deref(), failed);
+    } else {
+        body.finish(text.as_deref(), failed);
+    }
     let sealed = body.seal(keys).await?;
     // No upsert: a concurrent purge always wins. All frames and the snapshot
     // become visible atomically, before any network byte is exposed.
@@ -189,6 +202,22 @@ pub async fn finish(
         "expires_at":{"$gt":bson::DateTime::now()}}, doc! {"$set":{"terminal":true,
         "payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}},"$inc":{"revision":1_i64}}).await?;
     if changed.modified_count == 1 {
+        super::audit_service::log_async(
+            db.clone(),
+            Some(row.user_id.clone()),
+            "nyxbot_channel_answer_delivery".into(),
+            Some(
+                json!({"event_id":row.event_key,"conversation_id":row.conversation_id,
+                "turn_id":event.as_ref().and_then(|e| e.turn_id.as_deref()),
+                "transport":"gateway","outcome":"recovery_ready",
+                "reason":"gateway_delivery_receipt_not_available","response_failed":failed}),
+            ),
+            None,
+            None,
+            None,
+            None,
+        );
+
         db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME).update_one(
             doc! {"_id":&row.channel_id,"binding_id":&row.binding_id,"transport":"gateway"},
             doc! {"$set":{"gateway_native_delivery":if failed {"response_failed"} else {"response_ready"}}}).await?;
@@ -198,7 +227,16 @@ pub async fn finish(
 
 /// Called by snapshots/replay and the existing delivery sweep. Transcript is
 /// authoritative across process restarts; no in-memory receiver is required.
-pub async fn refresh(db: &Database, keys: &EncryptionKeys, row: &GatewayResponse) -> AppResult<()> {
+pub async fn refresh<F, Fut>(
+    db: &Database,
+    keys: &EncryptionKeys,
+    row: &GatewayResponse,
+    relay_images: F,
+) -> AppResult<()>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = String>,
+{
     if row.terminal {
         return Ok(());
     }
@@ -219,13 +257,20 @@ pub async fn refresh(db: &Database, keys: &EncryptionKeys, row: &GatewayResponse
         use crate::models::assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES};
         if let Some(message) = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"user_id":&row.user_id,
             "conversation_id":conversation,"turn_id":turn,"role":"assistant", "status":{"$in":["completed","failed","cancelled","interrupted"]}}).await? {
-            let mut text = message.text;
+            let start_refused = message.error_code.as_deref() == Some("assistant_start_unavailable");
+            let mut text = if start_refused { super::assistant_nyxagent::TurnError::new("assistant_start_unavailable").message } else { message.text };
             let images=super::assistant_nyxagent::turn_tool_attachments(db,&row.user_id,conversation,turn).await?;
-            if images.iter().any(super::assistant_nyxagent::chat_tool_image) {
+            if event.relay_message_id.is_none() && images.iter().any(super::assistant_nyxagent::chat_tool_image) {
                 text = text.chars().take(MAX_TEXT_CHARS - 512).collect();
                 text.push_str("\n\nImages are unavailable on this native gateway connection. View them in NyxID.");
             }
-            finish(db,keys,row,Some(&text),message.status != "completed").await?;
+            if event.relay_message_id.is_some() && images.iter().any(super::assistant_nyxagent::chat_tool_image) {
+                // The HTTP/delivery layer supplies the existing relay image
+                // ledger. Persist its result with the terminal frames so GET
+                // replay cannot change the answer or repeat uncertain sends.
+                text = relay_images(text).await;
+            }
+            finish(db,keys,row,Some(&text),message.status != "completed" && !start_refused).await?;
         } else {
             let mut body=payload(keys,row).await?;
             if body.progress() {
@@ -293,5 +338,13 @@ mod tests {
         p.finish(Some(&"😀".repeat(1_000_000)), true);
         assert!(serde_json::to_vec(&p).unwrap().len() < MAX_PAYLOAD_BYTES);
         assert_eq!(p.snapshot["status"], "failed");
+    }
+    #[test]
+    fn relay_recovery_preserves_a_long_multipart_answer() {
+        let text = "完整回复".repeat(20_000);
+        let mut payload = Payload::new("resp_long", "nyxbot_1", BTreeMap::new());
+        payload.finish_text(Some(&text), false);
+        assert_eq!(payload.snapshot["output"][0]["content"][0]["text"], text);
+        assert!(serde_json::to_vec(&payload).unwrap().len() < MAX_PAYLOAD_BYTES);
     }
 }

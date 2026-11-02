@@ -520,6 +520,17 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
 pub trait PlatformAdapter: Send + Sync {
+    /// Ephemeral indicator only. Never stores a message or consumes a reply claim.
+    async fn send_typing(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
+        _thread_id: Option<&str>,
+    ) -> AppResult<bool> {
+        Ok(false)
+    }
+
     fn supports_text_reply(&self) -> bool {
         true
     }

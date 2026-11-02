@@ -32,7 +32,8 @@ pub async fn bind_in_session(
         .get_document("delivery")
         .ok()
         .and_then(|d| d.get_str("state").ok())
-        == Some("replay");
+        == Some("replay")
+        || bound.get_str("gateway_response_id").is_ok();
     bind_response(db, session, event, owner, conversation, replay).await
 }
 
@@ -164,7 +165,8 @@ async fn bind_response(
         .collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
         .update_one(
             doc! {"_id":&response.channel_id,"user_id":owner,"binding_id":&response.binding_id,
-            "transport":"gateway","status":"active","gateway_native_phase":"ready"},
+            "transport":"gateway","status":"active",
+            "$or":[{"gateway_source":bson::Bson::Null},{"gateway_native_phase":"ready"}]},
             doc! {"$inc":{"native_admission_revision":1_i64}},
         )
         .session(&mut *session)

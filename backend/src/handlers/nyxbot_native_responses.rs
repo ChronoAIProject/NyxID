@@ -1,4 +1,4 @@
-//! Native response protocol. Legacy relay streams never enter this module.
+//! Durable provider response protocol for native and negotiated relay sources.
 use super::*;
 use crate::{
     models::nyxbot_gateway_response::{
@@ -413,6 +413,9 @@ pub async fn snapshot(
         Ok(v) => v,
         Err(r) => return r,
     };
+    if let Err(error) = relay_responses::claim_replay(&state, &row, &id).await {
+        return error.into_response();
+    }
     match current(&state, &row, &id).await {
         Ok(Some((_, body))) => {
             ([("cache-control", "no-store")], Json(body.snapshot)).into_response()
@@ -435,6 +438,9 @@ pub async fn events(
         Ok(v) => v,
         Err(r) => return r,
     };
+    if let Err(error) = relay_responses::claim_replay(&state, &row, &id).await {
+        return error.into_response();
+    }
     match current(&state, &row, &id).await {
         Ok(Some((_, body))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
             stream(state, row, headers, id, after)
@@ -449,7 +455,10 @@ async fn current(
     row: &NyxbotChannel,
     id: &str,
 ) -> AppResult<Option<(StoredResponse, recovery::Payload)>> {
-    if !source::ready(row) {
+    if row.transport != "gateway"
+        || row.status != "active"
+        || (row.gateway_source.is_some() && !source::ready(row))
+    {
         return Ok(None);
     }
     let Some(stored) = recovery::load(&state.db, row, id).await? else {
@@ -467,17 +476,55 @@ async fn current(
             .await?
             .is_none()
         {
+            if state.db.collection::<bson::Document>(RESPONSES).update_one(
+                doc! {"_id":&stored.id,"replay_refusal_recorded":{"$ne":true}},
+                doc! {"$set":{"replay_refusal_recorded":true,"replay_refusal_reason":"authority_changed"}},
+            ).await?.modified_count == 1 {
+                audit(state, &row.user_id, "nyxbot_channel_answer_delivery", json!({
+                    "event_id":stored.event_key,"conversation_id":stored.conversation_id,"turn_id":event.turn_id,
+                    "transport":"gateway","outcome":"refused","reason":"authority_changed"
+                })).await;
+            }
             return Ok(None);
         }
     }
-    recovery::refresh(&state.db, &state.encryption_keys, &stored).await?;
+    let event_key = &stored.event_key;
+    recovery::refresh(
+        &state.db,
+        &state.encryption_keys,
+        &stored,
+        |text| async move {
+            late_delivery::stream_images(
+                state,
+                event_key,
+                &text,
+                std::time::Instant::now() + Duration::from_secs(135),
+            )
+            .await
+        },
+    )
+    .await?;
     let Some(stored) = recovery::load(&state.db, row, id).await? else {
         return Ok(None);
     };
-    let payload = recovery::payload(&state.encryption_keys, &stored).await?;
+    let mut payload = recovery::payload(&state.encryption_keys, &stored).await?;
+    if row.gateway_source.is_none() && stored.terminal {
+        let event = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"_id":&stored.event_key})
+            .await?;
+        if event
+            .as_ref()
+            .and_then(|e| e.delivery.as_ref())
+            .is_some_and(|d| matches!(d.state.as_str(), "sending" | "sent" | "unknown" | "refused"))
+        {
+            relay_responses::suppress_output(&mut payload);
+        }
+    }
     Ok(Some((stored, payload)))
 }
-fn stream(
+pub(super) fn stream(
     state: AppState,
     row: NyxbotChannel,
     headers: HeaderMap,
@@ -485,8 +532,10 @@ fn stream(
     after: Option<u64>,
 ) -> Response {
     let response_id = id.clone();
+    let observer = relay_responses::Observer::new(&state, &row, &id);
     let stream = async_stream::stream! {
-        let deadline=tokio::time::Instant::now()+Duration::from_secs(55);
+        let _observer = observer;
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(if row.gateway_source.is_some() {55} else {570});
         let mut next=after.map_or(0,|n|n+1);
         loop {
             // Recheck the fresh key and binding, including while a stream waits.
@@ -496,27 +545,38 @@ fn stream(
                 _=>Err(AppError::OAuthAuthorityUnavailable),
             };
             match result {
-                Ok(Some((stored,body)))=>{
+                Ok(Some((stored,mut body)))=>{
+                    if stored.terminal && !relay_responses::stream_output(&state, &row, &stored, body.snapshot["status"].as_str().unwrap_or("failed")).await.unwrap_or(false) {
+                        relay_responses::suppress_output(&mut body);
+                    }
                     for frame in body.frames.iter().skip(next as usize) {
                         let seq=frame["sequence_number"].as_u64().unwrap_or_default();
-                        let bytes=format!("id: {seq}\nevent: {}\ndata: {}\n\n",frame["type"].as_str().unwrap_or_default(),frame);
                         next=seq+1;
-                        yield Ok::<_,Infallible>(Bytes::from(bytes));
+                        yield Ok::<_,Infallible>(axum::response::sse::Event::default()
+                            .id(seq.to_string()).event(frame["type"].as_str().unwrap_or_default()).data(frame.to_string()));
                     }
                     if stored.terminal {break;}
                 },
-                _=>{yield Ok(Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"code\":\"provider_unavailable\"}\n\n"));break;},
+                _=>{yield Ok(axum::response::sse::Event::default().event("error").data("{\"type\":\"error\",\"code\":\"provider_unavailable\"}"));break;},
             }
             if tokio::time::Instant::now()>=deadline {break;}
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     };
-    Response::builder()
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-store")
-        .header("x-cma-response-id", response_id)
-        .body(Body::from_stream(stream))
-        .expect("static response")
+    let mut response = axum::response::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response();
+    response
+        .headers_mut()
+        .insert("cache-control", "no-store".parse().expect("static header"));
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", "no".parse().expect("static header"));
+    response.headers_mut().insert(
+        "x-cma-response-id",
+        response_id.parse().expect("response identifier"),
+    );
+    response
 }
 
 /// Unrelated asynchronous updates retain their original event, including a

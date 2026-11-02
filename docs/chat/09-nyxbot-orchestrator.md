@@ -1694,3 +1694,39 @@ then receives its answer automatically. Concurrent visitors share one setup.
 Guests never become owner events, acquire owner tools or choose setup's model.
 See [engine guest model routes](08-nyxagent-engine.md) for admission, retention,
 recovery and mixed-replica details.
+
+### Channel reliability diagnostics
+
+Channel model execution resolves its typing destination and credentials once per
+task, then refreshes an ephemeral typing indicator every four seconds where
+supported. Refresh checks the live turn, event binding and channel eligibility;
+it stops on the first refusal or platform error without decrypting again. It is cancelled at settlement or Stop and never
+appears in the transcript. The existing optional **Channel progress reply**
+setting remains default-off; typing does not enable it.
+
+The settled assistant message's additive `turn_metadata.timing` stores
+`queue_wait_ms`, `admission_wait_ms`, `first_output_ms` (null if no semantic model
+output), `model_ms`, `tool_ms`, `model_calls`, `tool_calls` and `total_ms`.
+Model/tool durations are summed wall time per observed call, including failed
+calls; parallel calls can overlap. Tool duration uses retained activity start
+times; a call evicted from the bounded 40-entry activity list before completion
+still contributes to the total call count but cannot contribute a duration. Counts include calls recorded by NyxID, not
+an estimate from prose. No content, arguments or credentials are included.
+Legacy turns default to zero/null timing observations.
+
+A transient dependency refusal before any execution can retry twice under the
+same command, with 2s/4s backoff and a 15s bound. Accepted execution, model/tool
+activity or output closes that window permanently. Exhaustion has typed code
+`assistant_start_unavailable`, with the truthful message “Nothing was done.”
+Ambiguous transport failures retain the existing failure behavior.
+
+Relay response recovery is default-off behind `nyxbot:relay-response-recovery`,
+resolved for the linking person including live org overrides, in addition to
+fleet readiness and CMA capability discovery. Enable for one owner and verify
+before widening. Capability results are cached per gateway base; a dormant flag
+never probes CMA.
+
+Gateway completion is separate from platform delivery: `recovery_ready` means
+the answer is durable and CMA can retrieve it; `streamed` means it was offered
+to the live observer. Neither claims confirmed delivery. The gateway contract
+lists the required CMA journal/replay behavior and the remaining receipt gap.

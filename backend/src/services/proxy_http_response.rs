@@ -168,6 +168,9 @@ async fn relay_response_inner(
                                 for &byte in &bytes {
                                     let _ = observer.push_byte(byte);
                                 }
+                                if observer.take_first_output() {
+                                    let _ = request.first_output().await;
+                                }
                                 if observer.framing_invalid() && !framing_fault_recorded {
                                     let _ = request.fault("unknown", false).await;
                                     framing_fault_recorded = true;
@@ -670,6 +673,9 @@ pub(crate) async fn observe_model_response(
                 Some(Ok(bytes)) => {
                     for &byte in &bytes {
                         let _ = observer.push_byte(byte);
+                    }
+                    if observer.take_first_output() {
+                        let _ = request.first_output().await;
                     }
                     if observer.framing_invalid() && !framing_fault_recorded {
                         let _ = request.fault("unknown", false).await;

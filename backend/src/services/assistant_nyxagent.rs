@@ -2856,6 +2856,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        timing: Default::default(),
         collaboration: row.collaboration.clone(),
         channel_adapter_origin: None,
         invocation_id: start
@@ -3674,7 +3675,10 @@ pub async fn mark_dequeued(
     db.collection::<bson::Document>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": turn_id},
-            doc! {"$unset": {"active_turn.queued_at": "", "active_turn.queue_deadline": ""}},
+            vec![doc! {"$set": {"active_turn.timing.queue_wait_ms":{"$add":[
+                {"$ifNull":["$active_turn.timing.queue_wait_ms",0]},
+                {"$max":[0,{"$subtract":["$$NOW",{"$ifNull":["$active_turn.queued_at","$$NOW"]}]}]}]}}},
+                doc! {"$unset":["active_turn.queued_at","active_turn.queue_deadline"]}],
         )
         .await?;
     Ok(())
@@ -3807,6 +3811,7 @@ async fn finish_turn_inner(
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
+                                timing: saved.turn_metadata.as_ref().and_then(|data| data.timing.clone()),
                                 channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
                             }));
@@ -4789,6 +4794,7 @@ fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
             ]},
             -MAX_TURN_ACTIVITIES,
         ]},
+        "active_turn.timing.tool_calls": {"$add":[{"$ifNull":["$active_turn.timing.tool_calls",0]},1]},
         "active_turn.activity_total": {"$add": [{"$ifNull": ["$active_turn.activity_total", 0]}, 1]},
         "active_turn.activity_count": {"$cond": [
             {"$in": [{"$type": "$active_turn.activity_count"}, ["int", "long"]]},
@@ -5374,11 +5380,15 @@ pub async fn activity_finished_for_turn(
                 "active_turn.turn_id": turn_id,
                 "active_turn.activities.id": activity_id,
             },
-            doc! {"$set": {
-                "active_turn.activities.$.status": if ok { "completed" } else { "error" },
-                "active_turn.activities.$.ended_at": bson::DateTime::now(),
-                "active_turn.activities.$.failure": failure.map(|value| bson::to_bson(&value).expect("tool failure serialization")).unwrap_or(bson::Bson::Null),
-            }},
+            vec![doc! {"$set": {
+                "active_turn.timing.tool_ms": {"$add":[{"$ifNull":["$active_turn.timing.tool_ms",0]},
+                    {"$sum":{"$map":{"input":{"$filter":{"input":{"$ifNull":["$active_turn.activities",[]]},"as":"a","cond":{"$and":[{"$eq":["$$a.id",activity_id]},{"$eq":["$$a.status","running"]}]}}},"as":"a",
+                        "in":{"$max":[0,{"$subtract":["$$NOW","$$a.started_at"]}]}}}}]},
+                "active_turn.activities":{"$map":{"input":{"$ifNull":["$active_turn.activities",[]]},"as":"a","in":{
+                    "$cond":[{"$eq":["$$a.id",activity_id]},
+                        {"$mergeObjects":["$$a",{"status":if ok {"completed"} else {"error"},"ended_at":"$$NOW",
+                            "failure":{"$literal":failure.map(|v| bson::to_bson(&v).expect("tool failure")).unwrap_or(bson::Bson::Null)}}]},"$$a"]}}},
+            }}],
         )
         .await?;
     if !ok {
@@ -6376,6 +6386,10 @@ impl TurnError {
             && !code.starts_with("sk_"))
         .then(|| code.into());
         let (code, message) = match code {
+            "assistant_start_unavailable" => (
+                "assistant_start_unavailable",
+                "The assistant could not start because a dependency is temporarily unavailable. Nothing was done. Please try again shortly.",
+            ),
             "session_busy" => (
                 "session_busy",
                 "The assistant session is busy. Try again shortly.",

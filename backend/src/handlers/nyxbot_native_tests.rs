@@ -450,9 +450,14 @@ async fn native_unadmitted_crash_becomes_durable_failure_and_purge_wins() {
         .await
         .unwrap();
     state.db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {"_id":&saved.event_key},doc! {"$set":{"created_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::minutes(3)),"status":"running"}}).await.unwrap();
-    recovery::refresh(&state.db, &state.encryption_keys, &saved)
-        .await
-        .unwrap();
+    recovery::refresh(
+        &state.db,
+        &state.encryption_keys,
+        &saved,
+        std::future::ready,
+    )
+    .await
+    .unwrap();
     let terminal = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
     assert!(terminal.terminal);
     assert_eq!(
@@ -1023,9 +1028,14 @@ async fn native_queued_response_recovers_without_reposting_after_observers_disco
     assert_eq!(event.status, "queued");
     assert!(event.turn_id.is_none());
     assert!(stored.conversation_id.is_some());
-    recovery::refresh(&state.db, &state.encryption_keys, &stored)
-        .await
-        .unwrap();
+    recovery::refresh(
+        &state.db,
+        &state.encryption_keys,
+        &stored,
+        std::future::ready,
+    )
+    .await
+    .unwrap();
     let replay = native_responses::events(
         State(state.clone()),
         Path(id),
