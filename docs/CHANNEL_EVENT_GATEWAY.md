@@ -566,10 +566,10 @@ one owner-selected chat destination:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/nyxagent/custom-event-bindings` | List the owner's bindings (metadata only). |
-| POST | `/api/v1/nyxagent/custom-event-bindings` | Create a binding with `agent_id`, `destination_channel_id` and `destination_partition`. The response reveals the CMA producer `key_id` and HMAC `secret` once. |
-| GET | `/api/v1/nyxagent/custom-event-bindings/{id}` | Read one binding's status and CMA endpoint. |
-| POST | `/api/v1/nyxagent/custom-event-bindings/{id}/revoke` | Revoke the exact CMA channel, provider key and producer authority; repeated revocation is safe. |
+| GET | `/api/v1/assistant/nyxagent/custom-event-bindings` | List the owner's bindings (metadata only). |
+| POST | `/api/v1/assistant/nyxagent/custom-event-bindings` | Create a binding with `agent_id`, `destination_channel_id` and `destination_partition`. The response reveals the CMA producer `key_id` and HMAC `secret` once. |
+| GET | `/api/v1/assistant/nyxagent/custom-event-bindings/{id}` | Read one binding's status and CMA endpoint. |
+| POST | `/api/v1/assistant/nyxagent/custom-event-bindings/{id}/revoke` | Revoke the exact CMA channel, provider key and producer authority; repeated revocation is safe. |
 
 Creation is owner-only and requires live maintain authority for the selected
 agent, write access to the selected chat partition, and a live relay reply

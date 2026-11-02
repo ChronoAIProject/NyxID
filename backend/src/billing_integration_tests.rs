@@ -605,6 +605,14 @@ async fn run_billing_route_coverage_smoke() {
             format!("/api/v1/proxy/{}", proxy_catalog.id),
             "/api/v1/proxy/{service_id}",
         ),
+        (
+            format!("/api/v1/proxy/s/{}/", proxy.slug),
+            "/api/v1/proxy/s/{slug}/",
+        ),
+        (
+            format!("/api/v1/proxy/{}/", proxy_catalog.id),
+            "/api/v1/proxy/{service_id}/",
+        ),
     ] {
         call_mounted_route(
             &app,
@@ -613,7 +621,7 @@ async fn run_billing_route_coverage_smoke() {
         .await;
         exercised_routes.insert(mounted_route);
     }
-    assert_route_settled_count(&db, &proxy.slug, BillingMetric::Requests, 5).await;
+    assert_route_settled_count(&db, &proxy.slug, BillingMetric::Requests, 7).await;
 
     let node = insert_route_node(&state, &owner_id, "billing-route-node").await;
     let node_proxy = insert_route_service(
