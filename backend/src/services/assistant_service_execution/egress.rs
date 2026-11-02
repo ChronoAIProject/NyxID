@@ -452,7 +452,7 @@ impl<'a> HttpEgressGuard<'a> {
 impl AssistantEgressGuard<'_> {
     async fn revalidate_inner(&self) -> AppResult<()> {
         let projection = HttpProjection::default();
-        verify_resolved_projected(
+        super::http::verify_resolved_projected_inner(
             self.db,
             self.keys,
             &self.admission.chat,
@@ -461,6 +461,8 @@ impl AssistantEgressGuard<'_> {
             &self.method,
             &self.path,
             self.projection.unwrap_or(&projection),
+            self.admission.operation_identity["kind"] == "raw_inference"
+                && !is_shared_chat(&self.admission.chat),
         )
         .await?;
         if let Some(route) = self.route {

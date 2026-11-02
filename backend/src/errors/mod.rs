@@ -173,6 +173,11 @@ pub enum AppError {
     #[error("The selected model is not available. Choose another model in the model selector.")]
     AssistantModelUnavailable,
 
+    #[error(
+        "Your access settings or model connection changed during this task; review the completed actions and try again"
+    )]
+    AssistantModelAuthorityChanged,
+
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
 
@@ -890,6 +895,7 @@ impl AppError {
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
+            Self::AssistantModelAuthorityChanged => StatusCode::FORBIDDEN,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -1124,6 +1130,7 @@ impl AppError {
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
+            Self::AssistantModelAuthorityChanged => 12104,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
@@ -1403,6 +1410,7 @@ impl AppError {
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
+            Self::AssistantModelAuthorityChanged => "model_authority_changed",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
@@ -2279,6 +2287,7 @@ mod tests {
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),
             AppError::AssistantModelUnavailable.error_code(),
+            AppError::AssistantModelAuthorityChanged.error_code(),
             AppError::AdminUsageQueryTimeout.error_code(),
             AppError::WorkspaceDestinationsNotActivated.error_code(),
             AppError::NodeHttpSignatureUnsupported.error_code(),

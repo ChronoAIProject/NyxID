@@ -99,12 +99,12 @@ pub fn verify_resolved_projected<'a>(
     projection: &'a HttpProjection,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
     Box::pin(verify_resolved_projected_inner(
-        db, keys, chat, id, actual, method, path, projection,
+        db, keys, chat, id, actual, method, path, projection, false,
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn verify_resolved_projected_inner(
+pub(super) async fn verify_resolved_projected_inner(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
     chat: &acks::ChatAuthority,
@@ -113,6 +113,7 @@ async fn verify_resolved_projected_inner(
     method: &str,
     path: &str,
     projection: &HttpProjection,
+    model: bool,
 ) -> AppResult<()> {
     let before = connection_binding(db, id, &chat.api_key_id).await?;
     let mut fresh = crate::services::proxy_service::resolve_proxy_target_by_user_service_id(
@@ -171,9 +172,15 @@ async fn verify_resolved_projected_inner(
         )
         .await?;
     }
-    if before != connection_binding(db, id, &chat.api_key_id).await?
-        || execution_digest(actual) != execution_digest(&fresh.target)
-    {
+    let binding_matches = if model {
+        super::authority::model_bindings_match(db, id, &chat.api_key_id, &[&before]).await?
+    } else {
+        before == connection_binding(db, id, &chat.api_key_id).await?
+    };
+    if !binding_matches || execution_digest(actual) != execution_digest(&fresh.target) {
+        if model {
+            return Err(AppError::AssistantModelAuthorityChanged);
+        }
         return Err(AppError::Conflict(
             "Resolved service connection changed before execution".into(),
         ));
@@ -433,7 +440,7 @@ async fn check_http_projected_inner(
         });
     };
     if pool.is_none() {
-        verify_resolved_projected(
+        verify_resolved_projected_inner(
             &state.db,
             &state.encryption_keys,
             chat,
@@ -442,6 +449,7 @@ async fn check_http_projected_inner(
             method,
             path,
             projection,
+            !chat.guest && !is_shared_chat(chat) && generation && stateless && !method_override,
         )
         .await?;
     }
@@ -535,17 +543,18 @@ async fn check_http_projected_inner(
             .find_one(grant_filter)
             .await?
         {
-            if grant.get_str("binding")
-                == Ok(connection_binding(&state.db, id, &chat.api_key_id)
+            let binding = grant.get_str("binding").unwrap_or_default();
+            let matches = if !is_shared_chat(chat) {
+                super::authority::model_bindings_match(&state.db, id, &chat.api_key_id, &[binding])
                     .await?
-                    .as_str())
-            {
+            } else {
+                binding == connection_binding(&state.db, id, &chat.api_key_id).await?
+            };
+            if matches {
                 model_consent = true;
                 consent_binding = grant.get_str("binding").ok().map(str::to_owned);
             } else {
-                return Err(AppError::Conflict(
-                    "Model-use consent expired because the connection changed".into(),
-                ));
+                return Err(AppError::AssistantModelAuthorityChanged);
             }
         }
     }
@@ -594,7 +603,7 @@ async fn check_http_projected_inner(
     )
     .await?;
     if let Some(binding) = consent_binding.as_deref() {
-        validate_model_consent_snapshot(decision.admission.as_ref(), binding)?;
+        validate_model_consent_snapshot(&state.db, decision.admission.as_ref(), binding).await?;
     }
     if chat.turn_live && model_transport {
         super::bootstrap::observe_model_callback(&state.db, chat, decision.refusal.as_ref())
@@ -643,14 +652,26 @@ pub(super) async fn persist_model_consent(
     Ok(())
 }
 
-pub(super) fn validate_model_consent_snapshot(
+pub(super) async fn validate_model_consent_snapshot(
+    db: &Database,
     admission: Option<&Admission>,
     binding: &str,
 ) -> AppResult<()> {
-    if admission.is_some_and(|admission| admission.binding != binding) {
-        return Err(AppError::Conflict(
-            "Model-use authority changed during admission".into(),
-        ));
+    if let Some(admission) = admission
+        && admission.binding != binding
+    {
+        if !is_shared_chat(&admission.chat)
+            && super::authority::model_bindings_match(
+                db,
+                &admission.connection,
+                &admission.api_key_id,
+                &[&admission.binding, binding],
+            )
+            .await?
+        {
+            return Ok(());
+        }
+        return Err(AppError::AssistantModelAuthorityChanged);
     }
     Ok(())
 }
