@@ -545,7 +545,9 @@ fn admission_denial_status(error: &AppError) -> Option<u16> {
         | AppError::WalletSuspended
         | AppError::PlanEntitlementRequired(_) => Some(402),
         error if error.is_forbidden() => Some(403),
-        AppError::ApiKeyScopeForbidden(_) | AppError::OrgRoleInsufficient(_) => Some(403),
+        AppError::ApiKeyScopeForbidden(_)
+        | AppError::OrgRoleInsufficient(_)
+        | AppError::AssistantModelAuthorityChanged => Some(403),
         _ => None,
     }
 }

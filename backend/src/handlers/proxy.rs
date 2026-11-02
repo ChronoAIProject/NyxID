@@ -4634,7 +4634,12 @@ async fn execute_resolved_proxy_inner<'a>(
                 &all_headers,
                 &assistant_projection,
             )
-            .await?
+            .await
+            .inspect_err(|error| {
+                if matches!(error, AppError::AssistantModelAuthorityChanged) {
+                    request_audit.denied(error.status_code().as_u16());
+                }
+            })?
         },
     );
     let assistant_decision = assistant_decision_slot

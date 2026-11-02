@@ -487,8 +487,9 @@ export function VoicePanel({
                 awaiting_confirmation: "Needs your OK",
                 completed: "Done",
                 cancelled: "Cancelled",
+                failed: "Failed",
               } as Record<string, string>
-            )[t.state] ?? t.state}
+            )[t.outcome ?? t.state] ?? t.state}
             {t.result_message_id ? (
               <a
                 className="ml-1 text-nyx-secondary-400 underline"

@@ -209,7 +209,11 @@ impl ModelRequest {
 }
 
 pub fn refusal_code(error: &AppError) -> Option<&'static str> {
-    billing_failure_code(error.error_key())
+    if matches!(error, AppError::AssistantModelAuthorityChanged) {
+        Some("model_authority_changed")
+    } else {
+        billing_failure_code(error.error_key())
+    }
 }
 
 pub fn billing_failure_code(code: &str) -> Option<&'static str> {
@@ -246,7 +250,12 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
             turn.model_attempt_id.as_deref() == Some(&fact.attempt_id) && recent(fact.at)
         })
         .and_then(|fact| {
-            billing_failure_code(&fact.code).or_else(|| {
+            (fact.code == "model_authority_changed"
+                && fact.http_status == Some(403)
+                && fact.error_code == Some(12104))
+            .then_some("model_authority_changed")
+            .or_else(|| billing_failure_code(&fact.code))
+            .or_else(|| {
                 (fact.code == "guest_model_route_required"
                     && fact.http_status == Some(403)
                     && fact.error_code == Some(9000))
@@ -462,4 +471,22 @@ impl StreamObserver {
             None
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn model_2142_authority_refusal_is_actionable_and_never_replaces_identity_or_retries() {
+    use super::assistant_nyxagent::{Recovery, RecoveryAction};
+    let error = AppError::AssistantModelAuthorityChanged;
+    assert_eq!(error.status_code().as_u16(), 403);
+    assert_eq!(refusal_code(&error), Some("model_authority_changed"));
+    let classified = TurnError::new(error.error_key());
+    assert_eq!(classified.code, "model_authority_changed");
+    assert!(classified.message.contains("Review the completed actions"));
+    let mut recovery = Recovery::default();
+    assert_eq!(
+        recovery.decide(403, error.error_key(), true),
+        RecoveryAction::Fail
+    );
+    assert!(!recovery.replaced && !recovery.rebound && recovery.retries == 0);
 }

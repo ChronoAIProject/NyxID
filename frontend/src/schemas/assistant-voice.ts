@@ -57,6 +57,7 @@ export const voiceSnapshotSchema = z.object({
         "completed",
         "cancelled",
       ]),
+      outcome: z.enum(["failed", "cancelled"]).nullable().optional(),
       pending_acknowledgement_ids: z.array(z.string()),
       title: z.string().max(120).nullable().optional(),
       result_message_id: z.string().nullable().optional(),

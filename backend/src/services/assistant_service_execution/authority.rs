@@ -2,11 +2,11 @@ use super::*;
 
 /// A digest only: no key material, downstream arguments or internal authority
 /// metadata is exposed to the model or forwarded to a provider.
-pub fn connection_binding<'a>(
+fn connection_projection<'a>(
     db: &'a Database,
     id: &'a str,
     api_key_id: &'a str,
-) -> futures::future::BoxFuture<'a, AppResult<String>> {
+) -> futures::future::BoxFuture<'a, AppResult<Value>> {
     Box::pin(async move {
         let service =
             crate::services::service_history::collection::<UserService>(db, "user_services")
@@ -140,6 +140,35 @@ pub fn connection_binding<'a>(
         if !shared_policy.is_null() {
             projection["shared_policy"] = shared_policy;
         }
-        Ok(digest(projection))
+        Ok(projection)
     })
+}
+
+/// Preserve the persisted action/consent digest for rolling compatibility.
+pub fn connection_binding<'a>(
+    db: &'a Database,
+    id: &'a str,
+    api_key_id: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<String>> {
+    Box::pin(async move { Ok(digest(connection_projection(db, id, api_key_id).await?)) })
+}
+
+/// Model consent is independent of the owner's action-confirmation mode. Compare
+/// legacy digests against the same live projection under the three known modes;
+/// every other authority field must still match. No approval or tool path uses this.
+pub(super) async fn model_bindings_match(
+    db: &Database,
+    id: &str,
+    key: &str,
+    bindings: &[&str],
+) -> AppResult<bool> {
+    let mut projection = connection_projection(db, id, key).await?;
+    let mut accepted = Vec::new();
+    for mode in ["nyxmode", "autopilot", "ask_every_time"] {
+        projection["authority"]["mode"] = json!(mode);
+        accepted.push(digest(projection.clone()));
+    }
+    Ok(bindings
+        .iter()
+        .all(|binding| accepted.iter().any(|candidate| candidate == binding)))
 }

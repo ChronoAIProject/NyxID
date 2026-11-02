@@ -136,6 +136,11 @@ fn render(
             RequestState::Completed => "Done",
             RequestState::Claimed => "Running",
             RequestState::Queued => "Queued",
+            RequestState::Cancelled
+                if crate::services::assistant_voice::request_outcome(request) == Some("failed") =>
+            {
+                "Failed"
+            }
             RequestState::Cancelled => "Cancelled",
             RequestState::AwaitingConfirmation => "Needs your OK",
         };
@@ -189,6 +194,16 @@ mod tests {
             created_at: Utc::now(),
             expires_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn voice_2142_receipt_distinguishes_failure_from_stop() {
+        let mut failed = request(RequestState::Cancelled, "failed", "m1");
+        failed.terminal_error_code = Some("model_authority_changed".into());
+        let stopped = request(RequestState::Cancelled, "stopped", "m2");
+        let text = render(20, &[failed, stopped], &HashMap::new(), &[]);
+        assert!(text.contains("— Failed"));
+        assert!(text.contains("— Cancelled"));
     }
 
     #[test]
