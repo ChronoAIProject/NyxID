@@ -185,6 +185,9 @@ pub struct NyxbotChannel {
     /// their own thread, as a guest).
     #[serde(default)]
     pub private_chats: Option<String>,
+    /// Initial posting permission for new private chats only; absent means off.
+    #[serde(default)]
+    pub private_chat_posts: Option<bool>,
     /// Whether the chat app's messages reach the agent, judged from the
     /// newest inbound message: `ok` or `failing`; `None` before any message.
     #[serde(default)]

@@ -141,6 +141,12 @@ export const nyxBotApi = {
       body: { private_chats: privateChats },
     });
   },
+  async setPrivateChatPosts(channelAgentId: string, enabled: boolean, applyToExisting: boolean) {
+    return assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}`, {
+      method: "PATCH",
+      body: { private_chat_posts: enabled, apply_to_existing: applyToExisting },
+    });
+  },
   /** The bot's chats, most recent first. */
   async channelChats(channelAgentId: string) {
     return nyxAgentChannelChatListSchema.parse(

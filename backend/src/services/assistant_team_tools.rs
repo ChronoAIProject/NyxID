@@ -483,8 +483,10 @@ pub fn schema(name: &str) -> Value {
                 "private_chats": {"type": "string", "enum": ["owner", "everyone"],
                     "description": "Who may talk to the agent in private chats with the bot: \
                     only the user (owner), or anyone (everyone, each as a guest in their own \
-                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"}}),
-            vec!["channel_agent_id", "private_chats"],
+                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
+                "private_chat_posts": {"type":"boolean","description":"Allow new private customer chats to start with posting enabled. Default false. Groups, channels and topics still need per-chat opt-in. Turning off changes only future chats unless apply_to_existing is true."},
+                "apply_to_existing": {"type":"boolean","default":false,"description":"Also set existing private chats of this channel to private_chat_posts (required with this option). At most 1000 changed chats; over the cap nothing changes. Per-chat off remains effective until explicitly applied again."}}),
+            vec!["channel_agent_id"],
         ),
         "create_collaboration_group" => (
             json!({"name":string(60),"member_agent_ids":{"type":"array","minItems":1,"maxItems":8,"items":string(64)}}),
@@ -861,7 +863,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             posting). NyxID records chats and their kind by itself as messages arrive (a \
             group appears once the bot gets a message there): never ask the user for chat \
             IDs or whether a chat is a group. Use the chat id with nyxid__update_channel_chat \
-            and nyxid__post_to_chat."
+            and nyxid__post_to_chat. Use nyxid__update_channel_access private_chat_posts for new customer posting defaults, optionally apply_to_existing for existing private chats."
         }
         "list_channel_threads" => {
             "List followed platform threads and retained thread history. Returns metadata only, with conversation links, state and idle expiry. Optional channel/chat filters and bounded cursor pagination."
@@ -873,7 +875,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Change one chat's settings when the user asks: answer every message or only \
             mentions and replies (groups default to mentions); let members other than the user \
             talk to the agent (default once the user has talked to the bot there); allow \
-            posting there; or give the chat its own personal specialist. Organization specialists \
+            posting there (per-chat off always overrides the new-chat default); use nyxid__update_channel_access private_chat_posts to allow new customer chats automatically, with apply_to_existing to include existing private chats; or give the chat its own personal specialist. Organization specialists \
             cannot be linked to channel bots or chats. Guests never act for the user: you \
             answer them without tools, and a specialist given the chat uses only its own \
             services, as far as nyxid__set_guest_access lets guests (by default looking up, \
@@ -883,7 +885,7 @@ pub(crate) fn description(name: &str) -> &'static str {
         "update_channel_access" => {
             "Set who may talk to the agent in private chats with a channel bot: only the user \
             (default) or anyone, each in their own thread as a guest (no account actions and \
-            nothing private to the user; NyxBot uses no tools for them)."
+            nothing private to the user; NyxBot uses no tools for them). Also set private_chat_posts to allow new private customer chats to receive agent-initiated posts, optionally apply_to_existing. This does not open the audience or change group/channel/topic permissions."
         }
         _ => "Unknown NyxBot tool.",
     }
