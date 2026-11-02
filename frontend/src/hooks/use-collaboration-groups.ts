@@ -5,6 +5,7 @@ import { assistantGroupSchema } from "@/schemas/assistant-nyxagent";
 import {
   groupInviteSchema,
   groupInvitePreviewSchema,
+  guestAccessRequestSchema,
   type CollaborationChange,
 } from "@/schemas/collaboration-group";
 import { nyxBotGroupKeys } from "./use-nyxbot-groups";
@@ -19,6 +20,20 @@ const mutationSchema = z.object({
   invite: groupInviteSchema.nullable(),
 });
 export const collaborationApi = {
+  async askOwner(group: string, agent: string) {
+    return guestAccessRequestSchema.parse(
+      await assistantJson(
+        `${path(group)}/agents/${encodeURIComponent(agent)}/guest-requests`,
+        { method: "POST" },
+      ),
+    );
+  },
+  async cancelGuestRequest(group: string, agent: string, request: string) {
+    await assistantJson(
+      `${path(group)}/agents/${encodeURIComponent(agent)}/guest-requests/${encodeURIComponent(request)}`,
+      { method: "DELETE" },
+    );
+  },
   async change(id: string, revision: number, change: CollaborationChange) {
     return mutationSchema.parse(
       await assistantJson(`${path(id)}/membership`, {
@@ -62,6 +77,25 @@ export const collaborationApi = {
     );
   },
 };
+export function useCollaborationGuestRequest(group: string) {
+  const user = useAuthStore((s) => s.user?.id);
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { agent: string; cancelRequest?: string }) => {
+      if (input.cancelRequest) {
+        await collaborationApi.cancelGuestRequest(
+          group,
+          input.agent,
+          input.cancelRequest,
+        );
+      } else {
+        await collaborationApi.askOwner(group, input.agent);
+      }
+    },
+    onSettled: () =>
+      client.invalidateQueries({ queryKey: nyxBotGroupKeys.all(user) }),
+  });
+}
 export function useCollaborationAvailable() {
   const user = useAuthStore((s) => s.user?.id);
   const enabled = useFeature(FEATURE_FLAG.SHARED_AGENTS);

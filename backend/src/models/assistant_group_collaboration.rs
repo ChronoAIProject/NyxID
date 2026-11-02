@@ -83,6 +83,8 @@ impl std::fmt::Debug for Invite {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentAccess {
+    #[serde(default)]
+    pub guest_request: Option<GuestAccessRequest>,
     #[serde(rename = "_id")]
     pub id: String,
     pub group_id: String,
@@ -151,6 +153,18 @@ pub struct AgentProposal {
     pub agent_id: String,
     pub proposed_by: String,
     pub membership_revision: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Bounded, per-policy request; old replicas ignore this optional sibling field.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GuestAccessRequest {
+    pub id: String,
+    pub requested_by: String,
+    pub status: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
 }

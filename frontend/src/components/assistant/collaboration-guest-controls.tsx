@@ -6,6 +6,8 @@ import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { collaborationApi } from "@/hooks/use-collaboration-groups";
+import { guestAccessRequestSchema } from "@/schemas/collaboration-group";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -22,6 +24,7 @@ const schema = z.object({
       membership_revision: z.number(),
       guest_revision: z.number(),
       enabled: z.boolean(),
+      request: guestAccessRequestSchema.nullable().optional(),
     }),
   ),
 });
@@ -54,11 +57,23 @@ export function CollaborationGuestControls({
         agent_id: agentId,
         enabled: !row.enabled,
         guest_revision: row.guest_revision,
+        ...(!row.enabled && row.request?.status === "pending"
+          ? { request_id: row.request.id }
+          : {}),
       }),
     onSuccess: () => {
       setConfirm(undefined);
       return client.invalidateQueries({ queryKey: key });
     },
+  });
+  const cancel = useMutation({
+    mutationFn: (row: z.infer<typeof schema>["groups"][number]) =>
+      collaborationApi.cancelGuestRequest(
+        row.group_id,
+        agentId,
+        row.request!.id,
+      ),
+    onSettled: () => client.invalidateQueries({ queryKey: key }),
   });
   if (!query.data?.length) return null;
   return (
@@ -70,24 +85,60 @@ export function CollaborationGuestControls({
       </p>
       {query.data.map((row) => (
         <div
-          className="flex items-center justify-between gap-2"
+          className="space-y-2 rounded-lg border border-border p-3"
           key={row.group_id}
         >
-          <span className="min-w-0 break-all">{row.group_id}</span>
-          <Button
-            size="sm"
-            isLoading={mutation.isPending}
-            onClick={() =>
-              row.enabled ? mutation.mutate(row) : setConfirm(row)
-            }
-          >
-            {row.enabled ? "Disable guests" : "Enable guests"}
-          </Button>
+          <p className="min-w-0 break-all">Group {row.group_id}</p>
+          {row.request ? (
+            <Badge variant="secondary">Request {row.request.status}</Badge>
+          ) : null}
+          {row.request?.status === "pending" && !row.enabled ? (
+            <>
+              <p className="text-muted-foreground">
+                Allow current and future participants without use rights to use
+                this agent under your guest service policy. They use your
+                identity and billing; they cannot approve cards or use private
+                account tools.
+              </p>
+              <p className="text-muted-foreground">
+                Expires {new Date(row.request.expires_at).toLocaleString()}
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={cancel.isPending}
+                  isLoading={mutation.isPending}
+                  onClick={() => mutation.mutate(row)}
+                >
+                  Approve participant access
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={mutation.isPending}
+                  isLoading={cancel.isPending}
+                  onClick={() => cancel.mutate(row)}
+                >
+                  Cancel request
+                </Button>
+              </div>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              isLoading={mutation.isPending}
+              onClick={() =>
+                row.enabled ? mutation.mutate(row) : setConfirm(row)
+              }
+            >
+              {row.enabled ? "Disable guests" : "Enable guests"}
+            </Button>
+          )}
         </div>
       ))}
-      {mutation.error ? (
+      {mutation.error || cancel.error ? (
         <p role="alert" className="text-destructive">
-          {mutation.error.message}
+          {(mutation.error ?? cancel.error)?.message}
         </p>
       ) : null}
       {confirm ? (

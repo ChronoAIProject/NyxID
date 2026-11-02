@@ -251,3 +251,10 @@ describe("eventNotices across lines", () => {
     expect(eventNotices("Do this.\n- and that")).toEqual(["Do this.\n- and that"]);
   });
 });
+
+it("keeps group response display names independent of the viewer's inventory", () => {
+  const ref = { id: "agent", display_name: "Office Agent" };
+  expect(withDisplayName(ref, []).display_name).toBe("Office Agent");
+  expect(withDisplayName(ref, [{ id: "agent", display_name: "Stale" }]).display_name).toBe("Office Agent");
+  expect(withDisplayName({ ...ref, display_name: null }, [{ id: "agent", display_name: "Stale" }]).display_name).toBeNull();
+});

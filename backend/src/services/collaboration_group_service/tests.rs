@@ -508,6 +508,7 @@ async fn collaboration_identity_prioritizes_use_rights_and_refuses_org_guests() 
             &group.id,
             marker(&group).unwrap().membership_revision,
             Change::GuestAccess {
+                request_id: None,
                 agent_id: agent.id.clone(),
                 enabled: true,
                 expected_revision: 1
@@ -524,6 +525,7 @@ async fn collaboration_identity_prioritizes_use_rights_and_refuses_org_guests() 
             &group.id,
             marker(&group).unwrap().membership_revision,
             Change::GuestAccess {
+                request_id: None,
                 agent_id: org_agent.id.clone(),
                 enabled: true,
                 expected_revision: 1
@@ -538,6 +540,7 @@ async fn collaboration_identity_prioritizes_use_rights_and_refuses_org_guests() 
         &f.admin,
         &group,
         Change::GuestAccess {
+            request_id: None,
             agent_id: agent.id.clone(),
             enabled: true,
             expected_revision: 1,
@@ -619,6 +622,7 @@ async fn collaboration_revoked_shared_queue_never_downgrades_to_guest() {
         &f.admin,
         &group,
         Change::GuestAccess {
+            request_id: None,
             agent_id: agent.id.clone(),
             enabled: true,
             expected_revision: 1,
@@ -887,6 +891,7 @@ async fn collaboration_external_owner_can_only_opt_in_and_remove_readd_resets_gu
         &f.outsider,
         &group,
         Change::GuestAccess {
+            request_id: None,
             agent_id: foreign.id.clone(),
             enabled: true,
             expected_revision: 1,
@@ -1255,6 +1260,7 @@ async fn collaboration_runtime_guests_have_owner_keys_but_distinct_requester_slo
         &f.admin,
         &group,
         Change::GuestAccess {
+            request_id: None,
             agent_id: agent.id.clone(),
             enabled: true,
             expected_revision: 1,
@@ -1350,6 +1356,7 @@ async fn collaboration_guest_enable_requires_delegation_approval_in_the_write() 
     let (f, agent, group) = setup("collaboration_guest_delegation").await;
     let active = runtime_start(&f, &f.admin, &group, &agent).await;
     let guest_change = |enabled, expected_revision| Change::GuestAccess {
+        request_id: None,
         agent_id: agent.id.clone(),
         enabled,
         expected_revision,
@@ -2698,6 +2705,7 @@ async fn collaboration_public_rest_gates_writes_and_hides_nonparticipant_groups(
         Err(AppError::NotFound(_))
     ));
     let guest = api::GuestInput {
+        request_id: None,
         expected_revision: 999,
         guest_revision: 999,
         enabled: true,
@@ -3338,3 +3346,6 @@ async fn collaboration_card_snapshot_batches_threads_without_per_agent_reads() {
     assert_eq!(single, reads.load(Ordering::SeqCst));
     f.state.db.drop().await.unwrap();
 }
+
+#[path = "participant_access_tests.rs"]
+mod participant_access;

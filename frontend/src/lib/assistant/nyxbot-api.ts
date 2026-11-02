@@ -212,7 +212,7 @@ export const nyxBotApi = {
   /** Accepted (202): replies arrive later as new messages. */
   async postGroupMessage(id: string, text: string, attachmentIds?: string[], recipientAgentIds?: string[]) {
     return assistantGroupPostedSchema.parse(
-      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text, ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}), ...(recipientAgentIds?.length ? { recipient_agent_ids: recipientAgentIds } : {}) } }),
+      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text, ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}), ...(recipientAgentIds !== undefined ? { recipient_agent_ids: recipientAgentIds } : {}) } }),
     );
   },
 };

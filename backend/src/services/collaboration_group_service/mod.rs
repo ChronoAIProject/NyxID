@@ -2,8 +2,10 @@
 //! All new writers require the shared-agents flag and full-fleet Phase 2 readiness.
 
 pub mod cleanup;
+pub mod guest_requests;
 pub mod identity;
 pub mod membership;
+pub mod participant_posts;
 pub mod requests;
 pub mod runtime;
 #[cfg(test)]
@@ -30,7 +32,7 @@ use crate::{
 
 pub const READINESS: &str = "assistant:collaboration-groups-v1";
 pub const HISTORY_DISCLOSURE: &str = "New participants can read the full retained group history.";
-pub const REFUSAL: &str = "Ask this agent's owner to share it with you.";
+pub const REFUSAL: &str = "This agent cannot reply with your current access. Ask its owner to share it with you or allow participants in group settings.";
 
 fn missing() -> AppError {
     AppError::NotFound("Group not found".into())

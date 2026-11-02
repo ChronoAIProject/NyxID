@@ -543,6 +543,48 @@ and delivery; on removal send no subsequent content and close/revalidate group
 streams. Dropped identifier events retain polling/sweep as backstop. Do not route
 by `GroupMessage.user_id` or author: even system notices need the group marker.
 
+### Participant chat and requests for guest access
+
+Participation grants the right to post public text independently of agent use.
+An explicit empty `recipient_agent_ids` posts to people only: no request, turn,
+key or model charge. With omitted recipients, existing agent targeting remains;
+when no agent is usable and no agent is mentioned, the server posts to people
+only. Explicit unavailable targets and mentions produce an attributed refusal,
+never a silent redirect. People-only posts reject uploads with an actionable
+message; uploads on agent requests keep their existing binding rules. These
+messages are public transcript and intentionally become context for later group
+turns, subject to the same bounded public-transcript projection.
+
+Any current participant may ask a personal agent's owner to allow group guests.
+A single pending request is stored on the existing group/agent policy, with a
+UUID, requesting person and seven-day expiry. Repeated requests reuse it without
+re-notifying. The requester, creator or agent owner may cancel. Expiry is checked
+at use, independent of cleanup; removal/re-addition drops the request with the
+old policy. Notifications disclose identifiers and a link to Agent Details →
+Grants, never transcript or other participants. The owner reviews the scope and
+billing disclosure there and approves with one click through the existing
+owner-only GuestAccess decision. Approval naming a request must match its live
+ID and expiry; it cannot revive a cancelled, expired or removed request.
+A direct owner policy change remains available without a request.
+Requests share the existing per-person group-change rate limit. The human-only
+`POST /assistant/nyxagent/groups/{group}/agents/{agent}/guest-requests` route
+creates or reuses a request; `DELETE` of that route plus `/{request}` cancels it.
+The existing guest-access decision accepts an optional `request_id` binding.
+
+Owners outside the group may manage only their attached agent's policy. Their
+live person/feature eligibility is required, but participation is not. No owner
+policy action grants transcript access. Creators cannot enable foreign agents;
+organization agents cannot enable guests. Guest identity, billing, restrictions
+and lack of cards are unchanged. Request/decision audits contain metadata only.
+
+Responses add per-member unavailability reasons and request status. The composer
+stays writable for a current participant even without usable agents. It shows
+people-only delivery when no agent is selected; member/picker labels use the
+response's display names and explain who can enable access. Legacy personal
+crews and org groups retain their existing recipient requirements. Old replicas
+may refuse people-only posts, request routes or request-bound approvals; no old
+reader gains authority.
+
 ## 9. Frontend experience
 
 Use the existing Assistant shell, agent details sheet, Radix/shadcn components
