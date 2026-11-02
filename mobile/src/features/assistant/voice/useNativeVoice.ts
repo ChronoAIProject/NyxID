@@ -50,17 +50,27 @@ export function useNativeVoice(
     undefined,
   );
 
+  // Native gestures and async work can retain a handler from an earlier chat.
+  // Check its scope before touching the shared client ref or making a request.
+  function sameScope() {
+    return (
+      mounted.current &&
+      scope.current.thread === thread &&
+      scope.current.environment === environment &&
+      environment.epoch === getAuthEpoch()
+    );
+  }
+
   function reportError(message?: string, nextRecovery?: VoiceStartRecovery) {
     setError(message);
     setRecovery(nextRecovery);
   }
 
   function refresh() {
-    if (refreshTimer.current) return;
+    if (!sameScope() || refreshTimer.current) return;
     refreshTimer.current = setTimeout(() => {
       refreshTimer.current = undefined;
-      if (mounted.current && environment.epoch === getAuthEpoch())
-        update.current();
+      if (sameScope()) update.current();
     }, 1000);
   }
 
@@ -126,16 +136,22 @@ export function useNativeVoice(
   }, [thread, environment]);
 
   async function start(preferences: VoicePreferences, protocol: VoiceProtocol) {
-    if (busy.current || current.current || conflict) return;
+    if (
+      !sameScope() ||
+      AppState.currentState !== "active" ||
+      busy.current ||
+      current.current ||
+      conflict
+    )
+      return;
     busy.current = true;
     const generation = ++ticket.current;
     const controller = new AbortController();
     pending.current = controller;
     const valid = () =>
-      mounted.current &&
+      sameScope() &&
       ticket.current === generation &&
-      !controller.signal.aborted &&
-      getAuthEpoch() === environment.epoch;
+      !controller.signal.aborted;
     setStarting(true);
     reportError();
     latestSnapshot.current = null;
@@ -241,18 +257,16 @@ export function useNativeVoice(
   }
 
   async function end() {
+    if (!sameScope()) return;
     stopLocal();
     refresh();
   }
 
   async function endConflict() {
-    if (!conflict || conflictBusy.current) return;
+    if (!sameScope() || !conflict || conflictBusy.current) return;
     conflictBusy.current = true;
     const generation = ticket.current;
-    const valid = () =>
-      mounted.current &&
-      ticket.current === generation &&
-      environment.epoch === getAuthEpoch();
+    const valid = () => sameScope() && ticket.current === generation;
     setEndingConflict(true);
     reportError();
     try {
@@ -285,11 +299,6 @@ export function useNativeVoice(
   }
 
   async function stopTask(id: string) {
-    const sameScope = () =>
-      mounted.current &&
-      scope.current.thread === thread &&
-      scope.current.environment === environment &&
-      environment.epoch === getAuthEpoch();
     if (!sameScope()) return;
     if (current.current) return current.current.stopTask(id);
     const task = latestSnapshot.current?.tasks.find((row) => row.id === id);
@@ -334,17 +343,21 @@ export function useNativeVoice(
     end,
     endConflict,
     hold(pressed: boolean) {
+      if (!sameScope()) return;
       setHolding(current.current?.hold(pressed) ?? false);
     },
     mute(muted: boolean) {
+      if (!sameScope()) return;
       setHolding(false);
       return current.current?.mute(muted);
     },
     muteSpeaker(muted: boolean) {
+      if (!sameScope()) return;
       current.current?.muteSpeaker(muted);
       setSpeakerMuted(muted);
     },
     resumeAudio() {
+      if (!sameScope()) return;
       return current.current?.resumeAudio();
     },
     stopTask,

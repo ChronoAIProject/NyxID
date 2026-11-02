@@ -3,8 +3,10 @@ import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import { lightColors } from "../../theme/mobileTheme";
+import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
+import type { SegmentControlProps } from "../../components/SegmentControl";
 
-type Element = { type: unknown; props: Record<string, any>; key?: number };
+type Element = { type: unknown; props: Record<string, any>; key?: string | number };
 const style = (node: Element) =>
   Object.assign({}, ...[node.props.style].flat(Infinity).filter(Boolean));
 function elements(root: Element): Element[] {
@@ -19,18 +21,24 @@ function elements(root: Element): Element[] {
       ),
   ];
 }
-function renderRows(node: Element): Element {
+function renderRows(node: Element, fontScale = 1): Element {
+  if (node.type === renderSegmentControl) {
+    return renderRows(
+      renderSegmentControl(node.props as SegmentControlProps, { fontScale }),
+      fontScale,
+    );
+  }
   if (
     typeof node.type === "function" &&
     ["AccountRow", "DynamicTypeText"].includes(node.type.name)
   ) {
-    return renderRows(node.type(node.props));
+    return renderRows(node.type(node.props), fontScale);
   }
   const render = (child: unknown): unknown =>
     Array.isArray(child)
       ? child.map(render)
       : child && typeof child === "object" && "props" in child
-        ? renderRows(child as Element)
+        ? renderRows(child as Element, fontScale)
         : child;
   return {
     ...node,
@@ -102,6 +110,7 @@ function setup(connectedTelegram = false, pushDevices = 0) {
     },
     "../../components/DynamicTypeText": dynamicText,
     "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
+    "../../components/SegmentControl": { SegmentControl: renderSegmentControl },
     "../../components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
     "../../components/TelegramLinkModal": {
       TelegramLinkModal: "TelegramLinkModal",
@@ -148,6 +157,7 @@ function setup(connectedTelegram = false, pushDevices = 0) {
       AccountSettingsScreen({
         navigation: { push: (...args: unknown[]) => pushes.push(args) },
       }),
+      dimensions.fontScale,
     ),
   );
   const all = () => elements(harness.value());
@@ -172,6 +182,7 @@ function setup(connectedTelegram = false, pushDevices = 0) {
     title: () =>
       renderRows(
         AccountSettingsTitle({ children: "Settings", tintColor: "purple" }),
+        dimensions.fontScale,
       ),
     pending: () => {
       pending = true;
@@ -190,11 +201,18 @@ test("Settings reflows label/value, identity and control rows as Dynamic Type gr
     style(env.parent(env.text("Sign-in Method"))).flexDirection,
     "row",
   );
+  const appearance = () => env.all().find((node) => node.props.accessibilityRole === "tablist" && node.props.accessibilityLabel === "Appearance")!;
+  assert.equal(style(appearance()).flexDirection, "row");
+  assert.equal(env.all().find((node) => node.props.accessibilityLabel === "Light appearance")!.props.accessibilityState.selected, true);
   for (const [width, fontScale] of [
     [402, 3.12],
     [320, 1],
   ]) {
     env.resize(width!, fontScale!);
+    assert.equal(style(appearance()).flexDirection, "column", "Appearance follows the screen's large-text layout");
+    for (const label of ["Light appearance", "Dark appearance"]) {
+      assert.ok(elements(appearance()).some((node) => node.props.accessibilityRole === "tab" && node.props.accessibilityLabel === label));
+    }
     for (const label of [
       "Sign-in Method",
       "Push Notifications",
@@ -225,6 +243,7 @@ test("Settings reflows label/value, identity and control rows as Dynamic Type gr
     }
   }
   env.resize(402, 1);
+  assert.equal(style(appearance()).flexDirection, "row");
   assert.equal(
     style(env.parent(env.text("Sign-in Method"))).flexDirection,
     "row",

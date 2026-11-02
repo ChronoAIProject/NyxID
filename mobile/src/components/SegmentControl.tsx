@@ -1,18 +1,36 @@
-import { useEffect, useMemo, useRef } from "react";
-import { Animated, LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
-import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  Animated,
+  LayoutChangeEvent,
+  Pressable,
+  StyleSheet,
+  View,
+} from "react-native";
+import type { StyleProp, ViewStyle } from "react-native";
+import { radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
+import { createSegmentControlStyles } from "./segmentControlStyles";
+import { DynamicTypeText as Text } from "./DynamicTypeText";
 
 type Segment = {
+  /** Stable identity when the visible label includes a changing count. */
+  id?: string;
   label: string;
   count?: number;
+  accessibilityLabel?: string;
+  icon?: ReactNode;
 };
 
-type SegmentControlProps = {
+export type SegmentControlProps = {
   segments: Segment[];
   activeIndex: number;
   disabled?: boolean;
+  accessibilityLabel?: string;
+  /** External spacing only; grouped-choice visuals belong to this component. */
+  style?: StyleProp<ViewStyle>;
+  stacked?: boolean;
   onPress: (index: number) => void;
 };
 
@@ -20,56 +38,95 @@ export function SegmentControl({
   segments,
   activeIndex,
   disabled = false,
+  accessibilityLabel,
+  style,
+  stacked = false,
   onPress,
 }: SegmentControlProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const translateX = useRef(new Animated.Value(0)).current;
-  const segmentWidth = useRef(0);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const trackInset = styles.container.padding + styles.container.borderWidth;
+  // The highlight shares each tab's measured content width, excluding track
+  // borders, padding and the gaps between tabs.
+  const segmentWidth =
+    !stacked && segments.length > 0
+      ? Math.max(
+          0,
+          (containerWidth -
+            2 * trackInset -
+            (segments.length - 1) * styles.container.gap) /
+            segments.length,
+        )
+      : 0;
 
   useEffect(() => {
-    Animated.spring(translateX, {
-      toValue: activeIndex * segmentWidth.current,
+    if (stacked) return;
+    const animation = Animated.spring(translateX, {
+      toValue: activeIndex * (segmentWidth + styles.container.gap),
       useNativeDriver: true,
       tension: 300,
       friction: 30,
-    }).start();
-  }, [activeIndex, translateX]);
+      overshootClamping: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [activeIndex, segmentWidth, stacked, styles.container.gap, translateX]);
 
   const onContainerLayout = (e: LayoutChangeEvent) => {
-    const totalWidth = e.nativeEvent.layout.width - 4; // subtract container padding (2+2)
-    segmentWidth.current = totalWidth / segments.length;
-    translateX.setValue(activeIndex * segmentWidth.current);
+    setContainerWidth(e.nativeEvent.layout.width);
   };
 
   return (
-    <View style={styles.container} onLayout={onContainerLayout}>
-      <Animated.View
-        style={[
-          styles.highlight,
-          {
-            width: `${100 / segments.length}%` as unknown as number,
-            transform: [{ translateX }],
-          },
-        ]}
-      />
+    <View
+      accessibilityRole="tablist"
+      accessibilityLabel={accessibilityLabel}
+      style={[styles.container, stacked && styles.containerStacked, style]}
+      onLayout={onContainerLayout}
+    >
+      {segmentWidth > 0 ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.highlight,
+            styles.selected,
+            {
+              width: segmentWidth,
+              transform: [{ translateX }],
+            },
+          ]}
+        />
+      ) : null}
       {segments.map((seg, i) => {
         const isActive = i === activeIndex;
         return (
           <Pressable
-            key={seg.label}
+            key={seg.id ?? seg.label}
             accessibilityRole="tab"
-            accessibilityLabel={seg.label}
+            accessibilityLabel={seg.accessibilityLabel ?? seg.label}
             accessibilityState={{ selected: isActive, disabled }}
             disabled={disabled}
-            style={styles.item}
+            style={({ pressed }) => [
+              styles.item,
+              stacked && styles.itemStacked,
+              stacked && isActive && styles.selected,
+              pressed && !disabled && styles.pressed,
+            ]}
             onPress={() => onPress(i)}
           >
-            <Text style={[styles.label, isActive && styles.labelActive]}>{seg.label}</Text>
+            {seg.icon}
+            <Text style={[styles.label, isActive && styles.labelActive]}>
+              {seg.label}
+            </Text>
             {seg.count !== undefined && seg.count > 0 ? (
-              <View style={[styles.countBadge, isActive && styles.countBadgeActive]}>
-                <Text style={[styles.countText, isActive && styles.countTextActive]}>
+              <View
+                style={[styles.countBadge, isActive && styles.countBadgeActive]}
+              >
+                <Text
+                  style={[styles.countText, isActive && styles.countTextActive]}
+                >
                   {seg.count}
                 </Text>
               </View>
@@ -81,44 +138,40 @@ export function SegmentControl({
   );
 }
 
-const createStyles = (c: ThemeColors) =>
-  StyleSheet.create({
+const createStyles = (c: ThemeColors) => {
+  const shared = createSegmentControlStyles(c);
+  return StyleSheet.create({
+    ...shared,
     container: {
-      flexDirection: "row",
-      // DESIGN.md: chrome uses 50%-opacity borders.
-      backgroundColor: c.cardSoft,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      borderRadius: radius.md,
-      padding: 2,
+      ...shared.container,
       marginBottom: spacing.xxl,
       position: "relative",
     },
-    // DESIGN.md §Tabs: active state is subtle, not a filled pill. Mobile uses
-    // the same `navActive` token as BottomNavV2 so segment controls and bottom
-    // nav share one visual language for "selected".
+    containerStacked: {
+      flexDirection: "column",
+    },
     highlight: {
       position: "absolute",
-      top: 2,
-      left: 2,
-      bottom: 2,
-      borderRadius: radius.xs + 2, // 6 — visually nested inside the 8px container
-      backgroundColor: c.navActive,
+      top: shared.container.padding,
+      left: shared.container.padding,
+      bottom: shared.container.padding,
+      borderRadius: shared.item.borderRadius,
+      borderWidth: shared.item.borderWidth,
     },
     item: {
-      flex: 1,
+      ...shared.item,
       flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
       gap: spacing.xs,
-      minHeight: TOUCH_TARGET,
-      paddingHorizontal: spacing.xs,
-      borderRadius: radius.sm,
       zIndex: 1,
+    },
+    itemStacked: {
+      flex: undefined,
     },
     label: {
       ...typeScale.label,
       color: c.textMuted,
+      minWidth: 0,
+      flexShrink: 1,
     },
     // Active label color matches BottomNavV2 — the textPrimary swap signals selection.
     labelActive: {
@@ -151,3 +204,4 @@ const createStyles = (c: ThemeColors) =>
       color: c.primaryOnTint,
     },
   });
+};

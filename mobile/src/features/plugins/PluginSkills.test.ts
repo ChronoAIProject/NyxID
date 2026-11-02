@@ -4,6 +4,7 @@ import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import * as skillTypes from "./pluginSkillsTypes";
 import type { AssistantAgent } from "../agents/agentContracts";
+import type { AssistantParams } from "../../app/navigationTypes";
 
 type Element = { type: unknown; props: Record<string, any>; key?: string };
 type QueryOptions = {
@@ -96,6 +97,7 @@ function setup({
   let routePage: any = initialPage;
   let routeView = initialPage ? "versions" : "detail";
   const routes: { name: string; params: any }[] = [];
+  const chats: AssistantParams[] = [];
   const navigation = {
     push: (name: string, params: any) => {
       routes.push(JSON.parse(JSON.stringify({ name, params })));
@@ -256,7 +258,8 @@ function setup({
     },
     "../../app/WorkspaceHeader": {
       useWorkspaceBack: () => {},
-      useOpenWorkspaceChat: () => () => {},
+      useOpenWorkspaceChat: () => (params: AssistantParams) =>
+        chats.push(params),
     },
     "./pluginSkillsTypes": skillTypes,
     "./SkillLibrary": { SkillLibrary: "SkillLibrary" },
@@ -295,6 +298,7 @@ function setup({
     queries,
     state,
     routes,
+    chats,
     navigation: navigation.push,
     elements: () => elements(harness.flush()),
     manager: () => manager!,
@@ -704,6 +708,123 @@ test("skill detail is read-only with version choice, newest supported pin and ag
     assert.equal(written.args[0], first.id);
     assert.equal(written.args[1].expected_revision, 7);
     assert.deepEqual(Array.from(written.args[1].skills), []);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("skill guidance opens a fresh normal NyxBot chat while retaining the exact caller", () => {
+  const env = setup({ agentId: second.id });
+  try {
+    env.library().props.onOpenSkill("catalog-opaque", "weekly_report");
+    const caller = env.routes.at(-1);
+    env.control("Ask NyxBot").props.onPress();
+    env.control("Ask NyxBot").props.onPress();
+    assert.equal(env.chats.length, 2);
+    for (const chat of env.chats) {
+      assert.equal(chat.home, false);
+      assert.equal(chat.agentId, undefined, "authoring belongs to NyxBot");
+      assert.equal(chat.conversationId, undefined);
+      assert.equal(chat.draft, true);
+      assert.equal(chat.openLatest, false);
+    }
+    assert.notEqual(env.chats[0]!.draftId, env.chats[1]!.draftId);
+    assert.equal(env.routes.at(-1), caller);
+    assert.equal(env.routes.length, 1);
+    assert.equal(
+      env.calls.length,
+      0,
+      "opening chat must not send or change pins",
+    );
+  } finally {
+    env.unmount();
+  }
+});
+
+test("skill details distinguish loading or failed pin reads from a known unattached skill and retry only that read", async () => {
+  const env = setup();
+  const text = (value: string) =>
+    env.elements().some((item) => item.props.children === value);
+  try {
+    const query = env.state.get(first.id);
+    Object.assign(query, { data: undefined, isPending: true });
+    env.library().props.onOpenSkill("catalog-opaque", "weekly_report");
+    assert.ok(text("Loading attached version…"));
+    assert.equal(text("Not attached"), false);
+    assert.equal(env.control("Attach exact version").props.disabled, true);
+
+    let retries = 0;
+    Object.assign(query, {
+      isPending: false,
+      isError: true,
+      error: new Error("Pin read unavailable"),
+      refetch: async () => {
+        retries++;
+        Object.assign(query, { isError: false, data: currentSkills });
+      },
+    });
+    env.harness.render();
+    assert.ok(text("Attachment status unavailable"));
+    assert.equal(text("Not attached"), false);
+    assert.ok(
+      env
+        .elements()
+        .some((item) => item.type === "Notice" && item.props.tone === "error"),
+    );
+    assert.equal(env.control("Attach exact version").props.disabled, true);
+    assert.equal(env.control("Ask NyxBot").props.disabled, false);
+    env.control("Retry attached skills").props.onPress();
+    await env.harness.settle();
+    env.harness.render();
+    assert.equal(retries, 1);
+    assert.ok(text("Not attached"));
+    assert.equal(env.control("Attach exact version").props.disabled, false);
+    assert.equal(env.calls.length, 0);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("cached pin details survive refresh and a failed refresh blocks pin changes until a successful read", async () => {
+  const env = setup();
+  const text = (value: string) =>
+    env.elements().some((item) => item.props.children === value);
+  try {
+    env.library().props.onOpenSkill("pin-original", "dns-helper");
+    const query = env.state.get(first.id);
+    Object.assign(query, { isFetching: true });
+    env.harness.render();
+    assert.ok(text("1.0.0"));
+    assert.equal(text("Loading attached version…"), false);
+    Object.assign(query, {
+      isFetching: false,
+      isError: true,
+      error: new Error("Refresh failed"),
+    });
+    env.harness.render();
+    assert.ok(text("1.0.0"));
+    assert.ok(text("Last loaded version"));
+    assert.equal(env.control("Remove from agent").props.disabled, true);
+    assert.equal(env.control("Choose exact version").props.disabled, true);
+    assert.equal(
+      env.control(`Use latest (v${version.version})`).props.disabled,
+      true,
+    );
+
+    env.navigation("SkillVersions", {
+      agentId: first.id,
+      skillId: "pin-original",
+      name: "dns-helper",
+    });
+    env.control(`Select version ${version.version}`).props.onPress();
+    assert.equal(env.control("Update exact version").props.disabled, true);
+    env.control("Update exact version").props.onPress();
+    await env.harness.settle();
+    assert.equal(env.calls.length, 0, "failed pin reads cannot start a write");
+
+    Object.assign(query, { isError: false });
+    env.harness.render();
+    assert.equal(env.control("Update exact version").props.disabled, false);
   } finally {
     env.unmount();
   }

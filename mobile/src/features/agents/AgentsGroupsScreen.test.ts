@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
+import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 
 type Element = { type: unknown; props: Record<string, any> };
@@ -24,6 +25,9 @@ function setup(tab: "agents" | "groups", online = true) {
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
+    },
+    "../../components/SegmentControl": {
+      SegmentControl: renderSegmentControl,
     },
     "react-native": {
       Pressable: "Pressable",
