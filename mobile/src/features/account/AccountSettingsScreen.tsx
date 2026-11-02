@@ -761,8 +761,8 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         </View>
 
         <View onLayout={(event) => sectionLayout("privacy", event.nativeEvent.layout.y)} style={styles.card}>
-          <Text style={styles.accountRowLabel}>Usage Analytics</Text>
-          <Text style={styles.accountRowValue}>Optional events require account permission and this device's choice. Security and billing records have separate retention rules.</Text>
+          <Text style={styles.cardTitle}>Usage Analytics</Text>
+          <Text style={styles.analyticsDescription}>Optional events require account permission and this device's choice. Security and billing records have separate retention rules.</Text>
           <View style={styles.systemRow}>
             <Text style={styles.accountRowLabel}>{analyticsPermission.isFetching ? "Loading permission…" : analyticsPermission.isError ? "Permission unavailable" : analyticsPermission.data?.enabled ? "Account permission enabled" : "Account permission disabled"}</Text>
             <Switch accessibilityLabel="Allow account usage analytics"
@@ -923,6 +923,15 @@ const createStyles = (
     ...typeScale.title,
     color: c.textPrimary,
     marginBottom: 0,
+  },
+  analyticsDescription: {
+    ...typeScale.body,
+    color: c.textSecondary,
+    marginTop: spacing.sm,
+    minWidth: 0,
+    maxWidth: "100%",
+    flexShrink: 1,
+    textAlign: "left",
   },
   accountRow: {
     flexDirection: stacked ? "column" : "row",
