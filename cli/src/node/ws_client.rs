@@ -798,7 +798,7 @@ fn handle_pending_credential_cleanup_frame(
     evicted
 }
 
-fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
+pub(super) fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
     let http_url = if let Some(rest) = ws_url.strip_prefix("ws://") {
         format!("http://{rest}")
     } else if let Some(rest) = ws_url.strip_prefix("wss://") {
@@ -1145,6 +1145,7 @@ async fn connect_and_serve(
     capabilities.insert("proxy_upload_v1".to_string(), true.into());
     capabilities.insert("http_cancellation".to_string(), true.into());
     capabilities.insert("credential_ack_correlation".to_string(), true.into());
+    capabilities.insert("credential_target_update_v1".to_string(), true.into());
     capabilities.insert(
         rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),
         true.into(),
@@ -3620,6 +3621,35 @@ fn process_credential_update(
     let injection_method = parsed["injection_method"].as_str().unwrap_or("header");
 
     let result = match injection_method {
+        "target_url" => (|| {
+            // No defaults: a malformed metadata frame must never clear or
+            // replace an installed secret or injection/OAuth configuration.
+            if ["header_name", "header_value", "param_name", "param_value"]
+                .iter()
+                .any(|field| parsed.get(field).is_some_and(|v| !v.is_null()))
+            {
+                return Err(super::error::Error::Validation(
+                    "Target update contains credential fields".into(),
+                ));
+            }
+            let target = parsed["target_url"].as_str().ok_or_else(|| {
+                super::error::Error::Validation("Target update requires target_url".into())
+            })?;
+            let mut config = NodeConfig::load(config_path)?;
+            let revision = parsed["target_revision"]
+                .as_i64()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| {
+                    super::error::Error::Validation(
+                        "Target update requires a positive revision".into(),
+                    )
+                })?;
+            config.set_credential_target_revision(service_slug, target, revision)?;
+            let store = CredentialStore::from_config_with_backend(&config, backend)?;
+            config.save(config_path)?;
+            credential_sender.update(store);
+            Ok(())
+        })(),
         "ifttt_webhook" => (|| {
             let key = parsed["header_value"]
                 .as_str()
@@ -6066,6 +6096,109 @@ mod tests {
                 assert_eq!(value.as_str(), "Bearer sk-rci");
             }
             _ => panic!("expected header credential"),
+        }
+    }
+
+    #[test]
+    fn node_endpoint_2126_metadata_update_preserves_secrets_and_reloads_live_store() {
+        for keychain in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let config_path = dir.path().join("config.toml");
+            let backend = if keychain {
+                SecretBackend::new_mock_keychain("target-test")
+            } else {
+                SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap())
+            };
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+            let secret = uuid::Uuid::new_v4().to_string();
+            config
+                .add_header_credential_via(
+                    "monitor",
+                    "Authorization",
+                    &secret,
+                    Some("http://old-monitor"),
+                    &backend,
+                )
+                .unwrap();
+            // The metadata handler must preserve OAuth refresh material too.
+            let credential = config.credentials.get_mut("monitor").unwrap();
+            credential.oauth_managed = true;
+            credential.oauth_token_url = Some("https://provider.example/token".into());
+            credential.oauth_scopes = Some("read write".into());
+            credential.oauth_access_token_encrypted = backend
+                .store_credential_value("monitor:oauth_access", &secret)
+                .unwrap();
+            credential.oauth_refresh_token_encrypted = backend
+                .store_credential_value("monitor:oauth_refresh", &uuid::Uuid::new_v4().to_string())
+                .unwrap();
+            config.save(&config_path).unwrap();
+            let original = serde_json::to_value(&config.credentials["monitor"]).unwrap();
+            let (sender, credentials) = SharedCredentials::new(
+                CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+            );
+            let sender = Arc::new(sender);
+            for (revision, target) in [(1, "http://new-monitor"), (2, "")] {
+                let frame = serde_json::json!({"type":"credential_update", "request_id":uuid::Uuid::new_v4().to_string(), "service_slug":"monitor", "injection_method":"target_url", "target_url":target, "target_revision": revision});
+                let ack =
+                    process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+                let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+                assert_eq!(ack["status"], "ok");
+                assert_eq!(ack["request_id"], frame["request_id"]);
+                let duplicate =
+                    process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&duplicate).unwrap()["status"],
+                    "ok"
+                );
+                let live = credentials.snapshot();
+                assert_eq!(live.get("monitor").unwrap().header().unwrap().1, secret);
+                assert_eq!(
+                    live.get("monitor").unwrap().target_url(),
+                    (!target.is_empty()).then_some(target)
+                );
+                let reloaded = NodeConfig::load(&config_path).unwrap();
+                let mut expected = original.clone();
+                expected["target_revision"] = revision.into();
+                if target.is_empty() {
+                    expected.as_object_mut().unwrap().remove("target_url");
+                } else {
+                    expected["target_url"] = target.into();
+                }
+                assert_eq!(
+                    serde_json::to_value(&reloaded.credentials["monitor"]).unwrap(),
+                    expected
+                );
+            }
+            let saved = std::fs::read(&config_path).unwrap();
+            for extra in [
+                serde_json::json!({}),
+                serde_json::json!({"target_url":"http://new", "header_value":uuid::Uuid::new_v4().to_string()}),
+                serde_json::json!({"target_url":"ftp://bad", "target_revision":3}),
+                serde_json::json!({"target_url":"http://stale-monitor", "target_revision":1}),
+                serde_json::json!({"target_url":"http://conflicting-monitor", "target_revision":2}),
+                serde_json::json!({"target_url":"http://new-monitor#secret", "target_revision":3}),
+            ] {
+                let mut frame =
+                    serde_json::json!({"service_slug":"monitor", "injection_method":"target_url"});
+                frame
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let ack =
+                    process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+                    "error"
+                );
+                assert_eq!(std::fs::read(&config_path).unwrap(), saved);
+            }
+            let missing = serde_json::json!({"service_slug":"absent", "injection_method":"target_url", "target_url":"http://new", "target_revision":3});
+            let ack = process_credential_update(&missing, &sender, &config_path, &backend).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+                "error"
+            );
+            assert_eq!(std::fs::read(&config_path).unwrap(), saved);
         }
     }
 

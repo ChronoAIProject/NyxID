@@ -151,6 +151,7 @@ pub mod node_owner_service;
 pub mod node_pending_credential_service;
 pub mod node_routing_service;
 pub mod node_service;
+pub mod node_target_service;
 pub mod node_ws_manager;
 pub mod notification_service;
 pub mod notion_evidence;

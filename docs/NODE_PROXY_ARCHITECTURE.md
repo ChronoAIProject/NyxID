@@ -44,6 +44,20 @@ streaming, cancellation, timeout, and failover behavior.
 
 ---
 
+## Node-managed endpoint migration
+
+`node_target_service::Migration` handles endpoint-only edits from both `/keys/{id}` and `/endpoints/{id}` after their owner/org write checks. It also checks every affected service and node when an endpoint is shared. It never reads/decrypts the credential or changes the `UserService`, `UserApiKey` or binding IDs. Existing injection/node-change restrictions remain in place.
+
+The node-side owner command is `nyxid node credentials set-url --service <slug> --url <url>`. It validates the URL locally, uses the owner's login to the node's server, and sends only `endpoint_url` for exactly one matching node-managed service. It makes no local config save; the revision-checked push is the local writer. `--url ""` requests the acknowledged clear described below. `credentials add` retains its existing local/interactive credential-replacement behavior without requiring an owner login.
+
+The nonempty server `base_url` wins over the node's local fallback on HTTP and WebSocket proxy requests. The server commits a nonempty migration even if local sync cannot be confirmed. An additive `node_target_sync` result reports each service's metadata revision and `synced`, `offline`, `unsupported`, or `unconfirmed` status. Repeating the PUT retries sync; there is no background replay queue.
+
+Sync reuses the clustered credential-update transport and correlated ack, with a distinct `injection_method: "target_url"`, an explicit `target_url`, and positive `target_revision`. No credential or injection-name/value fields are sent. Both `credential_target_update_v1` and `credential_ack_correlation` must be advertised by the live node connection; remote capability projections default false, and the socket owner checks again before sending. Old agents never receive this message, and old replicas remain compatible (they may still reject endpoint-only `/keys` edits during rollout).
+
+The node edits only target metadata and reloads the live credential store; file-encrypted, keychain and OAuth credential fields stay intact. A monotonically increasing `node_target_revision` on the endpoint fences competing URL writes with MongoDB CAS. Reserving a revision is operational metadata; only committed configuration changes enter service history. The node persists the accepted revision with its credential config and rejects older messages. Explicit empty URLs require an acknowledged local clear before the fenced server write, preventing stale fallback after an offline migration or reordered push. If a later DB write fails, the previous nonempty server destination still wins. Existing local-only configurations and ordinary credential pushes retain their previous behavior.
+
+The `node_managed_endpoint_updated` audit event contains the service ID, old/new hosts and sync status only. It contains no credential, URL path, query, or fragment. Changing the URL preserves identity-based grants but does not bypass exact execution-authority revalidation.
+
 ## MongoDB Models
 
 ### Node (collection: `nodes`)
