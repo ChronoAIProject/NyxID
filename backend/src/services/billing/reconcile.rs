@@ -338,17 +338,18 @@ impl BillingReconciler {
             // Runtime contracts keep their accepted rate even after retirement.
             // Emit to the subscription verified on that plan, without a second
             // mutable wallet lookup or the ordinary service cache.
-            let verified_subscription = match super::machine_runtime::verify_usage_provider_rate(
-                &self.db, lago, &row,
-            )
-            .await
-            {
+            let binding = if super::sandbox_runtime::METRICS.contains(&row.metric) {
+                super::sandbox_runtime::verify_usage_provider_rate(&self.db, lago, &row).await
+            } else {
+                super::machine_runtime::verify_usage_provider_rate(&self.db, lago, &row).await
+            };
+            let verified_subscription = match binding {
                 Ok(binding) => binding,
                 Err(_) => {
                     bump_attempt(
                         &self.db,
                         &row.id,
-                        "Machine runtime billing provider binding verification will retry",
+                        "Runtime billing provider binding verification will retry",
                     )
                     .await?;
                     stats.retried += 1;
@@ -1319,7 +1320,7 @@ mod tests {
         assert!(saved.expires_at.is_none());
         assert_eq!(
             saved.last_error.as_deref(),
-            Some("Machine runtime billing provider binding verification will retry")
+            Some("Runtime billing provider binding verification will retry")
         );
         assert!(
             rows.find_one(doc! { "_id": &service.id })

@@ -203,6 +203,7 @@ pub mod async_service_operation;
 pub mod catalog_icon;
 
 pub mod machine_runtime_billing;
+pub mod sandbox_billing;
 
 pub mod machine_oauth_consent_request;
 

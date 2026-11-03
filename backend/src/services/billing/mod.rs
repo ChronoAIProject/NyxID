@@ -19,6 +19,8 @@ pub mod reconcile;
 pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
+pub mod sandbox_runtime;
+mod sandbox_runtime_math;
 pub mod schedules;
 mod targets;
 pub mod taxes;
@@ -495,6 +497,14 @@ impl BillingService {
         ctx: &BillingRouteContext,
         required: bool,
     ) -> AppResult<MeteredProxyContext> {
+        if ctx
+            .platform_specs()
+            .any(|(metric, _)| metric.is_runtime_allocation())
+        {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Runtime allocation pricing requires dedicated prepaid window admission".into(),
+            ));
+        }
         let public = ctx.public_admission.is_some();
         let managed = ctx.managed_admission.is_some();
         if public && (!required || !self.config.billing_enabled || ctx.pool_attempt.is_some()) {

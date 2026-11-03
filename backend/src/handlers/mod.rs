@@ -110,6 +110,7 @@ pub mod proxy;
 pub mod public_mcp;
 pub mod public_proxy;
 pub mod runtime_config;
+pub mod sandbox_billing;
 pub mod service_account_key_reads;
 #[cfg(test)]
 mod service_account_key_reads_tests;

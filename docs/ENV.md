@@ -848,3 +848,22 @@ After authenticated migration readiness across every field adapter, separately
 turn legacy reads off. Old backups and historical KMS key versions retain their
 own decryption requirements; the currently configured KMS resource can still
 serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Pending field adapters still block complete readiness; the runbook does not certify a deployment.
+
+
+### CMA Sandbox prepaid admission
+
+`CMA_BILLING_ENABLED` defaults to `false`. Enabling new quotes/windows also
+requires `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, a configured Lago
+client, exact-accounting readiness, the owner's existing billing rollout and
+subscription entitlement, and synchronized ordinary service prices.
+`CMA_BILLING_SERVICE_ID` selects that catalog service.
+`CMA_BILLING_SERVICE_ACCOUNT_ID` selects one General-purpose producer account;
+its issued token and live account must both allow `billing:sandbox:write`.
+Missing identities fail closed. Neither setting is a credential.
+
+Receipt recovery and evidence finalization remain available to the configured
+producer when new admission is disabled. Keep its authority and the existing
+billing reconciler available to drain admitted liability. No startup seeds,
+price defaults or new wallet are introduced. Upgrade all API readers and billing
+workers before authoring the three Sandbox metrics; old enum readers are unsafe
+once those units have been persisted. See [CMA billing](CMA_BILLING.md).
