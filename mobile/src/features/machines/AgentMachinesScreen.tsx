@@ -1,28 +1,22 @@
 import type { ContentScreenProps } from "../../app/navigationTypes";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { useRef, useState, type PropsWithChildren } from "react";
-import { View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { StatusBadge } from "../../components/StatusBadge";
-import { SectionBadge } from "../../components/SectionBadge";
+import {
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
 import {
   useOpenWorkspaceChat,
   useWorkspaceBack,
 } from "../../app/WorkspaceHeader";
 import {
-  ActionButton,
-  Card,
   Label,
   Notice,
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
 import { agentMachinesApi } from "../../lib/api/agentMachinesApi";
-import { MachineSwitch } from "./MachinePolicyScreen";
-import {
-  MachineActionRow,
-  MachineRowCard,
-  machineStyles,
-} from "./MachinePresentation";
+import { machinePageContent, MachineSwitch } from "./MachinePresentation";
 import {
   confirmDiscard,
   machineError,
@@ -41,6 +35,14 @@ import {
   type ContextMode,
   type MachineCapabilities,
 } from "./agentMachineContracts";
+
+export function agentMachineModeLabel(machine: AgentMachine) {
+  return selectionRequired(machine)
+    ? "Owner selection required"
+    : machine.mode === "separated"
+      ? "Separate workspace and browser"
+      : "Shared legacy";
+}
 
 export function AgentMachinesScreen({
   route,
@@ -126,72 +128,44 @@ export function AgentMachinesScreen({
       )}
       {query.data && !selected && !query.error && (
         <>
-          <View style={machineStyles.row}>
-            <AgentAvatar agent={query.data.agent} size="lg" />
-            <Label style={machineStyles.heading}>
-              {query.data.agent.display_name ?? query.data.agent.name}
-            </Label>
-          </View>
-          <Label muted style={machineStyles.metadata}>
-            Machine permissions only narrow the local capability ceiling. Saving
-            cancels this agent's current work on that machine. External API-key
-            and OAuth grants remain on the web.
-          </Label>
-          {!query.data.machines.length && (
-            <Label muted>No machines are available to this agent.</Label>
-          )}
-          {query.data.machines.map((row) => (
-            <MachineRowCard
-              key={row.node_id}
-              label={`Review ${row.name} access`}
-              summary={[
-                selectionRequired(row)
-                  ? "Owner selection required"
-                  : row.mode === "separated"
-                    ? "Separate workspace and browser"
-                    : "Shared legacy",
-                `Revision ${row.revision}`,
-                ...machineAccessState(row),
-              ].join(". ")}
-              onPress={() =>
-                navigation.push("AgentMachineEditor", {
-                  agentId: route.params.agentId,
-                  machineId: row.node_id,
-                })
-              }
-            >
-              <View style={machineStyles.row}>
-                <Label numberOfLines={1} style={machineStyles.name}>
-                  {row.name}
-                </Label>
-                <StatusBadge
-                  label={`Revision ${row.revision}`}
-                  variant="orgChip"
-                />
-              </View>
-              <View style={machineStyles.badges}>
-                <SectionBadge
-                  label={
-                    selectionRequired(row)
-                      ? "Owner selection required"
-                      : row.mode === "separated"
-                        ? "Separate workspace and browser"
-                        : "Shared legacy"
-                  }
-                  tone={
-                    selectionRequired(row) || row.mode !== "separated"
-                      ? "warning"
-                      : "success"
-                  }
-                />
-              </View>
-              {machineAccessState(row).map((message) => (
-                <Label muted style={machineStyles.metadata} key={message}>
-                  {message}
-                </Label>
-              ))}
-            </MachineRowCard>
-          ))}
+          <SettingsGroup
+            inset={false}
+            footer="Machine permissions only narrow the local capability ceiling. Saving cancels this agent's current work on that machine. External API-key and OAuth grants remain on the web."
+          >
+            <SettingsRow
+              leading={<AgentAvatar agent={query.data.agent} size="md" />}
+              label={query.data.agent.display_name ?? query.data.agent.name}
+            />
+          </SettingsGroup>
+          <SettingsGroup title="Machines" inset={false}>
+            {query.data.machines.map((row) => (
+              <SettingsRow
+                key={row.node_id}
+                label={row.name}
+                detail={machineAccessState(row).join(" ") || undefined}
+                value={agentMachineModeLabel(row)}
+                valueTone={
+                  selectionRequired(row) || row.mode !== "separated"
+                    ? "danger"
+                    : "default"
+                }
+                accessibilityLabel={`Review ${row.name} access. ${[
+                  agentMachineModeLabel(row),
+                  `Revision ${row.revision}`,
+                  ...machineAccessState(row),
+                ].join(". ")}`}
+                onPress={() =>
+                  navigation.push("AgentMachineEditor", {
+                    agentId: route.params.agentId,
+                    machineId: row.node_id,
+                  })
+                }
+              />
+            ))}
+            {!query.data.machines.length && (
+              <SettingsRow label="No machines are available to this agent." />
+            )}
+          </SettingsGroup>
         </>
       )}
       {selected && query.data && !machine && (
@@ -220,6 +194,7 @@ function AgentMachineListPage({
       showHeading={false}
       refreshing={refreshing}
       onRefresh={onRefresh}
+      contentStyle={machinePageContent}
     >
       {children}
     </WorkspacePage>
@@ -314,75 +289,73 @@ export function AgentMachineEditor({
       showHeading={false}
       refreshing={refreshing}
       onRefresh={reviewRefresh}
+      contentStyle={machinePageContent}
     >
       {notice && <Notice message={notice} />}
       {readError && <Notice tone="error" message={readError} />}
-      <Card>
-        <Label style={machineStyles.heading}>
-          {agentName} on {machine.name}
-        </Label>
-        <View style={machineStyles.badges}>
-          <StatusBadge
-            label={`Revision ${machine.revision}`}
-            variant="orgChip"
-          />
-          <SectionBadge
-            label={
-              selectionRequired(machine)
-                ? "Owner selection required"
-                : machine.mode === "separated"
-                  ? "Separate workspace and browser"
-                  : "Shared legacy"
-            }
-            tone={
-              machine.mode === "separated" && !selectionRequired(machine)
-                ? "success"
-                : "warning"
-            }
-          />
-        </View>
-        {machine.execution_note && (
-          <Label muted>{machine.execution_note}</Label>
-        )}
-        {machineAccessState(machine).map((message) => (
-          <Notice key={message} message={message} />
-        ))}
-        {machine.separated_setup_note && (
-          <Label muted>{machine.separated_setup_note}</Label>
-        )}
-        <Label muted>
-          Separation:{" "}
-          {separationAvailable(machine)
-            ? `Available (Landlock ABI ${machine.separated?.landlock_abi ?? "unknown"})`
-            : (machine.separated?.reason ?? "Unavailable")}
-        </Label>
-        <MachineActionRow
-          label="Reload access and recovery status"
-          disabled={write.busy || !write.active || refreshing}
-          onPress={reviewRefresh}
+      <SettingsGroup
+        inset={false}
+        footer={
+          [machine.execution_note, machine.separated_setup_note]
+            .filter(Boolean)
+            .join("\n\n") || undefined
+        }
+      >
+        <SettingsRow label="Agent" value={agentName} />
+        <SettingsRow label="Machine" value={machine.name} />
+        <SettingsRow label="Revision" value={String(machine.revision)} />
+        <SettingsRow
+          label="Mode"
+          value={agentMachineModeLabel(machine)}
+          valueTone={
+            machine.mode === "separated" && !selectionRequired(machine)
+              ? "default"
+              : "danger"
+          }
         />
-      </Card>
+        <SettingsRow
+          label="Separation"
+          value={
+            separationAvailable(machine)
+              ? `Available (Landlock ABI ${machine.separated?.landlock_abi ?? "unknown"})`
+              : (machine.separated?.reason ?? "Unavailable")
+          }
+        />
+      </SettingsGroup>
+      {machineAccessState(machine).map((message) => (
+        <Notice key={message} message={message} />
+      ))}
       {write.error && <Notice tone="error" message={write.error} />}
       {refreshError && <Notice tone="error" message={refreshError} />}
-      <Card>
-        {!editable && (
-          <Notice
-            message={
-              !features.includes("assistant:machine-capabilities")
-                ? "Capability editing is not enabled. Existing restrictions remain in effect."
-                : !machine.can_edit
-                  ? "Only the machine owner or an organization Admin can edit access."
-                  : !machine.protocol_v2
-                    ? "Update this machine before editing capabilities. Existing access continues."
-                    : "Complete owner selection before editing capabilities."
-            }
-          />
-        )}
+      {!editable && (
+        <Notice
+          message={
+            !features.includes("assistant:machine-capabilities")
+              ? "Capability editing is not enabled. Existing restrictions remain in effect."
+              : !machine.can_edit
+                ? "Only the machine owner or an organization Admin can edit access."
+                : !machine.protocol_v2
+                  ? "Update this machine before editing capabilities. Existing access continues."
+                  : "Complete owner selection before editing capabilities."
+          }
+        />
+      )}
+      <SettingsGroup
+        title="Capabilities"
+        inset={false}
+        footer={`Shell uses its OS user's full permissions even with File tools off. Computer control operates applications. Developer browser permits JavaScript in its separate browser; saved logins stay in Secure browser.\n\nSaved-login access is preserved: ${
+          machine.saved_login_ids === null
+            ? "legacy selection"
+            : `${machine.saved_login_ids.length} selected`
+        }. Review saved-login grants on the web.`}
+      >
         {(Object.keys(capabilityLabels) as (keyof MachineCapabilities)[]).map(
           (key) => (
             <MachineSwitch
               key={key}
-              label={`${capabilityLabels[key]}${machine.ceiling[key] ? "" : " (off on machine)"}`}
+              label={capabilityLabels[key]}
+              detail={machine.ceiling[key] ? undefined : "Off on machine"}
+              accessibilityLabel={`${capabilityLabels[key]}${machine.ceiling[key] ? "" : " (off on machine)"}`}
               value={caps[key]}
               disabled={
                 blocked ||
@@ -397,23 +370,13 @@ export function AgentMachineEditor({
             />
           ),
         )}
-        <Label muted>
-          Shell uses its OS user's full permissions even with File tools off.
-          Computer control operates applications. Developer browser permits
-          JavaScript in its separate browser; saved logins stay in Secure
-          browser.
-        </Label>
-        <Label muted>
-          Saved-login access is preserved:{" "}
-          {machine.saved_login_ids === null
-            ? "legacy selection"
-            : `${machine.saved_login_ids.length} selected`}
-          . Review saved-login grants on the web.
-        </Label>
-        <ActionButton
-          label="Save agent machine capabilities"
+      </SettingsGroup>
+      <SettingsGroup inset={false}>
+        <SettingsRow
+          tone="action"
+          label={write.busy ? "Saving…" : "Save Capabilities"}
+          accessibilityLabel="Save agent machine capabilities"
           disabled={blocked || !editable || !dirty}
-          loading={write.busy}
           onPress={() =>
             void write.run(async (current) => {
               const result = await agentMachinesApi.save(
@@ -427,94 +390,121 @@ export function AgentMachineEditor({
             })
           }
         />
-      </Card>
+      </SettingsGroup>
       {machine.can_edit && (
-        <Card>
-          <Label>Workspace and browser mode</Label>
-          <Label muted>
-            Mode changes require a separate owner action card in the Assistant.
-            Requesting approval does not apply the change. Save or discard
-            capability edits first.
-          </Label>
-          {features.includes("assistant:machine-contexts") &&
-            machine.mode !== "separated" &&
-            separationAvailable(machine) && (
-              <ActionButton
-                label="Review separate workspace request"
-                variant="secondary"
-                disabled={blocked || dirty || !!approval}
-                onPress={() => setConfirmMode("separated")}
-              />
-            )}
+        <>
           {machine.mode !== "shared_legacy" && (
-            <>
-              <Notice message={SHARED_LEGACY_WARNING} />
+            <Notice message={SHARED_LEGACY_WARNING} />
+          )}
+          <SettingsGroup
+            title="Workspace and browser mode"
+            inset={false}
+            footer="Mode changes require a separate owner action card in the Assistant. Requesting approval does not apply the change. Save or discard capability edits first."
+          >
+            <SettingsRow
+              label="Current mode"
+              value={agentMachineModeLabel(machine)}
+            />
+            {features.includes("assistant:machine-contexts") &&
+              machine.mode !== "separated" &&
+              separationAvailable(machine) && (
+                <SettingsRow
+                  tone="action"
+                  label="Review Separate Workspace Request"
+                  accessibilityLabel="Review separate workspace request"
+                  disabled={blocked || dirty || !!approval}
+                  onPress={() => setConfirmMode("separated")}
+                />
+              )}
+            {machine.mode !== "shared_legacy" && (
               <MachineSwitch
-                label="I explicitly choose shared legacy access and acknowledge the risk"
+                label="Choose shared legacy access"
+                detail="I acknowledge the risk"
+                accessibilityLabel="I explicitly choose shared legacy access and acknowledge the risk"
                 value={legacyAccepted}
                 disabled={blocked || dirty || !!approval}
                 onChange={setLegacyAccepted}
               />
-              <ActionButton
-                label="Review shared legacy request"
-                variant="secondary"
+            )}
+            {machine.mode !== "shared_legacy" && (
+              <SettingsRow
+                tone="action"
+                label="Review Shared Legacy Request"
+                accessibilityLabel="Review shared legacy request"
                 disabled={blocked || dirty || !legacyAccepted || !!approval}
                 onPress={() => setConfirmMode("shared_legacy")}
               />
-            </>
-          )}
+            )}
+          </SettingsGroup>
           {confirmMode && (
             <>
               <Notice
                 message={`Request owner approval for ${agentName} on ${machine.name}: ${confirmMode === "separated" ? "separate workspace and browser" : "shared legacy access"}? Current capability and saved-login selections are preserved.`}
               />
-              <ActionButton
-                label="Request owner action card"
-                disabled={
-                  blocked ||
-                  dirty ||
-                  (confirmMode === "shared_legacy" && !legacyAccepted)
-                }
-                onPress={() =>
-                  void write.run(async (current) => {
-                    const result = await agentMachinesApi.requestContext(
-                      agentId,
-                      ownerId,
-                      machine,
-                      confirmMode,
-                      current,
-                    );
-                    if (!current()) return;
-                    setApproval(result);
-                    setConfirmMode(undefined);
-                  })
-                }
-              />
-              <ActionButton
-                label="Cancel context request"
-                variant="secondary"
-                disabled={write.busy}
-                onPress={() => setConfirmMode(undefined)}
-              />
+              <SettingsGroup inset={false}>
+                <SettingsRow
+                  tone="action"
+                  label="Request Owner Action Card"
+                  accessibilityLabel="Request owner action card"
+                  disabled={
+                    blocked ||
+                    dirty ||
+                    (confirmMode === "shared_legacy" && !legacyAccepted)
+                  }
+                  onPress={() =>
+                    void write.run(async (current) => {
+                      const result = await agentMachinesApi.requestContext(
+                        agentId,
+                        ownerId,
+                        machine,
+                        confirmMode,
+                        current,
+                      );
+                      if (!current()) return;
+                      setApproval(result);
+                      setConfirmMode(undefined);
+                    })
+                  }
+                />
+                <SettingsRow
+                  tone="action"
+                  label="Cancel Context Request"
+                  accessibilityLabel="Cancel context request"
+                  disabled={write.busy}
+                  onPress={() => setConfirmMode(undefined)}
+                />
+              </SettingsGroup>
             </>
           )}
           {approval && (
             <>
               <Notice message="Owner approval requested. Review the action card in its Assistant conversation. Access changes only after approval succeeds." />
-              <ActionButton
-                label="Review owner action card in Assistant"
-                disabled={write.busy}
-                onPress={() =>
-                  onOpenApproval(
-                    approval.conversation_id,
-                    approval.acknowledgement_id,
-                  )
-                }
-              />
+              <SettingsGroup inset={false}>
+                <SettingsRow
+                  label="Review Owner Action Card in Assistant"
+                  accessibilityLabel="Review owner action card in Assistant"
+                  disabled={write.busy}
+                  onPress={() =>
+                    onOpenApproval(
+                      approval.conversation_id,
+                      approval.acknowledgement_id,
+                    )
+                  }
+                />
+              </SettingsGroup>
             </>
           )}
-        </Card>
+        </>
       )}
+      <SettingsGroup inset={false}>
+        <SettingsRow
+          tone="action"
+          label="Reload Access and Recovery Status"
+          accessibilityLabel="Reload access and recovery status"
+          disabled={write.busy || !write.active || refreshing}
+          onPress={reviewRefresh}
+        />
+      </SettingsGroup>
     </WorkspacePage>
   );
 }
