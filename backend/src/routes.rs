@@ -1210,6 +1210,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route("/audit-log/count", get(handlers::admin::count_audit_log))
         .route(
             "/telegram-managers/clear",
             post(handlers::telegram_managers::clear),

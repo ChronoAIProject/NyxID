@@ -1010,6 +1010,7 @@ export function DataTableFilterChips<
         </div>
       )}
       {searchFilters.map((searchFilter) => {
+        const operator = searchFilter.operator ?? "contains";
         const label =
           searchLabels.get(searchFilter.field) ?? searchFilter.field;
         return (
@@ -1021,7 +1022,7 @@ export function DataTableFilterChips<
           >
             <span className="flex items-center px-2.5 py-1.5">
               <span className="font-medium text-foreground">{label}</span>{" "}
-              <span className="ml-1 text-muted-foreground">contains</span>
+              <span className="ml-1 text-muted-foreground">{operator}</span>
             </span>
             {searchFilter.values.map((value, valueIndex) => {
               const visibleValue =
@@ -1037,7 +1038,7 @@ export function DataTableFilterChips<
                     <button
                       type="button"
                       className="min-w-0 px-2 py-1.5 text-left font-medium text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                      aria-label={`Edit ${label} search: contains ${value}`}
+                      aria-label={`Edit ${label} search: ${operator} ${value}`}
                       title={value}
                       onClick={() =>
                         onEditSearchValue(searchFilter.field, value)
