@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AssistantLinkModal } from "./assistant-link-modals";
 import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
+import { Link } from "@tanstack/react-router";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
@@ -216,7 +217,7 @@ function ConnectorCard({
 }: {
   readonly item: ConnectorCardItem;
   readonly onManage: (cardId: string) => void;
-  readonly onConnect: (slug: string) => void;
+  readonly onConnect: (slug: string, personal: boolean) => void;
 }) {
   const connectSlug = item.connectSlug;
   return (
@@ -230,17 +231,21 @@ function ConnectorCard({
         item.added
           ? () => onManage(item.id)
           : connectSlug
-            ? () => onConnect(connectSlug)
+            ? () => onConnect(connectSlug, false)
             : undefined
       }
     />
-      {item.advancedSetup ? (
-        <a className="text-12 text-muted-foreground underline" href="/keys?tab=services&action=add-service">
+      {item.advancedSetupSlug ? (
+        <Link
+          to="/keys"
+          search={{ tab: "services", action: "add-service", slug: item.advancedSetupSlug }}
+          className="inline-block text-12 underline underline-offset-4"
+        >
           Advanced setup for {item.name}
-        </a>
+        </Link>
       ) : null}
       {item.connectOwnSlug ? (
-        <Button variant="outline" onClick={() => onConnect(item.connectOwnSlug!)}>
+        <Button variant="outline" onClick={() => onConnect(item.connectOwnSlug!, true)}>
           Connect your own
         </Button>
       ) : null}
@@ -254,9 +259,9 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   const [manageCardId, setManageCardId] = useState<string | null>(null);
   const [connectHref, setConnectHref] = useState<string | null>(null);
   const createConnect = useCreateAssistantConnectLink();
-  function openConnect(slug: string) {
+  function openConnect(slug: string, personal: boolean) {
     if (createConnect.isPending) return;
-    void createConnect.mutateAsync(slug).then(setConnectHref).catch((cause: unknown) => {
+    void createConnect.mutateAsync({ serviceSlug: slug, personal }).then(setConnectHref).catch((cause: unknown) => {
       toast.error(cause instanceof Error ? cause.message : "Could not create connection link");
     });
   }
@@ -372,9 +377,13 @@ function ConnectorsTab({ query }: { readonly query: string }) {
         />
       )}
 
-      <a className="text-12 text-muted-foreground underline" href="/keys?tab=services&action=add-service">
+      <Link
+        to="/keys"
+        search={{ tab: "services", action: "add-service" }}
+        className="inline-block text-12 underline underline-offset-4"
+      >
         Advanced setup
-      </a>
+      </Link>
       <AssistantLinkModal href={connectHref} onClose={() => setConnectHref(null)} />
 
     </>

@@ -2681,14 +2681,14 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
         description: "Connect to an available service. If a credential is required and omitted, \
-            returns a hosted connection URL that the user can open. Assistant calls always use hosted human completion with personal intent by default, including when an organization connection exists; explicit platform intent also requires hosted completion. Specialists must use NyxBot or Plugins then receive a separate grant. Optional scopes request \
+            returns a hosted connection URL that the user can open. Provide service_id or service_slug. For assistant chats, connecting the owner's own credential always returns a hosted link with personal intent, including when an organization connection exists. Specialists must use NyxBot or Plugins then receive a separate grant. Optional scopes request \
             additional OAuth permissions on top of provider defaults through that hosted link; \
             omit credential when requesting scopes."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "service_slug": {"type":"string","description":"Catalog slug; if service_id is also supplied both must identify the same visible catalog"},
+                "service_slug": {"type":"string","description":"Catalog slug, as an alternative to service_id. Provide service_id or service_slug; if both are supplied they must identify the same visible catalog."},
                 "use_platform_key": { "type": "boolean", "default": false, "description": "Use an available NyxID platform key" },
                 "service_id": {
                     "type": "string",
@@ -2708,7 +2708,7 @@ pub fn generate_tool_definitions(
                     "description": "Additional OAuth scopes to request on top of the provider defaults, e.g. [\"public_repo\"]. Rejected for services whose provider does not accept scopes."
                 }
             },
-            "anyOf": [{"required":["service_id"]},{"required":["service_slug"]}]
+            "required": []
         }),
     });
 
@@ -10212,6 +10212,28 @@ mod tests {
             "List repositories"
         );
         assert_eq!(humanize_operation_name("  "), "Call operation");
+    }
+
+    #[test]
+    fn meta_tool_schemas_have_no_top_level_combinators() {
+        // Anthropic and OpenAI (strict) tool APIs reject a top-level
+        // anyOf/oneOf/allOf; one such schema can fail a client's whole tool list.
+        for tool in generate_tool_definitions(&[], None) {
+            assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
+            for keyword in ["anyOf", "oneOf", "allOf", "not"] {
+                assert!(
+                    tool.input_schema.get(keyword).is_none(),
+                    "{} uses top-level {keyword}",
+                    tool.name
+                );
+            }
+        }
+        let connect = generate_tool_definitions(&[], None)
+            .into_iter()
+            .find(|tool| tool.name == "nyx__connect_service")
+            .unwrap();
+        assert!(connect.input_schema["properties"]["service_id"].is_object());
+        assert!(connect.input_schema["properties"]["service_slug"].is_object());
     }
 
     #[test]

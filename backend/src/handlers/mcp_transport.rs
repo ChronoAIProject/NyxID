@@ -5040,7 +5040,11 @@ async fn handle_meta_search(
     .await
     {
         Ok(facts) => facts,
-        Err(error) => return app_error_to_rpc(request_id, &error),
+        Err(error) => {
+            // Facts are advisory; a lookup failure never fails the listing.
+            tracing::warn!(%error, "connection facts unavailable");
+            Default::default()
+        }
     };
     let results: Vec<_> = ranked_candidates
         .into_iter()
@@ -5182,7 +5186,11 @@ async fn handle_meta_list_connected(
     .await
     {
         Ok(facts) => facts,
-        Err(error) => return app_error_to_rpc(request_id, &error),
+        Err(error) => {
+            // Facts are advisory; a lookup failure never fails the listing.
+            tracing::warn!(%error, "connection facts unavailable");
+            Default::default()
+        }
     };
     let mut result =
         mcp_service::list_connected_services_ranked(&services, query, &ranks, &auth.user_id);
@@ -5275,28 +5283,23 @@ async fn handle_meta_connect(
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
 ) -> Response {
-    let catalog = match crate::services::assistant_connection_service::resolve_catalog(
-        &state.db,
-        &auth.user_id,
-        arguments["service_id"].as_str(),
-        arguments["service_slug"].as_str(),
-    )
-    .await
-    {
-        Ok(catalog) => catalog,
-        Err(error) => return tool_result(request_id, &error.to_string(), true),
+    // Slugs and assistant chat keys resolve through the visibility-checked
+    // catalog resolver. Other callers naming a service_id keep the original
+    // contract (UUID format, scope check, messages) unchanged.
+    let slug = arguments["service_slug"].as_str();
+    let resolved = if slug.is_some() || auth.chat.is_some() {
+        Some(
+            crate::services::assistant_connection_service::resolve_catalog(
+                &state.db,
+                &auth.user_id,
+                arguments["service_id"].as_str(),
+                slug,
+            )
+            .await,
+        )
+    } else {
+        None
     };
-    let service_id = catalog.id.as_str();
-    if auth.chat.is_none()
-        && !auth.allow_all_services
-        && !auth.allowed_service_ids.contains(&catalog.id)
-    {
-        return tool_result(
-            request_id,
-            &restricted_connect_refusal(auth, &state.config.frontend_url),
-            true,
-        );
-    }
     if let Some(chat) = auth.chat.as_ref()
         && !chat.access_request_allowed()
     {
@@ -5329,7 +5332,9 @@ async fn handle_meta_connect(
                 &state.config.frontend_url,
             )
         };
-        if !chat.guest {
+        if !chat.guest
+            && let Some(Ok(catalog)) = resolved.as_ref()
+        {
             refusal["catalog_service_id"] = serde_json::json!(catalog.id);
             refusal["service_slug"] = serde_json::json!(catalog.slug);
             if catalog.service_type == "ssh" {
@@ -5357,6 +5362,35 @@ async fn handle_meta_connect(
             true,
         );
     }
+    let catalog = match resolved {
+        Some(Ok(catalog)) => Some(catalog),
+        Some(Err(error)) => return tool_result(request_id, &error.to_string(), true),
+        None => None,
+    };
+    let service_id = match catalog.as_ref() {
+        Some(catalog) => catalog.id.as_str(),
+        None => match arguments.get("service_id").and_then(|s| s.as_str()) {
+            Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
+            Some(_) => return tool_result(request_id, "Invalid service_id format", true),
+            None => return tool_result(request_id, "service_id is required", true),
+        },
+    };
+
+    // Scoped API keys can only connect services already in their allow-list.
+    // An assistant chat key acts for its owner and only mints a hosted link the
+    // owner completes in the UI, so it may connect any visible catalog service;
+    // the new connection still needs its own card before the chat can use it.
+    if auth.chat.is_none()
+        && !auth.allow_all_services
+        && !auth.allowed_service_ids.contains(&service_id.to_string())
+    {
+        return tool_result(
+            request_id,
+            &restricted_connect_refusal(auth, &state.config.frontend_url),
+            true,
+        );
+    }
+
     let credential = arguments.get("credential").and_then(|c| c.as_str());
     let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
     let scopes = match mcp_service::parse_connect_scopes(arguments.get("scopes")) {
@@ -5386,13 +5420,23 @@ async fn handle_meta_connect(
         }
     }
 
-    let connected = if auth.chat.is_some() {
+    let use_platform_key = arguments
+        .get("use_platform_key")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    // A chat connecting the owner's own credential gets a hosted link with
+    // personal intent. Platform-key and credential-free connections are
+    // outside the organization rule and keep their one-step behavior.
+    let personal_hosted = catalog.as_ref().filter(|catalog| {
+        auth.chat.is_some() && !use_platform_key && catalog.requires_user_credential
+    });
+    let connected = if let Some(catalog) = personal_hosted {
         crate::services::assistant_connection_service::hosted(
             &state.db,
             &auth.user_id,
-            &catalog,
+            catalog,
             &state.config.frontend_url,
-            arguments["use_platform_key"].as_bool().unwrap_or(false),
+            false,
             credential_label,
             auth.api_key_name.as_deref(),
             &scopes,
@@ -5410,10 +5454,7 @@ async fn handle_meta_connect(
             &state.config.frontend_url,
             auth.api_key_name.as_deref(),
             &scopes,
-            arguments
-                .get("use_platform_key")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
+            use_platform_key,
         )
         .await
     };

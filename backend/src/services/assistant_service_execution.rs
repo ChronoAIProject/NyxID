@@ -471,7 +471,7 @@ async fn check_inner(
                 binding,
                 execution: target
                     .map(|target| execution_projection_digest(target, !target.credential_deferred)),
-                execution_credential: target.is_some_and(|target| !target.credential_deferred),
+                execution_credential: target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -814,10 +814,10 @@ async fn check_inner(
                 connection: connection_id.into(),
                 binding,
                 execution: target.map(|target| {
-                    execution_projection_digest(target, !pool && !target.credential.is_empty())
+                    execution_projection_digest(target, !pool && !target.credential_deferred)
                 }),
                 execution_credential: !pool
-                    && target.is_some_and(|target| !target.credential.is_empty()),
+                    && target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -893,8 +893,8 @@ async fn check_inner(
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(|target| execution_projection_digest(target, !pool && !target.credential.is_empty())),
-                execution_credential: !pool && target.is_some_and(|target| !target.credential.is_empty()),
+                execution: target.map(|target| execution_projection_digest(target, !pool && !target.credential_deferred)),
+                execution_credential: !pool && target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,

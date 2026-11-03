@@ -141,7 +141,7 @@ function ConnectOwnAction({ slug }: { readonly slug: string }) {
   return <>
     <Button variant="outline" disabled={connect.isPending} onClick={() => {
       setError(undefined);
-      void connect.mutateAsync(slug).then(setHref).catch((cause: unknown) => {
+      void connect.mutateAsync({ serviceSlug: slug, personal: true }).then(setHref).catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : "Could not create connection link.");
       });
     }}>Connect your own</Button>

@@ -191,5 +191,5 @@ it("keeps org controls in Full and offers hosted setup without a model-authored 
   expect(screen.getByRole("button", { name: "Deny" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Connect your own" }));
   expect(await screen.findByRole("dialog", { name: "Hosted connection" })).toHaveAttribute("data-href", "/connect/personal");
-  expect(createConnect).toHaveBeenCalledWith("github");
+  expect(createConnect).toHaveBeenCalledWith({ serviceSlug: "github", personal: true });
 });

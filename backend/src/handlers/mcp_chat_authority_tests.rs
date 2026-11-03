@@ -5983,7 +5983,7 @@ async fn public_connect_catalog(
 }
 
 #[tokio::test]
-async fn assistant_connect_accepts_catalog_slug_or_id_locks_intent_and_never_provisions_platform_inline()
+async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_keeps_platform_one_step()
  {
     use crate::services::feature_flag_service as flags;
     let f = orchestrator_fixture("assistant_hosted_connect").await;
@@ -6039,9 +6039,7 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_intent_and_never_pro
     for args in [
         json!({"service_slug":catalog.slug}),
         json!({"service_id":catalog.id}),
-        json!({"service_id":catalog.id,"service_slug":catalog.slug,"use_platform_key":true}),
     ] {
-        let platform = args["use_platform_key"].as_bool().unwrap_or(false);
         let value = result(
             handle_meta_connect(&f.state, &auth, None, &args, None, false).await,
             false,
@@ -6059,7 +6057,7 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_intent_and_never_pro
             .unwrap()
             .unwrap();
         assert!(stored.assistant_intent_locked);
-        assert_eq!(stored.use_platform_key, Some(platform));
+        assert_eq!(stored.use_platform_key, Some(false));
     }
     assert_eq!(
         f.state
@@ -6068,7 +6066,32 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_intent_and_never_pro
             .count_documents(doc! {"user_id":&f.owner})
             .await
             .unwrap(),
-        0
+        0,
+        "personal intent never provisions without the human completing the link"
+    );
+    // Platform keys are outside the organization rule: one step, as before.
+    let platform = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id,"service_slug":catalog.slug,"use_platform_key":true}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(platform["status"], "connected", "{platform}");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .count_documents(doc! {"user_id":&f.owner,"credential_binding":"platform"})
+            .await
+            .unwrap(),
+        1
     );
     let response = handle_meta_connect(
         &f.state,

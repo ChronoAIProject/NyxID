@@ -152,7 +152,7 @@ describe("PluginsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockLoaded();
-    mocks.createConnect.mockImplementation(async (slug: string) => `/connect/${slug}`);
+    mocks.createConnect.mockImplementation(async ({ serviceSlug }: { serviceSlug: string }) => `/connect/${serviceSlug}`);
     // Manage-modal hooks: a fully-shaped key + no-op mutations.
     mocks.useKey.mockReturnValue({
       data: {
@@ -200,7 +200,7 @@ describe("PluginsView", () => {
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     const dialog = await screen.findByRole("dialog", { name: "Hosted connection" });
     expect(dialog).toHaveAttribute("data-href", "/connect/github");
-    expect(mocks.createConnect).toHaveBeenCalledWith("github");
+    expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "github", personal: false });
   });
 
   it("offers a personal hosted connection when Added contains only an org account", async () => {
@@ -209,7 +209,10 @@ describe("PluginsView", () => {
     expect(screen.getByRole("button", { name: "Manage OpenAI" })).toBeVisible();
     await userEvent.setup().click(screen.getByRole("button", { name: "Connect your own" }));
     expect(await screen.findByRole("dialog", { name: "Hosted connection" })).toHaveAttribute("data-href", "/connect/openai");
-    expect(screen.getByRole("link", { name: "Advanced setup" })).toHaveAttribute("href", "/keys?tab=services&action=add-service");
+    expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "openai", personal: true });
+    const advanced = screen.getByRole("link", { name: "Advanced setup" });
+    expect(advanced).toHaveAttribute("data-to", "/keys");
+    expect(JSON.parse(advanced.getAttribute("data-search") ?? "null")).toEqual({ tab: "services", action: "add-service" });
   });
 
   it("connects from the keyboard", async () => {

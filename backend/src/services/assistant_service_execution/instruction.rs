@@ -35,18 +35,20 @@ pub(crate) async fn covered(
     chat: &acks::ChatAuthority,
     service: &UserService,
 ) -> AppResult<bool> {
-    if service.source.as_deref() == Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+    // Cheapest checks first: the actor's own rows and platform/auto rows never
+    // need instruction, so ordinary personal calls add no database reads.
+    if service.user_id == chat.user_id
+        || service.source.as_deref() == Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
         || service.credential_binding.as_deref() == Some("platform")
-        || !active(db, &chat.user_id).await?
-        || !personal_agent(db, chat).await?
     {
         return Ok(false);
     }
-    Ok(db
+    let org_owned = db
         .collection::<User>("users")
         .find_one(doc! {"_id":&service.user_id,"is_active":true})
         .await?
-        .is_some_and(|owner| owner.user_type == UserType::Org))
+        .is_some_and(|owner| owner.user_type == UserType::Org);
+    Ok(org_owned && active(db, &chat.user_id).await? && personal_agent(db, chat).await?)
 }
 
 /// This is positive, server-issued evidence for one exact connection in one live

@@ -43,8 +43,10 @@ export interface ConnectorCardItem {
   readonly disabled?: boolean;
   /** Available items only: catalog slug for the hosted connect link. */
   readonly connectSlug?: string;
+  /** Added org-only items: catalog slug for a personal "Connect your own" link. */
   readonly connectOwnSlug?: string;
-  readonly advancedSetup?: boolean;
+  /** Available items the hosted page cannot set up (SSH): Studio catalog slug. */
+  readonly advancedSetupSlug?: string;
 }
 
 export interface ConnectorItems {
@@ -183,7 +185,7 @@ function availableItem(entry: CatalogEntry): ConnectorCardItem {
     meta: catalogMeta(entry),
     added: false,
     connectSlug: entry.service_type === "ssh" ? undefined : entry.slug,
-    advancedSetup: entry.service_type === "ssh",
+    advancedSetupSlug: entry.service_type === "ssh" ? entry.slug : undefined,
   };
 }
 

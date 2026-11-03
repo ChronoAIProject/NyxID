@@ -99,15 +99,25 @@ export function useConnectLinkStatus(id: string, enabled = true) {
   });
 }
 
-/** User-clicked assistant setup always requests a personal hosted connection. */
+export interface AssistantConnectLinkInput {
+  readonly serviceSlug: string;
+  /**
+   * "Connect your own" pins the link to the person's own account. Plain
+   * Connect leaves the credential choice to the hosted page, as before.
+   */
+  readonly personal: boolean;
+}
+
+/** Creates a hosted connect link for a user-clicked assistant setup. */
 export function useCreateAssistantConnectLink() {
   return useMutation({
-    mutationFn: async (serviceSlug: string) => {
-      const response = await api.post("/connect-links", {
-        service_slug: serviceSlug,
-        use_platform_key: false,
-        assistant_personal: true,
-      });
+    mutationFn: async ({ serviceSlug, personal }: AssistantConnectLinkInput) => {
+      const response = await api.post(
+        "/connect-links",
+        personal
+          ? { service_slug: serviceSlug, use_platform_key: false, assistant_personal: true }
+          : { service_slug: serviceSlug },
+      );
       return createConnectLinkResponseSchema.parse(response).connect_url;
     },
   });

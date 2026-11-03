@@ -49,26 +49,10 @@ pub async fn resolve_catalog(
 }
 
 pub async fn facts(db: &Database, actor: &str, connection: &UserService) -> AppResult<Value> {
-    let owner = db
-        .collection::<User>("users")
-        .find_one(doc! {"_id":&connection.user_id,"is_active":true})
+    facts_for(db, actor, std::slice::from_ref(connection))
         .await?
-        .ok_or_else(|| AppError::NotFound("Connection owner unavailable".into()))?;
-    let org = owner.user_type == UserType::Org;
-    let catalog = match connection.catalog_service_id.as_deref() {
-        Some(id) => match resolve_catalog(db, actor, Some(id), None).await {
-            Ok(row) => Some(row),
-            Err(AppError::NotFound(_)) => None,
-            Err(error) => return Err(error),
-        },
-        None => None,
-    };
-    Ok(json!({"catalog_service_id":catalog.as_ref().map(|c| &c.id),
-        "catalog_service_slug":catalog.as_ref().map(|c| &c.slug),
-        "owner_type":if org {"organization"} else {"person"},
-        "relation":if org {"organization"} else if owner.id == actor {"self"} else {"shared_person"},
-        "organization_name":org.then(|| owner.display_name.as_deref().or(owner.slug.as_deref()).unwrap_or(&owner.id)),
-        "account":{"status":"unknown"}}))
+        .remove(&connection.id)
+        .ok_or_else(|| AppError::NotFound("Connection owner unavailable".into()))
 }
 
 /// Unsupported flows never advertise a link that cannot be completed personally.
@@ -163,28 +147,110 @@ pub async fn hosted(
     )
 }
 
+/// Batched, fail-soft connection facts keyed by `UserService.id`. A connection
+/// whose owner or catalog cannot be read is omitted rather than failing the
+/// listing that asked for it.
+pub async fn facts_for(
+    db: &Database,
+    actor: &str,
+    connections: &[UserService],
+) -> AppResult<std::collections::HashMap<String, Value>> {
+    use futures::TryStreamExt;
+    use std::collections::{BTreeSet, HashMap};
+    let mut result = HashMap::new();
+    if connections.is_empty() {
+        return Ok(result);
+    }
+    let owner_ids: BTreeSet<&str> = connections.iter().map(|c| c.user_id.as_str()).collect();
+    let owners: HashMap<String, User> = db
+        .collection::<User>("users")
+        .find(doc! {"_id":{"$in":owner_ids.into_iter().collect::<Vec<_>>()},"is_active":true})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|owner| (owner.id.clone(), owner))
+        .collect();
+    let catalog_ids: BTreeSet<&str> = connections
+        .iter()
+        .filter_map(|c| c.catalog_service_id.as_deref())
+        .collect();
+    let mut catalogs: HashMap<String, DownstreamService> = HashMap::new();
+    if !catalog_ids.is_empty() {
+        let rows: Vec<DownstreamService> = db
+            .collection::<DownstreamService>("downstream_services")
+            .find(doc! {"_id":{"$in":catalog_ids.into_iter().collect::<Vec<_>>()},"is_active":true})
+            .await?
+            .try_collect()
+            .await?;
+        for catalog in rows {
+            if super::retired_service_service::is_retired(&catalog)
+                || super::catalog_service::enforce_catalog_read_access(db, actor, &catalog)
+                    .await
+                    .is_err()
+            {
+                continue;
+            }
+            catalogs.insert(catalog.id.clone(), catalog);
+        }
+    }
+    for connection in connections {
+        let Some(owner) = owners.get(&connection.user_id) else {
+            continue;
+        };
+        let catalog = connection
+            .catalog_service_id
+            .as_deref()
+            .and_then(|id| catalogs.get(id));
+        result.insert(connection.id.clone(), project(actor, owner, catalog));
+    }
+    Ok(result)
+}
+
+fn project(actor: &str, owner: &User, catalog: Option<&DownstreamService>) -> Value {
+    let org = owner.user_type == UserType::Org;
+    json!({"catalog_service_id":catalog.map(|c| &c.id),
+        "catalog_service_slug":catalog.map(|c| &c.slug),
+        "owner_type":if org {"organization"} else {"person"},
+        "relation":if org {"organization"} else if owner.id == actor {"self"} else {"shared_person"},
+        "organization_name":org.then(|| owner.display_name.as_deref().or(owner.slug.as_deref()).unwrap_or(&owner.id)),
+        "account":{"status":"unknown"}})
+}
+
+/// Facts for MCP tool services, keyed by `McpToolService.service_id`.
 pub async fn mcp_facts(
     db: &Database,
     actor: &str,
     services: &[super::mcp_service::McpToolService],
 ) -> AppResult<std::collections::HashMap<String, Value>> {
-    let mut result = std::collections::HashMap::new();
-    for service in services {
-        if let super::mcp_service::McpToolSource::UserManaged {
-            user_service_id, ..
-        } = &service.source
-            && let Some(connection) = db
-                .collection::<UserService>("user_services")
-                .find_one(doc! {"_id":user_service_id})
-                .await?
-        {
-            result.insert(
-                service.service_id.clone(),
-                facts(db, actor, &connection).await?,
-            );
-        }
+    use futures::TryStreamExt;
+    let ids: Vec<(&str, &str)> = services
+        .iter()
+        .filter_map(|service| match &service.source {
+            super::mcp_service::McpToolSource::UserManaged {
+                user_service_id, ..
+            } => Some((service.service_id.as_str(), user_service_id.as_str())),
+            _ => None,
+        })
+        .collect();
+    if ids.is_empty() {
+        return Ok(Default::default());
     }
-    Ok(result)
+    let connections: Vec<UserService> = db
+        .collection::<UserService>("user_services")
+        .find(doc! {"_id":{"$in":ids.iter().map(|(_, id)| *id).collect::<Vec<_>>()}})
+        .await?
+        .try_collect()
+        .await?;
+    let by_connection = facts_for(db, actor, &connections).await?;
+    Ok(ids
+        .into_iter()
+        .filter_map(|(service, connection)| {
+            by_connection
+                .get(connection)
+                .map(|facts| (service.to_owned(), facts.clone()))
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -295,6 +361,38 @@ mod tests {
         }
         f.state.db.drop().await.unwrap();
     }
+    #[tokio::test]
+    async fn batched_facts_skip_unreadable_owners_instead_of_failing() {
+        let f = orchestrator_fixture("assistant_connection_facts_batch").await;
+        let org = Uuid::new_v4().to_string();
+        let mut inactive = crate::test_utils::test_user(&org, UserType::Org);
+        inactive.is_active = false;
+        f.state
+            .db
+            .collection::<User>("users")
+            .insert_one(inactive)
+            .await
+            .unwrap();
+        let own = connected(&f.state.db, &f.owner, "own", "https://example.test").await;
+        let stale = connected(&f.state.db, &org, "stale-org", "https://example.test").await;
+        let mut rows = Vec::new();
+        for id in [&own, &stale] {
+            rows.push(
+                crate::services::user_service_service::find_user_service_by_id(&f.state.db, id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let facts = facts_for(&f.state.db, &f.owner, &rows).await.unwrap();
+        assert_eq!(facts[&own]["relation"], "self");
+        assert!(
+            !facts.contains_key(&stale),
+            "an inactive owner is omitted, not an error"
+        );
+        f.state.db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn connect_own_requires_visible_personal_catalog_and_reports_ssh_or_custom_as_unsupported()
      {
