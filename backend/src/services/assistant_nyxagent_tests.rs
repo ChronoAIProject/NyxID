@@ -7814,7 +7814,10 @@ fn connect_guidance_gives_link_and_existing_facts_immediately_for_both_roles() {
             "Never ask whether to proceed",
             "suggest reusing an existing connection instead",
             "never guess the provider account identity",
-            "one-step success or connect_unavailable",
+            "Honor one-step success",
+            "For already_connected",
+            "no separate account to add",
+            "Explain connect_unavailable reasons plainly",
             "Specialists cannot mint links",
         ] {
             assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");

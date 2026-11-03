@@ -795,8 +795,9 @@ placement and refresh behavior.
 
 ## Assistant connection setup
 
-For NyxBot, `nyx__connect_service` returns a hosted personal-credential link
-immediately, even when personal or organization connections already exist.
+For eligible personal-credential catalogs, NyxBot's `nyx__connect_service`
+returns a hosted link immediately, even when personal or organization
+connections already exist.
 The chat result also includes bounded `existing_connections` metadata and
 `existing_connections_truncated`; each fact names ownership, connection label,
 and enabled state while leaving the provider account identity unknown. The
@@ -804,15 +805,26 @@ assistant gives the link immediately and mentions those facts in one short
 line, without asking whether to proceed, offering reuse instead, or replacing
 the link with a settings page.
 
-Platform-key and credential-free chat requests create independent connections
-in one step. A catalog whose sign-in provider exists only in
-`service_provider_requirements` is unavailable for hosted setup until an admin
-links `provider_config_id`; it returns `connect_unavailable` and existing facts,
-with no link. Admin-only OAuth and device-code providers must have their
-platform client credentials configured before a chat can mint a link; a
+Explicit platform-key requests create unified connections in one step. Other
+non-hosted chat requests retain the legacy connector, including no-auth and
+internal master-credential services. Repeating an active legacy connection
+returns successful `status: already_connected` with catalog ID/slug and existing
+facts: there is no separate account to add. It creates no duplicate connection.
+A catalog without `provider_config_id` returns `connect_unavailable` with
+`reason: provider_requirement_only` only when a `required: true` provider
+requirement is its only credential path (`requires_user_credential=false`).
+Optional requirements do not block setup, and `requires_user_credential=true`
+keeps the hosted API-key form. Admin-only OAuth and device-code providers must
+have their platform client credentials configured before a chat can mint a link; a
 device-code public client requires only a client ID. Specialists cannot create
-links and see only facts within their existing grants; completing setup never
-grants them access automatically.
+links and see only facts within their effective connection grants; completing
+setup never grants them access automatically. Inventory uses the shared service
+visibility resolver with one membership load, excludes Viewer/scope-denied
+rows and deleted tombstones, and retains disabled connections. Org-agent thread
+keys belong to the acting member; their effective connection IDs are restricted
+to the agent organization's own rows. A platform catalog grant in a personal
+key's effective scope does not grant inventory of that catalog's connections:
+selection matches exact `UserService` IDs.
 External MCP clients keep the legacy connection response contract. See
 [the engine contract](chat/08-nyxagent-engine.md#protected-org-connections-and-hosted-personal-setup)
 for bounds, owner checks, failures, and readiness-gated personal intent locks.

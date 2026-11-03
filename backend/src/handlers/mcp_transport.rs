@@ -5356,6 +5356,8 @@ async fn handle_meta_connect(
             refusal["service_slug"] = serde_json::json!(catalog.slug);
             // A denied specialist never gains inventory authority through
             // connect. Show only connections already in its effective grants.
+            // The effective scope can also contain platform catalog IDs;
+            // ServiceSelection matches UserService._id, never catalog authority.
             let existing = match assistant_connect::existing_connections(
                 &state.db,
                 &auth.user_id,
@@ -5376,7 +5378,7 @@ async fn handle_meta_connect(
                     );
                 }
                 Ok(readiness) => {
-                    let reason = readiness.err().unwrap_or("personal_account_not_supported");
+                    let reason = readiness.err().unwrap_or("no_separate_account");
                     refusal["connect_own"] = serde_json::json!({"supported":false,"reason":reason});
                     refusal["instructions"] =
                         serde_json::json!(assistant_connect::unavailable_instructions(reason));
@@ -5460,13 +5462,14 @@ async fn handle_meta_connect(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let existing = if auth.chat.is_some() {
-        match assistant_connect::existing_connections(
-            &state.db,
-            &auth.user_id,
-            catalog.as_ref().expect("chat catalog resolved"),
-            None,
-        )
-        .await
+        let Some(catalog) = catalog.as_ref() else {
+            return tool_result(
+                request_id,
+                "Catalog entry is required for chat connection setup",
+                true,
+            );
+        };
+        match assistant_connect::existing_connections(&state.db, &auth.user_id, catalog, None).await
         {
             Ok(existing) => Some(existing),
             Err(error) => return app_error_to_rpc(request_id, &error),
@@ -5488,11 +5491,7 @@ async fn handle_meta_connect(
             Ok(readiness) => readiness,
             Err(error) => return app_error_to_rpc(request_id, &error),
         };
-        let reason = readiness.err().or_else(|| {
-            (personal_hosted.is_none() && catalog.auth_method != "none")
-                .then_some("personal_account_not_supported")
-        });
-        if let Some(reason) = reason {
+        if let Err(reason) = readiness {
             let mut result = serde_json::json!({"error":"connect_unavailable", "reason":reason,
                 "catalog_service_id":catalog.id, "service_slug":catalog.slug,
                 "instructions":assistant_connect::unavailable_instructions(reason)});
@@ -5511,16 +5510,6 @@ async fn handle_meta_connect(
             false,
             credential_label,
             auth.api_key_name.as_deref(),
-            &scopes,
-        )
-        .await
-    } else if auth.chat.is_some() && !use_platform_key {
-        assistant_connect::credential_free(
-            &state.db,
-            &state.encryption_keys,
-            &auth.user_id,
-            catalog.as_ref().expect("chat catalog resolved"),
-            credential_label,
             &scopes,
         )
         .await
@@ -5641,8 +5630,11 @@ async fn handle_meta_connect(
             });
             if let Some(existing) = &existing {
                 existing.attach(&mut response_json);
-                response_json["service_id"] = result["service_id"].clone();
-                response_json["service_slug"] = result["service_slug"].clone();
+                for field in ["service_id", "service_slug"] {
+                    if let Some(value) = result.get(field) {
+                        response_json[field] = value.clone();
+                    }
+                }
                 response_json["instructions"] = serde_json::json!(
                     "The requested connection was created. Mention existing connections in one short line; do not suggest reusing one instead or substitute a page link."
                 );
@@ -5665,6 +5657,24 @@ async fn handle_meta_connect(
             }
         }
         Err(e) => {
+            // Only the legacy connector's active-connection conflict means
+            // there is no separate account to add. Preserve other failures.
+            if !use_platform_key
+                && personal_hosted.is_none()
+                && matches!(&e, crate::errors::AppError::Conflict(message) if message == "Already connected to this service")
+                && let Some(existing) = &existing
+            {
+                let mut result = serde_json::json!({
+                    "status": "already_connected",
+                    "catalog_service_id": service_id,
+                    "instructions": "There is no separate account to add for this service. Say it is already connected in one short line, mentioning existing connection facts when present. Do not ask whether to proceed, suggest reusing a connection instead, or substitute a page link.",
+                });
+                if let Some(catalog) = &catalog {
+                    result["service_slug"] = serde_json::json!(catalog.slug);
+                }
+                existing.attach(&mut result);
+                return tool_result(request_id, &result.to_string(), false);
+            }
             tracing::warn!("connect_service failed: {e}");
             let msg = match &e {
                 crate::errors::AppError::Internal(_)

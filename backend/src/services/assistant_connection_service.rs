@@ -75,15 +75,16 @@ pub async fn hosted_connect_ready(
         return Ok(Err("ssh_requires_advanced_setup"));
     }
     let Some(provider_id) = catalog.provider_config_id.as_deref() else {
-        // Hosted preview and unified provisioning resolve the provider only
-        // through provider_config_id. A requirement alone cannot start or
-        // complete its sign-in; do not mint a misleading API-key form.
-        if db
-            .collection::<bson::Document>("service_provider_requirements")
-            .find_one(doc! {"service_id": &catalog.id})
-            .projection(doc! {"_id": 1})
-            .await?
-            .is_some()
+        // A required provider without provider_config_id cannot supply a
+        // credential. Catalogs collecting their own credential still have a
+        // working hosted API-key form, independent of provider requirements.
+        if !catalog.requires_user_credential
+            && db
+                .collection::<bson::Document>("service_provider_requirements")
+                .find_one(doc! {"service_id": &catalog.id, "required": true})
+                .projection(doc! {"_id": 1})
+                .await?
+                .is_some()
         {
             return Ok(Err("provider_requirement_only"));
         }
@@ -132,10 +133,8 @@ pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -
             "instructions":format!("{} The current organization operation still requires its exact owner approval.", unavailable_instructions(reason))}));
     }
     if !personal_hosted_connect(&catalog) {
-        return Ok(
-            json!({"supported":false,"reason":"personal_account_not_supported",
-            "instructions":unavailable_instructions("personal_account_not_supported")}),
-        );
+        return Ok(json!({"supported":false,"reason":"no_separate_account",
+            "instructions":unavailable_instructions("no_separate_account")}));
     }
     Ok(
         json!({"supported":true,"catalog_service_id":catalog.id,"service_slug":catalog.slug,
@@ -147,7 +146,7 @@ pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -
 pub fn unavailable_instructions(reason: &str) -> &'static str {
     match reason {
         "provider_requirement_only" => {
-            "NyxID cannot connect another account for this catalog yet: its sign-in provider is declared only in a requirement. A platform admin must link the provider to the catalog before hosted setup can work. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
+            "NyxID cannot connect another account for this catalog yet: its required sign-in provider is declared only in a requirement and the catalog has no credential form. A platform admin must link the provider to the catalog before hosted setup can work. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
         }
         "ssh_requires_advanced_setup" => {
             "Hosted SSH setup is unsupported; SSH requires a node and advanced configuration. Mention existing connections in one short line; do not substitute a page link."
@@ -155,8 +154,8 @@ pub fn unavailable_instructions(reason: &str) -> &'static str {
         "provider_flow_unsupported" => {
             "This provider's sign-in flow is not supported by hosted setup. Mention existing connections in one short line; do not substitute a page link."
         }
-        "personal_account_not_supported" => {
-            "This catalog does not support connecting another personal account. A platform-key connection requires an explicit use_platform_key request and an available platform key. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
+        "no_separate_account" => {
+            "This service uses a one-step connection and has no separate personal account to add. If the owner asks to connect it, have NyxBot call nyx__connect_service and report connected or already_connected in one short line with existing connection facts. Do not substitute a page link."
         }
         _ => {
             "This service's sign-in is unavailable in NyxID: a platform admin must enable or configure its provider. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
@@ -177,7 +176,7 @@ impl ExistingConnections {
     }
 }
 
-/// Metadata only, bounded before owner/catalog/label hydration. The actor's
+/// Metadata only, bounded before facts and label hydration. The actor's
 /// live membership scopes govern visibility; a specialist is additionally
 /// restricted to its existing grants. No credential material is loaded.
 pub async fn existing_connections(
@@ -186,35 +185,61 @@ pub async fn existing_connections(
     catalog: &DownstreamService,
     selected: Option<&[String]>,
 ) -> AppResult<ExistingConnections> {
+    use super::user_service_service::{self, CredentialSource, ServiceSelection};
     use futures::TryStreamExt;
-    use std::collections::HashMap;
-    const LIMIT: i64 = 10;
+    use std::collections::{HashMap, HashSet};
+    const LIMIT: usize = 10;
     let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
-    let mut owners = vec![doc! {"user_id": actor}];
-    for membership in memberships {
-        let scope =
-            super::org_role_scope_service::effective_scope_for_membership(db, &membership).await?;
-        let mut filter = doc! {"user_id": &membership.org_user_id};
-        if let Some(ids) = scope {
-            filter.insert("_id", doc! {"$in": ids});
-        }
-        owners.push(filter);
+    let candidates = user_service_service::list_user_services_with_sources_selected_in_group(
+        db,
+        actor,
+        false,
+        true,
+        &memberships,
+        ServiceSelection {
+            ids: selected,
+            catalog_service_id: Some(&catalog.id),
+        },
+    )
+    .await?;
+    let mut rows: Vec<UserService> = candidates
+        .into_iter()
+        .filter(|entry| {
+            !matches!(&entry.source, CredentialSource::Org { allowed: false, .. })
+                && entry.service.deleted_at.is_none()
+        })
+        .map(|entry| entry.service)
+        .collect();
+    // Older deletes left inactive rows without deleted_at after removing the
+    // endpoint. Retain disabled rows only while their owner-bound endpoint exists.
+    let disabled_endpoints: Vec<_> = rows
+        .iter()
+        .filter(|row| !row.is_active)
+        .map(|row| row.endpoint_id.as_str())
+        .collect();
+    if !disabled_endpoints.is_empty() {
+        let endpoints: Vec<bson::Document> = db
+            .collection::<bson::Document>("user_endpoints")
+            .find(doc! {"_id": {"$in": disabled_endpoints}})
+            .projection(doc! {"_id": 1, "user_id": 1})
+            .await?
+            .try_collect()
+            .await?;
+        let retained: HashSet<_> = endpoints
+            .iter()
+            .filter_map(|entry| Some((entry.get_str("_id").ok()?, entry.get_str("user_id").ok()?)))
+            .collect();
+        rows.retain(|row| {
+            row.is_active || retained.contains(&(row.endpoint_id.as_str(), row.user_id.as_str()))
+        });
     }
-    let mut filter = doc! {"catalog_service_id": &catalog.id, "deleted_at": null, "$or": owners};
-    if let Some(ids) = selected {
-        filter.insert("_id", doc! {"$in": ids});
-    }
-    let mut rows: Vec<UserService> = db
-        .collection::<UserService>("user_services")
-        .find(filter)
-        .projection(doc! {"default_request_headers": 0, "ws_frame_injections": 0})
-        .sort(doc! {"created_at": -1, "_id": 1})
-        .limit(LIMIT + 1)
-        .await?
-        .try_collect()
-        .await?;
-    let truncated = rows.len() > LIMIT as usize;
-    rows.truncate(LIMIT as usize);
+    rows.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let truncated = rows.len() > LIMIT;
+    rows.truncate(LIMIT);
     let facts = facts_for(db, actor, &rows).await?;
     let mut labels = HashMap::new();
     for (collection, ids) in [
@@ -342,48 +367,6 @@ pub async fn hosted(
         "connect_link_id":created.link.id,"expires_at":created.link.expires_at.to_rfc3339(),"service_id":catalog.id,"catalog_service_id":catalog.id,"service_slug":catalog.slug,"scopes":created.link.scopes,
         "instructions":CONNECT_PRESENTATION_INSTRUCTIONS}),
     )
-}
-
-/// Credential-free chat adds use unified storage, where each add has its own
-/// connection identity. The legacy connector permits only one row per catalog.
-pub async fn credential_free(
-    db: &Database,
-    keys: &crate::crypto::aes::EncryptionKeys,
-    actor: &str,
-    catalog: &DownstreamService,
-    label: Option<&str>,
-    scopes: &[String],
-) -> AppResult<Value> {
-    if !scopes.is_empty() {
-        return Err(AppError::ValidationError(
-            "This service does not use OAuth; remove the additional scopes".into(),
-        ));
-    }
-    let created = super::unified_key_service::create_key(
-        db,
-        keys,
-        actor,
-        actor,
-        Some(&catalog.slug),
-        None,
-        "",
-        label.unwrap_or(&catalog.name),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        super::unified_key_service::OpenApiSpecUrlInput::Inherit,
-        None,
-        false,
-        super::unified_key_service::OauthClientCredentialsInput::None,
-        false,
-    )
-    .await?;
-    Ok(json!({"status":"connected", "service_name":catalog.name,
-        "service_id":created.service.id, "service_slug":created.service.slug,
-        "connected_at":created.service.created_at.to_rfc3339()}))
 }
 
 /// Batched, fail-soft connection facts keyed by `UserService.id`. A connection

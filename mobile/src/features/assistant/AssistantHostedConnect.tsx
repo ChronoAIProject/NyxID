@@ -188,10 +188,7 @@ export function AssistantHostedConnect({
                 label={field.label}
                 value={fieldValues[field.name] ?? ""}
                 onChangeText={(value) =>
-                  setFieldValues((current) => ({
-                    ...current,
-                    [field.name]: value,
-                  }))
+                  setFieldValues((current) => ({ ...current, [field.name]: value }))
                 }
                 secureTextEntry={field.secret}
                 autoCorrect={false}

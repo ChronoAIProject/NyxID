@@ -2692,9 +2692,11 @@ pub fn generate_tool_definitions(
             Give the hosted link immediately and mention existing_connections in one short line \
             (ownership, label, enabled/disabled; provider account identity is unknown). Never ask \
             whether to proceed, suggest reusing an existing connection instead, or substitute a page link. \
-            Platform-key and credential-free chat connects are one-step; explain connect_unavailable \
-            reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot send one, \
-            followed by a separate specialist grant. Optional scopes request additional OAuth \
+            Platform-key connects create a connection in one step. Other non-hosted connects keep \
+            the one-step service connection; already_connected means there is no separate account \
+            to add: say it is already connected in one short line. Explain connect_unavailable \
+            reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot handle \
+            setup, sending a hosted link when supported, followed by a separate specialist grant. Optional scopes request additional OAuth \
             permissions on top of provider defaults through that hosted link; omit credential \
             when requesting scopes. Never enter credentials through assistant chat."
             .to_string(),
@@ -10325,6 +10327,9 @@ mod tests {
             .unwrap();
         assert!(connect.input_schema["properties"]["service_id"].is_object());
         assert!(connect.input_schema["properties"]["service_slug"].is_object());
+        for guidance in ["already_connected", "no separate account", "one short line"] {
+            assert!(connect.description.contains(guidance), "missing {guidance}");
+        }
     }
 
     #[test]
