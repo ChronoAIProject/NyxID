@@ -176,6 +176,18 @@ impl ExistingConnections {
     }
 }
 
+/// The legacy collection also contains encrypted credentials. Deserialize only
+/// this inclusion projection so inventory never loads credential material.
+#[derive(serde::Deserialize)]
+struct LegacyConnectionMetadata {
+    #[serde(rename = "_id")]
+    id: String,
+    credential_label: Option<String>,
+    is_active: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Metadata only, bounded before facts and label hydration. The actor's
 /// live membership scopes govern visibility; a specialist is additionally
 /// restricted to its existing grants. No credential material is loaded.
@@ -233,14 +245,42 @@ pub async fn existing_connections(
             row.is_active || retained.contains(&(row.endpoint_id.as_str(), row.user_id.as_str()))
         });
     }
+    // Specialist grants name UserService IDs, so legacy rows cannot be in scope.
+    let legacy = if selected.is_none() {
+        db.collection::<LegacyConnectionMetadata>(
+            crate::models::user_service_connection::COLLECTION_NAME,
+        )
+        .find_one(doc! {"user_id":actor,"service_id":&catalog.id,"is_active":true})
+        .projection(doc! {"_id":1,"credential_label":1,"is_active":1,"created_at":1})
+        .await?
+        .filter(|legacy| {
+            // Startup migration retains the legacy row and marks its unified
+            // copy with this lineage. Independent same-catalog rows stay listed.
+            !rows.iter().any(|row| {
+                row.user_id == actor
+                    && row.source.as_deref() == Some("migration_connection")
+                    && row.source_id.as_deref() == Some(legacy.id.as_str())
+            })
+        })
+    } else {
+        None
+    };
     rows.sort_by(|a, b| {
         b.created_at
             .cmp(&a.created_at)
             .then_with(|| a.id.cmp(&b.id))
     });
-    let truncated = rows.len() > LIMIT;
+    let truncated = rows.len() + usize::from(legacy.is_some()) > LIMIT;
     rows.truncate(LIMIT);
-    let facts = facts_for(db, actor, &rows).await?;
+    let mut identities: Vec<_> = rows.iter().map(ConnectionIdentity::from).collect();
+    if let Some(legacy) = &legacy {
+        identities.push(ConnectionIdentity {
+            id: &legacy.id,
+            owner_id: actor,
+            catalog_id: Some(&catalog.id),
+        });
+    }
+    let facts = facts_for_identities(db, actor, &identities).await?;
     let mut labels = HashMap::new();
     for (collection, ids) in [
         (
@@ -279,7 +319,7 @@ pub async fn existing_connections(
             }
         }
     }
-    let connections = rows
+    let mut connections: Vec<_> = rows
         .iter()
         .filter_map(|row| {
             let mut fact = facts.get(&row.id)?.clone();
@@ -295,11 +335,28 @@ pub async fn existing_connections(
             if let Some(name) = fact["organization_name"].as_str() {
                 fact["organization_name"] = json!(name.chars().take(120).collect::<String>());
             }
-            Some(fact)
+            Some((row.created_at, row.id.as_str(), fact))
         })
         .collect();
+    if let Some(legacy) = &legacy
+        && let Some(mut fact) = facts.get(&legacy.id).cloned()
+    {
+        fact["connection_id"] = json!(legacy.id);
+        fact["connection_slug"] = json!(catalog.slug);
+        fact["label"] = json!(
+            legacy
+                .credential_label
+                .as_ref()
+                .map(|label| label.chars().take(120).collect::<String>())
+        );
+        fact["is_active"] = json!(legacy.is_active);
+        fact["source"] = json!("legacy_connection");
+        connections.push((legacy.created_at, legacy.id.as_str(), fact));
+    }
+    connections.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    connections.truncate(LIMIT);
     Ok(ExistingConnections {
-        connections,
+        connections: connections.into_iter().map(|(_, _, fact)| fact).collect(),
         truncated,
     })
 }
@@ -377,13 +434,40 @@ pub async fn facts_for(
     actor: &str,
     connections: &[UserService],
 ) -> AppResult<std::collections::HashMap<String, Value>> {
+    let identities: Vec<_> = connections.iter().map(ConnectionIdentity::from).collect();
+    facts_for_identities(db, actor, &identities).await
+}
+
+struct ConnectionIdentity<'a> {
+    id: &'a str,
+    owner_id: &'a str,
+    catalog_id: Option<&'a str>,
+}
+
+impl<'a> From<&'a UserService> for ConnectionIdentity<'a> {
+    fn from(connection: &'a UserService) -> Self {
+        Self {
+            id: &connection.id,
+            owner_id: &connection.user_id,
+            catalog_id: connection.catalog_service_id.as_deref(),
+        }
+    }
+}
+
+/// Share the same batched owner/catalog reads and wording across unified and
+/// legacy inventory without constructing or reading a credential-bearing row.
+async fn facts_for_identities(
+    db: &Database,
+    actor: &str,
+    connections: &[ConnectionIdentity<'_>],
+) -> AppResult<std::collections::HashMap<String, Value>> {
     use futures::TryStreamExt;
     use std::collections::{BTreeSet, HashMap};
     let mut result = HashMap::new();
     if connections.is_empty() {
         return Ok(result);
     }
-    let owner_ids: BTreeSet<&str> = connections.iter().map(|c| c.user_id.as_str()).collect();
+    let owner_ids: BTreeSet<&str> = connections.iter().map(|c| c.owner_id).collect();
     let owners: HashMap<String, User> = db
         .collection::<User>("users")
         .find(doc! {"_id":{"$in":owner_ids.into_iter().collect::<Vec<_>>()},"is_active":true})
@@ -393,10 +477,7 @@ pub async fn facts_for(
         .into_iter()
         .map(|owner| (owner.id.clone(), owner))
         .collect();
-    let catalog_ids: BTreeSet<&str> = connections
-        .iter()
-        .filter_map(|c| c.catalog_service_id.as_deref())
-        .collect();
+    let catalog_ids: BTreeSet<&str> = connections.iter().filter_map(|c| c.catalog_id).collect();
     let mut catalogs: HashMap<String, DownstreamService> = HashMap::new();
     if !catalog_ids.is_empty() {
         let rows: Vec<DownstreamService> = db
@@ -421,14 +502,11 @@ pub async fn facts_for(
         }
     }
     for connection in connections {
-        let Some(owner) = owners.get(&connection.user_id) else {
+        let Some(owner) = owners.get(connection.owner_id) else {
             continue;
         };
-        let catalog = connection
-            .catalog_service_id
-            .as_deref()
-            .and_then(|id| catalogs.get(id));
-        result.insert(connection.id.clone(), project(actor, owner, catalog));
+        let catalog = connection.catalog_id.and_then(|id| catalogs.get(id));
+        result.insert(connection.id.to_owned(), project(actor, owner, catalog));
     }
     Ok(result)
 }

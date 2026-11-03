@@ -818,9 +818,15 @@ keeps the hosted API-key form. Admin-only OAuth and device-code providers must
 have their platform client credentials configured before a chat can mint a link; a
 device-code public client requires only a client ID. Specialists cannot create
 links and see only facts within their effective connection grants; completing
-setup never grants them access automatically. Inventory uses the shared service
-visibility resolver with one membership load, excludes Viewer/scope-denied
-rows and deleted tombstones, and retains disabled connections. Org-agent thread
+setup never grants them access automatically. Unified inventory uses the shared
+service visibility resolver with one membership load, excludes Viewer/scope-denied
+rows and deleted tombstones, and retains disabled connections. Unscoped NyxBot
+also includes the actor's own active legacy `user_service_connections` row for
+the catalog, marked `source: "legacy_connection"`, using only ID, label, active
+state and creation time. Both sources share the ten-row bound and ordering;
+`migration_connection` / `source_id` lineage suppresses a legacy row already
+represented by a retained unified row. Specialist inventories contain only unified
+rows within their grants. Org-agent thread
 keys belong to the acting member; their effective connection IDs are restricted
 to the agent organization's own rows. A platform catalog grant in a personal
 key's effective scope does not grant inventory of that catalog's connections:
