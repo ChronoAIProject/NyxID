@@ -416,6 +416,7 @@ export const crmViewValidationResponseSchema = z.object({
 
 export type CrmField = z.infer<typeof crmFieldSchema>;
 export type CrmObject = z.infer<typeof crmObjectSchema>;
+export type CrmRecordLink = z.infer<typeof crmRecordLinkSchema>;
 export type CrmRecordRow = z.infer<typeof crmRecordRowSchema>;
 export type CrmRecord = z.infer<typeof crmRecordSchema>;
 export type CrmFilter = z.infer<typeof crmFilterSchema>;
