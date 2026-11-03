@@ -29,7 +29,13 @@ test("Display holds the appearance control, the system switch and chat layout se
   assert.equal(system.props.value, true);
   system.props.onValueChange(false);
   assert.deepEqual(env.preferences, ["light"]);
-  assert.ok(env.all().some((node) => node.type === "ChatDisplaySettings"));
+  const layout = env.all().find((node) => node.type === "ChatDisplaySettings")!;
+  assert.equal(
+    layout.props.embedded,
+    true,
+    "chat layout sits in its own group",
+  );
+  assert.ok(env.text("CHAT LAYOUT"));
   env.resize(402, 3.12);
   assert.equal(style(appearance()).flexDirection, "column");
   env.harness.unmount();

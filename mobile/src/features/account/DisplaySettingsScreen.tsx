@@ -103,7 +103,9 @@ export function DisplaySettingsScreen(
           }
         />
       </SettingsGroup>
-      <ChatDisplaySettings />
+      <SettingsGroup title="Chat layout">
+        <ChatDisplaySettings embedded />
+      </SettingsGroup>
     </SettingsPage>
   );
 }
