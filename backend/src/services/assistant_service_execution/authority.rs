@@ -113,7 +113,10 @@ fn connection_projection<'a>(
         };
         let mut authority = json!({"owner":key.user_id,"expires":key.expires_at,"scopes":key.assistant_operation_scopes,
         "allowed":allowed,"all_services":key.allow_all_services,"nodes":nodes,"mode":mode});
-        if let Some(chat) = acks::for_key(db, &key.user_id, Some(api_key_id)).await?
+        // Only another owner's row can need organization instruction; the
+        // actor's own connections skip the chat lookup entirely.
+        if service.user_id != key.user_id
+            && let Some(chat) = acks::for_key(db, &key.user_id, Some(api_key_id)).await?
             && instruction::covered(db, &chat, &service).await?
         {
             authority
