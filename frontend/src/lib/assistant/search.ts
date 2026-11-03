@@ -1,7 +1,4 @@
-import {
-  withAccountPanelSearch,
-  type AccountPanelSearch,
-} from "./account-panel-search";
+import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel-search";
 
 /**
  * The `/assistant` search contract, in one place: the router validates with
@@ -56,18 +53,11 @@ function parseChatSearch(
 ): Omit<AssistantSearch, keyof AccountPanelSearch> {
   return {
     ...(typeof search.c === "string" ? { c: search.c } : {}),
-    ...(typeof search.card === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      search.card,
-    )
+    ...(typeof search.card === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.card)
       ? { card: search.card }
       : {}),
-    ...(typeof search.proposal === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      search.proposal,
-    )
-      ? { proposal: search.proposal }
-      : {}),
+    ...(typeof search.proposal === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.proposal)
+      ? { proposal: search.proposal } : {}),
     ...(search.draft === true || search.draft === "true"
       ? { draft: true }
       : {}),
@@ -78,7 +68,9 @@ function parseChatSearch(
       ? { details: agentDetailsTab(search.details) }
       : {}),
     ...(typeof search.g === "string" && search.g ? { g: search.g } : {}),
-    ...(search.mock === 1 || search.mock === "1" ? { mock: 1 as const } : {}),
+    ...(search.mock === 1 || search.mock === "1"
+      ? { mock: 1 as const }
+      : {}),
   };
 }
 

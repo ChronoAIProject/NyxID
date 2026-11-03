@@ -8,7 +8,6 @@ import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { collaborationApi } from "@/hooks/use-collaboration-groups";
 import { guestAccessRequestSchema } from "@/schemas/collaboration-group";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -81,67 +80,84 @@ export function CollaborationGuestControls({
   if (!query.data?.length) return null;
   return (
     <section className="space-y-2 text-12" aria-label="Group guest replies">
-      <GroupedList
-        title="Group guest replies"
-        footer="Allow guests separately for each group. This gives you no access to its transcript or participants."
-      >
-        {query.data.map((row) => (
-          <GroupedRow key={row.group_id} className="block space-y-2">
-            <p className="min-w-0 break-all">Group {row.group_id}</p>
-            {row.request ? (
-              <Badge variant="secondary">Request {row.request.status}</Badge>
-            ) : null}
-            {row.request?.status === "pending" && !row.enabled ? (
-              <>
-                <p className="text-muted-foreground">
-                  Allow current and future participants without use rights to
-                  use this agent under your guest service policy. They use your
-                  identity and billing; they cannot approve cards or use private
-                  account tools.
+      {query.data.map((row) => (
+        <GroupedList
+          key={row.group_id}
+          title={`Group ${row.group_id}`}
+          footer={
+            <>
+              <p>
+                Allow guests separately for each group. This gives you no access
+                to its transcript or participants.
+              </p>
+              {row.request?.status === "pending" && !row.enabled ? (
+                <>
+                  <p>
+                    Allow current and future participants without use rights to
+                    use this agent under your guest service policy. They use
+                    your identity and billing; they cannot approve cards or use
+                    private account tools.
+                  </p>
+                  <p>
+                    Expires {new Date(row.request.expires_at).toLocaleString()}
+                  </p>
+                </>
+              ) : null}
+              {mutation.error || cancel.error ? (
+                <p role="alert" className="text-destructive">
+                  {(mutation.error ?? cancel.error)?.message}
                 </p>
-                <p className="text-muted-foreground">
-                  Expires {new Date(row.request.expires_at).toLocaleString()}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={disabled || cancel.isPending}
-                    isLoading={mutation.isPending}
-                    onClick={() => mutation.mutate(row)}
-                  >
-                    Approve participant access
-                  </Button>
-                  <Button
-                    size="sm"
-                    disabled={disabled || mutation.isPending}
-                    isLoading={cancel.isPending}
-                    onClick={() => cancel.mutate(row)}
-                  >
-                    Cancel request
-                  </Button>
-                </div>
-              </>
-            ) : (
-              <Button
-                size="sm"
-                isLoading={mutation.isPending}
-                disabled={disabled}
+              ) : null}
+            </>
+          }
+        >
+          <GroupedRow
+            title="Guest replies"
+            accessory={row.enabled ? "Enabled" : "Disabled"}
+          />
+          {row.request ? (
+            <GroupedRow
+              title="Request"
+              accessory={row.request.status.replaceAll("_", " ")}
+            />
+          ) : null}
+          {row.request?.status === "pending" && !row.enabled ? (
+            <>
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  disabled={disabled || cancel.isPending || mutation.isPending}
+                  onClick={() => mutation.mutate(row)}
+                >
+                  Approve participant access
+                </button>
+              </GroupedRow>
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  disabled={disabled || mutation.isPending || cancel.isPending}
+                  onClick={() => cancel.mutate(row)}
+                >
+                  Cancel request
+                </button>
+              </GroupedRow>
+            </>
+          ) : (
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
+                disabled={disabled || mutation.isPending}
                 onClick={() =>
                   row.enabled ? mutation.mutate(row) : setConfirm(row)
                 }
               >
                 {row.enabled ? "Disable guests" : "Enable guests"}
-              </Button>
-            )}
-          </GroupedRow>
-        ))}
-      </GroupedList>
-      {mutation.error || cancel.error ? (
-        <p role="alert" className="text-destructive">
-          {(mutation.error ?? cancel.error)?.message}
-        </p>
-      ) : null}
+              </button>
+            </GroupedRow>
+          )}
+        </GroupedList>
+      ))}
+
       {confirm ? (
         <Dialog
           open
@@ -161,7 +177,7 @@ export function CollaborationGuestControls({
             <DialogFooter>
               <Button onClick={() => setConfirm(undefined)}>Cancel</Button>
               <Button
-                variant="primary"
+                variant="ghost"
                 isLoading={mutation.isPending}
                 onClick={() => mutation.mutate(confirm)}
               >

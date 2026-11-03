@@ -207,8 +207,9 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
   const { user } = renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const grants = await within(sheet).findByRole("form", { name: "Grants" });
-  const save = within(grants).getByRole("button", { name: "Save grants" });
-  expect(save).toBeDisabled();
+  expect(
+    screen.queryByRole("region", { name: "Unsaved changes" }),
+  ).not.toBeInTheDocument();
   expect(within(grants).getByRole("checkbox", { name: /GitHub/ })).toBeChecked();
   const guests = within(grants).getByRole("list", { name: "Guest access" });
   expect(within(guests).getByRole("combobox", { name: "github" })).toHaveTextContent(
@@ -220,6 +221,7 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
     "Use, but not change or delete",
   );
   await user.click(within(grants).getByRole("switch", { name: "Read my account" }));
+  const save = screen.getByRole("button", { name: "Save changes" });
   expect(save).toBeEnabled();
   await user.click(save);
   await waitFor(() =>
@@ -236,10 +238,12 @@ it("lets the owner choose what others in the agent's chats may do with each serv
   const { user } = renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const grants = await within(sheet).findByRole("form", { name: "Grants" });
-  const save = within(grants).getByRole("button", { name: "Save grants" });
-  expect(save).toBeDisabled();
+  expect(
+    screen.queryByRole("region", { name: "Unsaved changes" }),
+  ).not.toBeInTheDocument();
   await user.click(within(grants).getByRole("combobox", { name: "github" }));
   await user.click(screen.getByRole("option", { name: "Everything this agent can do" }));
+  const save = screen.getByRole("button", { name: "Save changes" });
   expect(save).toBeEnabled();
   await user.click(save);
   await waitFor(() =>
@@ -258,7 +262,7 @@ it("edits the role and destroys only after confirmation", async () => {
   const description = within(profile).getByRole("textbox", { name: "Role" });
   await user.clear(description);
   await user.type(description, "Tracks p0 issues");
-  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
       method: "PATCH",
@@ -316,7 +320,7 @@ it("sets a display name and persona, and clears them by emptying the fields", as
   await user.clear(displayName);
   await user.type(displayName, "Luna");
   await user.clear(persona);
-  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
       method: "PATCH",
@@ -335,7 +339,7 @@ it("shows the server's refusal of a display name", async () => {
       status: 400,
     });
   await user.type(within(profile).getByRole("textbox", { name: "Display name" }), "sk-live");
-  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   expect(await within(profile).findByRole("alert")).toHaveTextContent(
     "A display name must not contain credentials",
   );
@@ -349,7 +353,7 @@ it("lets NyxBot get a display name and persona, with full access and no grants o
   expect(within(sheet).queryByRole("textbox", { name: "Name" })).not.toBeInTheDocument();
   await user.type(within(profile).getByRole("textbox", { name: "Display name" }), "Nyx");
   await user.type(within(profile).getByRole("textbox", { name: "Persona" }), "Warm and concise.");
-  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
       method: "PATCH",
@@ -360,7 +364,9 @@ it("lets NyxBot get a display name and persona, with full access and no grants o
   await user.click(within(sheet).getByRole("tab", { name: "Access" }));
   expect(within(sheet).getByRole("region", { name: "Access" })).toHaveTextContent("full access");
   expect(within(sheet).queryByRole("form", { name: "Grants" })).not.toBeInTheDocument();
-  expect(within(sheet).queryByRole("region", { name: "Danger zone" })).not.toBeInTheDocument();
+  expect(
+    within(sheet).queryByRole("region", { name: "Danger zone" }),
+  ).not.toBeInTheDocument();
 });
 
 it("shows an organization viewer a read-only profile without shared memory or lifecycle actions", async () => {
@@ -406,12 +412,10 @@ it("lets an organization Member edit shared memory with the privacy note and bac
   const input = within(form).getByRole("textbox", { name: "Add shared note" });
   expect(input).toHaveAttribute("maxlength", "500");
   expect(
-    within(form).getByRole("button", { name: "Save shared note" }),
-  ).toBeDisabled();
+    screen.queryByRole("button", { name: "Save changes" }),
+  ).not.toBeInTheDocument();
   await user.type(input, "Public team convention");
-  await user.click(
-    within(form).getByRole("button", { name: "Save shared note" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
       method: "POST",
@@ -434,15 +438,17 @@ it("explains the specialist sandbox and who approves in each request policy", as
   const authority = await screen.findByRole("region", { name: "Access authority" });
   await waitFor(() =>
     expect(authority).toHaveTextContent(
-      "When you talk to it directly, it tells you what it is missing and continues; you grant access below.",
+      "When you talk to it directly, it tells you what it is missing and continues; you grant access here.",
     ),
   );
   expect(authority).toHaveTextContent("cannot grant access to itself or to other agents");
   expect(authority).toHaveTextContent("Its requests are never routed");
   // Direct chats never hand the work to NyxBot: no copy in the sheet says so.
   expect(sheet).not.toHaveTextContent(NYXBOT_TAKEOVER);
-  expect(within(sheet).getByRole("region", { name: "Grants" })).toHaveTextContent(
-    "anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot",
+  expect(
+    within(sheet).getByRole("region", { name: "Grants" }),
+  ).toHaveTextContent(
+    "only work NyxBot assigned, or work in a group NyxBot is in, reports the missing access to NyxBot instead",
   );
   cleanup();
   requestMode = "routed_to_nyxbot";
@@ -573,7 +579,7 @@ it("selects the agent's model from the live list and its own access mode", async
   expect(mode).toHaveTextContent("Workspace setting (Auto)");
   await user.click(mode);
   await user.click(await screen.findByRole("option", { name: "Ask every time" }));
-  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
       method: "PATCH",
@@ -591,7 +597,7 @@ it("clears an agent's own access mode back to the workspace setting", async () =
   expect(mode).toHaveTextContent("Full access");
   await user.click(mode);
   await user.click(await screen.findByRole("option", { name: "Workspace setting (Auto)" }));
-  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
       method: "PATCH",
@@ -616,13 +622,17 @@ it("saves the optional channel progress reply without changing grants or prompt"
   const progress = within(profile).getByRole("switch", { name: "Channel progress reply" });
   expect(progress).not.toBeChecked();
   await user.click(progress);
-  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(writes).toContainEqual({
     method: "PATCH",
     endpoint: "/assistant/nyxagent/agents/agent-researcher",
     body: { channel_checking_notice: true },
   }));
-  await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save" })).toBeDisabled());
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: "Save changes" }),
+    ).not.toBeInTheDocument(),
+  );
 });
 
 it("fetches visitor readiness only in the open owner Grants settings", async () => {
@@ -645,11 +655,15 @@ it("preserves independent profile and grants drafts across tabs and a profile sa
   await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
   await user.click(screen.getByRole("tab", { name: "Overview" }));
   expect(role).toHaveValue("Unsaved profile");
-  await user.click(within(profile).getByRole("button", { name: "Save" }));
-  await waitFor(() => expect(within(profile).getByRole("button", { name: "Save" })).toBeDisabled());
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: "Save changes" }),
+    ).not.toBeInTheDocument(),
+  );
   await user.click(screen.getByRole("tab", { name: "Access" }));
   expect(within(grants).getByRole("checkbox", { name: /Slack/ })).toBeChecked();
-  expect(within(grants).getByRole("button", { name: "Save grants" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
   expect(writes).toHaveLength(1);
   expect(writes[0]?.method).toBe("PATCH");
   expect(document.querySelector("[data-grouped-list] [data-grouped-list]")).toBeNull();
@@ -665,8 +679,8 @@ it("refreshes pristine fields without replacing a dirty profile draft", async ()
   await client.invalidateQueries();
   await waitFor(() => expect(within(profile).getByRole("textbox", { name: "Display name" })).toHaveValue("Remote name"));
   expect(role).toHaveValue("My draft");
-  expect(within(profile).getByRole("button", { name: "Save" })).toBeEnabled();
-  await user.click(within(profile).getByRole("button", { name: "Discard" }));
+  expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Discard" }));
   expect(role).toHaveValue("Remote role");
 });
 
@@ -692,7 +706,7 @@ it("offers personal add-note and prevents every memory write after destruction",
   const { user } = renderSheet({ tab: "memory" });
   const note = await screen.findByRole("textbox", { name: "Note" });
   await user.type(note, "A personal convention");
-  await user.click(screen.getByRole("button", { name: "Save note" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(writes).toContainEqual({ method: "POST", endpoint: "/assistant/nyxagent/agents/agent-researcher/memory", body: { text: "A personal convention" } }));
   agent = { ...agent, status: "destroyed", destroyed_at: at };
   await client.invalidateQueries();
@@ -719,4 +733,177 @@ it.each(["user", "manager"] as const)("maps a shared %s's profile, consent and n
   await user.click(screen.getByRole("tab", { name: "Memory" }));
   expect(await screen.findByRole("heading", { name: "Your private notes" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "Published team memory" })).toBeVisible();
+});
+
+function machineAccessFixture() {
+  const user = useAuthStore.getState().user!;
+  useAuthStore.getState().setUser({
+    ...user,
+    capabilities: {
+      billing_available: false,
+      enabled_features: [
+        "assistant:model-controls",
+        "assistant:machine-capabilities",
+      ],
+    },
+  });
+  let machine = {
+    node_id: "node",
+    name: "Work Mac",
+    revision: 3,
+    protocol_v2: true,
+    can_edit: true,
+    mode: "shared_legacy",
+    legacy: false,
+    saved_login_ids: null,
+    capabilities: {
+      shell: false,
+      files: false,
+      browser: false,
+      computer: false,
+      developer_browser: false,
+    },
+    ceiling: {
+      shell: true,
+      files: true,
+      browser: true,
+      computer: true,
+      developer_browser: true,
+    },
+    separated: { available: true, landlock_abi: 6, reason: null },
+  };
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  const control = { fail: "" };
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    const { endpoint, init } = request;
+    if (endpoint.endsWith("/machines"))
+      return new Response(JSON.stringify([machine]));
+    const machineWrite =
+      endpoint.endsWith("/machines/node") && init.method === "PUT";
+    const grantsWrite = endpoint.endsWith("/grants") && init.method === "PUT";
+    if (machineWrite || (grantsWrite && control.fail === "grants")) {
+      const body = JSON.parse(String(init.body));
+      writes.push({ endpoint, method: init.method!, body });
+      if (control.fail === (machineWrite ? "machine access" : "grants")) {
+        return new Response(
+          JSON.stringify({ message: "Access changed; review and retry." }),
+          { status: 409 },
+        );
+      }
+      machine = {
+        ...machine,
+        revision: machine.revision + 1,
+        capabilities: body.capabilities,
+      };
+      return new Response(JSON.stringify(machine));
+    }
+    return original(request);
+  };
+  return control;
+}
+
+async function editGrantsAndMachine() {
+  const { user } = renderSheet({ tab: "grants" });
+  const grants = await screen.findByRole("form", { name: "Grants" });
+  await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
+  await user.click(await screen.findByRole("button", { name: /Work Mac/ }));
+  await user.click(screen.getByRole("checkbox", { name: "Shell commands" }));
+  await user.click(screen.getByRole("button", { name: "Back to Access" }));
+  const bar = screen.getByRole("region", { name: "Unsaved changes" });
+  expect(
+    screen.getAllByRole("region", { name: "Unsaved changes" }),
+  ).toHaveLength(1);
+  expect(bar).toHaveTextContent("Unsaved: grants, machine access");
+  return user;
+}
+
+it("saves dirty grants and machine access in order with independent payloads and fences", async () => {
+  machineAccessFixture();
+  const user = await editGrantsAndMachine();
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("region", { name: "Unsaved changes" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(writes).toEqual([
+    {
+      method: "PUT",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher/grants",
+      body: { services: ["github", "slack"], account_read: false },
+    },
+    {
+      method: "PUT",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher/machines/node",
+      body: {
+        expected_revision: 3,
+        capabilities: {
+          shell: true,
+          files: false,
+          browser: false,
+          computer: false,
+          developer_browser: false,
+        },
+        saved_login_ids: null,
+      },
+    },
+  ]);
+});
+
+it.each(["grants", "machine access"])(
+  "keeps failed %s dirty while the independent form succeeds",
+  async (failed) => {
+    const control = machineAccessFixture();
+    control.fail = failed;
+    const user = await editGrantsAndMachine();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(writes).toHaveLength(2));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("region", { name: "Unsaved changes" }),
+      ).toHaveTextContent(`Unsaved: ${failed}`),
+    );
+    if (failed === "machine access")
+      await user.click(screen.getByRole("button", { name: /Work Mac/ }));
+    const failedForm = screen.getByRole("form", {
+      name: failed === "grants" ? "Grants" : "Work Mac capabilities",
+    });
+    expect(
+      within(failedForm)
+        .getByText(
+          failed === "grants"
+            ? "Access changed; review and retry."
+            : "Could not save capabilities. Reload if access changed.",
+        )
+        .closest("[data-grouped-footer]"),
+    ).toBeInTheDocument();
+    control.fail = "";
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Unsaved changes" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(writes).toHaveLength(3);
+    expect(writes[2]!.endpoint).toMatch(
+      failed === "grants" ? /\/grants$/ : /\/machines\/node$/,
+    );
+  },
+);
+
+it("discards every dirty Access form including retained machine drafts", async () => {
+  machineAccessFixture();
+  const user = await editGrantsAndMachine();
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("region", { name: "Unsaved changes" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("checkbox", { name: /Slack/ })).not.toBeChecked();
+  await user.click(screen.getByRole("button", { name: /Work Mac/ }));
+  expect(
+    screen.getByRole("checkbox", { name: "Shell commands" }),
+  ).not.toBeChecked();
+  expect(writes).toEqual([]);
 });

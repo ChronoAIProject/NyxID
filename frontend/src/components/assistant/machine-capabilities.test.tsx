@@ -19,7 +19,13 @@ describe("machine capability editor", () => {
     expect(screen.getByRole("checkbox", { name: /Secure browser/ })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Separate workspace and browser for this agent" })).not.toBeInTheDocument();
     expect(screen.getByText(/Browser permissions are not required/)).toBeInTheDocument();
-    expect(screen.getByText("separated_requires_managed_browser").closest("details")).not.toHaveAttribute("open");
+    expect(
+      screen.queryByText("separated_requires_managed_browser"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Separation support")).toHaveAttribute(
+      "data-support-reason",
+      "separated_requires_managed_browser",
+    );
   });
   it("refuses unavailable separated work and shows the owner recovery path with the flag off", () => {
     render(<MachineCapabilityForm machine={{ ...machine, mode: "separated", separated: { available: false, landlock_abi: 8, reason: "separated_requires_managed_browser" } }} agentId="agent" />);
@@ -55,9 +61,13 @@ describe("machine capability editor", () => {
   });
   it("starts denied, uses names and requires an explicit dirty change", async () => {
     render(<MachineCapabilityForm machine={machine} agentId="agent" />);
-    expect(screen.getByText("Work Mac")).toBeInTheDocument();
+    expect(
+      screen.getByRole("form", { name: "Work Mac capabilities" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Shared legacy")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save capabilities" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Save capabilities" }),
+    ).not.toBeInTheDocument();
     for (const box of screen.getAllByRole("checkbox")) expect(box).not.toBeChecked();
     fireEvent.click(screen.getByRole("checkbox", { name: "File tools" }));
     fireEvent.click(screen.getByRole("button", { name: "Save capabilities" }));
@@ -81,6 +91,7 @@ describe("machine capability editor", () => {
   it("flag off keeps effective permissions visible but disables writes", () => {
     feature.mockReturnValue(false);
     render(<MachineCapabilities agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: /Work Mac/ }));
     expect(feature).toHaveBeenCalledWith("assistant:machine-capabilities");
     expect(screen.getByText(/Existing restrictions still apply/)).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "File tools" })).toBeDisabled();
@@ -88,6 +99,7 @@ describe("machine capability editor", () => {
   it("explains legacy defaults and the offline grace without promising instant delivery", () => {
     query.mockReturnValue({ data: [{ ...machine, revocation_pending: true }] });
     render(<MachineCapabilities agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: /Work Mac/ }));
     expect(screen.getByText(/Existing legacy access stays until edited/)).toBeInTheDocument();
     expect(screen.getByText(/Earlier commands are stopping/)).toBeInTheDocument();
     expect(screen.queryByText(/Online revocation is immediate/)).not.toBeInTheDocument();
@@ -126,7 +138,9 @@ describe("machine capability editor", () => {
     render(<MachineCapabilityForm machine={{ ...machine, can_edit: false }} agentId="agent" />);
     expect(screen.getByText(/Only the machine owner/)).toBeInTheDocument();
     for (const box of screen.getAllByRole("checkbox")) expect(box).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Save capabilities" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Save capabilities" }),
+    ).not.toBeInTheDocument();
   });
   it("local ceilings and failures stay visible", async () => {
     save.mockRejectedValue(new Error("conflict"));
@@ -138,6 +152,7 @@ describe("machine capability editor", () => {
   });
   it("requests separated mode through the owner card with an explicit login list", async () => {
     render(<MachineCapabilities agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: /Work Mac/ }));
     fireEvent.click(screen.getByRole("button", { name: "Separate workspace and browser for this agent" }));
     await waitFor(() => expect(contextSave).toHaveBeenCalledWith({
       node: "node",
@@ -151,9 +166,12 @@ it("keeps missing evidence actionable with flags off and requires affirmative le
   feature.mockReturnValue(false);
   query.mockReturnValue({ data: [{ ...machine, mode: "selection_required", selection_required: true, selection_reason: "Old node: no capability report", separated: null }] });
   render(<MachineCapabilities agentId="agent" />);
-  expect(screen.getByText("Owner selection required")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Work Mac/ }));
+  expect(screen.getAllByText("Needs owner selection")[0]).toBeInTheDocument();
   expect(screen.getByText("Old node: no capability report")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Save capabilities" })).toBeDisabled();
+  expect(
+    screen.queryByRole("button", { name: "Save capabilities" }),
+  ).not.toBeInTheDocument();
   const request = screen.getByRole("button", { name: "Request shared legacy owner approval" });
   expect(request).toBeDisabled();
   fireEvent.click(screen.getByRole("checkbox", { name: /I explicitly choose shared legacy/ }));
@@ -162,15 +180,17 @@ it("keeps missing evidence actionable with flags off and requires affirmative le
   expect(screen.getByText(/may read node tokens, signing secrets and stored credentials/)).toBeInTheDocument();
 });
 
- it("keeps owner selection available with capability editing off and disables it for a read-only view", () => {
-   const pending = { ...machine, mode: "selection_required" as const, selection_required: true };
-   const view = render(<MachineCapabilityForm machine={pending} agentId="agent" capabilityEditing={false} />);
-   const consent = screen.getByRole("checkbox", { name: /I explicitly choose shared legacy/ });
-   expect(consent).toBeEnabled();
-   fireEvent.click(consent);
-   expect(screen.getByRole("button", { name: "Request shared legacy owner approval" })).toBeEnabled();
-   expect(screen.getByRole("button", { name: "Save capabilities" })).toBeDisabled();
-   view.rerender(<MachineCapabilityForm machine={pending} agentId="agent" capabilityEditing={false} disabled />);
-   expect(consent).toBeDisabled();
-   expect(screen.getByRole("button", { name: "Request shared legacy owner approval" })).toBeDisabled();
- });
+it("keeps owner selection available with capability editing off and disables it for a read-only view", () => {
+  const pending = { ...machine, mode: "selection_required" as const, selection_required: true };
+  const view = render(<MachineCapabilityForm machine={pending} agentId="agent" capabilityEditing={false} />);
+  const consent = screen.getByRole("checkbox", { name: /I explicitly choose shared legacy/ });
+  expect(consent).toBeEnabled();
+  fireEvent.click(consent);
+  expect(screen.getByRole("button", { name: "Request shared legacy owner approval" })).toBeEnabled();
+  expect(
+    screen.queryByRole("button", { name: "Save capabilities" }),
+  ).not.toBeInTheDocument();
+  view.rerender(<MachineCapabilityForm machine={pending} agentId="agent" capabilityEditing={false} disabled />);
+  expect(consent).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Request shared legacy owner approval" })).toBeDisabled();
+});

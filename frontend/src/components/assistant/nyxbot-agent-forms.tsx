@@ -65,12 +65,14 @@ export function ServiceGrantPicker({
   value,
   onChange,
   disabled,
+  footer,
   org,
 }: {
   readonly org?: string;
   readonly value: readonly string[];
   readonly onChange: (slugs: string[]) => void;
   readonly disabled?: boolean;
+  readonly footer?: React.ReactNode;
 }) {
   const keys = useKeys({ includeTools: true });
   const [search, setSearch] = useState("");
@@ -90,37 +92,45 @@ export function ServiceGrantPicker({
   const known = new Set(services.map((service) => service.slug));
   const rows = [
     ...services,
-    ...value
-      .filter((slug) => !known.has(slug))
-      .map((slug) => ({ slug, label: slug })),
+    ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug })),
   ];
   function toggle(slug: string, checked: boolean) {
-    onChange(
-      checked ? [...value, slug] : value.filter((item) => item !== slug),
-    );
+    onChange(checked ? [...value, slug] : value.filter((item) => item !== slug));
   }
   if (keys.isPending) {
     return (
-      <p className="text-12 text-text-tertiary">Loading your services...</p>
+      <GroupedList title="Services" footer={footer}>
+        <GroupedRow title="Loading your services..." />
+      </GroupedList>
     );
   }
   if (!rows.length) {
     return (
-      <p className="px-4 py-3 text-12 text-text-tertiary">
-        You have no connected services yet. Connect a service first, then grant
-        it here; the agent uses only what you grant.
-      </p>
+      <GroupedList title="Services" footer={
+        <>
+          {footer}
+          <p>
+            You have no connected services yet. Connect a service first, then
+            grant it here; the agent uses only what you grant.
+          </p>
+        </>
+      }>
+        <GroupedRow title="No connected services" />
+      </GroupedList>
     );
   }
   return (
     <GroupedList
       title="Services"
       footer={
-        keys.error ? (
-          <span role="alert" className="text-destructive">
-            Could not refresh services. Your selections are kept.
-          </span>
-        ) : undefined
+        <>
+          {footer}
+          {keys.error ? (
+            <span role="alert" className="text-destructive">
+              Could not refresh services. Your selections are kept.
+            </span>
+          ) : null}
+        </>
       }
     >
       {rows.length > 8 ? (
@@ -161,7 +171,7 @@ export function ServiceGrantPicker({
               >
                 <span className="min-w-0 flex-1 break-words text-foreground">
                   {service.label}
-                  <span className="mt-0.5 block font-mono text-10 text-text-tertiary">
+                  <span className="mt-0.5 block font-mono text-11 font-normal text-text-tertiary">
                     {service.slug}
                   </span>
                 </span>

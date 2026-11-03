@@ -90,9 +90,7 @@ describe("agent operation scopes", () => {
   });
   it("selects catalog reads, excludes changes, and sends the reviewed revision", async () => {
     render(<ServiceOperationForm agentId="agent" service={service} />);
-    expect(
-      screen.getByRole("button", { name: "Save operations" }),
-    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save operations" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Select all reads" }));
     expect(screen.getByRole("checkbox", { name: "GET /items" })).toBeChecked();
     expect(
@@ -102,17 +100,10 @@ describe("agent operation scopes", () => {
       screen.getByRole("checkbox", { name: "DELETE /items/{id}" }),
     ).not.toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
-    await waitFor(() =>
-      expect(save).toHaveBeenCalledWith({
-        serviceId: "svc",
-        selection: {
-          expected_revision: 4,
-          all_operations: false,
-          endpoint_ids: ["read", "marked"],
-          rules: [],
-        },
-      }),
-    );
+    await waitFor(() => expect(save).toHaveBeenCalledWith({
+      serviceId: "svc",
+      selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["read", "marked"], rules: [] },
+    }));
   });
   it("searches without discarding selections and allows an empty deny selection", async () => {
     render(<ServiceOperationForm agentId="agent" service={service} />);
@@ -198,9 +189,7 @@ describe("agent operation scopes", () => {
       "checkbox",
     ))
       expect(checkbox).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Save operations" }),
-    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save operations" })).not.toBeInTheDocument();
   });
 });
 
@@ -260,7 +249,7 @@ it("pushes a service editor, preserves its draft on Back and restores disclosure
   expect(screen.getByRole("button", { name: "Covered sheet control" })).toBeVisible();
   await user.click(disclosure);
   expect(screen.getByRole("checkbox", { name: "GET /items" })).toBeChecked();
-  await user.click(screen.getByRole("button", { name: "Save operations" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(save).toHaveBeenCalledWith({ serviceId: "svc", selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["write", "read"], rules: [] } }));
 });
 

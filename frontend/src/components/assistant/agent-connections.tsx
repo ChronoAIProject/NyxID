@@ -1,5 +1,10 @@
-import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
+import { ArrowDown, ArrowUp, ChevronRight } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { useKeys } from "@/hooks/use-keys";
@@ -35,26 +40,48 @@ export function AgentConnections({
         );
   return (
     <section aria-label="Connections" className="space-y-3">
-      <div className="space-y-1">
-        <h3 className="text-13 font-semibold text-foreground">Connections</h3>
-        <p className="text-12 text-muted-foreground">
-          Accounts grouped by service, so you can see which source this agent
-          can use.
-        </p>
-      </div>
-      {keys.isPending && (
-        <p role="status" className="text-12 text-muted-foreground">
-          Loading connections…
-        </p>
-      )}
-      {keys.isError && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Could not load connections.</p>
-          <Button type="button" onClick={() => void keys.refetch()}>
-            Retry connections
-          </Button>
-        </div>
-      )}
+      <GroupedList
+        title="Connections"
+        footer={
+          <>
+            <p>
+              Accounts grouped by service, so you can see which source this
+              agent can use. A connection chooses an account. Folder, database
+              and other resource restrictions depend on the service’s operation
+              limits.
+            </p>
+            {keys.isError ? (
+              <p role="alert" className="text-destructive">
+                Could not load connections.
+              </p>
+            ) : null}
+          </>
+        }
+      >
+        <GroupedRow asChild interactive>
+          <Link to="/keys">
+            <span className="flex-1">Manage connected accounts</span>
+            <ChevronRight aria-hidden className="size-[1.125em]" />
+          </Link>
+        </GroupedRow>
+        {keys.isPending ? <GroupedRow title="Loading connections…" /> : null}
+        {keys.isError ? (
+          <GroupedRow asChild interactive>
+            <button type="button" onClick={() => void keys.refetch()}>
+              Retry connections
+            </button>
+          </GroupedRow>
+        ) : null}
+        {!keys.isPending && !keys.isError && !connections.length ? (
+          <GroupedRow
+            title={
+              agent.kind === "nyxbot"
+                ? "Connect a service to choose the accounts NyxBot uses."
+                : "Grant services in Access to make their connections available here."
+            }
+          />
+        ) : null}
+      </GroupedList>
       {agent.kind === "nyxbot" ? (
         <ConnectionPreferences
           inventory={inventory}
@@ -65,23 +92,6 @@ export function AgentConnections({
       ) : (
         <ConnectionGroups groups={groupServiceConnections(connections)} />
       )}
-      {!keys.isPending && !keys.isError && !connections.length && (
-        <p className="px-4 py-3 text-12 text-text-tertiary">
-          {agent.kind === "nyxbot"
-            ? "Connect a service to choose the accounts NyxBot uses."
-            : "Grant services in Access to make their connections available here."}
-        </p>
-      )}
-      <p className="text-11 text-muted-foreground">
-        A connection chooses an account. Folder, database and other resource
-        restrictions depend on the service's operation limits.
-      </p>
-      <Link
-        to="/keys"
-        className="inline-block text-12 underline underline-offset-4"
-      >
-        Manage connected accounts
-      </Link>
     </section>
   );
 }
@@ -108,23 +118,36 @@ function ConnectionPreferences({
   });
   return (
     <>
-      <p className="text-12 text-muted-foreground">
-        Your saved connection order applies across your agents. Eligible
-        personal accounts are used before organization accounts.
-      </p>
-      {order.readError && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Could not load saved connection order.</p>
-          <Button type="button" onClick={() => void order.retryRead()}>
-            Retry saved order
-          </Button>
-        </div>
-      )}
-      {order.unavailable && (
-        <p role="status" className="text-12 text-muted-foreground">
-          Saving connection order requires a server update.
-        </p>
-      )}
+      <GroupedList
+        title="Connection order"
+        footer={
+          <>
+            <p>
+              Your saved connection order applies across your agents. Eligible
+              personal accounts are used before organization accounts.
+            </p>
+            {order.readError ? (
+              <p role="alert" className="text-destructive">
+                Could not load saved connection order.
+              </p>
+            ) : null}
+            {order.unavailable ? (
+              <p role="status">
+                Saving connection order requires a server update.
+              </p>
+            ) : null}
+          </>
+        }
+      >
+        <GroupedRow title="Personal accounts first" />
+        {order.readError ? (
+          <GroupedRow asChild interactive>
+            <button type="button" onClick={() => void order.retryRead()}>
+              Retry saved order
+            </button>
+          </GroupedRow>
+        ) : null}
+      </GroupedList>
       <ConnectionGroups groups={groups} order={order} disabled={disabled} />
     </>
   );
@@ -145,99 +168,90 @@ function ConnectionGroups({
         const editing = order?.groupId === group.id;
         const rows = editing ? order.connections : group.connections;
         return (
-          <GroupedList key={group.id}>
-            <details open={editing || undefined}>
-              <summary className="cursor-pointer px-4 py-3 text-12 font-medium transition-colors hover:bg-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
-                {group.name}
-                <span className="ml-2 text-11 font-normal text-muted-foreground">
-                  {group.connections.length}{" "}
-                  {group.connections.length === 1 ? "account" : "accounts"}
-                </span>
-              </summary>
-              <div className="space-y-3 pb-3">
-                <ol aria-label={`${group.name} connections`}>
-                  {rows.map((key, index) => (
-                    <GroupedRow asChild key={key.id}>
-                      <li>
-                        <span className="min-w-0 flex-1 break-words">
-                          <span className="block font-medium">{key.label}</span>
-                          <span className="text-11 text-muted-foreground">
-                            {connectionOwnerLabel(key)} · {key.slug}
-                            {connectionAvailable(key) ? "" : " · Unavailable"}
-                          </span>
+          <GroupedList key={group.id} title={group.name}>
+            <div className="space-y-0">
+              <ol aria-label={`${group.name} connections`}>
+                {rows.map((key, index) => (
+                  <GroupedRow asChild key={key.id}>
+                    <li>
+                      <span className="min-w-0 flex-1 break-words">
+                        <span className="block font-medium">{key.label}</span>
+                        <span className="text-11 font-normal text-text-tertiary">
+                          {connectionOwnerLabel(key)} · {key.slug}
+                          {connectionAvailable(key) ? "" : " · Unavailable"}
                         </span>
-                        {editing && (
-                          <>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Move ${key.label} up`}
-                              disabled={
-                                disabled ||
-                                order.busy ||
-                                order.blocked ||
-                                index === 0
-                              }
-                              onClick={() => {
-                                const ids = rows.map((row) => row.id);
-                                [ids[index - 1], ids[index]] = [
-                                  ids[index]!,
-                                  ids[index - 1]!,
-                                ];
-                                order.update(ids);
-                              }}
-                            >
-                              <ArrowUp aria-hidden className="size-3.5" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Move ${key.label} down`}
-                              disabled={
-                                disabled ||
-                                order.busy ||
-                                order.blocked ||
-                                index === rows.length - 1
-                              }
-                              onClick={() => {
-                                const ids = rows.map((row) => row.id);
-                                [ids[index], ids[index + 1]] = [
-                                  ids[index + 1]!,
-                                  ids[index]!,
-                                ];
-                                order.update(ids);
-                              }}
-                            >
-                              <ArrowDown aria-hidden className="size-3.5" />
-                            </Button>
-                          </>
-                        )}
-                      </li>
+                      </span>
+                      {editing && (
+                        <>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Move ${key.label} up`}
+                            disabled={
+                              disabled ||
+                              order.busy ||
+                              order.blocked ||
+                              index === 0
+                            }
+                            onClick={() => {
+                              const ids = rows.map((row) => row.id);
+                              [ids[index - 1], ids[index]] = [
+                                ids[index]!,
+                                ids[index - 1]!,
+                              ];
+                              order.update(ids);
+                            }}
+                          >
+                            <ArrowUp aria-hidden className="size-3.5" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Move ${key.label} down`}
+                            disabled={
+                              disabled ||
+                              order.busy ||
+                              order.blocked ||
+                              index === rows.length - 1
+                            }
+                            onClick={() => {
+                              const ids = rows.map((row) => row.id);
+                              [ids[index], ids[index + 1]] = [
+                                ids[index + 1]!,
+                                ids[index]!,
+                              ];
+                              order.update(ids);
+                            }}
+                          >
+                            <ArrowDown aria-hidden className="size-3.5" />
+                          </Button>
+                        </>
+                      )}
+                    </li>
+                  </GroupedRow>
+                ))}
+              </ol>
+              {order &&
+                (editing ? (
+                  <ConnectionOrderForm order={order} disabled={disabled} />
+                ) : (
+                  group.id.startsWith("catalog:") &&
+                  rows.length > 1 && (
+                    <GroupedRow asChild interactive>
+                      <button
+                        type="button"
+                        disabled={disabled || Boolean(order.reason)}
+                        title={order.reason}
+                        onClick={() => order.start(group)}
+                      >
+                        Edit connection order
+                      </button>
                     </GroupedRow>
-                  ))}
-                </ol>
-                {order &&
-                  (editing ? (
-                    <ConnectionOrderForm order={order} disabled={disabled} />
-                  ) : (
-                    group.id.startsWith("catalog:") &&
-                    rows.length > 1 && (
-                      <GroupedRow asChild interactive>
-                        <button
-                          type="button"
-                          disabled={disabled || Boolean(order.reason)}
-                          title={order.reason}
-                          onClick={() => order.start(group)}
-                        >
-                          Edit connection order
-                        </button>
-                      </GroupedRow>
-                    )
-                  ))}
-              </div>
-            </details>
+                  )
+                ))}
+            </div>
           </GroupedList>
         );
       })}
@@ -253,93 +267,100 @@ function ConnectionOrderForm({
   readonly disabled: boolean;
 }) {
   return (
-    <form onSubmit={order.save} className="space-y-3 px-4">
-      {order.message && (
-        <p role="status" className="text-12 text-muted-foreground">
-          {order.message}
-        </p>
-      )}
-      {order.validationError && (
-        <p role="alert" className="text-12 text-destructive">
-          {order.validationError}
-        </p>
-      )}
+    <form onSubmit={order.save} className="space-y-0">
+      <GroupedFooter>
+        {order.message && (
+          <p role="status" className="text-11 text-text-tertiary">
+            {order.message}
+          </p>
+        )}
+        {order.validationError && (
+          <p role="alert" className="text-11 text-destructive">
+            {order.validationError}
+          </p>
+        )}
+        {order.failure === "conflict" && (
+          <p role="alert">
+            Connection order changed elsewhere. Reload it before saving.
+          </p>
+        )}
+        {order.failure === "stale" && (
+          <p role="alert">Some connections are no longer available.</p>
+        )}
+        {order.failure === "network" && (
+          <p role="alert">
+            Could not save connection order. Your edits are kept.
+          </p>
+        )}
+        {order.failure === "capacity" && (
+          <p role="alert">
+            {order.capacityMessage || "Connection order storage is full."}
+          </p>
+        )}
+      </GroupedFooter>
       {order.failure === "conflict" && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Connection order changed elsewhere. Reload it before saving.</p>
-          <Button
+        <GroupedRow asChild interactive>
+          <button
             type="button"
             disabled={order.busy}
             onClick={() => void order.recover(false)}
           >
             Reload order
-          </Button>
-        </div>
+          </button>
+        </GroupedRow>
       )}
       {order.failure === "stale" && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Some connections are no longer available.</p>
-          <Button
+        <GroupedRow asChild interactive>
+          <button
             type="button"
             disabled={order.busy}
             onClick={() => void order.refreshStale()}
           >
             Refresh connections
-          </Button>
-        </div>
+          </button>
+        </GroupedRow>
       )}
       {order.failure === "network" && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Could not save connection order. Your edits are kept.</p>
-          <Button
+        <GroupedRow asChild interactive>
+          <button
             type="button"
             disabled={order.busy || order.blocked}
             onClick={() => void order.retrySave()}
           >
             Retry save
-          </Button>
-        </div>
+          </button>
+        </GroupedRow>
       )}
       {order.failure === "capacity" && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>{order.capacityMessage || "Connection order storage is full."}</p>
-          <Link to="/keys" className="underline">
-            Manage saved orders
-          </Link>
-        </div>
+        <GroupedRow asChild interactive>
+          <Link to="/keys">Manage saved orders</Link>
+        </GroupedRow>
       )}
-      <div className="flex flex-wrap gap-2">
-        <Button
+      {!order.dirty && (
+        <GroupedRow asChild interactive>
+          <button type="button" disabled={order.busy} onClick={order.cancel}>
+            Done
+          </button>
+        </GroupedRow>
+      )}
+      <GroupedRow asChild interactive>
+        <button
           type="button"
-          variant="outline"
-          disabled={order.busy}
-          onClick={order.cancel}
-        >
-          Cancel
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
           disabled={disabled || order.busy || order.blocked}
           onClick={order.reset}
         >
           Use default order
-        </Button>
-        <Button
-          type="submit"
-          variant="primary"
-          isLoading={order.busy}
-          disabled={
-            disabled ||
-            order.busy ||
-            order.blocked ||
-            !order.dirty ||
-            Boolean(order.failure)
-          }
-        >
-          Save order
-        </Button>
-      </div>
+        </button>
+      </GroupedRow>
+      <GroupedFormActions
+        label="connection order"
+        dirty={order.dirty}
+        pending={order.busy}
+        disabled={disabled || order.blocked || Boolean(order.failure)}
+        saveLabel="Save order"
+        save={() => order.save()}
+        discard={order.cancel}
+      />
     </form>
   );
 }

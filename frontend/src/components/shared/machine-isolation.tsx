@@ -56,10 +56,11 @@ const supportReasons: Record<string, string> = {
   separated_browser_sandbox_probe_failed: "The actual managed Chromium sandbox could not be confirmed under both browser users. Check its executable and AppArmor user-namespace policy before rerunning setup.",
 };
 
-export function MachineSeparationSupport({ machine, support, setupNote }: {
+export function MachineSeparationSupport({ machine, support, setupNote, humanOnly = false }: {
   readonly machine?: MachineProfile;
   readonly support?: { available: boolean; reason: string | null } | null;
   readonly setupNote?: string | null;
+  readonly humanOnly?: boolean;
 }) {
   // Access DTOs contain the server's current selector result; raw profiles need
   // evidence validation, because their legacy support boolean is insufficient.
@@ -68,12 +69,13 @@ export function MachineSeparationSupport({ machine, support, setupNote }: {
   const confirmed = current?.available === true && !reason;
   const timeout = reason === "separated_probe_timeout";
   const unsupported = !!reason && Object.hasOwn(supportReasons, reason);
-  return <div className="space-y-1 text-12 text-muted-foreground" aria-label="Separation support">
-    <Badge variant={confirmed ? "success" : "warning"}>{confirmed
-      ? "Separation support confirmed"
-      : timeout ? "Separation probe timed out"
-      : unsupported ? "Separation prerequisites not met"
-      : "Separation support unknown"}</Badge>
+  const label = confirmed
+    ? "Separation support confirmed"
+    : timeout ? "Separation probe timed out"
+    : unsupported ? "Separation prerequisites not met"
+    : "Separation support unknown";
+  return <div className={humanOnly ? "space-y-1 text-11 text-text-tertiary" : "space-y-1 text-12 text-muted-foreground"} aria-label="Separation support" data-support-reason={reason}>
+    {humanOnly ? <p className={confirmed ? "text-foreground" : "text-warning"}>{label}</p> : <Badge variant={confirmed ? "success" : "warning"}>{label}</Badge>}
     <p>{confirmed
       ? "The latest capability report confirms support. Each agent’s stored mode and permissions still apply; existing shared legacy assignments stay shared."
       : timeout
@@ -81,6 +83,6 @@ export function MachineSeparationSupport({ machine, support, setupNote }: {
         : unsupported ? supportReasons[reason]
         : "Complete supported capability evidence is missing. Upgrade or reconnect the node and rerun setup. An older support boolean cannot confirm a new separated assignment."}</p>
     {!confirmed ? <p>{setupNote ?? SEPARATED_SETUP_NOTE}</p> : null}
-    {reason ? <details><summary className="cursor-pointer">Separate workspace diagnostics</summary><p>{reason}</p>{machine?.separated?.reason && machine.separated.reason !== reason ? <p>{machine.separated.reason}</p> : null}</details> : null}
+    {reason && !humanOnly ? <details><summary className="cursor-pointer">Separate workspace diagnostics</summary><p>{reason}</p>{machine?.separated?.reason && machine.separated.reason !== reason ? <p>{machine.separated.reason}</p> : null}</details> : null}
   </div>;
 }

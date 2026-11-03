@@ -74,12 +74,7 @@ export function AccessModeSwitcher({
   const workspace = settings.data?.access_mode;
   if (!workspace) return null;
   if (agentOverride) {
-    return (
-      <AccessModeBadge
-        mode={effectiveAccessMode(workspace, agentOverride)}
-        overridden
-      />
-    );
+    return <AccessModeBadge mode={effectiveAccessMode(workspace, agentOverride)} overridden />;
   }
   return (
     <div className="flex items-center gap-1">
@@ -91,16 +86,11 @@ export function AccessModeSwitcher({
           update
             .mutateAsync({ access_mode: nyxAgentAccessModeSchema.parse(value) })
             .catch((cause: unknown) => {
-              setError(
-                errorMessage(cause, "Could not change the access mode."),
-              );
+              setError(errorMessage(cause, "Could not change the access mode."));
             });
         }}
       >
-        <SelectTrigger
-          aria-label="Access mode"
-          className="h-7 w-auto gap-1 px-2 text-11"
-        >
+        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-11">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -204,11 +194,9 @@ export function ThreadModelSelect({
         onChange={(next) => {
           if (next === model) return;
           setError(undefined);
-          change
-            .mutateAsync({ conversationId, model: next })
-            .catch((cause: unknown) => {
-              setError(errorMessage(cause, "Could not change the model."));
-            });
+          change.mutateAsync({ conversationId, model: next }).catch((cause: unknown) => {
+            setError(errorMessage(cause, "Could not change the model."));
+          });
         }}
       />
       {error ? (

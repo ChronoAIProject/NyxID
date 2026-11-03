@@ -1,20 +1,16 @@
-import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
+import {
+  GroupedFooter,
+  GroupedList,
+  GroupedRow,
+  GroupedDisclosure,
+} from "@/components/ui/grouped-list";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Badge } from "@/components/ui/badge";
-import { ErrorBanner } from "@/components/shared/error-banner";
-import {
-  useNyxBotChannelThreads,
-  useStopNyxBotChannelThread,
-} from "@/hooks/use-nyxbot-agents";
-import { cn, formatRelativeTime } from "@/lib/utils";
-import type {
-  NyxAgentChannelChat,
-  NyxAgentChannelThread,
-} from "@/schemas/assistant-nyxagent";
+import { useNyxBotChannelThreads, useStopNyxBotChannelThread } from "@/hooks/use-nyxbot-agents";
+import { formatRelativeTime } from "@/lib/utils";
+import type { NyxAgentChannelChat, NyxAgentChannelThread } from "@/schemas/assistant-nyxagent";
 
 function ThreadRow({
   thread,
@@ -24,57 +20,57 @@ function ThreadRow({
   readonly chat: NyxAgentChannelChat;
 }) {
   const stop = useStopNyxBotChannelThread();
-  const labels = {
-    active: "Following",
-    opening: "Starting",
-    stopped: "Stopped",
-    expired: "Expired",
-    unavailable: "Unavailable",
-  };
+  const labels = { active: "Following", opening: "Starting", stopped: "Stopped", expired: "Expired", unavailable: "Unavailable" };
   return (
-    <GroupedRow asChild className="block space-y-1">
-      <li>
-        <div className="flex flex-wrap items-center gap-2">
-          {thread.conversation_id ? (
-            <Link
-              to="/assistant"
-              search={{ c: thread.conversation_id }}
-              className="min-w-0 flex-1 break-words text-12 hover:underline"
-            >
-              {thread.label}
-            </Link>
-          ) : (
-            <span className="flex-1 text-12">{thread.label}</span>
-          )}
-          <Badge variant={thread.state === "active" ? "success" : "secondary"}>
-            {thread.state === "active" && thread.follow_readiness !== "ready"
-              ? "Unavailable"
-              : labels[thread.state]}
-          </Badge>
-          {thread.state === "active" || thread.state === "opening" ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              isLoading={stop.isPending}
-              onClick={() =>
-                stop.mutate({
-                  channelId: chat.channel_agent_id,
-                  chatId: chat.id,
-                  threadId: thread.id,
-                })
-              }
-            >
-              Stop following
-            </Button>
-          ) : null}
-        </div>
-        <p className="text-11 text-muted-foreground">
-          {thread.last_admitted_at
-            ? `Last activity ${formatRelativeTime(thread.last_admitted_at)}. `
-            : ""}
-          {thread.state === "active" && thread.expires_at
-            ? `Idle expiry ${new Date(thread.expires_at).toLocaleString()}. `
-            : ""}
+    <>
+      <GroupedRow asChild className="block space-y-1">
+        <li>
+          <div className="flex flex-wrap items-center gap-2">
+            {thread.conversation_id ? (
+              <Link
+                to="/assistant"
+                search={{ c: thread.conversation_id }}
+                className="min-w-0 flex-1 break-words text-12 hover:underline"
+              >
+                {thread.label}
+              </Link>
+            ) : (
+              <span className="flex-1 text-12">{thread.label}</span>
+            )}
+            <span className="text-11 font-normal text-text-tertiary">
+              {thread.state === "active" && thread.follow_readiness !== "ready"
+                ? "Unavailable"
+                : labels[thread.state]}
+            </span>
+            {thread.state === "active" || thread.state === "opening" ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                isLoading={stop.isPending}
+                onClick={() =>
+                  stop.mutate({
+                    channelId: chat.channel_agent_id,
+                    chatId: chat.id,
+                    threadId: thread.id,
+                  })
+                }
+              >
+                Stop following
+              </Button>
+            ) : null}
+          </div>
+          <p className="text-11 font-normal text-text-tertiary">
+            {thread.last_admitted_at
+              ? `Last activity ${formatRelativeTime(thread.last_admitted_at)}. `
+              : ""}
+            {thread.state === "active" && thread.expires_at
+              ? `Idle expiry ${new Date(thread.expires_at).toLocaleString()}. `
+              : ""}
+          </p>
+        </li>
+      </GroupedRow>
+      <GroupedFooter>
+        <p>
           {(thread.dropped_message_count ?? 0) > 0
             ? `${thread.dropped_message_count} messages arrived while busy and were not queued. `
             : ""}
@@ -90,8 +86,8 @@ function ThreadRow({
             {stop.error.message}
           </p>
         ) : null}
-      </li>
-    </GroupedRow>
+      </GroupedFooter>
+    </>
   );
 }
 
@@ -102,84 +98,79 @@ export function ChannelThreads({
 }) {
   const [open, setOpen] = useState(false);
   const [history, setHistory] = useState(false);
-  const threads = useNyxBotChannelThreads(
-    chat.channel_agent_id,
-    chat.id,
-    history ? "all" : "active",
-    open,
-  );
+  const threads = useNyxBotChannelThreads(chat.channel_agent_id, chat.id, history ? "all" : "active", open);
   const rows = threads.data?.pages.flatMap((page) => page.threads) ?? [];
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-3 text-11">
-        <button
-          type="button"
-          aria-expanded={open}
-          className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
-          onClick={() => setOpen(!open)}
-        >
-          <ChevronRight
-            aria-hidden="true"
-            className={cn("h-3 w-3", open && "rotate-90")}
-          />
-          Followed threads ({chat.followed_thread_count ?? 0})
-        </button>
-        {chat.conversation_id ? (
-          <Link
-            to="/assistant"
-            search={{ c: chat.conversation_id }}
-            className="text-muted-foreground hover:underline"
-          >
+    <GroupedList
+      title="Threads"
+      footer={
+        <>
+          {chat.reply_mode === "all" ? (
+            <p>Every message still allows replies after you stop following.</p>
+          ) : null}
+          {threads.error ? (
+            <p role="alert" className="text-destructive">
+              {threads.error.message}
+            </p>
+          ) : null}
+        </>
+      }
+    >
+      <GroupedDisclosure aria-expanded={open} onClick={() => setOpen(!open)}>
+        Followed threads ({chat.followed_thread_count ?? 0})
+      </GroupedDisclosure>
+      {chat.conversation_id ? (
+        <GroupedRow asChild interactive>
+          <Link to="/assistant" search={{ c: chat.conversation_id }}>
             Chat history
           </Link>
-        ) : null}
-      </div>
+        </GroupedRow>
+      ) : null}
       {open ? (
-        <div className="space-y-3">
-          {chat.reply_mode === "all" ? (
-            <p className="text-11 text-muted-foreground">
-              Every message still allows replies after you stop following.
-            </p>
-          ) : null}
-          <label className="flex items-center gap-2 text-11 text-muted-foreground">
-            <Checkbox
-              checked={history}
-              onCheckedChange={(value) => setHistory(value === true)}
-            />
-            Include stopped and expired threads
-          </label>
+        <>
+          <GroupedRow asChild interactive>
+            <label>
+              <span className="min-w-0 flex-1">
+                Include stopped and expired threads
+              </span>
+              <Checkbox
+                checked={history}
+                onCheckedChange={(value) => setHistory(value === true)}
+              />
+            </label>
+          </GroupedRow>
           {threads.error ? (
-            <ErrorBanner
-              message={threads.error.message}
-              onRetry={() => void threads.refetch()}
-            />
+            <GroupedRow asChild interactive>
+              <button type="button" onClick={() => void threads.refetch()}>
+                Retry threads
+              </button>
+            </GroupedRow>
           ) : threads.isPending ? (
-            <p className="text-11 text-muted-foreground">Loading threads...</p>
+            <GroupedRow title="Loading threads..." />
           ) : rows.length ? (
-            <GroupedList title="Followed threads">
-              <ul aria-label="Platform threads">
-                {rows.map((thread) => (
-                  <ThreadRow key={thread.id} thread={thread} chat={chat} />
-                ))}
-              </ul>
-            </GroupedList>
+            <ul aria-label="Platform threads">
+              {rows.map((thread) => (
+                <ThreadRow key={thread.id} thread={thread} chat={chat} />
+              ))}
+            </ul>
           ) : (
-            <p className="text-11 text-muted-foreground">
-              No {history ? "recorded" : "active"} threads.
-            </p>
+            <GroupedRow
+              title={`No ${history ? "recorded" : "active"} threads.`}
+            />
           )}
           {threads.hasNextPage ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              isLoading={threads.isFetchingNextPage}
-              onClick={() => void threads.fetchNextPage()}
-            >
-              Show more threads
-            </Button>
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
+                disabled={threads.isFetchingNextPage}
+                onClick={() => void threads.fetchNextPage()}
+              >
+                Show more threads
+              </button>
+            </GroupedRow>
           ) : null}
-        </div>
+        </>
       ) : null}
-    </div>
+    </GroupedList>
   );
 }

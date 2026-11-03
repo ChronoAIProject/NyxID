@@ -1,3 +1,4 @@
+import { ChevronRight } from "lucide-react";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Link } from "@tanstack/react-router";
 import { TimezoneSelect } from "@/components/shared/timezone-select";
@@ -49,7 +50,11 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
       ))}
       <GroupedRow asChild interactive>
         <Link to="/assistant/automations" search={{ agent: agentId }}>
-          Manage automations ({rows.length})
+          <span className="flex-1">Manage automations ({rows.length})</span>
+          <ChevronRight
+            aria-hidden
+            className="size-[1.125em] shrink-0 text-text-tertiary"
+          />
         </Link>
       </GroupedRow>
     </GroupedList>

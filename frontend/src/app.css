@@ -300,7 +300,7 @@ html.assistant-display svg[data-ui-icon] {
   flex-shrink: 0;
 }
 
-html.assistant-display :where(button, a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]):not(:where([data-icon-button], .assistant-icon-button)):has(> :is(svg.lucide, svg[data-ui-icon])) {
+html.assistant-display :where(button, a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]):not(:where([data-icon-button], .assistant-icon-button, [data-grouped-row])):has(> :is(svg.lucide, svg[data-ui-icon])) {
   column-gap: calc(0.5em * var(--assistant-density));
   padding-inline: calc(0.75em * var(--assistant-density));
   padding-block: calc(0.375em * var(--assistant-density));
@@ -309,6 +309,33 @@ html.assistant-display :where(button, a, [role="menuitem"], [role="menuitemcheck
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+/* Grouped rows own their insets; icon-button density must not shift their text. */
+html.assistant-display [data-grouped-row] {
+  min-height: calc(var(--spacing) * 11);
+  padding-inline: calc(var(--spacing) * 4);
+  padding-block: calc(var(--spacing) * 2.5);
+}
+
+html.assistant-display [data-grouped-list] [data-slot="grouped-select"] {
+  padding-inline: 0;
+}
+
+[data-grouped-row].grouped-field > span:first-child,
+[data-grouped-row].grouped-field > label,
+[data-grouped-row].grouped-field > label > span:first-child {
+  font-size: var(--text-11);
+  color: var(--color-text-tertiary);
+}
+
+[data-grouped-row].grouped-field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+html.assistant-display [data-grouped-row] > * { margin-block: 0; }
 
 html.assistant-display button:has(> svg.lucide):not([data-icon-button]) {
   flex-wrap: wrap;

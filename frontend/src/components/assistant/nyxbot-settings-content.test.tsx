@@ -484,6 +484,9 @@ it("lists connected bots with their agent, relinks one, and connects another to 
   await waitFor(() => expect(agentFor).toHaveTextContent("writer"));
 
   // A connected bot is not offered again; the other connects to the chosen agent.
+  await user.click(
+    within(page).getByRole("button", { name: "Connect another bot" }),
+  );
   const available = within(page).getByRole("list", {
     name: "Channel bots you can connect",
   });
@@ -530,9 +533,11 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
   const toggle = within(connected).getByRole("button", {
     name: "Chats and who can talk",
   });
-  expect(toggle).toHaveAttribute("aria-expanded", "false");
   await user.click(toggle);
-  const list = await within(connected).findByRole("list", {
+  expect(
+    within(page).getByRole("heading", { name: "Home bot · Chats" }),
+  ).toHaveFocus();
+  const list = await within(page).findByRole("list", {
     name: "Chats of Home bot",
   });
   // Groups have reply and member settings; private chats do not.
@@ -580,7 +585,7 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
     }),
   );
   await user.click(
-    within(connected).getByRole("combobox", {
+    within(page).getByRole("combobox", {
       name: "Who can talk to Home bot in private chats",
     }),
   );

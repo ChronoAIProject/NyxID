@@ -1,11 +1,12 @@
+import {
+  GroupedFormActions,
+  GroupedFormScope,
+  GroupedFormBar,
+} from "@/components/ui/grouped-form";
+import { GroupedDetailContext } from "@/lib/grouped-detail";
 import { CollaborationGuestControls } from "./collaboration-guest-controls";
 import { GuestReadiness } from "./guest-readiness";
-import {
-  ShareAgentDialog,
-  SharedAgentMemory,
-  SharedAgentProfile,
-  SharedConsentCards,
-} from "./shared-agent-controls";
+import { ShareAgentDialog, SharedAgentMemory, SharedAgentProfile, SharedConsentCards } from "./shared-agent-controls";
 import { AgentSkills } from "./agent-skills";
 import { AgentConnections } from "./agent-connections";
 import { AgentLearningReview } from "./agent-learning-review";
@@ -23,7 +24,7 @@ import {
   GroupedInput,
   GroupedTextarea,
   GroupedSelectTrigger,
-  GroupedSaveBar,
+  GroupedFooter,
 } from "@/components/ui/grouped-list";
 import {
   SegmentedControl,
@@ -127,10 +128,9 @@ export function accessAuthorityCopy(
   agent: AssistantAgent,
   requestMode: "denied" | "routed_to_nyxbot" | undefined,
 ): string {
-  const sandbox =
-    "This specialist is sandboxed: it cannot grant access to itself or to other agents.";
+  const sandbox = "This specialist is sandboxed: it cannot grant access to itself or to other agents.";
   const direct =
-    "When you talk to it directly, it tells you what it is missing and continues; you grant access below.";
+    "When you talk to it directly, it tells you what it is missing and continues; you grant access here.";
   if (agent.owner_kind === "org") {
     const org = agent.owner_name ?? "the organization";
     return agent.can_maintain === false
@@ -146,9 +146,7 @@ const GRANTS_SECTION_ID = "agent-details-grants";
 const SKILLS_SECTION_ID = "agent-details-skills";
 
 function isNoAccess(error: unknown): boolean {
-  return (
-    error instanceof ApiError && (error.status === 403 || error.status === 404)
-  );
+  return error instanceof ApiError && (error.status === 403 || error.status === 404);
 }
 
 /** Says why the forms are read-only instead of leaving a silently dead Save button. */
@@ -381,7 +379,9 @@ function AgentDetailsContent({
       ?.focus({ preventScroll: true });
   }, [incoming]);
   useEffect(() => {
-    panels.current?.scrollTo?.({ top: 0 });
+    panels.current
+      ?.querySelector<HTMLElement>("[data-panel]:not([hidden]) [data-panel-scroll]")
+      ?.scrollTo?.({ top: 0 });
   }, [selected]);
   return (
     <SegmentedControl
@@ -400,7 +400,7 @@ function AgentDetailsContent({
       </div>
       <div
         ref={panels}
-        className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto px-4 pb-6"
+        className="min-h-0 flex-1 overflow-hidden px-4"
       >
         {tabs.map(([value, label]) => (
           <SegmentedControlContent
@@ -409,136 +409,149 @@ function AgentDetailsContent({
             value={value}
             hidden={selected !== value}
             data-panel={value}
+            className="h-full min-h-0 flex-col space-y-0 data-[state=active]:flex data-[state=inactive]:hidden"
           >
             <h2 tabIndex={-1} className="sr-only outline-none">
               {label}
             </h2>
-            {value === "overview" ? (
-              <>
-                {agent.share_role ? (
-                  <SharedAgentProfile agent={agent} />
-                ) : (
-                  <ProfileForm agent={agent} />
-                )}
-                <GroupedList title="Ownership">
-                  <GroupedRow
-                    title={
-                      agent.owner_kind === "org"
-                        ? (agent.owner_name ?? agent.owner_id)
-                        : agent.share_role
-                          ? `Shared by ${agent.owner_name ?? agent.owner_id}`
-                          : "Personal agent"
-                    }
-                    description={
-                      agent.owner_kind === "org"
-                        ? `Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
-                        : agent.share_role
-                          ? `Your role: ${agent.share_role}. Your chats and notes stay private.`
-                          : undefined
-                    }
-                  />
-                </GroupedList>
-                <ShareAgentDialog agent={agent} />
-                {!agent.share_role && agent.can_use !== false ? (
-                  <AgentAutomations agentId={agent.id} />
-                ) : null}
-                {!agent.share_role &&
-                agent.kind === "specialist" &&
-                agent.can_maintain !== false ? (
-                  <Lifecycle agent={agent} onDeleted={onDeleted} />
-                ) : null}
-              </>
-            ) : value === "grants" ? (
-              <>
-                {agent.share_role ? (
-                  <SharedConsentCards agentId={agent.id} />
-                ) : (
-                  <>
-                    {agent.kind === "specialist" ? (
-                      <>
-                        <GrantsForm agent={agent} />
-                        <section
-                          aria-label="Access authority"
-                          className="px-4 text-11 leading-relaxed text-text-tertiary"
-                        >
-                          {accessAuthorityCopy(agent, requestMode)}
-                        </section>
-                        {agent.can_maintain !== false ? (
-                          <>
-                            <AgentOperationScopes
-                              agentId={agent.id}
-                              disabled={readOnly}
-                              drillIn
-                              visible={selected === "grants"}
-                              onClose={onClose}
-                              detailContainer={detailContainer}
-                            />
-                            {agent.owner_kind !== "org" ? (
-                              <CollaborationGuestControls
-                                agentId={agent.id}
-                                disabled={readOnly}
-                              />
-                            ) : null}
-                            {agent.owner_kind !== "org" ? (
-                              <AgentOperationScopes
-                                agentId={agent.id}
-                                disabled={readOnly}
-                                guests
-                                drillIn
-                                visible={selected === "grants"}
-                                onClose={onClose}
-                                detailContainer={detailContainer}
-                              />
-                            ) : null}
-                          </>
-                        ) : null}
-                      </>
-                    ) : (
+            <GroupedDetailContext.Provider
+              value={{
+                container: detailContainer,
+                visible: selected === value,
+              }}
+            >
+              <GroupedFormScope>
+                <div data-panel-scroll="" className="assistant-scrollbar min-h-0 flex-1 space-y-6 overflow-y-auto pb-6">
+                  {value === "overview" ? (
+                    <>
+                      {agent.share_role ? (
+                        <SharedAgentProfile agent={agent} />
+                      ) : (
+                        <ProfileForm agent={agent} />
+                      )}
                       <GroupedList
-                        title="Access"
-                        footer="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first."
+                        title="Ownership"
+                        footer={
+                          agent.owner_kind === "org"
+                            ? `Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
+                            : agent.share_role
+                              ? `Your role: ${agent.share_role}. Your chats and notes stay private.`
+                              : undefined
+                        }
                       >
                         <GroupedRow
-                          title="Connected services and account"
-                          accessory="Full access"
+                          title={
+                            agent.owner_kind === "org"
+                              ? (agent.owner_name ?? agent.owner_id)
+                              : agent.share_role
+                                ? `Shared by ${agent.owner_name ?? agent.owner_id}`
+                                : "Personal agent"
+                          }
                         />
                       </GroupedList>
-                    )}
-                    {agent.kind === "nyxbot" || agent.can_maintain !== false ? (
-                      <MachineCapabilities
+                      <ShareAgentDialog agent={agent} />
+                      {!agent.share_role && agent.can_use !== false ? (
+                        <AgentAutomations agentId={agent.id} />
+                      ) : null}
+                      {!agent.share_role &&
+                      agent.kind === "specialist" &&
+                      agent.can_maintain !== false ? (
+                        <Lifecycle agent={agent} onDeleted={onDeleted} />
+                      ) : null}
+                    </>
+                  ) : value === "grants" ? (
+                    <>
+                      {agent.share_role ? (
+                        <SharedConsentCards agentId={agent.id} />
+                      ) : (
+                        <>
+                          {agent.kind === "specialist" ? (
+                            <>
+                              <GrantsForm
+                                agent={agent}
+                                requestMode={requestMode}
+                              />
+                              {agent.can_maintain !== false ? (
+                                <>
+                                  <AgentOperationScopes
+                                    agentId={agent.id}
+                                    disabled={readOnly}
+                                    drillIn
+                                    visible={selected === "grants"}
+                                    onClose={onClose}
+                                    detailContainer={detailContainer}
+                                  />
+                                  {agent.owner_kind !== "org" ? (
+                                    <CollaborationGuestControls
+                                      agentId={agent.id}
+                                      disabled={readOnly}
+                                    />
+                                  ) : null}
+                                  {agent.owner_kind !== "org" ? (
+                                    <AgentOperationScopes
+                                      agentId={agent.id}
+                                      disabled={readOnly}
+                                      guests
+                                      drillIn
+                                      visible={selected === "grants"}
+                                      onClose={onClose}
+                                      detailContainer={detailContainer}
+                                    />
+                                  ) : null}
+                                </>
+                              ) : null}
+                            </>
+                          ) : (
+                            <GroupedList
+                              title="Access"
+                              footer="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first."
+                            >
+                              <GroupedRow
+                                title="Connected services and account"
+                                accessory="Full access"
+                              />
+                            </GroupedList>
+                          )}
+                          {agent.kind === "nyxbot" ||
+                          agent.can_maintain !== false ? (
+                            <MachineCapabilities
+                              agentId={agent.id}
+                              disabled={readOnly}
+                            />
+                          ) : null}
+                          <AgentConnections agent={agent} />
+                        </>
+                      )}
+                    </>
+                  ) : value === "skills" ? (
+                    <>
+                      <AgentSkills
+                        id={SKILLS_SECTION_ID}
                         agentId={agent.id}
-                        disabled={readOnly}
+                        readOnly={readOnly || Boolean(agent.share_role)}
                       />
-                    ) : null}
-                    <AgentConnections agent={agent} />
-                  </>
-                )}
-              </>
-            ) : value === "skills" ? (
-              <>
-                <AgentSkills
-                  id={SKILLS_SECTION_ID}
-                  agentId={agent.id}
-                  readOnly={readOnly || Boolean(agent.share_role)}
-                />
-                {!agent.share_role ? (
-                  <AgentLearningReview
-                    key={proposalId ?? ""}
-                    agentId={agent.id}
-                    proposalId={proposalId}
-                    readOnly={readOnly}
-                  />
-                ) : null}
-              </>
-            ) : value === "memory" ? (
-              agent.share_role ? (
-                <SharedAgentMemory agent={agent} />
-              ) : (
-                <MemoryList agent={agent} memory={memory} />
-              )
-            ) : (
-              <ChannelBotsManager agents={agents} agent={agent} />
-            )}
+                      {!agent.share_role ? (
+                        <AgentLearningReview
+                          key={proposalId ?? ""}
+                          agentId={agent.id}
+                          proposalId={proposalId}
+                          readOnly={readOnly}
+                        />
+                      ) : null}
+                    </>
+                  ) : value === "memory" ? (
+                    agent.share_role ? (
+                      <SharedAgentMemory agent={agent} />
+                    ) : (
+                      <MemoryList agent={agent} memory={memory} />
+                    )
+                  ) : (
+                    <ChannelBotsManager agents={agents} agent={agent} />
+                  )}
+                </div>
+                <GroupedFormBar />
+              </GroupedFormScope>
+            </GroupedDetailContext.Provider>
           </SegmentedControlContent>
         ))}
       </div>
@@ -605,13 +618,22 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
           onSubmit={form.handleSubmit(save)}
           className="space-y-3"
         >
-          <GroupedList title="Profile">
+          <GroupedList
+            title="Profile"
+            footer={
+              error ? (
+                <p role="alert" className="text-destructive">
+                  {error}
+                </p>
+              ) : undefined
+            }
+          >
             {nyxbot ? null : (
               <FormField
                 control={form.control}
                 name="name"
                 render={({ field }) => (
-                  <GroupedRow asChild className="block space-y-1.5">
+                  <GroupedRow asChild className="grouped-field">
                     <FormItem>
                       <FormLabel>Name</FormLabel>
                       <FormControl>
@@ -624,10 +646,14 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                           }
                         />
                       </FormControl>
-                      <FormDescription className="text-11">
-                        The @handle used in groups and by NyxBot.
-                      </FormDescription>
-                      <FormMessage />
+                      <GroupedFooter>
+                        <FormDescription className="text-11">
+                          The @handle used in groups and by NyxBot.
+                        </FormDescription>
+                      </GroupedFooter>
+                      <GroupedFooter>
+                        <FormMessage />
+                      </GroupedFooter>
                     </FormItem>
                   </GroupedRow>
                 )}
@@ -637,7 +663,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="display_name"
               render={({ field }) => (
-                <GroupedRow asChild className="block space-y-1.5">
+                <GroupedRow asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>Display name</FormLabel>
                     <FormControl>
@@ -649,11 +675,15 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="text-11">
-                      Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}.
-                      Leave empty to use it.
-                    </FormDescription>
-                    <FormMessage />
+                    <GroupedFooter>
+                      <FormDescription className="text-11">
+                        Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}.
+                        Leave empty to use it.
+                      </FormDescription>
+                    </GroupedFooter>
+                    <GroupedFooter>
+                      <FormMessage />
+                    </GroupedFooter>
                   </FormItem>
                 </GroupedRow>
               )}
@@ -663,7 +693,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 control={form.control}
                 name="model"
                 render={({ field }) => (
-                  <GroupedRow asChild className="block space-y-1.5">
+                  <GroupedRow asChild className="grouped-field">
                     <FormItem>
                       <FormLabel>Model</FormLabel>
                       <ModelSelect
@@ -673,11 +703,15 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         disabled={readOnly}
                         onChange={field.onChange}
                       />
-                      <FormDescription className="text-11">
-                        Used by this agent's new threads. Each thread can switch
-                        from its composer.
-                      </FormDescription>
-                      <FormMessage />
+                      <GroupedFooter>
+                        <FormDescription className="text-11">
+                          Used by this agent's new threads. Each thread can
+                          switch from its composer.
+                        </FormDescription>
+                      </GroupedFooter>
+                      <GroupedFooter>
+                        <FormMessage />
+                      </GroupedFooter>
                     </FormItem>
                   </GroupedRow>
                 )}
@@ -687,9 +721,14 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="access_mode_override"
               render={({ field }) => (
-                <GroupedRow asChild className="block space-y-1.5">
+                <GroupedRow
+                  asChild
+                  className="!flex-row !flex-wrap !items-center !gap-3"
+                >
                   <FormItem>
-                    <FormLabel>Access mode</FormLabel>
+                    <FormLabel className="mr-auto text-12 font-medium text-foreground">
+                      Access mode
+                    </FormLabel>
                     <Select
                       value={field.value ?? INHERIT}
                       disabled={readOnly}
@@ -720,14 +759,18 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         ))}
                       </SelectContent>
                     </Select>
-                    <FormDescription className="text-11">
-                      {
-                        ACCESS_MODE_DESCRIPTION[
-                          effectiveAccessMode(workspaceMode, field.value)
-                        ]
-                      }
-                    </FormDescription>
-                    <FormMessage />
+                    <GroupedFooter>
+                      <FormDescription className="text-11">
+                        {
+                          ACCESS_MODE_DESCRIPTION[
+                            effectiveAccessMode(workspaceMode, field.value)
+                          ]
+                        }
+                      </FormDescription>
+                    </GroupedFooter>
+                    <GroupedFooter>
+                      <FormMessage />
+                    </GroupedFooter>
                   </FormItem>
                 </GroupedRow>
               )}
@@ -736,10 +779,12 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="channel_checking_notice"
               render={({ field }) => (
-                <GroupedRow asChild className="block space-y-1.5">
+                <GroupedRow asChild className="grouped-field">
                   <FormItem>
                     <div className="flex items-center justify-between gap-3">
-                      <FormLabel>Channel progress reply</FormLabel>
+                      <FormLabel className="text-12 font-medium text-foreground">
+                        Channel progress reply
+                      </FormLabel>
                       <FormControl>
                         <Switch
                           checked={field.value ?? false}
@@ -748,12 +793,14 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         />
                       </FormControl>
                     </div>
-                    <FormDescription className="text-11">
-                      After five seconds, send “Got it, let me check and get
-                      back to you.” if an external check is needed. Attached
-                      skill reads and tool discovery do not trigger it. The
-                      completed answer follows in the same chat.
-                    </FormDescription>
+                    <GroupedFooter>
+                      <FormDescription className="text-11">
+                        After five seconds, send “Got it, let me check and get
+                        back to you.” if an external check is needed. Attached
+                        skill reads and tool discovery do not trigger it. The
+                        completed answer follows in the same chat.
+                      </FormDescription>
+                    </GroupedFooter>
                   </FormItem>
                 </GroupedRow>
               )}
@@ -762,7 +809,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="description"
               render={({ field }) => (
-                <GroupedRow asChild className="block space-y-1.5">
+                <GroupedRow asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>{nyxbot ? "Notes" : "Role"}</FormLabel>
                     <FormControl>
@@ -778,7 +825,9 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <FormMessage />
+                    <GroupedFooter>
+                      <FormMessage />
+                    </GroupedFooter>
                   </FormItem>
                 </GroupedRow>
               )}
@@ -787,7 +836,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="persona"
               render={({ field }) => (
-                <GroupedRow asChild className="block space-y-1.5">
+                <GroupedRow asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>Persona</FormLabel>
                     <FormControl>
@@ -799,45 +848,32 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="text-11">
-                      Personality and tone only; it never changes what the agent
-                      may do.
-                    </FormDescription>
-                    <FormMessage />
+                    <GroupedFooter>
+                      <FormDescription className="text-11">
+                        Personality and tone only; it never changes what the
+                        agent may do.
+                      </FormDescription>
+                    </GroupedFooter>
+                    <GroupedFooter>
+                      <FormMessage />
+                    </GroupedFooter>
                   </FormItem>
                 </GroupedRow>
               )}
             />
           </GroupedList>
-          {error ? (
-            <p role="alert" className="text-12 text-destructive">
-              {error}
-            </p>
-          ) : null}
           {readOnly ? null : (
-            <GroupedSaveBar>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={!form.formState.isDirty || update.isPending}
-                onClick={() => {
-                  form.reset(undefined, { keepDirtyValues: false });
-                  setError(undefined);
-                }}
-              >
-                Discard
-              </Button>
-              <Button
-                type="submit"
-                size="sm"
-                variant="primary"
-                isLoading={update.isPending}
-                disabled={!form.formState.isDirty}
-              >
-                Save
-              </Button>
-            </GroupedSaveBar>
+            <GroupedFormActions
+              label="profile"
+              dirty={form.formState.isDirty}
+              pending={update.isPending}
+              saveLabel="Save"
+              save={form.handleSubmit(save)}
+              discard={() => {
+                form.reset(undefined, { keepDirtyValues: false });
+                setError(undefined);
+              }}
+            />
           )}
         </form>
       </Form>
@@ -845,13 +881,14 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   );
 }
 
-function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
-  const readiness = useGuestReadiness(
-    agent.id,
-    agent.owner_kind !== "org" &&
-      !agent.share_role &&
-      agent.can_maintain !== false,
-  );
+function GrantsForm({
+  agent,
+  requestMode,
+}: {
+  readonly agent: AssistantAgent;
+  readonly requestMode?: "denied" | "routed_to_nyxbot";
+}) {
+  const readiness = useGuestReadiness(agent.id, agent.owner_kind !== "org" && !agent.share_role && agent.can_maintain !== false);
   const grants = useSetNyxBotAgentGrants();
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentGrants>({
@@ -897,12 +934,6 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
 
   return (
     <section id={GRANTS_SECTION_ID} aria-label="Grants" className="space-y-3">
-      <p className="px-4 text-11 leading-relaxed text-text-tertiary">
-        This specialist is sandboxed and cannot grant access itself. Saving
-        replaces the current grants on every thread. When you talk to it
-        directly, anything beyond them is reported to you as missing; only work
-        NyxBot assigned, or work in a group NyxBot is in, asks NyxBot.
-      </p>
       <Form {...form}>
         <form
           aria-label="Grants"
@@ -916,6 +947,19 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
             render={({ field }) => (
               <FormItem>
                 <ServiceGrantPicker
+                  footer={
+                    <>
+                      <p>Saving replaces the current grants on every thread.</p>
+                      <section aria-label="Access authority">
+                        {accessAuthorityCopy(agent, requestMode)}
+                      </section>
+                      {error ? (
+                        <p role="alert" className="text-destructive">
+                          {error}
+                        </p>
+                      ) : null}
+                    </>
+                  }
                   org={agent.owner_kind === "org" ? agent.owner_id : undefined}
                   value={field.value}
                   onChange={field.onChange}
@@ -949,7 +993,6 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               )}
             />
           ))}
-          <GuestReadiness readiness={readiness.data} />
           {services.length && agent.owner_kind !== "org" ? (
             <FormField
               control={form.control}
@@ -957,6 +1000,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               render={({ field }) => (
                 <FormItem>
                   <GuestAccessList
+                    footer={<GuestReadiness readiness={readiness.data} />}
                     services={services}
                     value={field.value}
                     onChange={field.onChange}
@@ -972,13 +1016,24 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               name="account_read"
               render={({ field }) => (
                 <FormItem>
-                  <GroupedList title="Account">
-                    <GroupedRow>
-                      <div className="space-y-1">
-                        <FormLabel>Read my account</FormLabel>
-                        <FormDescription className="text-12">
+                  <GroupedList
+                    title="Account"
+                    footer={
+                      <>
+                        {!services.length ? (
+                          <GuestReadiness readiness={readiness.data} />
+                        ) : null}
+                        <p>
                           Look up keys, services and nodes; never change them.
-                        </FormDescription>
+                        </p>
+                      </>
+                    }
+                  >
+                    <GroupedRow>
+                      <div className="mr-auto">
+                        <FormLabel className="text-12 font-medium text-foreground">
+                          Read my account
+                        </FormLabel>
                       </div>
                       <FormControl>
                         <Switch
@@ -993,35 +1048,18 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               )}
             />
           ) : null}
-          {error ? (
-            <p role="alert" className="text-12 text-destructive">
-              {error}
-            </p>
-          ) : null}
           {readOnly ? null : (
-            <GroupedSaveBar>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={!form.formState.isDirty || grants.isPending}
-                onClick={() => {
-                  form.reset(undefined, { keepDirtyValues: false });
-                  setError(undefined);
-                }}
-              >
-                Discard
-              </Button>
-              <Button
-                type="submit"
-                size="sm"
-                variant="primary"
-                isLoading={grants.isPending}
-                disabled={!form.formState.isDirty}
-              >
-                Save grants
-              </Button>
-            </GroupedSaveBar>
+            <GroupedFormActions
+              label="grants"
+              dirty={form.formState.isDirty}
+              pending={grants.isPending}
+              saveLabel="Save grants"
+              save={form.handleSubmit(save)}
+              discard={() => {
+                form.reset(undefined, { keepDirtyValues: false });
+                setError(undefined);
+              }}
+            />
           )}
         </form>
       </Form>
@@ -1045,11 +1083,13 @@ function GuestAccessList({
   value,
   onChange,
   disabled,
+  footer,
 }: {
   readonly services: readonly string[];
   readonly value: Record<string, AssistantGuestAccess>;
   readonly onChange: (value: Record<string, AssistantGuestAccess>) => void;
   readonly disabled?: boolean;
+  readonly footer?: React.ReactNode;
 }) {
   return (
     <GroupedList
@@ -1060,6 +1100,7 @@ function GuestAccessList({
           lets them look things up, create and act (send a message, turn a light
           on), but not change or delete what already exists. Anything behind
           your approval stays yours. You can also ask NyxBot to change this.
+          {footer}
         </>
       }
     >
@@ -1070,7 +1111,7 @@ function GuestAccessList({
             <GroupedRow key={slug} role="listitem">
               <label
                 htmlFor={id}
-                className="min-w-0 flex-1 break-words font-mono text-11 text-muted-foreground"
+                className="min-w-0 flex-1 break-words text-12 font-medium text-foreground"
               >
                 {slug}
               </label>
@@ -1144,16 +1185,6 @@ function MemoryList({
 
   return (
     <section aria-label="Memory" className="space-y-6">
-      <p className="px-4 text-11 text-text-tertiary">
-        {agent.owner_kind === "org"
-          ? "Shared organization memory. Never save private member content here."
-          : `What ${name} remembers across its threads and chat apps.`}
-      </p>
-      {error ? (
-        <p role="alert" className="text-12 text-destructive">
-          {error}
-        </p>
-      ) : null}
       {agent.status !== "destroyed" ? (
         <form
           aria-label={
@@ -1162,8 +1193,33 @@ function MemoryList({
           onSubmit={memoryForm.handleSubmit(saveNote)}
           className="space-y-2"
         >
-          <GroupedList title={editing ? "Edit note" : "Add a note"}>
-            <GroupedRow className="block space-y-2">
+          <GroupedList
+            title={editing ? "Edit note" : "Add a note"}
+            footer={
+              <>
+                <p>
+                  {agent.owner_kind === "org"
+                    ? "Shared organization memory. Never save private member content here."
+                    : `What ${name} remembers across its threads and chat apps.`}
+                </p>
+                {error ? (
+                  <p role="alert" className="text-destructive">
+                    {error}
+                  </p>
+                ) : null}
+                {memoryForm.formState.errors.text ? (
+                  <p
+                    id="memory-error"
+                    role="alert"
+                    className="text-destructive"
+                  >
+                    {memoryForm.formState.errors.text.message}
+                  </p>
+                ) : null}
+              </>
+            }
+          >
+            <GroupedRow className="grouped-field">
               <label
                 htmlFor="shared-memory-note"
                 className="text-12 font-medium"
@@ -1186,46 +1242,43 @@ function MemoryList({
               />
             </GroupedRow>
           </GroupedList>
-          {memoryForm.formState.errors.text ? (
-            <p
-              id="memory-error"
-              role="alert"
-              className="px-4 text-11 text-destructive"
-            >
-              {memoryForm.formState.errors.text.message}
-            </p>
-          ) : null}
-          <GroupedSaveBar>
-            {editing ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setEditing(undefined);
-                  memoryForm.reset({ text: "" });
-                }}
-              >
-                Cancel edit
-              </Button>
-            ) : null}
-            <Button
-              type="submit"
-              size="sm"
-              variant="primary"
-              isLoading={remember.isPending}
-              disabled={
-                !memoryForm.formState.isDirty ||
-                !memoryForm.watch("text").trim()
-              }
-            >
-              {agent.owner_kind === "org" ? "Save shared note" : "Save note"}
-            </Button>
-          </GroupedSaveBar>
+          <GroupedFormActions
+            label="memory note"
+            dirty={memoryForm.formState.isDirty}
+            pending={remember.isPending}
+            disabled={!memoryForm.watch("text").trim()}
+            saveLabel={
+              agent.owner_kind === "org" ? "Save shared note" : "Save note"
+            }
+            save={memoryForm.handleSubmit(saveNote)}
+            discard={() => {
+              memoryForm.reset({ text: "" });
+              setEditing(undefined);
+              setError(undefined);
+            }}
+          />
         </form>
       ) : null}
       {memory.length ? (
-        <GroupedList title="Notes">
+        <GroupedList
+          title="Notes"
+          footer={
+            agent.status === "destroyed" ? (
+              <>
+                <p>
+                  {agent.owner_kind === "org"
+                    ? "Shared organization memory. Never save private member content here."
+                    : `What ${name} remembers across its threads and chat apps.`}
+                </p>
+                {error ? (
+                  <p role="alert" className="text-destructive">
+                    {error}
+                  </p>
+                ) : null}
+              </>
+            ) : undefined
+          }
+        >
           <div role="list" aria-label={`${name} memory`}>
             {memory.map((note) => (
               <GroupedRow key={note.id} role="listitem" className="items-start">
@@ -1233,7 +1286,7 @@ function MemoryList({
                   <p className="whitespace-pre-wrap break-words text-12 text-foreground">
                     {note.text}
                   </p>
-                  <p className="font-mono text-10 text-text-tertiary">
+                  <p className="font-mono text-11 font-normal text-text-tertiary">
                     {formatDateTime(note.updated_at)}
                   </p>
                 </div>
@@ -1264,9 +1317,18 @@ function MemoryList({
           </div>
         </GroupedList>
       ) : (
-        <p className="px-4 py-3 text-12 text-text-tertiary">
-          Nothing remembered yet.
-        </p>
+        <GroupedList
+          title="Notes"
+          footer={
+            agent.status === "destroyed"
+              ? agent.owner_kind === "org"
+                ? "Shared organization memory. Never save private member content here."
+                : `What ${name} remembers across its threads and chat apps.`
+              : undefined
+          }
+        >
+          <GroupedRow title="Nothing remembered yet." />
+        </GroupedList>
       )}
     </section>
   );
@@ -1294,9 +1356,7 @@ function Lifecycle({
       if (confirm === "destroy") {
         await destroy.mutateAsync(agent.id);
         // Its open threads become read-only.
-        await queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.root(userId),
-        });
+        await queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.root(userId) });
       } else {
         await remove.mutateAsync(agent.id);
         nyxAgentTransport.forgetAgent(agent.id);
@@ -1317,10 +1377,9 @@ function Lifecycle({
           : "Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable."
       }
     >
-      <GroupedRow asChild interactive>
+      <GroupedRow asChild interactive className="text-destructive">
         <button
           type="button"
-          className="font-medium text-destructive"
           onClick={() => {
             setError(undefined);
             setConfirm(destroyed ? "delete" : "destroy");

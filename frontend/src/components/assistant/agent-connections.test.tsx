@@ -190,3 +190,15 @@ it("makes a destroyed agent's order read-only", async () => {
   ).toBeDisabled();
   expect(writes).toHaveLength(0);
 });
+
+it("leaves pristine connection-order editing without a save bar or request", async () => {
+  mount();
+  const editButton = screen.getByRole("button", { name: "Edit connection order" });
+  await waitFor(() => expect(editButton).toBeEnabled());
+  fireEvent.click(editButton);
+  expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+  expect(screen.getByRole("button", { name: "Edit connection order" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "Move Personal up" })).toBeNull();
+  expect(writes).toEqual([]);
+});

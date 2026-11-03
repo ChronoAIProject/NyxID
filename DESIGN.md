@@ -250,10 +250,14 @@ explanations below the group, never in another bordered box. Destructive
 actions are destructive-colored rows in their own neutral group.
 
 Selection lists use checkmark or switch rows, search when there are more than
-eight items, and scroll internally only for long lists. Every logical form has
-one Save action, with its existing dirty/pending/permission guards.
-`GroupedSaveBar` provides a sticky footer for Discard and Save. Immediate
-controls remain immediate only where their existing behavior requires it.
+eight items, and scroll internally only for long lists. `GroupedFormScope` gives
+each tab one dirty-only `GroupedFormBar`, naming its unsaved forms. Save runs each
+dirty form in order with its own validation, payload and revision fence. A failed
+form keeps its draft and local error; successful forms stay saved. Discard resets
+all dirty forms in that scope. Drill-ins share the tab scope and preserve each
+operation editor's revision fence. Covered save bars leave interaction and
+accessibility navigation. Immediate controls remain immediate only where their
+existing behavior requires it.
 
 `components/ui/segmented-control.tsx` wraps Radix Tabs: a `bg-muted` track,
 raised `bg-card shadow-sm` selected segment, `text-12` labels, arrow-key

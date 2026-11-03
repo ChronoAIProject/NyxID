@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import {
   GroupedDisclosure,
+  GroupedFooter,
   GroupedInput,
   GroupedList,
   GroupedRow,
@@ -54,4 +55,32 @@ it("preserves labels and error descriptions for borderless controls", async () =
   expect(input).toBeInvalid();
   await userEvent.setup().type(input, "Scout");
   expect(input).toHaveValue("Scout");
+});
+
+it("places portaled form descriptions and validation outside the card with linked IDs", async () => {
+  render(
+    <GroupedList title="Profile">
+      <GroupedRow>
+        <label htmlFor="portaled-name">Name</label>
+        <GroupedInput
+          id="portaled-name"
+          aria-describedby="name-help portaled-error"
+          aria-invalid
+        />
+        <GroupedFooter>
+          <p id="name-help">Shown to everyone.</p>
+          <p id="portaled-error" role="alert">
+            Name is required.
+          </p>
+        </GroupedFooter>
+      </GroupedRow>
+    </GroupedList>,
+  );
+  const input = screen.getByRole("textbox", { name: "Name" });
+  expect(input).toHaveAccessibleDescription(
+    "Shown to everyone. Name is required.",
+  );
+  const error = screen.getByRole("alert");
+  expect(error.closest("[data-grouped-list]")).toBeNull();
+  expect(error.closest("[data-grouped-footer]")).toBeInTheDocument();
 });

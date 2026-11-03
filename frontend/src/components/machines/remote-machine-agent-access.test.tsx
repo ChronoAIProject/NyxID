@@ -255,7 +255,10 @@ it("does not enable editing when the existing capability feature is unavailable"
   state.feature = false;
   await show();
   expect(
-    screen.getByRole("button", { name: /^Save (agent )?capabilities$/ }),
+    screen.queryByRole("button", { name: /^Save (agent )?capabilities$/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("checkbox", { name: "Shell commands" }),
   ).toBeDisabled();
   expect(
     screen.getByText(/Capability editing is unavailable/),
@@ -424,10 +427,10 @@ it.each(["can_edit", "protocol_v2"] as const)(
     for (const checkbox of within(form).getAllByRole("checkbox"))
       expect(checkbox).toBeDisabled();
     expect(
-      within(form).getByRole("button", {
+      within(form).queryByRole("button", {
         name: /^Save (agent )?capabilities$/,
       }),
-    ).toBeDisabled();
+    ).not.toBeInTheDocument();
     expect(state.setCapabilities).not.toHaveBeenCalled();
   },
 );

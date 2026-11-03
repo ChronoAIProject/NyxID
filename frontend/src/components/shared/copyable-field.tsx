@@ -8,6 +8,7 @@ interface CopyableFieldProps {
   readonly label: string;
   readonly value: string;
   readonly size?: "sm" | "md";
+  readonly grouped?: boolean;
 }
 
 /* ── NyxID Copyable Field ── */
@@ -15,6 +16,7 @@ export function CopyableField({
   label,
   value,
   size = "md",
+  grouped = false,
 }: CopyableFieldProps) {
   const [copied, setCopied] = useState(false);
 
@@ -36,13 +38,17 @@ export function CopyableField({
   const minH = size === "sm" ? "min-h-[36px]" : "min-h-[44px]";
 
   return (
-    <div>
+    <div className={grouped ? "w-full" : undefined}>
       <p className={`mb-1 ${labelSize} font-medium text-text-tertiary`}>
         {label}
       </p>
       <div className="relative">
         <code
-          className={`flex items-center rounded-xl border border-border bg-muted font-mono ${padding} pr-10 ${minH} ${textSize} break-all text-foreground`}
+          className={
+            grouped
+              ? "flex min-h-8 items-center break-all pr-10 font-mono text-11 font-normal text-foreground"
+              : `flex items-center rounded-xl border border-border bg-muted font-mono ${padding} pr-10 ${minH} ${textSize} break-all text-foreground`
+          }
         >
           {value}
         </code>

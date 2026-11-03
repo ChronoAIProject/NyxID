@@ -1,9 +1,14 @@
+import {
+  GroupedFormActions,
+  GroupedFormScope,
+  GroupedFormBar,
+} from "@/components/ui/grouped-form";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { coverGroupedContent } from "@/lib/grouped-detail";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ChevronLeft, X } from "lucide-react";
@@ -13,7 +18,6 @@ import {
   GroupedDisclosure,
   GroupedInput,
   GroupedSelectTrigger,
-  GroupedSaveBar,
 } from "@/components/ui/grouped-list";
 import { useAppForm } from "@/components/ui/form";
 import {
@@ -54,11 +58,7 @@ export function AgentOperationScopes({
   const root = useRef<HTMLDivElement>(null);
   const views = useRef(new Map<string, HTMLElement>());
   const returnFocus = useRef<HTMLButtonElement>(null);
-  const enabled = useFeature(
-    guests
-      ? FEATURE_FLAG.GUEST_OPERATION_SCOPES
-      : FEATURE_FLAG.AGENT_OPERATION_SCOPES,
-  );
+  const enabled = useFeature(guests ? FEATURE_FLAG.GUEST_OPERATION_SCOPES : FEATURE_FLAG.AGENT_OPERATION_SCOPES);
   const query = useAgentOperations(agentId, enabled && !disabled, guests);
   const activeAvailable = Boolean(
     query.data?.some((service) => service.service_id === active),
@@ -72,35 +72,21 @@ export function AgentOperationScopes({
     const view = activeAvailable ? views.current.get(active) : undefined;
     if (!view) return;
     // Covered sheet controls leave keyboard and screen-reader navigation until Back.
-    const covered: {
-      element: HTMLElement;
-      inert: boolean;
-      hidden: string | null;
-    }[] = [];
+    const release: (() => void)[] = [];
     const boundary = root.current?.closest('[role="dialog"]') ?? root.current;
     let current: HTMLElement = view;
     while (current !== boundary && current.parentElement) {
       const parent = current.parentElement;
       for (const sibling of parent.children) {
         if (sibling === current || !(sibling instanceof HTMLElement)) continue;
-        covered.push({
-          element: sibling,
-          inert: sibling.inert,
-          hidden: sibling.getAttribute("aria-hidden"),
-        });
-        sibling.inert = true;
-        sibling.setAttribute("aria-hidden", "true");
+        release.push(coverGroupedContent(sibling));
       }
       if (parent.getAttribute("role") === "dialog") break;
       current = parent;
     }
     view.querySelector<HTMLElement>("h2")?.focus({ preventScroll: true });
     return () => {
-      for (const { element, inert, hidden } of covered) {
-        element.inert = inert;
-        if (hidden === null) element.removeAttribute("aria-hidden");
-        else element.setAttribute("aria-hidden", hidden);
-      }
+      release.forEach((restore) => restore());
       if (!view.isConnected) {
         const target = returnFocus.current?.isConnected
           ? returnFocus.current
@@ -113,10 +99,17 @@ export function AgentOperationScopes({
   }, [active, activeAvailable, enabled, visible, detailContainer]);
   if (!enabled) {
     return (
-      <p role="status" className="text-12 text-muted-foreground">
-        {guests ? "Guest operation" : "Operation scope"} configuration is not
-        enabled yet. Existing operation limits still apply.
-      </p>
+      <GroupedList
+        title={guests ? "Guest service operations" : "Service operations"}
+        footer={
+          <p role="status">
+            {guests ? "Guest operation" : "Operation scope"} configuration is
+            not enabled yet. Existing operation limits still apply.
+          </p>
+        }
+      >
+        <GroupedRow title="Configuration unavailable" />
+      </GroupedList>
     );
   }
   return (
@@ -159,7 +152,7 @@ export function AgentOperationScopes({
                 <span className="block font-medium">
                   {service.service_name}
                 </span>
-                <span className="text-11 text-text-tertiary">
+                <span className="text-11 font-normal text-text-tertiary">
                   {service.all_operations
                     ? "All operations"
                     : `${service.endpoint_ids.length + service.rules.length} selected operations`}
@@ -197,6 +190,7 @@ export function AgentOperationScopes({
                 : undefined
             }
             data-operation-view={service.service_id}
+            data-grouped-level={1}
             aria-label={`${service.service_name} ${guests ? "guest " : ""}operation details`}
             className="absolute inset-0 z-10 flex flex-col bg-background p-4"
           >
@@ -226,20 +220,23 @@ export function AgentOperationScopes({
               </Button>
               <h2
                 tabIndex={-1}
-                className="mt-3 break-words px-2 text-15 font-semibold outline-none"
+                className="mt-3 break-words px-4 text-15 font-semibold outline-none"
               >
                 {service.service_name}
                 {guests ? " · Guest operations" : " · Operations"}
               </h2>
             </div>
             <div className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto">
-              <ServiceOperationForm
-                key={`${service.service_id}:${service.revision}`}
-                agentId={agentId}
-                guests={guests}
-                service={service}
-                disabled={disabled}
-              />
+              <GroupedFormScope inherit>
+                <ServiceOperationForm
+                  key={`${service.service_id}:${service.revision}`}
+                  agentId={agentId}
+                  guests={guests}
+                  service={service}
+                  disabled={disabled}
+                />
+                <GroupedFormBar />
+              </GroupedFormScope>
             </div>
           </section>
         );
@@ -305,13 +302,7 @@ export function OperationSelectionForm({
   const all = form.watch("all_operations");
   const selected = form.watch("endpoint_ids");
   const rules = form.watch("rules");
-  const [guestMode, setGuestMode] = useState(
-    service.all_operations
-      ? "all"
-      : service.endpoint_ids.length
-        ? "selected"
-        : "none",
-  );
+  const [guestMode, setGuestMode] = useState(service.all_operations ? "all" : service.endpoint_ids.length ? "selected" : "none");
   const operations = service.operations.filter((op) =>
     `${op.method} ${op.path} ${op.summary ?? ""}`
       .toLowerCase()
@@ -340,10 +331,25 @@ export function OperationSelectionForm({
       className="space-y-6"
     >
       <GroupedList
-        title={service.service_name}
-        footer={`Revision ${service.revision}`}
+        footer={
+          <>
+            <p>Revision {service.revision}</p>
+            {error ? (
+              <p role="alert" className="text-destructive">
+                {error}
+              </p>
+            ) : null}
+            {Object.keys(form.formState.errors).length ? (
+              <p role="alert" className="text-destructive">
+                Check the selection: paths must start with / and at most 256
+                operations may be selected.
+              </p>
+            ) : null}
+          </>
+        }
       >
-        <GroupedRow className="block space-y-2">
+        <GroupedRow>
+          <span className="mr-auto">Allowed operations</span>
           <Select
             value={guests ? guestMode : all ? "all" : "selected"}
             disabled={disabled}
@@ -379,7 +385,10 @@ export function OperationSelectionForm({
         <>
           {service.operations.length ? (
             <>
-              <GroupedList title="Select operations">
+              <GroupedList
+                title="Select operations"
+                footer="An empty selection blocks every operation."
+              >
                 <GroupedRow>
                   <GroupedInput
                     aria-label={`Search ${service.service_name} operations`}
@@ -389,7 +398,7 @@ export function OperationSelectionForm({
                   />
                 </GroupedRow>
                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2">
-                  <span className="text-11 text-muted-foreground">
+                  <span className="text-11 text-text-tertiary">
                     {selected.length} selected
                   </span>
                   <Button
@@ -437,18 +446,24 @@ export function OperationSelectionForm({
                           <span className="block break-all font-mono">
                             {operation.method} {operation.path}
                           </span>
-                          <span className="block text-muted-foreground">
+                          <span className="block text-11 font-normal text-text-tertiary">
                             {operation.summary}
                           </span>
                           <span className="flex gap-1">
                             {operation.read_only ? (
-                              <Badge variant="success">Read only</Badge>
+                              <span className="text-11 font-normal text-text-tertiary">
+                                Read only
+                              </span>
                             ) : null}
                             {operation.changes_existing ? (
-                              <Badge variant="warning">Changes existing</Badge>
+                              <span className="text-11 font-normal text-warning">
+                                Changes existing
+                              </span>
                             ) : null}
                             {savedInputs[operation.endpoint_id] ? (
-                              <Badge variant="secondary">Value limits</Badge>
+                              <span className="text-11 font-normal text-text-tertiary">
+                                Value limits
+                              </span>
                             ) : null}
                           </span>
                         </span>
@@ -456,19 +471,25 @@ export function OperationSelectionForm({
                     </GroupedRow>
                   ))}
                   {!operations.length ? (
-                    <p className="text-12 text-muted-foreground">
-                      No matching operations.
-                    </p>
+                    <GroupedRow title="No matching operations." />
                   ) : null}
                 </div>
               </GroupedList>
             </>
           ) : service.allows_explicit_rules ? (
             <>
-              <p className="text-12 text-muted-foreground">
-                No catalog operations. Add exact methods and paths; a variable
-                such as {"{id}"} matches one segment.
-              </p>
+              <GroupedList
+                title="Custom operations"
+                footer={
+                  <>
+                    No catalog operations. Add exact methods and paths; a
+                    variable such as {"{id}"} matches one segment. An empty
+                    selection blocks every operation.
+                  </>
+                }
+              >
+                <GroupedRow title="Use exact methods and paths" />
+              </GroupedList>
               {rules.map((rule, index) => (
                 <GroupedList key={index} title={`Rule ${index + 1}`}>
                   <GroupedRow>
@@ -510,6 +531,7 @@ export function OperationSelectionForm({
                       disabled={disabled}
                     />
                     <Button
+                      variant="ghost"
                       type="button"
                       size="sm"
                       disabled={disabled}
@@ -525,92 +547,65 @@ export function OperationSelectionForm({
                   </GroupedRow>
                 </GroupedList>
               ))}
-              <Button
-                type="button"
-                size="sm"
-                disabled={disabled || rules.length >= 256}
-                onClick={() =>
-                  form.setValue("rules", [
-                    ...rules,
-                    { method: "GET", path_template: "/" },
-                  ])
-                }
-              >
-                Add rule
-              </Button>
+              <GroupedList>
+                <GroupedRow asChild interactive>
+                  <button
+                    type="button"
+                    disabled={disabled || rules.length >= 256}
+                    onClick={() =>
+                      form.setValue("rules", [
+                        ...rules,
+                        { method: "GET", path_template: "/" },
+                      ])
+                    }
+                  >
+                    Add rule
+                  </button>
+                </GroupedRow>
+              </GroupedList>
             </>
           ) : (
-            <p className="text-12 text-muted-foreground">
-              No active catalog operations.
-            </p>
+            <GroupedList>
+              <GroupedRow title="No active catalog operations." />
+            </GroupedList>
           )}
           {selected.some(
             (id) => !service.operations.some((op) => op.endpoint_id === id),
           ) ? (
-            <p role="status" className="text-12 text-muted-foreground">
-              Some selected operations are unavailable.{" "}
-              <Button
-                type="button"
-                size="sm"
-                onClick={() =>
-                  form.setValue(
-                    "endpoint_ids",
-                    selected.filter((id) =>
-                      service.operations.some((op) => op.endpoint_id === id),
-                    ),
-                  )
-                }
-                disabled={disabled}
-              >
-                Remove unavailable selections
-              </Button>
-            </p>
+            <GroupedList footer="Some selected operations are unavailable.">
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  onClick={() =>
+                    form.setValue(
+                      "endpoint_ids",
+                      selected.filter((id) =>
+                        service.operations.some((op) => op.endpoint_id === id),
+                      ),
+                    )
+                  }
+                  disabled={disabled}
+                >
+                  Remove unavailable selections
+                </button>
+              </GroupedRow>
+            </GroupedList>
           ) : null}
-          <p className="text-11 text-muted-foreground">
-            An empty selection blocks every operation.
-          </p>
         </>
       ) : null}
-      {Object.keys(form.formState.errors).length ? (
-        <p role="alert" className="text-12 text-destructive">
-          Check the selection: paths must start with / and at most 256
-          operations may be selected.
-        </p>
-      ) : null}
-      {error ? (
-        <p role="alert" className="text-12 text-destructive">
-          {error}
-        </p>
-      ) : null}
-      <GroupedSaveBar>
-        <Button
-          type="button"
-          size="sm"
-          disabled={disabled || !form.formState.isDirty}
-          onClick={() => {
-            form.reset();
-            setGuestMode(
-              service.all_operations
-                ? "all"
-                : service.endpoint_ids.length
-                  ? "selected"
-                  : "none",
-            );
-            setError(undefined);
-          }}
-        >
-          Cancel
-        </Button>
-        <Button
-          type="submit"
-          variant="primary"
-          size="sm"
-          disabled={disabled || !form.formState.isDirty}
-          isLoading={isSaving}
-        >
-          {guests ? "Save guest operations" : "Save operations"}
-        </Button>
-      </GroupedSaveBar>
+      <GroupedFormActions
+        label={guests ? "guest operations" : "operations"}
+        dirty={form.formState.isDirty}
+        pending={isSaving}
+        disabled={disabled}
+        saveLabel={guests ? "Save guest operations" : "Save operations"}
+        save={form.handleSubmit(save)}
+        discard={() => {
+          form.reset();
+          setGuestMode(service.all_operations ? "all" : service.endpoint_ids.length ? "selected" : "none");
+          setError(undefined);
+        }}
+      />
     </form>
   );
 }
