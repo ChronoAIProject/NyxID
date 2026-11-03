@@ -49,12 +49,17 @@ export function WizardShell({
   useScrollFades(mainRef)
   return (
     <div className="min-h-screen bg-background text-foreground">
+    {/*
+      Header + footer chrome stays within 20% of the window: 182px from
+      920px up, 134px in the `short` tier (680-919px), and 72px below that,
+      where the footer is hidden entirely (see WizardFooter).
+    */}
     <div
-      className={`mx-auto flex max-h-screen w-full ${narrow ? "max-w-[640px]" : "max-w-[1040px]"} flex-col px-6 pt-10 pb-6`}
+      className={`mx-auto flex max-h-screen w-full ${narrow ? "max-w-[640px]" : "max-w-[1040px]"} flex-col px-6 pt-10 pb-6 short:pt-6 short:pb-4 very-short:pt-4 very-short:pb-4`}
     >
-      <header className="mb-6 flex items-center justify-between">
+      <header className="mb-6 flex items-center justify-between short:mb-4 very-short:mb-4">
         <div className="flex items-center">
-          <NyxidLogo className="h-9 w-auto" />
+          <NyxidLogo className="h-9 w-auto short:h-7 very-short:h-6" />
         </div>
         {step ? (
           <div className="text-12 text-muted-foreground">{formatStepLabel(step)}</div>
