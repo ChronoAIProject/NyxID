@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     extract::State,
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -121,10 +121,19 @@ pub async fn oauth_authorization_server_metadata(
 ///
 /// RFC 9728 Protected Resource Metadata. MCP clients use this to discover
 /// where to authenticate (NyxID's OAuth endpoints) before connecting.
-pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub async fn oauth_protected_resource(
+    State(state): State<AppState>,
+    request_origin: Option<Extension<crate::mw::cookie_domain::McpResourceOrigin>>,
+) -> Json<serde_json::Value> {
     let base = &state.config.base_url;
+    // RFC 9728 §3.3: `resource` must be the identifier the client used. A
+    // client still configured with an API alias keeps that origin's `/mcp`;
+    // every other request keeps the canonical base.
+    let resource_base = request_origin
+        .as_ref()
+        .map_or(base.as_str(), |Extension(origin)| origin.0.as_str());
     // An issuer pinned to a configured API alias must still be the discovery
-    // identity (RFC 8414), even while the resource uses the new canonical base.
+    // identity (RFC 8414), whichever API origin names the resource.
     // Preserve the existing base for unrelated/custom issuers and unset aliases.
     let authorization_server = state
         .config
@@ -133,7 +142,7 @@ pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<ser
         .unwrap_or(base);
 
     Json(serde_json::json!({
-        "resource": format!("{base}/mcp"),
+        "resource": format!("{}/mcp", resource_base.trim_end_matches('/')),
         "authorization_servers": [authorization_server],
         // Aligned with DEFAULT_MCP_ALLOWED_SCOPES (NyxID#1222/#1226): clients
         // use this list to decide which scopes to request.
@@ -280,7 +289,7 @@ mod tests {
         let mut state = crate::test_utils::test_app_state_no_db().await;
         state.config.base_url = "https://id.example.test".to_string();
 
-        let axum::Json(value) = oauth_protected_resource(State(state)).await;
+        let axum::Json(value) = oauth_protected_resource(State(state), None).await;
         assert_eq!(value["resource"], "https://id.example.test/mcp");
         let scopes: Vec<&str> = value["scopes_supported"]
             .as_array()
@@ -312,14 +321,14 @@ mod tests {
             value["nyxid_api_origins"],
             serde_json::json!(["https://new.example", "https://old.example"])
         );
-        let axum::Json(resource) = oauth_protected_resource(State(state.clone())).await;
+        let axum::Json(resource) = oauth_protected_resource(State(state.clone()), None).await;
         assert_eq!(resource["resource"], "https://new.example/mcp");
         assert_eq!(
             resource["authorization_servers"],
             serde_json::json!(["https://old.example"])
         );
         state.config.domain_aliases.base_urls.clear();
-        let axum::Json(resource) = oauth_protected_resource(State(state)).await;
+        let axum::Json(resource) = oauth_protected_resource(State(state), None).await;
         assert_eq!(
             resource["authorization_servers"],
             serde_json::json!(["https://new.example"])
@@ -449,7 +458,7 @@ mod tests {
         let mut state = crate::test_utils::test_app_state_no_db().await;
         state.config.base_url = "https://api.example.test".to_string();
 
-        let axum::Json(value) = oauth_protected_resource(State(state)).await;
+        let axum::Json(value) = oauth_protected_resource(State(state), None).await;
 
         assert_eq!(value["resource"], "https://api.example.test/mcp");
         assert_eq!(
