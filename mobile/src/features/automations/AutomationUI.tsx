@@ -6,7 +6,6 @@ import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { SkeletonRows } from "../../components/Skeleton";
 
 export const AUTOMATIONS = ["workspace", "automations"] as const;
-export const AUTOMATION_SETTINGS = [...AUTOMATIONS, "settings"] as const;
 export function automationError(error: unknown): string {
   if (error instanceof z.ZodError)
     return error.issues[0]?.message ?? "Could not read automations.";

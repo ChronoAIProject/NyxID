@@ -67,8 +67,13 @@ function setup(
   page: Page,
   {
     zone = "UTC",
+    deviceZone = "UTC",
     params = { id, runId } as Record<string, unknown>,
-  }: { zone?: string; params?: Record<string, unknown> } = {},
+  }: {
+    zone?: string;
+    deviceZone?: string;
+    params?: Record<string, unknown>;
+  } = {},
 ) {
   const routes: any[] = [];
   const menus: any[] = [];
@@ -138,7 +143,7 @@ function setup(
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/automationsApi": { automationsApi: {} },
     "./automationPresentation": presentation,
-    "./automationTime": time,
+    "./automationTime": { ...time, deviceTimezone: () => deviceZone },
     "./AutomationUI": {
       AUTOMATIONS: ["workspace", "automations"],
       AUTOMATION_SETTINGS: ["workspace", "automations", "settings"],
@@ -390,22 +395,27 @@ test("details are label/value groups with the task, target and confirmation poli
   }
 });
 
-test("automation next, latest and history times use the owner timezone with one display-zone label", () => {
-  const zone = "Asia/Singapore";
+test("automation times read in the phone's local time, never an account time zone", () => {
+  const deviceZone = "Asia/Singapore";
   for (const page of [
     "AutomationsScreen",
     "AutomationDetailScreen",
     "AutomationRunsScreen",
     "AutomationRunDetailScreen",
   ] as const) {
-    const env = setup(page, { zone });
+    // An account zone elsewhere must not change what the phone shows.
+    const env = setup(page, { zone: "America/Los_Angeles", deviceZone });
     const text = env.text();
-    assert.equal(text.split(`Times shown in ${zone}`).length - 1, 1, page);
-    assert.ok(text.includes(time.formatAutomationTime(at, zone)), page);
+    assert.equal(text.includes("Times shown in"), false, page);
+    assert.equal(text.includes("America/Los_Angeles"), false, page);
+    assert.ok(text.includes(time.formatAutomationTime(at, deviceZone)), page);
     if (page === "AutomationsScreen")
-      assert.ok(text.includes(`Next ${time.formatAutomationTime(at, zone)}`));
+      assert.ok(text.includes(`Next ${time.formatAutomationTime(at, deviceZone)}`));
+    // 8:00 AM UTC on weekdays is 4:00 PM the same days in Singapore.
     if (page === "AutomationsScreen" || page === "AutomationDetailScreen")
-      assert.match(text, /Weekdays at 8:00 AM \(UTC\)/);
+      assert.match(text, /Weekdays at 4:00 PM/);
+    if (page === "AutomationDetailScreen")
+      assert.match(text, /Shown in your local time\. This automation follows UTC time/);
     env.harness.unmount();
   }
 });

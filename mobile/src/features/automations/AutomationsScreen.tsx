@@ -65,7 +65,6 @@ import {
 } from "./automationPresentation";
 import {
   AUTOMATIONS,
-  AUTOMATION_SETTINGS,
   AutomationLoading,
   automationError,
   useAutomationRuntime,
@@ -84,14 +83,9 @@ function useAgents(enabled: boolean) {
   });
 }
 
-function useAutomationZone(enabled: boolean) {
-  const settings = useQuery({
-    queryKey: AUTOMATION_SETTINGS,
-    queryFn: ({ signal }) => automationsApi.settings(signal),
-    enabled,
-    retry: false,
-  });
-  return settings.data?.timezone ?? deviceTimezone();
+/** Automation times always read in the phone's own local time. */
+function useAutomationZone(_enabled: boolean) {
+  return deviceTimezone();
 }
 
 function useAutomationRuns(id: string, enabled: boolean) {
@@ -318,9 +312,6 @@ export function AutomationsScreen({
               </Text>
             </View>
           )}
-          <Text style={[styles.footnote, { color: colors.textMuted }]}>
-            {`Times shown in ${zone}.`}
-          </Text>
         </View>
       )}
     </SettingsPage>
@@ -433,8 +424,7 @@ function AutomationCard({
 }) {
   const status = automationStatusLabel(row.status);
   const active = row.status === "active";
-  // The page footnote names the zone once; cards drop the repeat.
-  const schedule = automationScheduleSummary(row).replace(` (${zone})`, "");
+  const schedule = automationScheduleSummary(row, zone);
   const next =
     row.source === "schedule"
       ? active
@@ -645,11 +635,15 @@ export function AutomationDetailScreen({
           <SettingsGroup
             title="Schedule"
             inset={false}
-            footer={`Times shown in ${zone}.`}
+            footer={
+              row.schedule?.kind === "cron" && row.schedule.timezone !== zone
+                ? `Shown in your local time. This automation follows ${row.schedule.timezone} time, including daylight saving changes.`
+                : undefined
+            }
           >
             <SettingsRow
               label="Repeats"
-              value={automationScheduleSummary(row)}
+              value={automationScheduleSummary(row, zone)}
             />
             {row.schedule?.kind === "cron" && (
               <SettingsRow
@@ -813,7 +807,7 @@ export function AutomationRunsScreen({
       {history.data && (
         <SettingsGroup
           inset={false}
-          footer={`Up to 1,000 recent runs are retained for 90 days. Times shown in ${zone}.`}
+          footer="Up to 1,000 recent runs are retained for 90 days."
         >
           {runs.map((run) => {
             const value = automationStatusLabel(run.outcome);
@@ -897,8 +891,8 @@ export function AutomationRunDetailScreen({
         inset={false}
         footer={
           run.outcome === "waiting" && run.reason === "confirmation_required"
-            ? `Open the thread to review the required action card. Times shown in ${zone}.`
-            : `Times shown in ${zone}.`
+            ? "Open the thread to review the required action card."
+            : undefined
         }
       >
         <SettingsRow
