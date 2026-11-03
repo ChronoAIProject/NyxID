@@ -65,7 +65,7 @@ test("standalone built wizard loads connection and platform scope through the CL
   ).toBeVisible();
   await page
     .getByRole("checkbox", { name: "Allow all services", exact: true })
-    .click();
+    .uncheck();
   const connection = page.getByRole("checkbox", { name: /Wizard Slack/ });
   await expect(connection).toBeVisible();
   await connection.click();

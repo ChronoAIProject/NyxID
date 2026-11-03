@@ -35,6 +35,8 @@ pub struct ConnectLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_platform_key: Option<bool>,
     #[serde(default)]
+    pub assistant_intent_locked: bool,
+    #[serde(default)]
     pub scopes: Vec<String>,
     pub label: Option<String>,
     #[serde(default)]
@@ -158,6 +160,7 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             service_slug: "api-github-pat".to_string(),
             use_platform_key: None,
+            assistant_intent_locked: false,
             service_id: uuid::Uuid::new_v4().to_string(),
             label: Some("Release automation".to_string()),
             endpoint_url: Some("https://private.example.test".to_string()),

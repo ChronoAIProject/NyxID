@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
 import type { AddedSkillItem } from "./SkillLibrary";
 import type { CatalogSkill } from "./pluginSkillsTypes";
 
@@ -110,6 +111,9 @@ function setup(overrides: Record<string, unknown> = {}) {
       ActionButton: "ActionButton",
       Label: "Label",
       Notice: "Notice",
+    },
+    "../../components/SegmentControl": {
+      SegmentControl: renderSegmentControl,
     },
     "../../theme/designTokens": { fonts: {} },
     "../../theme/ThemeContext": {

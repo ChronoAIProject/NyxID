@@ -97,7 +97,9 @@ export function ConnectLinkContent({
   );
   const usePlatformKey =
     platformAvailable &&
-    (platformChoice ?? preview.data?.use_platform_key ?? true);
+    (preview.data?.assistant_intent_locked
+      ? preview.data.use_platform_key === true
+      : (platformChoice ?? preview.data?.use_platform_key ?? true));
   const complete = useCompleteConnectLink();
   const completeConnect = complete.mutateAsync;
   const cancel = useCancelHostedConnectLink();
@@ -489,6 +491,9 @@ export function ConnectLinkContent({
               </div>
             ) : (
               <>
+                {preview.data.assistant_intent_locked ? (
+                  <p className="text-12 text-muted-foreground">{preview.data.use_platform_key ? "Use the NyxID platform connection. This link's intent is fixed." : "Connect your own personal account. This link's intent is fixed."}</p>
+                ) : null}
                 <ConnectionIdentityHeading
                   className="connection-card-heading"
                   serviceSlug={preview.data.service_slug}
@@ -499,7 +504,7 @@ export function ConnectLinkContent({
                 />
                 {submitError ? <ErrorBanner message={submitError} /> : null}
                 <RequestDetails preview={preview.data} />
-                {platformAvailable &&
+                {!preview.data.assistant_intent_locked && platformAvailable &&
                   catalog?.platform_key &&
                   preview.data.status === "pending" && (
                     <CredentialBindingChoice

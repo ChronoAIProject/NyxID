@@ -3745,7 +3745,7 @@ async fn authorize_mcp_operation(
 
 /// Tells the assistant what each `chat_access` value means so it calls gated
 /// tools instead of telling the user it lacks permission.
-const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = call freely. \
+const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = scope allows a call; NyxID may still ask the owner to confirm a specific call (for example an organization connection). \
     acknowledgement_required (subagents only) = call the tool now; NyxID asks your \
     orchestrator for permission and tells you to end your turn; you are resumed with \
     the decision. source meanings: user_service = a personal or organization connection; \
@@ -5030,6 +5030,28 @@ async fn handle_meta_search(
     } else {
         mcp_service::rank_search_candidates(candidates, query)
     };
+    // Facts only for the services this search returns.
+    let mut returned_ids = std::collections::HashSet::new();
+    let returned: Vec<&mcp_service::McpToolService> = ranked_candidates
+        .iter()
+        .filter_map(|tool| mcp_service::resolve_tool_call(&tool.name, &services))
+        .map(|(service, _)| service)
+        .filter(|service| returned_ids.insert(service.service_id.clone()))
+        .collect();
+    let connection_facts = match crate::services::assistant_connection_service::mcp_facts(
+        &state.db,
+        &auth.user_id,
+        &returned,
+    )
+    .await
+    {
+        Ok(facts) => facts,
+        Err(error) => {
+            // Facts are advisory; a lookup failure never fails the listing.
+            tracing::warn!(%error, "connection facts unavailable");
+            Default::default()
+        }
+    };
     let results: Vec<_> = ranked_candidates
         .into_iter()
         .map(|tool| {
@@ -5040,6 +5062,10 @@ async fn handle_meta_search(
             });
             if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
                 value["service_id"] = serde_json::json!(service.service_id);
+                value["connection"] = connection_facts
+                    .get(&service.service_id)
+                    .cloned()
+                    .unwrap_or_default();
                 value["executable"] = serde_json::json!(service.executable);
                 value["preference_rank"] =
                     serde_json::json!(ranks.get(&service.service_id).copied());
@@ -5160,6 +5186,39 @@ async fn handle_meta_list_connected(
 
     let mut result =
         mcp_service::list_connected_services_ranked(&services, query, &ranks, &auth.user_id);
+    // Facts only for the rows this listing returns.
+    let returned: Vec<&mcp_service::McpToolService> = services
+        .iter()
+        .filter(|service| {
+            result["services"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["service_id"] == service.service_id)
+            })
+        })
+        .collect();
+    let connection_facts = match crate::services::assistant_connection_service::mcp_facts(
+        &state.db,
+        &auth.user_id,
+        &returned,
+    )
+    .await
+    {
+        Ok(facts) => facts,
+        Err(error) => {
+            // Facts are advisory; a lookup failure never fails the listing.
+            tracing::warn!(%error, "connection facts unavailable");
+            Default::default()
+        }
+    };
+    if let Some(rows) = result["services"].as_array_mut() {
+        for row in rows {
+            row["connection"] = row["service_id"]
+                .as_str()
+                .and_then(|id| connection_facts.get(id))
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
     if auth.chat.is_some()
         && let Some(rows) = result["services"].as_array_mut()
     {
@@ -5240,6 +5299,23 @@ async fn handle_meta_connect(
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
 ) -> Response {
+    // Slugs and assistant chat keys resolve through the visibility-checked
+    // catalog resolver. Other callers naming a service_id keep the original
+    // contract (UUID format, scope check, messages) unchanged.
+    let slug = arguments["service_slug"].as_str();
+    let resolved = if slug.is_some() || auth.chat.is_some() {
+        Some(
+            crate::services::assistant_connection_service::resolve_catalog(
+                &state.db,
+                &auth.user_id,
+                arguments["service_id"].as_str(),
+                slug,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     if let Some(chat) = auth.chat.as_ref()
         && !chat.access_request_allowed()
     {
@@ -5264,7 +5340,7 @@ async fn handle_meta_connect(
             )
             .await;
         }
-        let refusal = if chat.guest {
+        let mut refusal = if chat.guest {
             crate::services::assistant_acknowledgement_service::access_request_denied()
         } else {
             crate::services::assistant_access_policy::with_frontend(
@@ -5272,6 +5348,23 @@ async fn handle_meta_connect(
                 &state.config.frontend_url,
             )
         };
+        if !chat.guest
+            && let Some(Ok(catalog)) = resolved.as_ref()
+        {
+            refusal["catalog_service_id"] = serde_json::json!(catalog.id);
+            refusal["service_slug"] = serde_json::json!(catalog.slug);
+            if catalog.service_type == "ssh" {
+                refusal["connect_own"] =
+                    serde_json::json!({"supported":false,"reason":"ssh_requires_advanced_setup"});
+                refusal["instructions"] = serde_json::json!(
+                    "Ask the owner to use Plugins → Advanced setup for SSH, then grant this specialist access. Hosted SSH connection is unsupported."
+                );
+            } else {
+                refusal["instructions"] = serde_json::json!(
+                    "Ask the owner to connect their account through NyxBot or Plugins, then grant this specialist access. Completing a link never grants the specialist automatically."
+                );
+            }
+        }
         return tool_result(request_id, &refusal.to_string(), true);
     }
     if auth.chat.is_some() && arguments.get("credential").is_some() {
@@ -5285,16 +5378,24 @@ async fn handle_meta_connect(
             true,
         );
     }
-    let service_id = match arguments.get("service_id").and_then(|s| s.as_str()) {
-        Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
-        Some(_) => return tool_result(request_id, "Invalid service_id format", true),
-        None => return tool_result(request_id, "service_id is required", true),
+    let catalog = match resolved {
+        Some(Ok(catalog)) => Some(catalog),
+        Some(Err(error)) => return tool_result(request_id, &error.to_string(), true),
+        None => None,
+    };
+    let service_id = match catalog.as_ref() {
+        Some(catalog) => catalog.id.as_str(),
+        None => match arguments.get("service_id").and_then(|s| s.as_str()) {
+            Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
+            Some(_) => return tool_result(request_id, "Invalid service_id format", true),
+            None => return tool_result(request_id, "service_id is required", true),
+        },
     };
 
     // Scoped API keys can only connect services already in their allow-list.
     // An assistant chat key acts for its owner and only mints a hosted link the
-    // owner completes in the UI, so it may connect any catalog service; the new
-    // connection still needs its own card before the chat can use it.
+    // owner completes in the UI, so it may connect any visible catalog service;
+    // the new connection still needs its own card before the chat can use it.
     if auth.chat.is_none()
         && !auth.allow_all_services
         && !auth.allowed_service_ids.contains(&service_id.to_string())
@@ -5335,24 +5436,45 @@ async fn handle_meta_connect(
         }
     }
 
-    match mcp_service::connect_service_with_binding(
-        &state.db,
-        &state.encryption_keys,
-        state.node_ws_manager.as_ref(),
-        &auth.user_id,
-        service_id,
-        credential,
-        credential_label,
-        &state.config.frontend_url,
-        auth.api_key_name.as_deref(),
-        &scopes,
-        arguments
-            .get("use_platform_key")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-    )
-    .await
-    {
+    let use_platform_key = arguments
+        .get("use_platform_key")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    // A chat connecting the owner's own credential gets a hosted link with
+    // personal intent. Platform-key and credential-free connections are
+    // outside the organization rule and keep their one-step behavior.
+    let personal_hosted = catalog.as_ref().filter(|catalog| {
+        auth.chat.is_some() && !use_platform_key && catalog.requires_user_credential
+    });
+    let connected = if let Some(catalog) = personal_hosted {
+        crate::services::assistant_connection_service::hosted(
+            &state.db,
+            &auth.user_id,
+            catalog,
+            &state.config.frontend_url,
+            false,
+            credential_label,
+            auth.api_key_name.as_deref(),
+            &scopes,
+        )
+        .await
+    } else {
+        mcp_service::connect_service_with_binding(
+            &state.db,
+            &state.encryption_keys,
+            state.node_ws_manager.as_ref(),
+            &auth.user_id,
+            service_id,
+            credential,
+            credential_label,
+            &state.config.frontend_url,
+            auth.api_key_name.as_deref(),
+            &scopes,
+            use_platform_key,
+        )
+        .await
+    };
+    match connected {
         Ok(mut result) => {
             if result.get("status").and_then(|value| value.as_str()) == Some("pending_connection") {
                 // A chat resumes by itself when the user finishes the link.
@@ -10987,3 +11109,7 @@ mod attachment_upload_tests;
 #[cfg(test)]
 #[path = "mcp_lark_base_tests.rs"]
 mod lark_base_tests;
+
+#[cfg(test)]
+#[path = "mcp_lark_im_tests.rs"]
+mod lark_im_tests;

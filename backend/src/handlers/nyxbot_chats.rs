@@ -1695,6 +1695,11 @@ pub(crate) async fn post_current_turn(
             .await?;
         if let Some(row) = row.filter(|row| engine::live_turn(row, Utc::now()).is_some()) {
             let plan = super::images::ImageSendPlan {
+                delegated: row
+                    .active_turn
+                    .as_ref()
+                    .map(|t| t.delegated_images.references.clone())
+                    .unwrap_or_default(),
                 attachments: row
                     .active_turn
                     .map(|turn| turn.attachments)
@@ -2507,6 +2512,7 @@ pub(crate) async fn post_automation_images(
                     fence: None,
                 },
                 &super::images::ImageSendPlan {
+                    delegated: Vec::new(),
                     attachments: vec![item.attachment.clone()],
                 },
                 stop,
@@ -2525,6 +2531,86 @@ pub(crate) async fn post_automation_images(
             {
                 stop = Some("billing");
             }
+            report.attempted += one.attempted;
+            report.sent += one.sent;
+            report.failed += one.failed;
+            report.unknown += one.unknown;
+            report.skipped += one.skipped;
+            report.unsupported |= one.unsupported;
+            report.outcomes.extend(one.outcomes);
+        }
+        for reference in run
+            .delegated_image_refs
+            .iter()
+            .rev()
+            .take(crate::services::trigger_run_images::MAX_RUN_IMAGES)
+        {
+            if !seen.insert(reference.attachment.id.as_str()) {
+                continue;
+            }
+            if budget == 0 {
+                omitted = omitted.saturating_add(1);
+                continue;
+            }
+            if run.thread_id.as_deref()
+                != Some(reference.assignment.recipient_conversation.as_str())
+            {
+                continue;
+            }
+            // Each reference can belong to a different receiving turn, so these
+            // one-image plans must share the run's Telegram group pacing.
+            if matches!(target.bot.platform.as_str(), "telegram" | "telegram-new")
+                && target.thread.kind.as_deref() != Some("private")
+                && let Some(last) = last_send
+            {
+                tokio::time::sleep(
+                    (last + std::time::Duration::from_secs(1))
+                        .saturating_duration_since(std::time::Instant::now()),
+                )
+                .await;
+            }
+            let one = super::images::report_or_failure_with_stop(
+                state,
+                super::images::ImageSendContext {
+                    owner: &run.user_id,
+                    conversation_id: &reference.assignment.recipient_conversation,
+                    turn_id: &reference.recipient_turn,
+                    channel: &target.channel,
+                    thread: &target.thread,
+                    anchor: super::images::ImageAnchor::Initiated {
+                        chat_id: chat_id.into(),
+                    },
+                    audience: super::images::ImageAudience {
+                        owner_private: false,
+                    },
+                    deadline: Some(deadline),
+                    initiated: Some(&target),
+                    fence: None,
+                },
+                &super::images::ImageSendPlan {
+                    attachments: Vec::new(),
+                    delegated: vec![reference.clone()],
+                },
+                stop,
+            )
+            .await;
+            if one.attempted > 0 {
+                last_send = Some(std::time::Instant::now());
+            }
+            if one.claimed > 0 || one.unknown > 0 {
+                budget -= 1;
+            }
+            if one.unknown > 0 {
+                stop = Some("after_unknown");
+            }
+            if one
+                .outcomes
+                .iter()
+                .any(|item| item.code.as_deref() == Some("billing"))
+            {
+                stop = Some("billing");
+            }
+            report.app_visible = false;
             report.attempted += one.attempted;
             report.sent += one.sent;
             report.failed += one.failed;

@@ -17,6 +17,10 @@ type Props = {
   onClose: () => void;
   onDismiss?: () => void;
   onBack?: () => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  refreshDisabled?: boolean;
+  refreshLabel?: string;
   emptyText?: string;
   footer?: Element;
   primaryAction?: {
@@ -106,10 +110,12 @@ function setup(
     "react-native": {
       ...Object.fromEntries(
         [
+          "ActivityIndicator",
           "FlatList",
           "KeyboardAvoidingView",
           "Modal",
           "Pressable",
+          "RefreshControl",
           "Text",
           "TextInput",
           "View",
@@ -124,10 +130,9 @@ function setup(
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "lucide-react-native": Object.fromEntries(
-      ["ChevronLeft", "Search", "X", "Plus", "MessageSquare"].map((name) => [
-        name,
-        name,
-      ]),
+      ["ChevronLeft", "RefreshCw", "Search", "X", "Plus", "MessageSquare"].map(
+        (name) => [name, name],
+      ),
     ),
     "react-native-safe-area-context": {
       SafeAreaProvider: "SafeAreaProvider",
@@ -281,6 +286,120 @@ test("switching scopes clears the previous agent search without losing the prima
   assert.equal(env.search().props.value, "");
   assert.equal(env.list().props.data.length, 2);
   assert.ok(env.button("Start a chat with HR Admin Bot"));
+  env.harness.unmount();
+});
+
+test("refresh stays optional for browsers that do not own a reload action", () => {
+  const env = setup();
+  assert.equal(
+    env.all().some((row) => row.type === "RefreshCw"),
+    false,
+  );
+  assert.equal(env.list().props.refreshControl, undefined);
+  env.harness.unmount();
+});
+
+test("header and pull refresh share one action while retaining the active search", () => {
+  let refreshed = 0;
+  const env = setup({
+    title: "All agents",
+    scopeKey: "agents",
+    refreshLabel: "Refresh agents",
+    onRefresh: () => {
+      refreshed++;
+    },
+  });
+  env.query("First");
+  const button = env.button("Refresh agents");
+  const pull = env.list().props.refreshControl;
+  assert.equal(button.props.accessibilityRole, "button");
+  assert.equal(button.props.accessibilityState.disabled, false);
+  assert.equal(button.props.accessibilityState.busy, false);
+  assert.equal(
+    elements(button).some((row) => row.type === "RefreshCw"),
+    true,
+  );
+  assert.equal(pull.type, "RefreshControl");
+  assert.equal(pull.props.onRefresh, button.props.onPress);
+  assert.equal(pull.props.enabled, true);
+  assert.equal(env.list().props.alwaysBounceVertical, true);
+  button.props.onPress();
+  pull.props.onRefresh();
+  assert.equal(refreshed, 2);
+  env.update({ items: [{ id: "first-new", title: "First updated" }] });
+  assert.equal(env.search().props.value, "First");
+  assert.equal(env.list().props.data.length, 1);
+  assert.equal(env.list().props.data[0].id, "first-new");
+  assert.equal(env.counts().dismissals, 2);
+  assert.equal(env.counts().closed, 0);
+  assert.equal(env.counts().dismissed, 0);
+  env.harness.unmount();
+});
+
+test("busy and disabled refresh controls block taps and pulls, including queued handlers", () => {
+  for (const blocked of [
+    { refreshing: true },
+    { refreshDisabled: true },
+    { visible: false },
+  ]) {
+    let refreshed = 0;
+    const env = setup({
+      onRefresh: () => {
+        refreshed++;
+      },
+    });
+    const queuedTap = env.button("Refresh hr admin bot").props.onPress;
+    const queuedPull = env.list().props.refreshControl.props.onRefresh;
+    env.update(blocked);
+    const button = env.button("Refresh hr admin bot");
+    assert.equal(button.props.disabled, true);
+    assert.equal(button.props.accessibilityState.disabled, true);
+    assert.equal(button.props.accessibilityState.busy, "refreshing" in blocked);
+    assert.equal(env.list().props.refreshControl.props.enabled, false);
+    assert.equal(
+      env.list().props.refreshControl.props.refreshing,
+      "refreshing" in blocked,
+    );
+    button.props.onPress();
+    env.list().props.refreshControl.props.onRefresh();
+    queuedTap();
+    queuedPull();
+    assert.equal(refreshed, 0);
+    assert.equal(
+      elements(button).some((row) => row.type === "ActivityIndicator"),
+      "refreshing" in blocked,
+    );
+    env.update({ refreshing: false, refreshDisabled: false, visible: true });
+    queuedTap();
+    assert.equal(refreshed, 1);
+    env.harness.unmount();
+    queuedPull();
+    assert.equal(refreshed, 1);
+  }
+});
+
+test("queued refresh uses the current action and stops when refresh support is removed", () => {
+  let previous = 0;
+  let current = 0;
+  const env = setup({
+    onRefresh: () => {
+      previous++;
+    },
+  });
+  const queued = env.button("Refresh hr admin bot").props.onPress;
+  env.update({
+    onRefresh: () => {
+      current++;
+    },
+  });
+  queued();
+  assert.equal(previous, 0);
+  assert.equal(current, 1);
+  env.update({ onRefresh: undefined });
+  queued();
+  assert.equal(current, 1);
+  assert.equal(env.counts().dismissals, 1);
+  assert.equal(env.list().props.refreshControl, undefined);
   env.harness.unmount();
 });
 

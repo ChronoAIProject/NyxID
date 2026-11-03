@@ -64,6 +64,7 @@ import {
   type AiKeyPairingSuccess,
 } from "@/components/cli-wizard/ai-key-confirm-panel";
 import { parseAiKeyPrefill } from "@/schemas/cli-wizard";
+import { WizardHeading } from "@/components/cli-wizard/wizard-heading";
 
 type ActionResult =
   | AiKeyPairingSuccess
@@ -399,10 +400,14 @@ function StageRouter() {
     <WizardShell
       context="pair"
       step={step}
+      // Only the service catalog grid needs the wide card.
       narrow={
-        stage.phase === "claimed" &&
-        stage.claim.kind === "ai-key" &&
-        slugPicked
+        !(
+          stage.phase === "claimed" &&
+          stage.claim.kind === "ai-key" &&
+          !slugPicked &&
+          !stage.claim.prefill?.reconnect_key_id
+        )
       }
     >
       {pairingLost ? (
@@ -900,15 +905,12 @@ function ResumedCreateWarningPanel({
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-xl font-semibold">
-        This pairing was already started
-      </h2>
-      <p className="text-12 text-muted-foreground">
+      <WizardHeading title="This pairing was already started">
         Another tab or window began the {labelForKind(claim.kind)}{" "}
         flow for this code. We can't safely replay it from here —
         that first tab may still be finishing, or it may have
         already created the resource.
-      </p>
+      </WizardHeading>
       <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
         Check your {manageLabel} first — if a new entry is there,
         the first tab succeeded and you can close this tab. If
@@ -1037,17 +1039,12 @@ function NotifyingCliPanel({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-xl font-semibold">
-          Notifying CLI...
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Your {describeResultKind(result.kind)} is ready on the
-          server. Once the CLI acknowledges, we'll show the secret
-          here to copy. If this page closes before then, the CLI
-          will time out cleanly — re-run the command to try again.
-        </p>
-      </div>
+      <WizardHeading title="Notifying CLI...">
+        Your {describeResultKind(result.kind)} is ready on the
+        server. Once the CLI acknowledges, we'll show the secret
+        here to copy. If this page closes before then, the CLI
+        will time out cleanly — re-run the command to try again.
+      </WizardHeading>
       {completeError ? (
         <>
           <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
@@ -1242,15 +1239,10 @@ function AiKeyAckPanel({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-xl font-semibold">
-          Service created
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          <strong>{result.label}</strong> is now connected. Check your
-          terminal — the CLI is printing the proxy URL and next steps.
-        </p>
-      </div>
+      <WizardHeading title="Service created">
+        <strong>{result.label}</strong> is now connected. Check your
+        terminal — the CLI is printing the proxy URL and next steps.
+      </WizardHeading>
       {completeError ? (
         <>
           <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
@@ -1287,15 +1279,12 @@ function ResumedRotationChoicePanel({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-xl font-semibold">
-        This pairing was already started
-      </h2>
-      <p className="text-12 text-muted-foreground">
+      <WizardHeading title="This pairing was already started">
         Another tab or window began the {labelForKind(kind)} flow
         for this code but never finished notifying the CLI. We
         need to know what happened there so we don't tell the CLI
         something false:
-      </p>
+      </WizardHeading>
       <ul className="ml-4 list-disc text-12 text-muted-foreground">
         <li>
           If the other tab <strong>showed you a new secret you
@@ -1344,18 +1333,13 @@ function ResendingAckPanel({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-xl font-semibold">
-          Notifying CLI...
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          This {labelForKind(kind)} was already completed on
-          another tab. We couldn't find the secret here, but we
-          can still tell the CLI so it stops waiting. The new
-          credential should be in whichever tab finished the
-          rotation; check there for the secret to save.
-        </p>
-      </div>
+      <WizardHeading title="Notifying CLI...">
+        This {labelForKind(kind)} was already completed on
+        another tab. We couldn't find the secret here, but we
+        can still tell the CLI so it stops waiting. The new
+        credential should be in whichever tab finished the
+        rotation; check there for the secret to save.
+      </WizardHeading>
       {completeError ? (
         <>
           <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
@@ -1374,14 +1358,11 @@ function ResendingAckPanel({
 
 function DonePanel() {
   return (
-    <div className="flex flex-col gap-3 text-center">
-      <h2 className="text-xl font-semibold">
-        Pairing complete
-      </h2>
-      <p className="text-12 text-muted-foreground">
+    <div className="flex flex-col gap-3">
+      <WizardHeading title="Pairing complete">
         You can close this tab. Your CLI should now show a success
         message in the terminal.
-      </p>
+      </WizardHeading>
     </div>
   );
 }

@@ -209,6 +209,7 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
         // section + Custom card visible without scrolling the whole
         // page.
         <div
+          data-scroll-fade=""
           className="max-h-[420px] overflow-y-auto overscroll-contain pr-1"
           role="list"
         >

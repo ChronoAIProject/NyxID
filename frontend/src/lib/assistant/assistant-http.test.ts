@@ -62,6 +62,23 @@ describe("assistantHttp", () => {
     });
   });
 
+  it("uses the readiness error key while preserving the trace", async () => {
+    const traceId = "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({
+        error: "security_readiness_unavailable",
+        error_code: 12900,
+        message: "private readiness detail",
+      }),
+      { status: 503, headers: { "X-NyxID-Trace-Id": traceId } },
+    )));
+    await expect(assistantHttp("/assistant/nyxagent/agents")).rejects.toMatchObject({
+      status: 503,
+      message: "This setting is unavailable until an administrator completes the security rollout. Your current permissions were not changed.\nTrace ID: " + traceId,
+      errorResponse: { error: "security_readiness_unavailable", error_code: 12900 },
+    });
+  });
+
   it("explains a network failure without inventing a server trace", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network error")));
     await expect(assistantHttp("/assistant/nyxagent/turns")).rejects.toMatchObject({

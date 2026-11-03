@@ -209,7 +209,7 @@ export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
 export const nyxAgentActionConfirmationSchema = z.object({
   risk: z.enum(["read", "change", "sensitive", "destructive"]),
   access_mode: nyxAgentAccessModeSchema.nullish(),
-  reason: z.enum(["access_mode", "webhook", "policy", "approval"]).catch("access_mode"),
+  reason: z.enum(["access_mode", "webhook", "policy", "approval", "org_connection", "delegation"]).catch("access_mode"),
 });
 export type NyxAgentActionConfirmation = z.infer<typeof nyxAgentActionConfirmationSchema>;
 
@@ -224,6 +224,10 @@ export const nyxAgentModelSchema = z.object({
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
+  connect_own: z.object({
+    supported: z.boolean(), catalog_service_id: z.string().optional(), service_slug: z.string().optional(),
+    reason: z.string().optional(), instructions: z.string().optional(),
+  }).nullish(),
   creation_turn_id: z.string().nullish(),
   /** The tool call (turn activity) this card or receipt belongs to. */
   activity_id: z.string().nullish(),

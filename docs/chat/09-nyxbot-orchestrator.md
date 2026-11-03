@@ -26,7 +26,7 @@ unchanged.
 
 ## 2. Requirements as stated
 
-1. Full access never asks; Auto confirms sensitive/destructive actions; Ask every time confirms changes. The owner chooses the workspace mode and agent overrides.
+1. Full access still asks for covered organization connections without trusted instruction; Auto confirms sensitive/destructive actions; Ask every time confirms changes. The owner chooses the workspace mode and agent overrides.
 2. NyxBot is the chief of staff; it creates specialists and can destroy them.
 3. A specialist working for NyxBot asks NyxBot for permission; NyxBot grants or
    refuses based on what the user asked. A specialist the user talks to
@@ -976,7 +976,8 @@ thread's native topic (`NyxbotThread.platform_thread_id`, e.g. a Telegram forum
 topic or Slack root thread) for text and images. Optional `include_images`
 (default false; `nyxbot_chats::post_current_turn`) also sends the calling
 turn's own tool images (trusted `TurnAttachment` metadata of the exact live
-turn, `chat_tool_image` only, deduplicated, at most 8) before the text: the
+turn, `chat_tool_image` only, deduplicated, at most 8), plus server-adopted
+delegated images authorized for this original destination, before the text: the
 limiter token is taken once with the text validation, each image rechecks the
 turn fence immediately before dispatch and takes a per-(image, audience)
 delivery claim (`services/channel_image_delivery.rs`, audience from
@@ -1089,11 +1090,15 @@ policy; successful silence closes each eligible source without a send.
 
 ### Grounded cross-thread task status
 
-Owner turns may receive other-thread title/question excerpts for duplicate-work
-**discovery only**. These do not prove that work is running. Stable instructions
-require `nyxid__task_status` evidence before reporting progress, completion or
-failure, and require “unknown” when evidence is absent or stale. Guests receive
-neither this note nor the status tool.
+Owner turns may receive title/question excerpts from the owner's other private
+threads for duplicate-work **discovery only**. Channel, guest and group-member
+threads belonging to other people are excluded because their answers do not
+reach the requester. These excerpts do not prove that work is running. Stable
+instructions require `nyxid__task_status` evidence before reporting progress,
+completion or failure, require “unknown” when evidence is absent or stale, and
+require the assistant to answer in the current thread rather than telling the
+user that a question is being handled elsewhere. Guests receive neither this
+note nor the status tool.
 
 `nyxid__task_status` is a read-only native tool for live owner turns. It reads only
 the acting person's private threads of the **same agent**, including that agent's
@@ -1485,11 +1490,12 @@ Specialist threads are sandboxed. Only the owner, and the owner's NyxBot for wor
 
 NyxBot approval behavior is controlled by the owner-level `access_mode` setting:
 **Auto** (`nyxmode`, default) confirms sensitive and destructive actions, **Ask every time** (`ask_every_time`)
-confirms every changing action, and **Full access** (`autopilot`) never asks.
-Auto and Ask every time also confirm organization connection use, including
-reads and model inference. All three modes enforce saved personal-first
+confirms every changing action, and **Full access** (`autopilot`) bypasses ordinary
+confirmations. Covered organization connections require trusted owner instruction
+or an exact card in every mode. NyxBot's own model route retains its existing
+transport behavior. All three modes enforce saved personal-first
 connection order and exact owner selection; see [service execution](../NYXBOT_SERVICE_EXECUTION.md).
-Full access bypasses every confirmation, including webhook automation, machine and
+Full access retains the org-instruction exception and otherwise bypasses webhook automation, machine and
 saved-login policies, pairing/updates, authored publication and service approvals.
 Each successful bypass leaves a non-consumable automatic receipt
 (`decided_by: access_mode`, reason `access_mode`, `webhook`, `policy` or `approval`),
@@ -1525,7 +1531,7 @@ Only opted-in channel turns run the timer; other turns add no polling reads.
 
 ### Access modes
 
-NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses them with receipts. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
+NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses ordinary resource policies with receipts; covered org connections still require trusted instruction or an exact card. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
 
 Per-service `approval_mode`, per-machine `machine_confirm`, saved-login
 `confirm_each_sign_in`, webhook `confirmation_policy`, machine-update cards and
@@ -1682,6 +1688,16 @@ model wake-up is needed, no visitor content is included, and no group receives
 the owner's diagnostic. See the engine's guest model route section for the
 closed reasons, runtime fixtures and model-routes.json maintenance contract.
 
+## Protected org connections and hosted personal setup
+
+After readiness activation of `assistant:org-instruction-v1`, NyxBot and personal specialists need trusted owner selection of the exact org connection this turn or an approved exact single-use card in every access mode, including Full access. Org-owned specialists are excluded by actual owner UserType; model bootstrap/compaction and auto-connected/platform services retain their contract. Positive provenance comes only from first-party owner UI or verified private owner-channel ingress, bound to actor/key/conversation/live turn/expiry. Legacy selectors, API/delegated/automation/group/guest/model text and `_nyxid_via` are insufficient. Independent sensitive/destructive policies remain.
+
+Org cards persist reason `org_connection`, retain controls in Full and survive an Auto-to-Full mode switch. Admission precedes credential refresh/token exchange and is carried through final send revalidation. Machine declarations are checked per exact connection; new job/watch receipts cover only their bounded lifecycle. Legacy org jobs require a reviewed replacement command; unproven watches pause for an exact continuation card.
+
+“My account” requires the owner's personal connection; never describe org data as their personal data. Use `nyx__connect_service` with visible catalog UUID/slug and present the hosted link. Named `settings_link add_service` gives structured connect guidance; unnamed opens Plugins. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Specialist keys remain denied and direct the owner to NyxBot/Plugins, followed by a separate specialist grant. The server org acknowledgement carries Connect your own independently of model prose. Connection facts report self/shared-person/org ownership and unknown provider account identity.
+
+`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Upgrade readers/UI first, drain all old writers/completers, then activate; old binaries must not rejoin. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
+
 ### Automatic visitor model setup
 
 Opening private chats to everyone, enabling group members or relinking an open
@@ -1730,3 +1746,41 @@ Gateway completion is separate from platform delivery: `recovery_ready` means
 the answer is durable and CMA can retrieve it; `streamed` means it was offered
 to the live observer. Neither claims confirmed delivery. The gateway contract
 lists the required CMA journal/replay behavior and the remaining receipt gap.
+
+### Delegated specialist image results (#1897)
+
+An assignment made by a live, owner-authorized NyxBot turn captures its exact
+source specialist/turn and original reply destinations. The specialist's
+settlement publishes an exact result event transactionally when the receiving
+queue accepts it. A business refusal records a stable metadata-only code on the
+saved reply and falls back to the existing best-effort, text-only settlement
+notice; it never rolls back the specialist's reply or grants image authority.
+Database/transport errors still abort settlement. Delegated results follow the
+original FIFO eviction rule alongside ordinary notices, so they cannot
+monopolize the bounded event queue. Source questions and invocation fences keep
+their existing protections. Both event drain
+and `nyxid__wait_for_subagents` adopt the same authorized result into the live
+receiving turn before consuming its event ID. Wait exposes only server-adopted
+image references; arbitrary IDs in model text cannot export another thread's
+images, and a newer assignment to the same agent cannot replace the result.
+
+At most 16 delegated image references persist separately from owned attachments
+on the receiving reply. They retain source identity and original retention;
+the app's attachment APIs remain source-scoped. Replies through stream, late
+recovery, Event and trigger delivery use this projection and the existing
+per-source-image/per-audience claims. Tool images qualify; machine screenshots
+never do. Images remain in the specialist's app thread rather than becoming
+new attachments on NyxBot's reply.
+
+Source use access (`require_use`, including live org/group membership), source
+existence/retention, receiver authority and destination policy are checked at
+adoption and immediately before sending. Stop/failure cancels image forwarding;
+recipient reset, source deletion, guest mode and revoked membership refuse it.
+Clearing the owner's direct-message destination in the app prevents the prior
+assignment's images from following the owner into another chat. A specialist's
+later direct message or changed report target neither grants newer images nor
+revokes its completed assignment. Source and receiver turns, not mutable agent
+home/report pointers, define the result.
+
+The storage and claim contract is in
+[Channel bot relay — assigned specialist images](../CHANNEL_BOT_RELAY.md#images-from-an-assigned-specialist-1897).

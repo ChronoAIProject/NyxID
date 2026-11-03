@@ -119,3 +119,45 @@ test('Stop is explicit; malformed/overflow input cannot leave the client',async(
   for(let i=0;i<100;i++)f.viewer.input(click);
   assert.equal(f.sockets[0]?.sent.filter(v=>v instanceof ArrayBuffer).length,60);f.viewer.stop();
 });
+
+test('input reports acceptance so a rejected text send can preserve the draft', async () => {
+  const f = fixture();
+  f.viewer.start(); await f.advance(0); f.connected();
+  const text = { tool: 'type_text', arguments: { text: 'Draft to keep' } };
+  assert.equal(f.viewer.input(text), false, 'viewing alone cannot send text');
+  f.viewer.takeControl(); ack(f);
+  const socket = f.sockets[0]!;
+  socket.bufferedAmount = 65537;
+  assert.equal(f.viewer.input(text), false, 'backpressure must not claim text was sent');
+  socket.bufferedAmount = 0;
+  assert.equal(f.viewer.input({ tool: 'exec', arguments: {} }), false);
+  assert.equal(f.viewer.input({ tool: 'type_text', arguments: { text: '文'.repeat(8192) } }), false);
+  assert.equal(socket.closed, false, 'oversized encoded input is not a transport failure');
+  assert.equal(f.viewer.input(text), true);
+  for (let i = 1; i < 60; i++) assert.equal(f.viewer.input(click), true);
+  assert.equal(f.viewer.input(text), false, 'rate-limited input is not accepted');
+  await f.advance(1000);
+  assert.equal(f.viewer.input(text), true);
+  f.viewer.stop();
+  assert.equal(f.viewer.input(text), false);
+});
+
+test('input transport failure reconnects without replaying text or control', async () => {
+  const f = fixture();
+  f.viewer.start(); await f.advance(0); f.connected();
+  f.viewer.takeControl(); ack(f);
+  const socket = f.sockets[0]!;
+  const send = socket.send.bind(socket);
+  socket.send = value => {
+    if (value instanceof ArrayBuffer) throw new Error('Transport closed');
+    send(value);
+  };
+  const text = { tool: 'type_text', arguments: { text: 'Never replay this' } };
+  assert.equal(f.viewer.input(text), false);
+  assert.equal(socket.closed, true);
+  assert.equal(f.states.at(-1)?.phase, 'reconnecting');
+  await f.advance(1000); f.connected(); ack(f);
+  assert.deepEqual(f.sockets.at(-1)?.sent, []);
+  assert.equal(f.viewer.input(text), false, 'a new connection requires a fresh human takeover');
+  f.viewer.stop();
+});

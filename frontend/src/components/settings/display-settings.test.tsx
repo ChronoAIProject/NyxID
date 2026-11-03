@@ -13,6 +13,28 @@ beforeEach(() => {
 });
 
 describe("DisplaySettings", () => {
+  it("supports keyboard selection and focus within display radio groups", async () => {
+    const user = userEvent.setup();
+    render(<DisplaySettings />);
+    const theme = within(screen.getByRole("radiogroup", { name: "Theme" }));
+    theme.getByRole("radio", { name: "Light" }).focus();
+    await user.keyboard("{ArrowRight}");
+    expect(theme.getByRole("radio", { name: "Dark" })).toHaveFocus();
+    expect(useThemeStore.getState().mode).toBe("dark");
+    await user.keyboard("{ArrowRight}");
+    expect(theme.getByRole("radio", { name: "System" })).toHaveFocus();
+    expect(useThemeStore.getState().mode).toBe("system");
+    await user.keyboard("{End}");
+    expect(theme.getByRole("radio", { name: "Dark" })).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(theme.getByRole("radio", { name: "System" })).toHaveFocus();
+    const motion = within(screen.getByRole("radiogroup", { name: "Motion" }));
+    motion.getByRole("radio", { name: "Follow system" }).focus();
+    await user.keyboard("{ArrowDown}");
+    expect(motion.getByRole("radio", { name: "Reduce" })).toHaveFocus();
+    expect(useThemeStore.getState().motion).toBe("reduce");
+  });
+
   it("switches theme, text size, spacing and motion", async () => {
     const user = userEvent.setup();
     render(<DisplaySettings />);

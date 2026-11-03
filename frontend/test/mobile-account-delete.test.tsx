@@ -29,6 +29,18 @@ function harness() {
     Alert: { alert: (title: string, message: string, buttons: NativeButton[]) => alerts.push({ title, message, buttons }) },
     AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
     AppState: { currentState: "active", addEventListener: () => ({ remove: () => undefined }) },
+    // Shared mobile controls animate (e.g. SegmentControl). Animations are
+    // inert here: values hold numbers and start/stop do nothing.
+    Animated: {
+      Value: class {
+        constructor(public value: number) {}
+        setValue(value: number) { this.value = value; }
+        interpolate() { return this; }
+      },
+      View: box,
+      spring: () => ({ start: () => undefined, stop: () => undefined }),
+      timing: () => ({ start: () => undefined, stop: () => undefined }),
+    },
     Keyboard: { addListener: () => ({ remove: () => undefined }), dismiss: () => undefined },
     Share: { share: async () => ({}) },
     useWindowDimensions: () => ({ width: 390, height: 844, scale: 3, fontScale: 1 }),

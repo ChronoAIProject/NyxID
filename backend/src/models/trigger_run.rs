@@ -75,6 +75,8 @@ pub struct TriggerRun {
     #[serde(default)]
     pub image_refs: Vec<RunImageRef>,
     #[serde(default)]
+    pub delegated_image_refs: Vec<super::assistant_delegated_image::DeliveryReference>,
+    #[serde(default)]
     pub image_refs_truncated: u32,
     #[serde(default)]
     pub agent_id: Option<String>,

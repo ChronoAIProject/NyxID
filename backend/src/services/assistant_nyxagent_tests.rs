@@ -460,6 +460,7 @@ fn readiness_2092_route_diagnostic_requires_matching_recent_attempt() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -617,6 +618,7 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -654,6 +656,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -702,6 +705,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -780,6 +784,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -846,6 +851,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -912,6 +918,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -1254,6 +1261,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            delegated_images: Default::default(),
             timing: Default::default(),
             collaboration: None,
             channel_adapter_origin: None,
@@ -3512,6 +3520,7 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -4592,6 +4601,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -4653,6 +4663,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -5681,6 +5692,92 @@ async fn platform_thread_requires_live_turn_with_ordinary_rollout_disabled() {
     db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn in_progress_excludes_other_people_channel_and_guest_threads() {
+    let db = connect_transaction_test_database("nyxa_in_progress_request_scope").await;
+    let now = Utc::now();
+    let fresh_row = || {
+        let mut row = stale_test_row(now);
+        row.active_turn.as_mut().unwrap().started_at = now;
+        row
+    };
+    let mut current = fresh_row();
+    current.role = AgentRole::Subagent;
+    let mut own = fresh_row();
+    own.id = format!("own-{}", Uuid::new_v4().simple());
+    own.agent_id = Some("agent".into());
+    own.active_turn.as_mut().unwrap().question = Some("owner question".into());
+    own.active_turn.as_mut().unwrap().question_key = Some("owner-key".into());
+
+    let mut channel = fresh_row();
+    channel.id = format!("channel-{}", Uuid::new_v4().simple());
+    channel.agent_id = Some("agent".into());
+    channel.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        native_event_id: None,
+        thread: None,
+        nyxbot_channel_id: "channel".into(),
+        partition: "customer".into(),
+        platform: "telegram".into(),
+    });
+    channel.guest_turn = true;
+    channel.active_turn.as_mut().unwrap().question = Some("customer question".into());
+    channel.active_turn.as_mut().unwrap().question_key = Some("customer-key".into());
+    let mut channel_owner_turn = channel.clone();
+    channel_owner_turn.id = format!("channel-owner-{}", Uuid::new_v4().simple());
+    channel_owner_turn.guest_turn = false;
+    let mut guest = channel.clone();
+    guest.id = format!("guest-{}", Uuid::new_v4().simple());
+    guest.channel = None;
+
+    let mut group = fresh_row();
+    group.id = format!("group-{}", Uuid::new_v4().simple());
+    group.agent_id = Some("agent".into());
+    group.group_id = Some("group".into());
+    group.active_turn.as_mut().unwrap().question = Some("group question".into());
+
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_many([
+            current.clone(),
+            own.clone(),
+            channel,
+            channel_owner_turn,
+            guest,
+            group,
+        ])
+        .await
+        .unwrap();
+    // Pre-field rows retain private-owner discovery compatibility.
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &own.id}, doc! {"$unset": {"guest_turn": ""}})
+        .await
+        .unwrap();
+    let rows =
+        crate::services::assistant_team_service::in_progress(&db, "owner", "agent", &current.id)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].question.as_deref(), Some("owner question"));
+    let agent: crate::models::assistant_agent::AssistantAgent = bson::from_document(doc! {
+        "_id":"agent", "user_id":"owner", "kind":"specialist", "name":"helper", "created_by":"user",
+        "model":"nyxagent/chat",
+        "created_at":bson::DateTime::from_chrono(now), "updated_at":bson::DateTime::from_chrono(now)
+    })
+    .unwrap();
+    let state = test_app_state(db.clone());
+    let note = crate::services::assistant_nyxagent_runtime::turn_notes(
+        &state,
+        &current,
+        Some(&agent),
+        None,
+    )
+    .await;
+    assert!(note.contains("owner question"));
+    assert!(!note.contains("customer question"));
+    assert!(!note.contains("group question"));
+    assert!(note.contains("Answer the user in this thread"));
+    db.drop().await.unwrap();
+}
+
 #[test]
 fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separate() {
     use crate::models::async_service_operation::{AsyncServiceOperation, DeliveryBinding};
@@ -5714,6 +5811,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        instruction_receipt_version: 0,
         shared_execution: None,
         secret_context_versions: Default::default(),
         cma: None,

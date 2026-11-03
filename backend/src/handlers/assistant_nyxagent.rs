@@ -1205,6 +1205,7 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    connect_own: Option<serde_json::Value>,
     creation_turn_id: Option<String>,
     /// The tool call (turn activity ID) this card or receipt belongs to.
     activity_id: Option<String>,
@@ -1252,6 +1253,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             decided_by: row.decided_by,
             reason: row.reason,
             confirmation: row.confirmation,
+            connect_own: row.connect_own,
             service_slug: row.service_slug,
             service_name: row.service_name,
             tool_name: row.tool_name,
@@ -1963,6 +1965,9 @@ pub async fn turns(
     let policy = parts.extensions.get::<BillingRoutePolicy>().copied();
     let mut start = engine::TurnStart::from(&input);
     start.org_access = org_access;
+    if super::login_client_context::require_first_party_human(&auth).is_ok() {
+        start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);
+    }
     if start.conversation_id.is_none() && start.agent_id.is_none() && start.model.is_none() {
         start.model = Some(
             crate::services::assistant_profile_routing::model_for(

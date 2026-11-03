@@ -702,6 +702,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.billing = Some(fixture_billing());
         let target = ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: "https://api.telnyx.com/v2".into(),

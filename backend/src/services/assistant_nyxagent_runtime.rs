@@ -467,8 +467,9 @@ async fn in_progress_note(
         .as_ref()
         .and_then(|turn| turn.question_key.as_deref());
     let mut note = String::from(
-        "\n\nOther-thread question excerpts for duplicate-work discovery only (not execution evidence; \
-        consult nyxid__task_status before reporting progress, and say unknown without evidence):",
+        "\n\nQuestion excerpts from the owner's other private threads are for duplicate-work discovery only, never execution evidence. \
+        Answer the user in this thread; never tell them that their question is being handled in another conversation. \
+        Cross-chat delivery is handled separately by NyxID. Consult nyxid__task_status before reporting progress, and say unknown without evidence:",
     );
     for other in others {
         note.push_str(&format!(
@@ -532,6 +533,21 @@ pub(crate) async fn turn_notes(
     // (memory, other chats, the team, pending requests) goes into this turn.
     if row.guest_turn || row.collaboration.is_some() {
         return notes;
+    }
+    if let Some(turn) = row.active_turn.as_ref() {
+        let refs = &turn.delegated_images.references;
+        if !refs.is_empty() {
+            notes.push_str("\n\nNyxID adopted these delegated tool images into this turn. They retain their source lifetime and may accompany this reply only at the assignment's original authorized chat. Do not invent foreign IDs or claim confirmed delivery:");
+            for reference in refs
+                .iter()
+                .take(super::assistant_delegated_images::MAX_REFERENCES)
+            {
+                notes.push_str(&format!(
+                    "\n- image {} (specialist {})",
+                    reference.attachment.id, reference.assignment.source_agent
+                ));
+            }
+        }
     }
     if let Some(agent) = agent {
         // Only the agent's own threads hear about its other chats.
@@ -1578,6 +1594,19 @@ async fn execute_turn_inner(
         ""
     };
     let mut guidance = guidance.to_owned();
+    if !row.guest_model_setup
+        && !row.guest_turn
+        && crate::services::assistant_service_execution::instruction::prompt_applies(
+            &state.db,
+            &row.user_id,
+            agent.as_ref(),
+        )
+        .await
+        .unwrap_or(false)
+    {
+        guidance
+            .push_str(crate::services::assistant_service_execution::instruction::PROMPT_GUIDANCE);
+    }
     if !row.guest_model_setup
         && let Some(agent) = agent.as_ref()
         && crate::services::agent_skill_preload::enabled(agent, row.guest_turn)
