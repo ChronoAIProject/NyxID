@@ -715,6 +715,13 @@ export function AssistantScreen({
     );
   }
 
+  // Activity ids are unique, so one set serves every turn's disclosure.
+  const confirmationActivityIds = new Set(
+    (assistant.history?.acknowledgements ?? []).flatMap((row) =>
+      row.activity_id ? [row.activity_id] : [],
+    ),
+  );
+
   function renderMessage({
     item,
     index,
@@ -825,6 +832,7 @@ export function AssistantScreen({
                           : "Completed"
                     }
                     metadata={item.turn_metadata}
+                    confirmationActivityIds={confirmationActivityIds}
                     decisions={(
                       assistant.history?.acknowledgements ?? []
                     ).filter(
@@ -1235,6 +1243,7 @@ export function AssistantScreen({
                                 conversation?.active_turn?.activity_total
                               }
                               turnLabel="Working…"
+                              confirmationActivityIds={confirmationActivityIds}
                               onToggle={() => {
                                 transcriptScroll.pause();
                               }}
