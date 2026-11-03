@@ -16,10 +16,15 @@ export interface WizardFooterProps {
   readonly localOrigin?: string
 }
 
+// A short window shrinks the footer's gap; below 680px it is hidden so the
+// shell's chrome stays within 20% of the window.
+const FOOTER_CLASS =
+  "mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-12 text-muted-foreground short:mt-4 very-short:hidden"
+
 export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
   if (context === "local") {
     return (
-      <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-12 text-muted-foreground">
+      <footer className={FOOTER_CLASS}>
         <span>
           Served locally from{" "}
           <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs">
@@ -32,7 +37,7 @@ export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
   }
 
   return (
-    <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-12 text-muted-foreground">
+    <footer className={FOOTER_CLASS}>
       <span>Pairing with a remote CLI</span>
       <span>· Secrets never travel back through the pairing channel</span>
     </footer>
