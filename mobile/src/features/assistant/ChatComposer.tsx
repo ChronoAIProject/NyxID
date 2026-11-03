@@ -7,7 +7,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from "react-native";
-import { ArrowUp, AudioLines, Plus, Square } from "lucide-react-native";
+import { ArrowUp, Plus, Square } from "lucide-react-native";
 import { useTheme } from "../../theme/ThemeContext";
 
 /** One filled, borderless pill shared by personal, contextual and group chats. */
@@ -83,7 +83,7 @@ export function ComposerSubmitButton({
   busy,
   onPress,
 }: {
-  kind: "send" | "stop" | "voice";
+  kind: "send" | "stop";
   label: string;
   disabled?: boolean;
   busy?: boolean;
@@ -113,8 +113,6 @@ export function ComposerSubmitButton({
             <ActivityIndicator size="small" color={colors.bg} />
           ) : kind === "stop" ? (
             <Square size={12} color={colors.bg} fill={colors.bg} />
-          ) : kind === "voice" ? (
-            <AudioLines size={18} color={colors.bg} strokeWidth={2.5} />
           ) : (
             <ArrowUp size={18} color={colors.bg} strokeWidth={2.5} />
           )}

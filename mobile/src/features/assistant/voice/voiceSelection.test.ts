@@ -3,7 +3,6 @@ import test from "node:test";
 import type { VoiceOption, VoicePreferences } from "./voiceContracts";
 import {
   chooseVoiceOption,
-  showVoiceComposer,
   voiceElapsed,
   voiceOptionKey,
   voiceTariff,
@@ -202,29 +201,6 @@ test("missing or unsynced platform duration prices never appear free", () => {
     ),
     "Voice tariff unavailable.",
   );
-});
-
-test("composer offers voice only for an eligible empty private thread and never masks Send or Stop", () => {
-  const ready = {
-    enabled: true,
-    running: false,
-    text: "",
-    attachmentCount: 0,
-    uploadBlocked: false,
-  };
-  assert.equal(showVoiceComposer(ready), true);
-  assert.equal(showVoiceComposer({ ...ready, text: "  \n\t" }), true);
-  for (const patch of [
-    { enabled: false },
-    { running: true },
-    { text: "你好" },
-    { attachmentCount: 1 },
-    { uploadBlocked: true },
-    { channel: { platform: "telegram" } },
-    { subagent: true },
-    { destroyed: true },
-  ])
-    assert.equal(showVoiceComposer({ ...ready, ...patch }), false);
 });
 
 test("voice timer floors seconds, clamps future starts and freezes at the server close time", () => {

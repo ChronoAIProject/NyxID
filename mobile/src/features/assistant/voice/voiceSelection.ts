@@ -78,25 +78,3 @@ export function voiceElapsed(
   return `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
 }
 
-/** Mirrors Web: empty Send becomes Voice only for an eligible private chat. */
-export function showVoiceComposer(input: {
-  enabled: boolean;
-  running: boolean;
-  text: string;
-  attachmentCount: number;
-  uploadBlocked: boolean;
-  channel?: unknown;
-  subagent?: boolean;
-  destroyed?: boolean;
-}) {
-  return (
-    input.enabled &&
-    !input.running &&
-    !input.text.trim() &&
-    input.attachmentCount === 0 &&
-    !input.uploadBlocked &&
-    !input.channel &&
-    !input.subagent &&
-    !input.destroyed
-  );
-}

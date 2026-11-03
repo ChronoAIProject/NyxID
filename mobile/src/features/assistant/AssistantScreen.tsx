@@ -127,11 +127,7 @@ import { NativeAuthoredSkillReview } from "../plugins/NativeAuthoredSkillReview"
 import { parseAutomationLink } from "../automations/automationLinks";
 import { NYXID_FRONTEND_URL } from "../../lib/env";
 import { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
-import { AssistantVoiceConversation } from "./voice/AssistantVoiceConversation";
-import {
-  NATIVE_VOICE_ENTRY_ENABLED,
-  showVoiceComposer,
-} from "./voice/voiceSelection";
+import { NATIVE_VOICE_ENTRY_ENABLED } from "./voice/voiceSelection";
 import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
 import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -196,9 +192,6 @@ export function AssistantScreen({
   }
   const [sheet, setSheet] = useState<"agents" | "permissions">();
   const [localError, setLocalError] = useState<string>();
-  const [voiceThread, setVoiceThread] = useState<string>();
-  const [openingVoice, setOpeningVoice] = useState(false);
-  const voiceOpening = useRef<AbortController | undefined>(undefined);
   const composerPress = useRef(createAssistantComposerPressGuard());
   const [stopProtected, setStopProtected] = useState(false);
   const transcript = useRef<FlatList<AssistantMessage>>(null);
@@ -323,18 +316,14 @@ export function AssistantScreen({
       assistant.loading ||
       assistant.recoveryRequired ||
       !!route?.params?.openLatest ||
-      !!sheet ||
-      openingVoice ||
-      !!voiceThread,
+      !!sheet,
     onRefresh: assistant.recover,
   });
   const connection = useComposerConnection(
     draftKey,
     !canCompose ||
       uploads.session.sending ||
-      uploads.picking ||
-      openingVoice ||
-      !!voiceThread,
+      uploads.picking,
   );
   const newChatDisabled =
     assistant.loading ||
@@ -359,8 +348,6 @@ export function AssistantScreen({
       canCompose &&
       !uploads.picking &&
       !uploads.session.sending &&
-      !openingVoice &&
-      !voiceThread &&
       NATIVE_VOICE_ENTRY_ENABLED &&
       voiceFeatures.data?.includes("assistant:voice") === true &&
       !conversation?.channel &&
@@ -387,98 +374,6 @@ export function AssistantScreen({
     !uploads.picking &&
     !!draft.trim() &&
     [...draft].length <= guidance.maxChars;
-  const voiceAvailable = showVoiceComposer({
-    enabled:
-      NATIVE_VOICE_ENTRY_ENABLED &&
-      voiceFeatures.data?.includes("assistant:voice") === true,
-    running,
-    text: draft,
-    attachmentCount: uploads.files.length,
-    uploadBlocked:
-      !!connection.connection ||
-      uploads.blocked ||
-      uploads.picking ||
-      uploads.session.sending ||
-      dictation.active,
-    channel: conversation?.channel,
-    subagent: conversation?.role === "subagent",
-    destroyed: !!destroyed,
-  });
-  const voiceContext = useRef({
-    agentId: assistant.agentId,
-    conversationId: assistant.conversationId,
-    epoch: getAuthEpoch(),
-    revision: draftRevision.current,
-    voiceAllowed: canCompose && voiceAvailable,
-  });
-  voiceContext.current = {
-    agentId: assistant.agentId,
-    conversationId: assistant.conversationId,
-    epoch: getAuthEpoch(),
-    revision: draftRevision.current,
-    voiceAllowed: canCompose && voiceAvailable,
-  };
-  useEffect(() => {
-    setOpeningVoice(false);
-    return () => {
-      voiceOpening.current?.abort();
-    };
-  }, [route?.params?.agentId, route?.params?.conversationId]);
-  useEffect(() => {
-    if (voiceThread && voiceThread !== assistant.conversationId)
-      setVoiceThread(undefined);
-  }, [voiceThread, assistant.conversationId]);
-
-  async function openVoice() {
-    if (!canCompose || !voiceAvailable || voiceOpening.current) return;
-    if (voiceThread === assistant.conversationId && voiceThread) return;
-    Keyboard.dismiss();
-    const scope = { ...voiceContext.current, revision: draftRevision.current };
-    const controller = new AbortController();
-    voiceOpening.current = controller;
-    setOpeningVoice(true);
-    const current = () =>
-      !controller.signal.aborted &&
-      voiceContext.current.agentId === scope.agentId &&
-      voiceContext.current.conversationId === scope.conversationId &&
-      voiceContext.current.voiceAllowed &&
-      getAuthEpoch() === scope.epoch &&
-      draftRevision.current === scope.revision;
-    try {
-      const id =
-        scope.conversationId ??
-        (await assistantUploadsApi.createDraft(
-          scope.agentId,
-          controller.signal,
-        ));
-      if (!current()) return;
-      if (!scope.conversationId) {
-        adoptedId.current = id;
-        assistant.openConversation(id);
-        navigation.setParams({
-          conversationId: id,
-          acknowledgementId: undefined,
-          home: false,
-          draft: false,
-          draftId: undefined,
-          openLatest: false,
-        });
-      }
-      setVoiceThread(id);
-    } catch (cause) {
-      if (current())
-        setLocalError(
-          cause instanceof Error
-            ? cause.message
-            : "Voice could not open. Try again.",
-        );
-    } finally {
-      if (voiceOpening.current === controller) {
-        voiceOpening.current = undefined;
-        if (!controller.signal.aborted) setOpeningVoice(false);
-      }
-    }
-  }
 
   const openSafeLink = useCallback(
     (url: string): boolean => {
@@ -1363,23 +1258,6 @@ export function AssistantScreen({
         />
         <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.bg} />
       </View>
-      {voiceThread && voiceThread === assistant.conversationId ? (
-        <AssistantVoiceConversation
-          key={`voice:${voiceThread}`}
-          thread={voiceThread}
-          agentName={agentName}
-          onClose={() => setVoiceThread(undefined)}
-          onUpdate={() => void assistant.recover()}
-          onReview={(acknowledgementId) => {
-            assistant.openConversation(voiceThread, acknowledgementId);
-            navigation.setParams({
-              conversationId: voiceThread,
-              acknowledgementId,
-              openLatest: false,
-            });
-          }}
-        />
-      ) : null}
       <View style={styles.composerInset}>
         <ChatComposerFrame style={[styles.composer, chatColumn]}>
           {guidance.canSteer ? (
@@ -1481,9 +1359,7 @@ export function AssistantScreen({
                       !!destroyed ||
                       assistant.loading ||
                       assistant.recoveryRequired ||
-                      uploads.picking ||
-                      openingVoice ||
-                      !!voiceThread
+                      uploads.picking
                     }
                     visible={sheet === "permissions"}
                     onOpenChange={(open) =>
@@ -1496,9 +1372,7 @@ export function AssistantScreen({
                     disabled={
                       !canCompose ||
                       uploads.picking ||
-                      uploads.session.sending ||
-                      openingVoice ||
-                      !!voiceThread
+                      uploads.session.sending
                     }
                   />
                   {guidance.canSteer && draft.trim() ? (
@@ -1523,15 +1397,6 @@ export function AssistantScreen({
                       onPress={() => {
                         if (composerPress.current("stop")) void assistant.stop();
                       }}
-                    />
-                  ) : voiceAvailable &&
-                    (!voiceThread || voiceThread !== assistant.conversationId) ? (
-                    <ComposerSubmitButton
-                      kind="voice"
-                      label="Open voice call"
-                      disabled={!canCompose || openingVoice}
-                      busy={openingVoice}
-                      onPress={() => void openVoice()}
                     />
                   ) : (
                     <ComposerSubmitButton
