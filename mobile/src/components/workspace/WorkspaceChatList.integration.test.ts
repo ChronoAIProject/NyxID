@@ -409,7 +409,7 @@ test("cached agents refresh immediately on reopen, foreground and reconnect with
         [() => env.setAppState("background"), () => env.setAppState("active")],
         [() => env.setOnline(false), () => env.setOnline(true)],
       ]) {
-        const before = requests;
+        const before: number = requests;
         pause!();
         observer.setOptions(queryOptions());
         assert.equal(queryOptions().enabled, false);

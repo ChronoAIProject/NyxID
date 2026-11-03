@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (root: Element): Element[] => [
@@ -131,7 +131,7 @@ function setup(
   const loaded = harness.load(
     fileURLToPath(new URL(`./${component}.tsx`, import.meta.url)),
   ) as Record<string, (props: Record<string, unknown>) => Element>;
-  harness.mount(() => loaded[component](props));
+  harness.mount(() => loaded[component]!(props));
   const find = (label: string) => {
     const node = nodes(harness.value()).find(
       (node) => node.props.label === label,
@@ -186,14 +186,14 @@ test("password/policy controls submit live API data, request confirmation for we
     ["Current password for password change", "old"],
     ["New password", "new password"],
     ["Confirm new password", "new password"],
-  ]) {
+  ] as const) {
     env.find(field).props.onChangeText(value);
     env.harness.flush();
   }
   env.find("Change password").props.onPress();
   await env.harness.settle();
-  assert.equal(env.calls[0][0], "changePassword");
-  assert.equal(env.calls[0][1], "owner");
+  assert.equal(env.calls[0]?.[0], "changePassword");
+  assert.equal(env.calls[0]?.[1], "owner");
   assert.equal(env.find("New password").props.value, "");
   const toggle = nodes(env.harness.value()).find(
     (node) => node.type === "Switch",
@@ -245,10 +245,10 @@ test("OAuth/broker revocation confirms the exact source then re-reads server lis
   assert.equal(env.calls.length, 0);
   env.confirm();
   await env.harness.settle();
-  assert.equal(env.calls[0][0], "revokeConsent");
-  assert.equal(env.calls[0][1], "owner");
-  assert.equal(env.calls[0][2], "client");
-  assert.equal(env.calls[1][0], "reset");
+  assert.equal(env.calls[0]?.[0], "revokeConsent");
+  assert.equal(env.calls[0]?.[1], "owner");
+  assert.equal(env.calls[0]?.[2], "client");
+  assert.equal(env.calls[1]?.[0], "reset");
   env.find("Revoke Broker").props.onPress();
   env.confirm();
   await env.harness.settle();
@@ -332,7 +332,7 @@ function fillPassword(env: ReturnType<typeof setup>) {
     ["Current password for password change", "old password"],
     ["New password", "new password"],
     ["Confirm new password", "new password"],
-  ]) {
+  ] as const) {
     env.find(field).props.onChangeText(value);
     env.harness.flush();
   }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 
 test("account settings refresh only on focused foreground returns and reject callbacks from a replacement login", () => {

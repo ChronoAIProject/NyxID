@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 
 function setup() {

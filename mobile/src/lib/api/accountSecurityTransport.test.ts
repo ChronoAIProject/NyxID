@@ -111,12 +111,12 @@ test("password validation preserves whitespace/UTF-8 limits, strips confirmation
     new_password: " new password ",
     confirmation: " new password ",
   });
-  assert.deepEqual(calls[0].body, {
+  assert.deepEqual(calls[0]?.body, {
     current_password: " old ",
     new_password: " new password ",
   });
-  assert.equal(calls[0].expectedAccountId, "owner");
-  assert.equal(calls[0].invalidateSessionOnAuthFailure, false);
+  assert.equal(calls[0]?.expectedAccountId, "owner");
+  assert.equal(calls[0]?.invalidateSessionOnAuthFailure, false);
 });
 
 test("authorization lists are distinct from approval grants and revoke encoded identities under the shown account", async () => {
@@ -168,11 +168,11 @@ test("security preferences and org create/join follow the actual server contract
     }),
     { skip_mfa_for_approved_sign_ins: false },
   );
-  assert.equal((await api.organizations("owner"))[0].your_role, "owner");
+  assert.equal((await api.organizations("owner"))[0]?.your_role, "owner");
   await api.createOrganization("owner", " Team ");
-  assert.deepEqual(calls[2].options?.body, { display_name: "Team" });
+  assert.deepEqual(calls[2]?.options?.body, { display_name: "Team" });
   await api.joinOrganization("owner", "nonce/slash");
-  assert.equal(calls[3].path, "/orgs/join/nonce%2Fslash");
+  assert.equal(calls[3]?.path, "/orgs/join/nonce%2Fslash");
   assert.ok(calls.every((call) => call.options?.expectedAccountId === "owner"));
   await assert.rejects(api.createOrganization("owner", " "));
 });
@@ -225,10 +225,11 @@ test("nonempty consent and broker fixtures preserve service access and nullable 
         },
   );
   const [parsedConsent] = await api.consents("owner");
-  assert.equal(parsedConsent.allowed_services[0].label, "Calendar");
+  assert.ok(parsedConsent);
+  assert.equal(parsedConsent.allowed_services[0]?.label, "Calendar");
   assert.equal(parsedConsent.expires_at, null);
   assert.equal(parsedConsent.allow_all_services, false);
   const bindings = await api.brokerBindings("owner");
   assert.deepEqual(bindings[0], binding);
-  assert.equal(bindings[1].external_subject, null);
+  assert.equal(bindings[1]?.external_subject, null);
 });

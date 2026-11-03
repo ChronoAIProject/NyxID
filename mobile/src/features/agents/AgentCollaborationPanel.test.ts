@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import * as sharing from "./sharingContracts";
 import * as operations from "./operationContracts";
