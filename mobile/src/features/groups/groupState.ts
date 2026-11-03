@@ -11,6 +11,7 @@ export interface RecipientMember {
   readonly id: string;
   readonly name: string;
   readonly destroyed?: boolean;
+  readonly unavailable?: boolean;
 }
 export interface RecipientSelection {
   readonly mentioned: readonly string[];
@@ -24,6 +25,25 @@ export const NO_RECIPIENT_EDITS: RecipientSelection = {
 };
 const unique = (ids: readonly string[]) => [...new Set(ids)];
 
+/** An unavailable namesake still makes a bare handle ambiguous. */
+export function ambiguousGroupMentions(
+  text: string,
+  members: readonly RecipientMember[],
+): string[] {
+  const names = new Map<string, number>();
+  for (const row of members)
+    names.set(
+      row.name.toLowerCase(),
+      (names.get(row.name.toLowerCase()) ?? 0) + 1,
+    );
+  return unique(
+    [...text.matchAll(/(?:^|[^\p{L}\p{N}_.-])@([A-Za-z0-9_-]+)/gu)].flatMap(
+      (match) =>
+        (names.get(match[1]!.toLowerCase()) ?? 0) > 1 ? [match[1]!] : [],
+    ),
+  );
+}
+
 /** Same word boundary and handle matching as the group router. */
 export function mentionedIds(
   text: string,
@@ -31,9 +51,20 @@ export function mentionedIds(
 ): string[] {
   const names = new Map(
     members
-      .filter((member) => !member.destroyed)
+      .filter(
+        (member) =>
+          !member.destroyed &&
+          !member.unavailable &&
+          members.filter(
+            (row) => row.name.toLowerCase() === member.name.toLowerCase(),
+          ).length === 1,
+      )
       .map((member) => [member.name.toLowerCase(), member.id]),
   );
+  for (const member of members.filter(
+    (row) => !row.destroyed && !row.unavailable,
+  ))
+    names.set(member.id.toLowerCase(), member.id);
   const found: string[] = [];
   for (
     let index = text.indexOf("@");
@@ -87,7 +118,7 @@ export function resolveRecipients(
   members: readonly RecipientMember[],
 ): { ids: string[]; edited: boolean } {
   const liveIds = members
-    .filter((member) => !member.destroyed)
+    .filter((member) => !member.destroyed && !member.unavailable)
     .map((member) => member.id);
   const keep = (id: string) =>
     liveIds.includes(id) && !selection.removed.includes(id);
@@ -136,6 +167,7 @@ export function mergeGroupPage(
 }
 
 export function canManageGroup(group: Group): boolean {
+  if (group.collaboration) return group.collaboration.can_manage;
   return (
     group.owner?.type !== "org" ||
     group.your_role === "creator" ||
@@ -143,6 +175,7 @@ export function canManageGroup(group: Group): boolean {
   );
 }
 export function canLeaveGroup(group: Group): boolean {
+  if (group.collaboration) return true;
   return group.owner?.type === "org" && group.your_role !== undefined;
 }
 export const groupCanManage = canManageGroup;

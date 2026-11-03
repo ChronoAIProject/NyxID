@@ -41,7 +41,10 @@ import { agentsApi } from "../../lib/api/agentsApi";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useTheme } from "../../theme/ThemeContext";
-import { chatBubbleColors, userBubbleCorners } from "../../theme/chatAppearance";
+import {
+  chatBubbleColors,
+  userBubbleCorners,
+} from "../../theme/chatAppearance";
 import { fonts, radius } from "../../theme/designTokens";
 import { AssistantPendingUploads } from "../assistant/AssistantPendingUploads";
 import {
@@ -67,12 +70,14 @@ import {
 } from "../assistant/AssistantBanner";
 import { sanitizeAssistantMessageContent } from "../assistant/assistantChatContent";
 import { GroupPendingCard } from "./GroupPendingCard";
+import { CollaborationCards } from "./CollaborationGroupControls";
 import { GroupMachineReceipts } from "./GroupMachineReceipts";
 import { AssistantMessageFooter } from "../assistant/AssistantMessageFooter";
 import { useAssistantUploads } from "../assistant/useAssistantUploads";
 import { useTranscriptScrollFollow } from "../assistant/useTranscriptScrollFollow";
 import {
   NO_RECIPIENT_EDITS,
+  ambiguousGroupMentions,
   groupCanDecide,
   groupPendingOwned,
   groupPendingReview,
@@ -157,7 +162,9 @@ function GroupChat({
     return agent?.display_name ?? fallback;
   }
   const liveMembers =
-    group?.members.filter((member) => !member.destroyed) ?? [];
+    group?.members.filter(
+      (member) => !member.destroyed && !member.unavailable,
+    ) ?? [];
   const defaults =
     group?.default_recipient_ids ??
     [
@@ -199,7 +206,12 @@ function GroupChat({
       )
       .map((member) => ({
         id: `agent:${member.id}`,
-        handle: member.name,
+        handle:
+          group?.members.filter(
+            (row) => row.name.toLowerCase() === member.name.toLowerCase(),
+          ).length === 1
+            ? member.name
+            : member.id,
         label: title(member.id, member.name),
         kind: "agent" as const,
         agent: member,
@@ -213,6 +225,9 @@ function GroupChat({
     })),
   ];
   const resolvedDraft = resolveAttachmentMentions(draft, attachmentMentions);
+  const ambiguous =
+    !selection.added.length &&
+    ambiguousGroupMentions(resolvedDraft, group?.members ?? []).length > 0;
   const recipients = resolveRecipients(
     // Route from the text that will reach the server. Recompute on roster
     // changes so an existing @file-1 cannot become a new agent's mention.
@@ -255,7 +270,10 @@ function GroupChat({
             }
             members={group?.members ?? []}
             status={
-              chat.data?.pending_actions.length
+              chat.data?.pending_actions.length ||
+              chat.data?.collaboration_decisions?.some(
+                (card) => card.can_decide,
+              )
                 ? "Needs you"
                 : group?.working_agent_ids.length
                   ? "Running"
@@ -274,6 +292,7 @@ function GroupChat({
   }, [
     group,
     chat.data?.pending_actions.length,
+    chat.data?.collaboration_decisions,
     names.data,
     Boolean(group),
     chat.sending,
@@ -304,6 +323,7 @@ function GroupChat({
     chat.isError;
   const canSend =
     !blocked &&
+    !ambiguous &&
     !uploads.blocked &&
     !uploads.session.sending &&
     !!recipients.ids.length &&
@@ -613,57 +633,79 @@ function GroupChat({
         />
         <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.bg} />
       </View>
-      {!!group && !!chat.data?.pending_actions.length && (
+      {!!group?.collaboration && (
         <ScrollView
-          accessibilityLabel="Actions waiting for you"
           style={styles.pending}
           contentContainerStyle={{ gap: 8 }}
           keyboardShouldPersistTaps="handled"
+          accessibilityLabel="Collaboration decisions"
         >
-          {chat.data.pending_actions.map((action, index) => {
-            const member = group?.members.find(
-              (row) => row.id === action.agent_id,
-            );
-            return (
-              <GroupPendingCard
-                key={
-                  action.acknowledgement_id ??
-                  action.approval_request_id ??
-                  `${action.conversation_id}:${index}`
-                }
-                action={action}
-                name={member ? title(member.id, member.name) : "An agent"}
-                actorId={identity.data?.id}
-                organization={group?.owner?.type === "org"}
-                blocked={blocked}
-                onReview={
-                  onOpenConversation
-                    ? () => {
-                        if (blocked || !chat.available()) return;
-                        const review = groupPendingReview(
-                          action,
-                          identity.data?.id,
-                          group?.owner?.type === "org",
-                        );
-                        if (review)
-                          onOpenConversation({
-                            conversationId: review.conversationId,
-                            agentId: action.agent_id ?? undefined,
-                            acknowledgementId: review.acknowledgementId,
-                          });
-                      }
-                    : undefined
-                }
-                onDecision={(choice) => void decide(action, choice)}
-                onAnswer={(yes) => void answer(action, yes)}
-              />
-            );
-          })}
+          <CollaborationCards
+            key={`${chat.epoch}:${group.id}`}
+            group={group}
+            decisions={chat.data?.collaboration_decisions ?? []}
+          />
         </ScrollView>
       )}
+      {!!group &&
+        !group.collaboration &&
+        !!chat.data?.pending_actions.length && (
+          <ScrollView
+            accessibilityLabel="Actions waiting for you"
+            style={styles.pending}
+            contentContainerStyle={{ gap: 8 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            {chat.data.pending_actions.map((action, index) => {
+              const member = group?.members.find(
+                (row) => row.id === action.agent_id,
+              );
+              return (
+                <GroupPendingCard
+                  key={
+                    action.acknowledgement_id ??
+                    action.approval_request_id ??
+                    `${action.conversation_id}:${index}`
+                  }
+                  action={action}
+                  name={member ? title(member.id, member.name) : "An agent"}
+                  actorId={identity.data?.id}
+                  organization={group?.owner?.type === "org"}
+                  blocked={blocked}
+                  onReview={
+                    onOpenConversation
+                      ? () => {
+                          if (blocked || !chat.available()) return;
+                          const review = groupPendingReview(
+                            action,
+                            identity.data?.id,
+                            group?.owner?.type === "org",
+                          );
+                          if (review)
+                            onOpenConversation({
+                              conversationId: review.conversationId,
+                              agentId: action.agent_id ?? undefined,
+                              acknowledgementId: review.acknowledgementId,
+                            });
+                        }
+                      : undefined
+                  }
+                  onDecision={(choice) => void decide(action, choice)}
+                  onAnswer={(yes) => void answer(action, yes)}
+                />
+              );
+            })}
+          </ScrollView>
+        )}
       {group && (
         <View style={styles.composerInset}>
           <View style={[styles.composerArea, chatColumn]}>
+            {ambiguous && (
+              <Label style={[styles.small, { color: colors.danger }]}>
+                This handle names multiple agents. Choose an exact recipient or
+                use its UUID mention before sending.
+              </Label>
+            )}
             {!recipients.ids.length && (
               <Label style={[styles.small, { color: colors.danger }]}>
                 Choose at least one recipient.
@@ -921,7 +963,10 @@ function GroupMessage({
           {message.agent ? (
             <AgentAvatar agent={message.agent} size="sm" />
           ) : null}
-          <Label muted style={[styles.small, user && { color: bubble.foreground }]}>
+          <Label
+            muted
+            style={[styles.small, user && { color: bubble.foreground }]}
+          >
             {user
               ? (message.author?.display_name ?? "You")
               : message.agent
@@ -930,6 +975,17 @@ function GroupMessage({
           </Label>
         </View>
       </Pressable>
+      {message.requester_user_id && (
+        <Label muted>
+          For{" "}
+          {group?.participants?.find(
+            (person) => person.id === message.requester_user_id,
+          )?.display_name ?? "participant"}
+          {message.execution_mode === "guest"
+            ? " · Guest reply (agent owner pays)"
+            : " · Requester access and billing"}
+        </Label>
+      )}
       {user && !!message.recipient_agent_ids?.length && (
         <Label style={[styles.small, { color: bubble.foreground }]}>
           to{" "}
@@ -943,8 +999,14 @@ function GroupMessage({
       )}
       {user ? (
         <>
-          <Label selectable style={{ color: bubble.foreground }}>{message.text}</Label>
-          <GroupMachineReceipts groupId={group?.id} message={message} foreground={bubble.foreground} />
+          <Label selectable style={{ color: bubble.foreground }}>
+            {message.text}
+          </Label>
+          <GroupMachineReceipts
+            groupId={group?.id}
+            message={message}
+            foreground={bubble.foreground}
+          />
         </>
       ) : (
         <AssistantReplyBody

@@ -13,6 +13,7 @@ import {
   withRemoved,
   resolveRecipients,
   mentionedIds,
+  ambiguousGroupMentions,
   mergeGroupMessages,
   mergeGroupPage,
   groupCanManage,
@@ -54,6 +55,39 @@ const group = groupSchema.parse({
   members: members.map((m) => ({ ...m, kind: "specialist" })),
   lead_agent_id: "a",
   created_at: NOW,
+});
+
+test("shared namesakes never resolve by bare handle and unavailable selections cannot fall back", () => {
+  const roster = [
+    { id: USER, name: "research" },
+    { id: OTHER, name: "research", unavailable: true },
+    { id: "third", name: "write" },
+  ];
+  assert.deepEqual(ambiguousGroupMentions("@research please help", roster), [
+    "research",
+  ]);
+  assert.deepEqual(mentionedIds("@research", roster), []);
+  assert.deepEqual(mentionedIds(`@${USER}`, roster), [USER]);
+  assert.deepEqual(mentionedIds(`@${OTHER}`, roster), []);
+  const selection = withAdded(NO_RECIPIENT_EDITS, OTHER);
+  assert.deepEqual(resolveRecipients(selection, ["third"], roster).ids, []);
+});
+
+test("collaboration management is decided by the explicit policy, never personal legacy ownership", () => {
+  const collaboration = {
+    version: 1 as const,
+    creator_user_id: USER,
+    membership_revision: 1,
+    history_disclosure: "History",
+    can_manage: false,
+    your_request_ids: [],
+    transfer_to_user_id: null,
+    guest_access: [],
+    proposals: [],
+    invites: [],
+  };
+  assert.equal(groupCanManage({ ...group, collaboration }), false);
+  assert.equal(groupCanLeave({ ...group, collaboration }), true);
 });
 const message = (seq: number, text = `Message ${seq}`) =>
   groupMessageSchema.parse({

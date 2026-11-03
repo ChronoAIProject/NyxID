@@ -34,9 +34,13 @@ test("crew header shows member identity and narrows recipients through its picke
       },
       messages: [],
       pending_actions: [] as any[],
+      collaboration_decisions: [] as any[],
     },
   };
   const h = hookHarness<E>({
+    "./CollaborationGroupControls": {
+      CollaborationCards: "CollaborationCards",
+    },
     "../../lib/accessibility/useReducedMotion": {
       useReducedMotion: () => false,
     },
@@ -229,6 +233,10 @@ test("crew header shows member identity and narrows recipients through its picke
   chat.data.pending_actions = [
     { summary: "Needs confirmation", conversation_id: "chat" },
   ];
+  h.render();
+  assert.equal(identity().props.status, "Needs you");
+  chat.data.pending_actions = [];
+  chat.data.collaboration_decisions = [{ can_decide: true }];
   h.render();
   assert.equal(identity().props.status, "Needs you");
   chat.data.group.working_agent_ids = [];
