@@ -1,32 +1,39 @@
-import type { ReactNode } from "react";
-import { AgentAvatar } from "../../components/AgentAvatar";
 import { useEffect, useState } from "react";
-import { Pressable, View } from "react-native";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { ChevronRight, Clock3 } from "lucide-react-native";
 import type {
   WorkspaceContentParamList,
   WorkspaceScreenProps,
 } from "../../app/navigationTypes";
 import { useOpenWorkspaceChat } from "../../app/WorkspaceHeader";
 import { newAssistantChatParams } from "../../app/assistantChatParams";
+import { AgentAvatar } from "../../components/AgentAvatar";
+import { SegmentControl } from "../../components/SegmentControl";
 import {
-  ActionButton,
-  Card,
-  Field,
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+  SettingsCheckRow,
+  SettingsGroup,
+  SettingsPage,
+  SettingsRow,
+  SettingsTextField,
+} from "../../components/settings/SettingsList";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import { agentsApi } from "../../lib/api/agentsApi";
 import { automationsApi } from "../../lib/api/automationsApi";
-import { useTheme } from "../../theme/ThemeContext";
-import type { Automation, AutomationRunsCursor } from "./automationContracts";
+import type {
+  Automation,
+  AutomationRun,
+  AutomationRunsCursor,
+} from "./automationContracts";
 import { deviceTimezone, formatAutomationTime } from "./automationTime";
 import {
+  automationListDetail,
   automationPauseReason,
+  automationReason,
+  automationRunDetail,
+  automationRunDuration,
   automationScheduleSummary,
+  automationSourceLabel,
+  automationStatusLabel,
   automationTarget,
   uniqueAutomationRuns,
 } from "./automationPresentation";
@@ -34,21 +41,78 @@ import {
   AUTOMATIONS,
   AUTOMATION_SETTINGS,
   AutomationLoading,
-  AutomationStatus,
-  ChoiceField,
   automationError,
-  automationStyles as s,
   useAutomationRuntime,
+  usePullRefresh,
 } from "./AutomationUI";
+
+const STATUSES = ["all", "active", "disabled"] as const;
+const AGENTS_KEY = ["workspace", "agents", "list"] as const;
+
+function useAgents(enabled: boolean) {
+  return useQuery({
+    queryKey: AGENTS_KEY,
+    queryFn: ({ signal }) => agentsApi.list(signal),
+    enabled,
+    retry: false,
+  });
+}
+
+function useAutomationZone(enabled: boolean) {
+  const settings = useQuery({
+    queryKey: AUTOMATION_SETTINGS,
+    queryFn: ({ signal }) => automationsApi.settings(signal),
+    enabled,
+    retry: false,
+  });
+  return settings.data?.timezone ?? deviceTimezone();
+}
+
+function useAutomationRuns(id: string, enabled: boolean) {
+  return useInfiniteQuery({
+    queryKey: [...AUTOMATIONS, id, "runs"],
+    initialPageParam: undefined as AutomationRunsCursor | undefined,
+    queryFn: ({ signal, pageParam }) =>
+      automationsApi.runs(id, pageParam, signal),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    enabled,
+    retry: false,
+    refetchInterval: enabled ? 5000 : false,
+  });
+}
+
+/** A failed load: the message, then a tinted Retry row. */
+function AutomationRetry({
+  error,
+  label,
+  onRetry,
+}: {
+  error: unknown;
+  label: string;
+  onRetry: () => void;
+}) {
+  return (
+    <>
+      <Notice tone="error" message={automationError(error)} />
+      <SettingsGroup inset={false}>
+        <SettingsRow
+          tone="action"
+          label="Retry"
+          accessibilityLabel={label}
+          onPress={onRetry}
+        />
+      </SettingsGroup>
+    </>
+  );
+}
 
 export function AutomationsScreen({
   navigation,
   route,
 }: WorkspaceScreenProps<"Automations">) {
   const runtime = useAutomationRuntime();
-  const { colors } = useTheme();
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("all");
+  const [status, setStatus] = useState<(typeof STATUSES)[number]>("all");
   const [agentId, setAgentId] = useState(route.params?.agentId ?? "");
   const list = useQuery({
     queryKey: [...AUTOMATIONS, "list"],
@@ -57,22 +121,12 @@ export function AutomationsScreen({
     retry: false,
     refetchInterval: runtime.active ? 15_000 : false,
   });
-  const agents = useQuery({
-    queryKey: ["workspace", "agents", "list"],
-    queryFn: ({ signal }) => agentsApi.list(signal),
-    enabled: runtime.active,
-    retry: false,
-  });
-  const settings = useQuery({
-    queryKey: AUTOMATION_SETTINGS,
-    queryFn: ({ signal }) => automationsApi.settings(signal),
-    enabled: runtime.active,
-    retry: false,
-  });
+  const agents = useAgents(runtime.active);
+  const zone = useAutomationZone(runtime.active);
+  const pull = usePullRefresh(() => list.refetch());
   useEffect(() => {
     setAgentId(route.params?.agentId ?? "");
   }, [route.params?.agentId]);
-  const zone = settings.data?.timezone ?? deviceTimezone();
   const rows = (list.data?.triggers ?? []).filter(
     (row) =>
       (status === "all" || row.status === status) &&
@@ -83,137 +137,149 @@ export function AutomationsScreen({
         .toLowerCase()
         .includes(search.trim().toLowerCase()),
   );
-  const agentOptions =
-    agents.data?.agents
-      .filter((a) => a.status !== "destroyed")
-      .map((a) => ({
-        value: a.id,
-        label: a.display_name || a.name,
-        leading: (<AgentAvatar agent={a} size="lg" />) as ReactNode,
-      })) ?? [];
-  if (agentId && !agentOptions.some((a) => a.value === agentId))
-    agentOptions.push({
-      value: agentId,
-      label: "Selected agent",
-      leading: undefined,
-    });
+  const agent = agents.data?.agents.find((item) => item.id === agentId);
+  const agentLabel = !agentId
+    ? "All agents"
+    : agent
+      ? agent.display_name || agent.name
+      : "Selected agent";
   return (
-    <WorkspacePage title="Automations" showHeading={false}>
-      <View style={s.spread}>
-        <View style={s.flex}>
-          <Label style={s.section}>Tasks that run for you</Label>
-          <Label muted style={s.small}>
-            On a schedule or when an event arrives.
-          </Label>
-        </View>
-      </View>
-      <Label muted style={s.small}>
-        Times shown in {zone}
-      </Label>
-      <AutomationGuidance />
-      <Field
-        label="Search automations"
-        placeholder="Search by name or agent"
-        value={search}
-        onChangeText={setSearch}
+    <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
+      <SegmentControl
+        accessibilityLabel="Status"
+        segments={[{ label: "All" }, { label: "Active" }, { label: "Paused" }]}
+        activeIndex={STATUSES.indexOf(status)}
+        onPress={(index) => setStatus(STATUSES[index] ?? "all")}
       />
-      <View style={s.row}>
-        <View style={s.flex}>
-          <ChoiceField
-            label="Status"
-            value={status}
-            onChange={setStatus}
-            options={[
-              { value: "all", label: "All statuses" },
-              { value: "active", label: "Active" },
-              { value: "disabled", label: "Paused" },
-            ]}
-          />
-        </View>
-        <View style={s.flex}>
-          <ChoiceField
-            label="Agent"
-            value={agentId}
-            onChange={setAgentId}
-            options={[{ value: "", label: "All agents" }, ...agentOptions]}
-          />
-        </View>
-      </View>
+      <SettingsGroup inset={false}>
+        <SettingsTextField
+          accessibilityLabel="Search automations"
+          placeholder="Search by name or agent"
+          value={search}
+          onChangeText={setSearch}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="search"
+        />
+        <SettingsRow
+          label="Agent"
+          value={agentLabel}
+          onPress={() =>
+            navigation.push("AutomationAgentFilter", {
+              agentId: agentId || undefined,
+            })
+          }
+        />
+      </SettingsGroup>
       {!runtime.online && (
         <Notice message="You’re offline. Reconnect to refresh automations." />
       )}
       {list.isPending && <AutomationLoading />}
       {list.error && (
-        <>
-          <Notice tone="error" message={automationError(list.error)} />
-          <ActionButton
-            label="Retry automations"
-            variant="secondary"
-            onPress={() => void list.refetch()}
-          />
-        </>
+        <AutomationRetry
+          error={list.error}
+          label="Retry automations"
+          onRetry={() => void list.refetch()}
+        />
       )}
-      {rows.map((row) => (
-        <Pressable
-          key={row.id}
-          accessibilityRole="button"
-          accessibilityLabel={`Open ${row.label}`}
-          onPress={() => navigation.push("AutomationDetail", { id: row.id })}
+      {list.data && (
+        <SettingsGroup
+          inset={false}
+          footer={`Tasks that run for you on a schedule or when an event arrives. Times shown in ${zone}.`}
         >
-          <Card>
-            <View style={s.spread}>
-              <View style={s.row}>
-                <Clock3 size={18} color={colors.primary} />
-                <AutomationStatus value={row.status} />
-              </View>
-              <ChevronRight size={18} color={colors.textMuted} />
-            </View>
-            <Label style={s.title}>{row.label}</Label>
-            <Label muted>
-              {automationTarget(row, agents.data?.agents)} ·{" "}
-              {(row.source ?? "webhook") === "schedule"
-                ? "Scheduled"
-                : "Webhook"}
-            </Label>
-            <Label muted style={s.small}>
-              {automationScheduleSummary(row)}
-            </Label>
-            {row.source === "schedule" && (
-              <Label style={s.small}>
-                {row.status === "disabled"
-                  ? "Paused · no new scheduled runs"
-                  : `Next: ${formatAutomationTime(row.next_run_at, zone)}`}
-              </Label>
-            )}
-            {row.last_run && (
-              <Label muted style={s.small}>
-                Last run: {row.last_run.outcome} ·{" "}
-                {formatAutomationTime(row.last_run.scheduled_at, zone)}
-              </Label>
-            )}
-            {row.pause_reason && (
-              <Label style={s.small}>
-                {automationPauseReason(row.pause_reason)}
-              </Label>
-            )}
-          </Card>
-        </Pressable>
-      ))}
-      {list.data && !rows.length && (
-        <Card>
-          <Label style={s.title}>
-            {list.data.triggers.length
-              ? "No matching automations"
-              : "No automations yet"}
-          </Label>
-          <Label muted>
-            {list.data.triggers.length
-              ? "Try another search, agent or status."
-              : "Your configured automations will appear here."}
-          </Label>
-        </Card>
+          {rows.map((row) => {
+            const value = automationStatusLabel(row.status);
+            const detail = automationListDetail(
+              row,
+              automationTarget(row, agents.data?.agents),
+              zone,
+            );
+            return (
+              <SettingsRow
+                key={row.id}
+                label={row.label}
+                detail={detail}
+                value={value}
+                accessibilityLabel={`${row.label}, ${value}. ${detail}`}
+                accessibilityHint="Opens this automation"
+                onPress={() =>
+                  navigation.push("AutomationDetail", { id: row.id })
+                }
+              />
+            );
+          })}
+          {!rows.length && (
+            <SettingsRow
+              label={
+                list.data.triggers.length
+                  ? "No matching automations"
+                  : "No automations yet"
+              }
+              detail={
+                list.data.triggers.length
+                  ? "Try another search, agent or status."
+                  : "Your configured automations will appear here."
+              }
+            />
+          )}
+        </SettingsGroup>
       )}
-    </WorkspacePage>
+      <AutomationGuidance />
+    </SettingsPage>
+  );
+}
+
+/** Automations › Agent: a checkmark list; the choice filters the list it came from. */
+export function AutomationAgentFilterScreen({
+  navigation,
+  route,
+}: NativeStackScreenProps<WorkspaceContentParamList, "AutomationAgentFilter">) {
+  const runtime = useAutomationRuntime();
+  const agents = useAgents(runtime.active);
+  const selected = route.params?.agentId ?? "";
+  const choose = (agentId: string) =>
+    navigation.popTo(
+      "Automations",
+      { agentId: agentId || undefined },
+      { merge: true },
+    );
+  const live = (agents.data?.agents ?? []).filter(
+    (agent) => agent.status !== "destroyed",
+  );
+  return (
+    <SettingsPage>
+      {agents.error && (
+        <AutomationRetry
+          error={agents.error}
+          label="Retry agents"
+          onRetry={() => void agents.refetch()}
+        />
+      )}
+      <SettingsGroup>
+        <SettingsCheckRow
+          label="All agents"
+          selected={!selected}
+          onPress={() => choose("")}
+        />
+        {live.map((agent) => (
+          <SettingsCheckRow
+            key={agent.id}
+            leading={<AgentAvatar agent={agent} size="sm" />}
+            label={agent.display_name || agent.name}
+            selected={agent.id === selected}
+            onPress={() => choose(agent.id)}
+          />
+        ))}
+        {selected && !live.some((agent) => agent.id === selected) ? (
+          <SettingsCheckRow
+            label="Selected agent"
+            selected
+            onPress={() => choose(selected)}
+          />
+        ) : null}
+      </SettingsGroup>
+      {agents.isPending && <AutomationLoading />}
+    </SettingsPage>
   );
 }
 
@@ -229,288 +295,341 @@ export function AutomationDetailScreen({
     retry: false,
     refetchInterval: runtime.active ? 5000 : false,
   });
-  const agents = useQuery({
-    queryKey: ["workspace", "agents", "list"],
-    queryFn: ({ signal }) => agentsApi.list(signal),
-    enabled: runtime.active,
-    retry: false,
-  });
-  const settings = useQuery({
-    queryKey: AUTOMATION_SETTINGS,
-    queryFn: ({ signal }) => automationsApi.settings(signal),
-    enabled: runtime.active,
-    retry: false,
-  });
+  const agents = useAgents(runtime.active);
+  const zone = useAutomationZone(runtime.active);
+  const pull = usePullRefresh(() => detail.refetch());
   const row = detail.data;
-  const zone = settings.data?.timezone ?? deviceTimezone();
+  const target = row ? automationTarget(row, agents.data?.agents) : "";
+  const nextRuns = row
+    ? row.status === "active" && row.source === "schedule"
+      ? row.next_runs?.length
+        ? row.next_runs
+        : row.next_run_at
+          ? [row.next_run_at]
+          : []
+      : []
+    : [];
+  const pause = row
+    ? [
+        automationPauseReason(row.pause_reason),
+        row.status === "disabled"
+          ? "Future scheduled runs are paused. Existing run threads remain available."
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    : "";
   return (
-    <WorkspacePage title="Automation" showHeading={false}>
+    <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
       {detail.isPending && <AutomationLoading />}
       {detail.error && (
-        <>
-          <Notice tone="error" message={automationError(detail.error)} />
-          <ActionButton
-            label="Retry automation"
-            variant="secondary"
-            onPress={() => void detail.refetch()}
-          />
-        </>
+        <AutomationRetry
+          error={detail.error}
+          label="Retry automation"
+          onRetry={() => void detail.refetch()}
+        />
       )}
       {row && (
         <>
-          <Label muted style={s.small}>
-            Times shown in {zone}
-          </Label>
-          <AutomationStatus value={row.status} />
-          <Label accessibilityRole="header" style={s.section}>
-            {row.label}
-          </Label>
-          <Label muted>
-            {automationTarget(row, agents.data?.agents)} ·{" "}
-            {row.source ?? "webhook"}
-          </Label>
-          {row.pause_reason && (
-            <Notice message={automationPauseReason(row.pause_reason)!} />
-          )}
-          {row.status === "disabled" && (
-            <Notice message="Future scheduled runs are paused. Existing run threads remain available." />
-          )}
-          <Card>
-            <Label style={s.title}>Schedule</Label>
-            <Label>{automationScheduleSummary(row)}</Label>
-            {row.schedule?.kind === "cron" && (
-              <Label muted mono style={s.small}>
-                Calendar expression: {row.schedule.expression}
-              </Label>
-            )}
-            {row.status === "active" &&
-              row.source === "schedule" &&
-              (row.next_runs?.length
-                ? row.next_runs
-                : row.next_run_at
-                  ? [row.next_run_at]
-                  : []
-              ).map((at) => (
-                <Label key={at} mono style={s.small}>
-                  {formatAutomationTime(at, zone)}
-                </Label>
-              ))}
-            <Label muted style={s.small}>
-              Overlap:{" "}
-              {row.overlap === "queue"
-                ? "Queue one run"
-                : "Skip overlapping runs"}
-            </Label>
-          </Card>
-          <AutomationDeliveryCard
-            row={row}
-            target={automationTarget(row, agents.data?.agents)}
-          />
-          {row.delivery.type === "assistant" && (
-            <ActionButton
-              label="Review agent permissions"
-              variant="secondary"
-              onPress={() => {
-                if (row.delivery.type === "assistant")
-                  navigation.push("AgentDetail", {
-                    agentId: row.delivery.agent_id,
-                  });
-              }}
+          <SettingsGroup inset={false} footer={pause || undefined}>
+            <SettingsRow label="Name" value={row.label} />
+            <SettingsRow
+              label="Status"
+              value={automationStatusLabel(row.status)}
             />
-          )}
-          {row.last_run && (
-            <Card>
-              <View style={s.spread}>
-                <Label style={s.title}>Latest run</Label>
-                <AutomationStatus value={row.last_run.outcome} />
-              </View>
-              <Label muted>
-                {formatAutomationTime(row.last_run.scheduled_at, zone)}
-              </Label>
-              {row.last_run.reason && (
-                <Label>{row.last_run.reason.replaceAll("_", " ")}</Label>
-              )}
-            </Card>
-          )}
-          <ActionButton
-            label="View run history"
-            variant="secondary"
-            onPress={() => navigation.push("AutomationRuns", { id: row.id })}
-          />
-          <AutomationGuidance />
+            <SettingsRow label="Runs for" value={target} />
+            <SettingsRow label="Starts" value={automationSourceLabel(row)} />
+          </SettingsGroup>
+          <SettingsGroup
+            title="Schedule"
+            inset={false}
+            footer={`Times shown in ${zone}.`}
+          >
+            <SettingsRow
+              label="Repeats"
+              value={automationScheduleSummary(row)}
+            />
+            {row.schedule?.kind === "cron" && (
+              <SettingsRow
+                label="Calendar expression"
+                value={row.schedule.expression}
+              />
+            )}
+            {nextRuns.map((at, index) => (
+              <SettingsRow
+                key={at}
+                label={index === 0 ? "Next run" : "Then"}
+                value={formatAutomationTime(at, zone)}
+              />
+            ))}
+            <SettingsRow
+              label="Overlap"
+              value={
+                row.overlap === "queue"
+                  ? "Queue one run"
+                  : "Skip overlapping runs"
+              }
+            />
+          </SettingsGroup>
+          <AutomationDelivery row={row} />
+          <SettingsGroup title="Runs" inset={false}>
+            {row.last_run ? (
+              <SettingsRow
+                label="Latest run"
+                detail={[
+                  formatAutomationTime(row.last_run.scheduled_at, zone),
+                  automationReason(row.last_run.reason),
+                ]
+                  .filter(Boolean)
+                  .join("\n")}
+                value={automationStatusLabel(row.last_run.outcome)}
+                valueTone={
+                  row.last_run.outcome === "failed" ? "danger" : "default"
+                }
+              />
+            ) : null}
+            <SettingsRow
+              label="Run history"
+              onPress={() => navigation.push("AutomationRuns", { id: row.id })}
+            />
+          </SettingsGroup>
           {row.delivery.type === "assistant" && (
-            <Label muted style={s.small}>
-              Normal agent usage and billing apply. This automation uses
-              existing agent permissions.
-            </Label>
+            <SettingsGroup
+              inset={false}
+              footer="Normal agent usage and billing apply. This automation uses existing agent permissions."
+            >
+              <SettingsRow
+                label="Agent permissions"
+                onPress={() => {
+                  if (row.delivery.type === "assistant")
+                    navigation.push("AgentDetail", {
+                      agentId: row.delivery.agent_id,
+                    });
+                }}
+              />
+            </SettingsGroup>
           )}
+          <AutomationGuidance />
         </>
       )}
-    </WorkspacePage>
+    </SettingsPage>
   );
 }
 
+/** Ask NyxBot: the one way to create, run or change an automation. */
 function AutomationGuidance() {
   const openChat = useOpenWorkspaceChat();
   return (
-    <Card>
-      <Label muted>To create, run or change automations, ask NyxBot.</Label>
-      <ActionButton
+    <SettingsGroup
+      inset={false}
+      footer="To create, run or change automations, ask NyxBot."
+    >
+      <SettingsRow
+        tone="action"
         label="Ask NyxBot"
-        variant="secondary"
         onPress={() => openChat(newAssistantChatParams())}
       />
-    </Card>
+    </SettingsGroup>
   );
 }
 
-function AutomationDeliveryCard({
-  row,
-  target,
-}: {
-  row: Automation;
-  target: string;
-}) {
+function AutomationDelivery({ row }: { row: Automation }) {
   const d = row.delivery;
+  if (d.type === "assistant")
+    return (
+      <>
+        <SettingsGroup title="Instruction" inset={false}>
+          <SettingsRow label={d.instruction} selectable />
+        </SettingsGroup>
+        <SettingsGroup title="Delivery" inset={false}>
+          <SettingsRow
+            label="Thread"
+            value={d.thread_policy ?? "Default for this agent and source"}
+          />
+          <SettingsRow
+            label="Result"
+            value={
+              d.deliver_to.type === "chat"
+                ? "Channel chat"
+                : d.deliver_to.type === "notification"
+                  ? "Notification"
+                  : "Thread"
+            }
+          />
+          <SettingsRow
+            label="Confirmation"
+            value={
+              d.confirmation_policy === "destructive"
+                ? "Destructive actions"
+                : "Every changing action"
+            }
+          />
+        </SettingsGroup>
+      </>
+    );
   return (
-    <Card>
-      <Label style={s.title}>Task & delivery</Label>
-      <Label>{target}</Label>
-      {d.type === "assistant" ? (
-        <>
-          <Label selectable>{d.instruction}</Label>
-          <Label muted>
-            Thread: {d.thread_policy ?? "Default for this agent and source"}
-          </Label>
-          <Label muted>
-            Result:{" "}
-            {d.deliver_to.type === "chat"
-              ? "Channel chat"
-              : d.deliver_to.type === "notification"
-                ? "Notification"
-                : "Thread"}
-          </Label>
-          <Label muted>
-            Confirmation:{" "}
-            {d.confirmation_policy === "destructive"
-              ? "Destructive actions"
-              : "Every changing action"}
-          </Label>
-        </>
-      ) : d.type === "webhook" ? (
-        <Label selectable>{d.url}</Label>
+    <SettingsGroup title="Delivery" inset={false}>
+      {d.type === "webhook" ? (
+        <SettingsRow label={d.url} selectable />
       ) : d.type === "agent" ? (
-        <Label mono>{d.conversation_id}</Label>
+        <SettingsRow label={d.conversation_id} mono selectable />
       ) : (
-        <Label muted>Send a reminder notification.</Label>
+        <SettingsRow label="Send a reminder notification." />
       )}
-    </Card>
+    </SettingsGroup>
   );
 }
 
 export function AutomationRunsScreen({
+  navigation,
   route,
 }: NativeStackScreenProps<WorkspaceContentParamList, "AutomationRuns">) {
-  const openChat = useOpenWorkspaceChat();
   const runtime = useAutomationRuntime();
-  const settings = useQuery({
-    queryKey: AUTOMATION_SETTINGS,
-    queryFn: ({ signal }) => automationsApi.settings(signal),
-    enabled: runtime.active,
-    retry: false,
-  });
-  const history = useInfiniteQuery({
-    queryKey: [...AUTOMATIONS, route.params.id, "runs"],
-    initialPageParam: undefined as AutomationRunsCursor | undefined,
-    queryFn: ({ signal, pageParam }) =>
-      automationsApi.runs(route.params.id, pageParam, signal),
-    getNextPageParam: (page) => page.next_cursor ?? undefined,
-    enabled: runtime.active,
-    retry: false,
-    refetchInterval: runtime.active ? 5000 : false,
-  });
-  const zone = settings.data?.timezone ?? deviceTimezone();
+  const zone = useAutomationZone(runtime.active);
+  const history = useAutomationRuns(route.params.id, runtime.active);
+  const pull = usePullRefresh(() => history.refetch());
   const runs = uniqueAutomationRuns(history.data?.pages ?? []);
   return (
-    <WorkspacePage title="Run history" showHeading={false}>
-      <Label muted>Up to 1,000 recent runs are retained for 90 days.</Label>
-      <Label muted style={s.small}>
-        Times shown in {zone}
-      </Label>
+    <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
       {history.isPending && <AutomationLoading />}
       {history.error && (
-        <>
-          <Notice tone="error" message={automationError(history.error)} />
-          <ActionButton
-            label="Retry run history"
-            variant="secondary"
-            onPress={() => void history.refetch()}
-          />
-        </>
-      )}
-      {history.data && !runs.length && (
-        <Card>
-          <Label style={s.title}>No runs yet</Label>
-          <Label muted>
-            Scheduled, requested and event runs will appear here.
-          </Label>
-        </Card>
-      )}
-      {runs.map((run) => (
-        <Card key={run.id}>
-          <View style={s.spread}>
-            <AutomationStatus value={run.outcome} />
-            <Label muted style={s.small}>
-              {run.duration_ms == null
-                ? ""
-                : `${(run.duration_ms / 1000).toFixed(1)} seconds`}
-            </Label>
-          </View>
-          <Label>
-            Scheduled: {formatAutomationTime(run.scheduled_at, zone)}
-          </Label>
-          {run.started_at && (
-            <Label muted style={s.small}>
-              Started: {formatAutomationTime(run.started_at, zone)}
-            </Label>
-          )}
-          {run.finished_at && (
-            <Label muted style={s.small}>
-              Finished: {formatAutomationTime(run.finished_at, zone)}
-            </Label>
-          )}
-          {run.reason && (
-            <Label selectable>{run.reason.replaceAll("_", " ")}</Label>
-          )}
-          {run.outcome === "waiting" &&
-            run.reason === "confirmation_required" && (
-              <Notice message="Open the thread to review the required action card." />
-            )}
-          {run.missed && (
-            <Label muted>
-              Missed {run.missed.count} occurrences between{" "}
-              {formatAutomationTime(run.missed.from, zone)} and{" "}
-              {formatAutomationTime(run.missed.through, zone)}.
-            </Label>
-          )}
-          {run.thread_id && (
-            <ActionButton
-              label="Open thread"
-              variant="secondary"
-              onPress={() => openChat({ conversationId: run.thread_id! })}
-            />
-          )}
-        </Card>
-      ))}
-      {history.hasNextPage && (
-        <ActionButton
-          label="Load older runs"
-          variant="secondary"
-          disabled={!runtime.online}
-          loading={history.isFetchingNextPage}
-          onPress={() => void history.fetchNextPage()}
+        <AutomationRetry
+          error={history.error}
+          label="Retry run history"
+          onRetry={() => void history.refetch()}
         />
       )}
-    </WorkspacePage>
+      {history.data && (
+        <SettingsGroup
+          inset={false}
+          footer={`Up to 1,000 recent runs are retained for 90 days. Times shown in ${zone}.`}
+        >
+          {runs.map((run) => {
+            const value = automationStatusLabel(run.outcome);
+            const label = formatAutomationTime(run.scheduled_at, zone);
+            const detail = automationRunDetail(run) || undefined;
+            return (
+              <SettingsRow
+                key={run.id}
+                label={label}
+                detail={detail}
+                value={value}
+                valueTone={run.outcome === "failed" ? "danger" : "default"}
+                accessibilityLabel={`Run scheduled ${label}, ${value}${detail ? `. ${detail}` : ""}`}
+                accessibilityHint="Opens this run"
+                onPress={() =>
+                  navigation.push("AutomationRunDetail", {
+                    id: route.params.id,
+                    runId: run.id,
+                  })
+                }
+              />
+            );
+          })}
+          {!runs.length && (
+            <SettingsRow
+              label="No runs yet"
+              detail="Scheduled, requested and event runs will appear here."
+            />
+          )}
+          {history.hasNextPage && (
+            <SettingsRow
+              tone="action"
+              label={
+                history.isFetchingNextPage ? "Loading…" : "Load Older Runs"
+              }
+              accessibilityLabel="Load older runs"
+              accessibilityState={{ busy: history.isFetchingNextPage }}
+              disabled={!runtime.online || history.isFetchingNextPage}
+              onPress={() => void history.fetchNextPage()}
+            />
+          )}
+        </SettingsGroup>
+      )}
+    </SettingsPage>
+  );
+}
+
+/** Run history › one run: its times, outcome and thread. */
+export function AutomationRunDetailScreen({
+  route,
+}: NativeStackScreenProps<WorkspaceContentParamList, "AutomationRunDetail">) {
+  const openChat = useOpenWorkspaceChat();
+  const runtime = useAutomationRuntime();
+  const zone = useAutomationZone(runtime.active);
+  // Shares the run history cache, so the run opens without another request.
+  const history = useAutomationRuns(route.params.id, runtime.active);
+  const run: AutomationRun | undefined = uniqueAutomationRuns(
+    history.data?.pages ?? [],
+  ).find((item) => item.id === route.params.runId);
+  if (!run)
+    return (
+      <SettingsPage>
+        {history.isPending ? (
+          <AutomationLoading />
+        ) : history.error ? (
+          <AutomationRetry
+            error={history.error}
+            label="Retry run"
+            onRetry={() => void history.refetch()}
+          />
+        ) : (
+          <Notice message="This run is no longer in the recent run history." />
+        )}
+      </SettingsPage>
+    );
+  const duration = automationRunDuration(run);
+  const reason = automationReason(run.reason);
+  return (
+    <SettingsPage>
+      <SettingsGroup
+        inset={false}
+        footer={
+          run.outcome === "waiting" && run.reason === "confirmation_required"
+            ? `Open the thread to review the required action card. Times shown in ${zone}.`
+            : `Times shown in ${zone}.`
+        }
+      >
+        <SettingsRow
+          label="Outcome"
+          value={automationStatusLabel(run.outcome)}
+          valueTone={run.outcome === "failed" ? "danger" : "default"}
+        />
+        <SettingsRow
+          label="Scheduled"
+          value={formatAutomationTime(run.scheduled_at, zone)}
+        />
+        {run.started_at ? (
+          <SettingsRow
+            label="Started"
+            value={formatAutomationTime(run.started_at, zone)}
+          />
+        ) : null}
+        {run.finished_at ? (
+          <SettingsRow
+            label="Finished"
+            value={formatAutomationTime(run.finished_at, zone)}
+          />
+        ) : null}
+        {duration ? <SettingsRow label="Duration" value={duration} /> : null}
+        {reason ? <SettingsRow label="Reason" value={reason} /> : null}
+      </SettingsGroup>
+      {run.missed && (
+        <SettingsGroup title="Missed" inset={false}>
+          <SettingsRow
+            label={`Missed ${run.missed.count} occurrences between ${formatAutomationTime(run.missed.from, zone)} and ${formatAutomationTime(run.missed.through, zone)}.`}
+          />
+        </SettingsGroup>
+      )}
+      {run.thread_id && (
+        <SettingsGroup inset={false}>
+          <SettingsRow
+            tone="action"
+            label="Open Thread"
+            onPress={() => openChat({ conversationId: run.thread_id! })}
+          />
+        </SettingsGroup>
+      )}
+    </SettingsPage>
   );
 }

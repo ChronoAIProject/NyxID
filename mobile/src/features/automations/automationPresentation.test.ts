@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { agentSchema, type AssistantAgent } from "../agents/agentContracts";
 import {
+  automationListDetail,
+  automationRunDetail,
+  automationStatusLabel,
   automationPauseReason,
   automationTarget,
   automationScheduleSummary,
@@ -172,4 +175,47 @@ test("schedule summaries distinguish webhook, cron, interval and one-time tasks"
       }),
       `${description} (UTC)`,
     );
+});
+
+test("list and run rows describe status, timing and outcome as label/value text", () => {
+  assert.equal(automationStatusLabel("disabled"), "Paused");
+  assert.equal(automationStatusLabel("active"), "Active");
+  assert.equal(automationStatusLabel("waiting"), "Waiting");
+  const scheduled = automationSchema.parse({
+    id: "12345678-1234-4123-8123-123456789abc",
+    user_id: "owner",
+    label: "Daily",
+    user_service_id: null,
+    status: "disabled",
+    source: "schedule",
+    schedule: { kind: "cron", expression: "0 8 * * *", timezone: "UTC" },
+    verification: { mode: "schedule" },
+    delivery: { type: "notification" },
+    pause_reason: "owner_unavailable",
+    inbound_url: null,
+    created_at: "2026-10-15T00:00:00Z",
+    updated_at: "2026-10-15T00:00:00Z",
+  });
+  assert.equal(
+    automationListDetail(scheduled, "Reminder", "UTC"),
+    "Reminder · Scheduled\nEvery day at 8:00 AM (UTC)\nPaused · no new scheduled runs\nThe owner account is unavailable.",
+  );
+  assert.equal(
+    automationRunDetail({
+      ...run,
+      reason: "confirmation_required",
+      missed: { count: 3, from: run.scheduled_at, through: run.scheduled_at },
+      duration_ms: 1500,
+    }),
+    "confirmation required · Missed 3 occurrences · 1.5 seconds",
+  );
+  assert.equal(
+    automationRunDetail({
+      ...run,
+      reason: null,
+      missed: null,
+      duration_ms: null,
+    }),
+    "",
+  );
 });

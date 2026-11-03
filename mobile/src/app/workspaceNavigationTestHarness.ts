@@ -44,6 +44,8 @@ export const contentNames = [
   "MachineSavedLogin",
   "AutomationDetail",
   "AutomationRuns",
+  "AutomationRunDetail",
+  "AutomationAgentFilter",
   "ActivityDetail",
 ];
 export const settingsNames = [

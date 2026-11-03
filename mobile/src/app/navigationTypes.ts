@@ -102,6 +102,8 @@ export type WorkspaceContentParamList = Omit<
   MachineSavedLogin: { loginId: string; ownerLabel: string };
   AutomationDetail: { id: string };
   AutomationRuns: { id: string };
+  AutomationRunDetail: { id: string; runId: string };
+  AutomationAgentFilter: { agentId?: string } | undefined;
   ActivityDetail: { challengeId: string; entryPoint?: string };
 };
 
@@ -184,6 +186,8 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "MachineSavedLogin",
   "AutomationDetail",
   "AutomationRuns",
+  "AutomationRunDetail",
+  "AutomationAgentFilter",
   "ActivityDetail",
 ];
 export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
