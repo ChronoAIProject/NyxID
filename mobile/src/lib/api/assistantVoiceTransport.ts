@@ -103,12 +103,14 @@ export function createAssistantVoiceApi(
         }),
       );
     },
-    async options(conversationId: string, signal?: AbortSignal) {
-      const id = conversationIdSchema.parse(conversationId);
+    /** Without a conversation the server answers for Settings: same options, no thread gate. */
+    async options(conversationId?: string, signal?: AbortSignal) {
+      const query =
+        conversationId === undefined
+          ? ""
+          : `?conversation_id=${conversationIdSchema.parse(conversationId)}`;
       return voiceOptionsSchema.parse(
-        await request(`${ROOT}/voice/options?conversation_id=${id}`, {
-          signal,
-        }),
+        await request(`${ROOT}/voice/options${query}`, { signal }),
       );
     },
     async dictationOptions(conversationId: string, signal?: AbortSignal) {

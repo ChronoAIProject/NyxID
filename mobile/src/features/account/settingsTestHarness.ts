@@ -69,10 +69,12 @@ export function setupSettingsScreen(
   {
     connectedTelegram = false,
     pushDevices = 0,
+    voiceEnabled = false,
     params,
   }: {
     connectedTelegram?: boolean;
     pushDevices?: number;
+    voiceEnabled?: boolean;
     params?: Record<string, unknown>;
   } = {},
 ) {
@@ -159,7 +161,11 @@ export function setupSettingsScreen(
                   telegram_username: "a_very_long_telegram_username",
                   global_approval_mode: "writes_only",
                 }
-              : { enabled: true },
+              : queryKey[1] === "voice-features"
+                ? voiceEnabled
+                  ? ["assistant:voice"]
+                  : []
+                : { enabled: true },
       }),
       useMutation: () => ({
         mutate: (value: unknown) => mutations.push(value),
@@ -201,6 +207,8 @@ export function setupSettingsScreen(
       useNetworkStatus: () => ({ isConnected: true }),
     },
     "../../lib/api/mobileApi": { mobileApi: {} },
+    "../../lib/api/assistantVoiceApi": { assistantVoiceFeatures: async () => [] },
+    "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
     "../../lib/notifications/pushNotifications": {},
     "../../theme/ThemeContext": theme,
     "../../theme/flowStyles": { createFlowStyles: () => ({}) },

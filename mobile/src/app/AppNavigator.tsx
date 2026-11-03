@@ -40,6 +40,7 @@ import { AgentKeyLoginScreen } from "../features/auth/AgentKeyLoginScreen";
 import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
 import { DisplaySettingsScreen } from "../features/account/DisplaySettingsScreen";
+import { VoiceSettingsScreen } from "../features/account/VoiceSettingsScreen";
 import { NotificationSettingsScreen } from "../features/account/NotificationSettingsScreen";
 import { PrivacySettingsScreen } from "../features/account/PrivacySettingsScreen";
 import {
@@ -729,6 +730,11 @@ function SettingsSheetRoute({
             name="DisplaySettings"
             component={DisplaySettingsScreen}
             options={{ title: "Display" }}
+          />
+          <SheetStack.Screen
+            name="VoiceSettings"
+            component={VoiceSettingsScreen}
+            options={{ title: "Voice" }}
           />
           <SheetStack.Screen
             name="PrivacySettings"

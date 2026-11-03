@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AudioLines,
   Bell,
   FileText,
   Lock,
@@ -37,6 +38,8 @@ import { useAuthSession } from "../auth/AuthSessionContext";
 import { capture } from "../../lib/telemetry";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
+import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
+import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { AccountDeletionSheet } from "./AccountDeletionSheet";
 import { isApiError } from "../../lib/api/ApiError";
 import { useTheme } from "../../theme/ThemeContext";
@@ -193,6 +196,15 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     queryKey: ["account", "profile"],
     queryFn: () => mobileApi.getAccountProfile(),
   });
+  // Same key as the chat's voice gate, so Settings and chat agree.
+  const voiceFeatures = useQuery({
+    queryKey: ["workspace", "voice-features", getAuthEpoch()],
+    queryFn: ({ signal }) => assistantVoiceFeatures(signal),
+    enabled: isConnected,
+    retry: false,
+    staleTime: 30000,
+  });
+  const voiceEnabled = !!voiceFeatures.data?.includes("assistant:voice");
 
   const showToast = (message: string, kind: ToastKind) =>
     setToast({ message, kind });
@@ -356,6 +368,13 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             label="Display"
             onPress={() => navigation.push("DisplaySettings")}
           />
+          {voiceEnabled ? (
+            <SettingsRow
+              icon={AudioLines}
+              label="Voice"
+              onPress={() => navigation.push("VoiceSettings")}
+            />
+          ) : null}
           <SettingsRow
             icon={Lock}
             label="Privacy"

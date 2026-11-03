@@ -187,3 +187,20 @@ test("live scaling refreshes only text leaves and keeps the title heading", () =
   }
   env.harness.unmount();
 });
+
+test("Voice appears in Preferences only when live voice is enabled for the account", () => {
+  const off = setupSettingsScreen(
+    "./AccountSettingsScreen.tsx",
+    "AccountSettingsScreen",
+  );
+  assert.throws(() => off.row("Voice"));
+  off.harness.unmount();
+  const on = setupSettingsScreen(
+    "./AccountSettingsScreen.tsx",
+    "AccountSettingsScreen",
+    { voiceEnabled: true },
+  );
+  on.row("Voice").props.onPress();
+  assert.deepEqual(on.pushes.at(-1), ["VoiceSettings"]);
+  on.harness.unmount();
+});
