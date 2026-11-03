@@ -287,7 +287,7 @@ export function AiKeyConfirm({
       ? "Custom / self-hosted service"
       : "Connect service";
   const subtitle = onCatalogStep
-    ? "Pick a service to connect. Simple-bearer APIs (OpenAI, Anthropic, Gemini) land in the guided form. Anything else — self-hosted, OAuth, device code, custom endpoint — goes to the power-user form."
+    ? "Pick a service to connect to NyxID."
     : onCustomStep
       ? "For services not in the catalog — paste your own endpoint URL and credential."
       : `Your CLI wants to add ${trimmedSlug || "a service"} to NyxID. Confirm the details here.`;
@@ -1301,7 +1301,7 @@ function CatalogConfirmForm({
   return (
     <div className="flex flex-col gap-4">
 
-      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
+      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} showPricing={false} />}
       {oauthClientChoice ? (
         <OAuthClientSourceChoice
           value={oauthClientSource}

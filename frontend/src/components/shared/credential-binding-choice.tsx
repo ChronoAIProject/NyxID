@@ -11,6 +11,7 @@ export function CredentialBindingChoice({
   legacyBillable = false,
   resaleBillable = false,
   disabled = false,
+  showPricing = true,
 }: {
   readonly value: boolean;
   readonly onChange: (platform: boolean) => void;
@@ -19,6 +20,8 @@ export function CredentialBindingChoice({
   readonly disabled?: boolean;
   readonly legacyBillable?: boolean;
   readonly resaleBillable?: boolean;
+  /** The CLI wizard keeps cost out of this step and shows what each key means. */
+  readonly showPricing?: boolean;
 }) {
   const priceLabel = (price: LanePricingView | null | undefined) =>
     !platformPrice && !byokPrice && legacyBillable
@@ -29,7 +32,7 @@ export function CredentialBindingChoice({
       label="Choose a key"
       ariaLabel="Credential"
       footer={
-        resaleBillable ? (
+        showPricing && resaleBillable ? (
           <p className="text-11 text-muted-foreground">
             Platform-key use may also incur the separate resale fee.
           </p>
@@ -42,7 +45,11 @@ export function CredentialBindingChoice({
         onSelect={() => onChange(true)}
         icon={<NyxidIcon className="h-5 w-5" alt="" />}
         title="Use NyxID's key"
-        description={priceLabel(platformPrice)}
+        description={
+          showPricing
+            ? priceLabel(platformPrice)
+            : "NyxID supplies the key. Nothing to paste."
+        }
       />
       <ChoiceCard
         checked={!value}
@@ -50,7 +57,11 @@ export function CredentialBindingChoice({
         onSelect={() => onChange(false)}
         icon={<KeyRound className="h-5 w-5" />}
         title="Use your own key"
-        description={priceLabel(byokPrice)}
+        description={
+          showPricing
+            ? priceLabel(byokPrice)
+            : "Use a key from your own account."
+        }
       />
     </ChoiceCardGroup>
   );
