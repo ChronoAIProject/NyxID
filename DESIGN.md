@@ -541,6 +541,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 | 2026-07-31 | The assistant composer holds focus by default | Arriving at the chat, opening a conversation, and finishing a turn all leave the caret in the composer — it is the only thing anyone opens this screen to use. Focus has one unconditional trigger and three conditional ones. Unconditional: an explicit `focusRequest` counter the page bumps from the sidebar row, New Chat, and deleting the conversation you were in. That takes focus outright, including off the sidebar row just clicked, because that click IS the request. Conditional (each requires focus to still be parked on the body, so nothing anyone is holding is taken): a `draftKey` that moves without a request — browser Back/Forward, canonical-id repair, confirmed-stale cleanup, the first send migrating off a draft thread; and a turn ending, which additionally restores only focus the turn itself took (the composer is read for focus during the render that flips `active`, before the commit disables the field). Parked focus is not by itself evidence that nobody is reading — scrolling, selecting answer text and a screen reader's virtual cursor all leave `activeElement` on the body — so from the moment a send starts (not from `active` — a first send can sit in `sending` for seconds) the composer watches for `pointerdown`/`keydown`/`wheel`/`touchstart` outside itself and drops any focus it was holding for you once you have moved on. That watch only exists while a turn runs, so the parked test stands alone for the automatic `draftKey` moves — acceptable because those are canonical-id repair and stale-route cleanup, which land moments after a conversation opens rather than at an arbitrary time. A request that lands while the field is disabled is held until the turn hands it back, and dropped if you move on first. Touch devices opt out entirely (`(pointer: coarse)`): raising the on-screen keyboard over half the screen is the wrong default when opening a conversation to read it is the common case. Known gap: the shell's home logo is a plain `Link`, so clicking it from a conversation leaves focus on the logo in browsers that focus links on click. |
 | 2026-10-15 | Message timestamps name the date and zone inline (supersedes the `HH:MM` stamp in the 2026-07-22 chat-layout decision) | Every user message, reply, NyxBot instruction and group message shows its stored instant through the shared `MessageTime` (`components/assistant/message-time.tsx`): JetBrains Mono 11px `text-text-tertiary`, formatted with the reader's own locale and time zone and always naming the date, year and zone (`Oct 15, 2026, 3:40 AM GMT+8`), so messages from different days, or either side of a clock change, never read alike. Everything is inline; there is no tooltip. A reply's time ends its feedback line, and a user message's sits under its bubble. Both are revealed on hover or focus within the message (`group/message`) and always shown on devices without hover. Group agent replies keep the time in their header, always visible. A streaming reply shows none until it settles, and a missing or invalid instant renders nothing. |
 | 2026-10-28 | Message timestamps show the day and month; reply feedback asks after the vote (supersedes the inline label of the 2026-10-15 timestamp decision) | `MessageTime` now shows only the local day and month (`27 Oct`), adding the year outside the reader's current year (`27 Oct 2025`), in the surrounding sans `text-11 text-text-tertiary` instead of JetBrains Mono. English readers always get day-first order; other languages keep their own (`10月27日`). The full date, time and zone moves to the native `title`, so it is still one hover away. Placement and reveal rules are unchanged. A reply's feedback line is copy, thumbs up, thumbs down and the time, with no Comment button. A vote saves at once and opens a standard `Dialog` (`md:max-w-md`; full screen on mobile like every dialog) from `components/assistant/reply-feedback.tsx`, shared by chats and groups, modelled on Claude's feedback dialog: title `Give positive feedback` or `Give negative feedback`, a description asking what the reader liked or what went wrong, `h-8 rounded-full text-12 font-medium` reason pills (a `hairline-strong` ring at rest; chosen pills gain a leading check, a `nyx-secondary-400` ring and a `/15` tint of it), a `Details (optional)` `Textarea`, and Cancel (`outline`) beside Submit (`primary`). Up offers Useful, Accurate and Easy to understand; down offers Not useful, Not accurate, Bad response and Hard to understand. Submit stores `Reasons, in offered order — details`, closes the dialog and confirms with a `Thanks for the feedback.` toast; an empty Submit just closes, since the vote is already saved. Cmd/Ctrl+Enter submits from the details field. Cancel, Escape, the close button or the overlay keep the vote; a failed Submit keeps the dialog and its text open with an error. Clicking the chosen thumb again withdraws the vote. |
+| 2026-11-04 | Native voice mode is a full-screen call with a live aura | Supersedes the native voice sheet with its in-call voice and microphone pickers and two-caption “Show all” transcript; those choices move to Settings › Voice. The aura (`voice/VoiceAura.tsx`) is five soft `react-native-svg` radial-gradient discs in the theme's violet stops (light mode adds a white core), animated only through Reanimated transforms and opacity so the gradients never re-render. It breathes slowly (4.2s) at rest; Listening grows and brightens with the microphone level, Speaking with playback loudness, and Thinking (a queued or claimed task, or a finished utterance awaiting the reply) widens a slow 16s orbit. Levels come from Web Audio analysers in the hidden media WebView for both OpenAI and Grok (about 20 Hz, sent only on change) and ease on the UI thread with a 90ms attack and 320ms release, so the aura never jitters; the Speaking phase uses a 600ms quiet hold between words. Reduce Motion keeps a static glow whose opacity alone distinguishes phases. The call view is an opaque `overFullScreen` modal rather than `fullScreen`, because a fullScreen presentation detaches the screen hosting the media WebView, which would end the call. |
 | 2026-10-29 | User chat bubble shape and editable colors | Supersedes the bubble fill and corners in the 2026-07-22 chat-layout decision: user messages in individual and group chats share three 18px corners and a tighter 4px bottom-right corner (pt on native). On web, dedicated `chat-bubble` and `chat-bubble-foreground` colors are editable per theme in Settings → Display with a live preview and a 4.5:1 text contrast check. Native Display offers device-saved Gray, Lavender, and Graphite palettes, each with a light and a dark version and live previews of both; every version meets 4.5:1 for text, including author, recipient, date, and copy controls. Gray is the default: light `#E0E0E5` with `#18181B` text, dark `#2C2C30` with `#EFEFF1` text. Dark Lavender is `#3A2E5E` / `#EEE8FF` and dark Graphite `#4A4A52` / `#FFFFFF`. |
 
 ## Portaled overlay layers
@@ -602,13 +603,14 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   full-width text sits above a toolbar with Attach, optional mentions, dictation
   and a trailing Send/Stop circle inside a 44pt target. Attach offers Camera,
   Photos and Files through their native pickers. Dictation requires review before text is
-  inserted into the draft and never sends a message automatically. While it runs
-  it takes over the pill (the draft field collapses but stays mounted so a held
-  mic press still releases): a status line with a live dot and mono timer, the
-  transcript at 17/24pt with interim words in tertiary, then a 44pt Discard
-  circle, a microphone level meter (3pt bars, peak per 90ms) and one filled
-  Done pill, which becomes Insert in review. Idle errors stay a compact notice
-  above the field. Chat pages
+  inserted into the draft and never sends a message automatically. The first
+  tap opens a compact intro sheet once (what it does, microphone access,
+  language, Start); a long press starts directly. While it runs it fills the
+  screen: Discard, a “Speech to Text” title with a live dot, status and mono
+  timer, the transcript as the page at 30/40pt with interim words in tertiary,
+  a microphone level meter (3pt bars, peak per 90ms) and one filled Finish pill,
+  which becomes Insert in review. Idle errors stay a compact notice above the
+  field. Chat pages
   use an edge-to-edge transcript viewport within the system safe area, so its
   scroll indicator sits at the window edge. The centered transcript content
   retains 12pt horizontal padding and the configured column maximum; composers
@@ -624,6 +626,8 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
 - Native permissions controls contain Full access, Auto and Ask every time only,
   with the effective agent override shown read-only. Chat and agent settings use
   the server default without a native selector or per-turn override. Voice automatically uses an available server default, without a source selector. This is the user's deliberate native scope (2026-10-28).
+  Voice, conversation mode and completion notices are chosen in Settings › Voice;
+  the call screen has no pickers and only names the voice and mode (Hold to talk or Hands-free) before a call.
 - Native Automations is display-only: configured tasks, source/schedule, target,
   confirmation policy, read-only status and paged run history with exact thread
   links. It issues GET requests only. Creation, changes and execution belong to
@@ -668,7 +672,16 @@ Native support remains portrait iPhone on iOS and Android phone, with wide
 Android windows as a secondary layout. Eligible private chats expose a
 voice-conversation mode in the trailing composer button when the server enables
 `assistant:voice`: an empty composer shows the waveform, text or attachments
-show Send, and an active reply shows Stop. Dictation streams microphone audio to
+show Send, and an active reply shows Stop. Voice mode is a full-screen call: a
+top bar with a minimise chevron, the agent name and status (Connecting…,
+Listening, Thinking, Speaking, Muted) with a mono call timer; a live aura in the
+centre; the live transcript under it (the two newest utterances at 19/27pt,
+earlier ones smaller, interim words in tertiary, scrolling for more); a small
+collapsible tasks tray only while tasks exist; round 64pt Mute, Speaker and red
+End controls, plus a large 88pt hold-to-talk button in Hold to talk mode; and
+the price as a quiet footnote. Minimising keeps the call in a compact bar above
+the composer. The aura is decorative and hidden from VoiceOver (see the
+2026-11-04 decision). Dictation streams microphone audio to
 the server for review before insertion, matching the web’s private-chat scope.
 Crew chats retain the keyboard’s own dictation.
 

@@ -23,6 +23,8 @@ import {
 export type VoiceMediaEvent =
   | { type: "provider-ready" }
   | { type: "pcm"; bytes: ArrayBuffer }
+  /** Mic and playback loudness, 0..1, about 20 Hz while either changes. */
+  | { type: "level"; input: number; output: number }
   | { type: "error"; message: string };
 
 /** Ephemeral device media only; this adapter never receives account credentials. */
@@ -284,7 +286,11 @@ export class AssistantVoiceClient {
       this.fail(
         "Voice media stopped. Check microphone permission and start a new call.",
       );
-    } else if (this.protocol === "xai_realtime" && this.inputEnabled) {
+    } else if (
+      event.type === "pcm" &&
+      this.protocol === "xai_realtime" &&
+      this.inputEnabled
+    ) {
       const bytes = event.bytes;
       if (
         !bytes.byteLength ||

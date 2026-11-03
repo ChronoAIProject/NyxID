@@ -105,6 +105,7 @@ function setup(
     snapshot?: VoiceSnapshot;
     error?: string;
     recovery?: VoiceStartRecovery;
+    reducedMotion?: boolean;
   } = {},
 ) {
   const events: unknown[][] = [];
@@ -112,6 +113,12 @@ function setup(
   let online = true;
   let browserFails = false;
   const environment = { origin: "https://nyx.example", epoch: 7 };
+  const levels = {
+    input: { value: 0 },
+    output: { value: 0 },
+    speaking: false,
+    media: undefined as unknown,
+  };
   const voice = {
     media: { id: 1 },
     mediaAttempt: 1,
@@ -185,7 +192,7 @@ function setup(
       }),
     },
     "../../../lib/accessibility/useReducedMotion": {
-      useReducedMotion: () => false,
+      useReducedMotion: () => input.reducedMotion ?? false,
     },
     "react/jsx-runtime": {
       Fragment: "Fragment",
@@ -207,12 +214,15 @@ function setup(
           "Modal",
           "Pressable",
           "ScrollView",
-          "Switch",
           "Text",
           "View",
         ].map((name) => [name, name]),
       ),
       StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
+      useWindowDimensions: () => ({ width: 390, height: 844 }),
+    },
+    "react-native-safe-area-context": {
+      useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
     },
     "@react-navigation/native": { useIsFocused: () => focused },
     "expo-web-browser": {
@@ -228,14 +238,12 @@ function setup(
     "lucide-react-native": Object.fromEntries(
       [
         "ChevronDown",
-        "ChevronLeft",
+        "ChevronUp",
         "Mic",
         "MicOff",
-        "Minus",
         "PhoneOff",
         "Volume2",
         "VolumeX",
-        "X",
       ].map((name) => [name, name]),
     ),
     "../../../components/workspace/WorkspaceSheetSurface": {
@@ -260,6 +268,13 @@ function setup(
     },
     "../../../theme/designTokens": { fonts: {} },
     "./useNativeVoice": { useNativeVoice: () => voice },
+    "./useVoiceLevels": {
+      useVoiceLevels: (media: unknown) => {
+        levels.media = media;
+        return levels;
+      },
+    },
+    "./VoiceAura": { VoiceAura: "VoiceAura" },
     "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
   });
   const component = harness.load(
@@ -276,6 +291,7 @@ function setup(
     harness,
     events,
     voice,
+    levels,
     query,
     all,
     text: () =>
@@ -293,6 +309,7 @@ function setup(
           (row.type === "ActionButton" && row.props.label === label),
       ),
     modal: () => one((row) => row.type === "Modal").props,
+    aura: () => one((row) => row.type === "VoiceAura").props,
     media: () => one((row) => row.type === "VoiceMediaBridge"),
     setFocused: (value: boolean) => {
       focused = value;
@@ -419,13 +436,8 @@ test("Grok forces Hold to talk even when the saved microphone mode was automatic
     "push_to_talk",
   );
   assert.equal(f.events[0]?.[2], "xai_realtime");
-  f.button("Microphone: Hold to talk").props.onPress();
-  assert.equal(
-    f
-      .all()
-      .some((row) => row.props.accessibilityLabel?.startsWith("Automatic")),
-    false,
-  );
+  assert.match(f.text(), /Hold to talk/);
+  assert.doesNotMatch(f.text(), /Hands-free/);
   f.harness.unmount();
 });
 
@@ -544,18 +556,8 @@ test("a new call gets a fresh media engine while ordinary updates preserve its o
   f.harness.unmount();
 });
 
-test("native Back returns from a picker before dismissing the voice surface", () => {
+test("native Back ends voice and dismisses the full-screen surface", () => {
   const f = setup();
-  f.button("Voice: Cedar").props.onPress();
-  f.button("Back to voice call");
-  f.modal().onRequestClose();
-  assert.equal(
-    f
-      .all()
-      .some((row) => row.props.accessibilityLabel === "Back to voice call"),
-    false,
-  );
-  assert.deepEqual(f.events, []);
   f.modal().onRequestClose();
   assert.deepEqual(f.events, [["end"], ["close"]]);
   f.harness.unmount();
@@ -614,5 +616,162 @@ test("loss of connectivity ends local voice and disables starting until the app 
       ),
     true,
   );
+  f.harness.unmount();
+});
+
+test("the call fills the screen and the aura follows listening, speaking and thinking", () => {
+  const f = setup({ active: true });
+  const modal = f.modal();
+  assert.equal(modal.presentationStyle, "overFullScreen");
+  assert.equal(f.levels.media, f.voice.media);
+  assert.equal(f.aura().phase, "listening");
+  assert.equal(f.aura().input, f.levels.input);
+  assert.equal(f.aura().output, f.levels.output);
+  assert.equal(f.aura().reducedMotion, false);
+  assert.match(f.text(), /Listening/);
+  f.levels.speaking = true;
+  f.harness.render();
+  assert.equal(f.aura().phase, "speaking");
+  assert.match(f.text(), /Speaking/);
+  f.levels.speaking = false;
+  f.voice.snapshot = {
+    ...snapshot,
+    captions: [
+      {
+        id: "caption-1",
+        speaker: "user",
+        text: "Summarise my inbox",
+        sealed: true,
+        complete: true,
+      },
+    ],
+  };
+  f.harness.render();
+  assert.equal(f.aura().phase, "thinking");
+  assert.match(f.text(), /Thinking/);
+  f.harness.unmount();
+});
+
+test("Reduce Motion reaches the aura", () => {
+  const f = setup({ active: true, reducedMotion: true });
+  assert.equal(f.aura().reducedMotion, true);
+  f.harness.unmount();
+});
+
+test("round call controls mute the microphone and speaker and End closes the call", () => {
+  const f = setup({
+    active: true,
+    saved: { ...saved, input_mode: "push_to_talk" },
+  });
+  f.button("Mute microphone").props.onPress();
+  f.button("Mute speaker").props.onPress();
+  const hold = f.button("Hold to talk");
+  hold.props.onPressIn();
+  hold.props.onPressOut();
+  f.button("End voice and close").props.onPress();
+  assert.deepEqual(f.events, [
+    ["mute", true],
+    ["speaker", true],
+    ["hold", true],
+    ["hold", false],
+    ["end"],
+    ["close"],
+  ]);
+  f.harness.unmount();
+});
+
+test("automatic mode has no hold button and the call shows no in-call pickers", () => {
+  const f = setup({ active: true });
+  assert.equal(
+    f.all().some((row) => row.props.accessibilityLabel === "Hold to talk"),
+    false,
+  );
+  assert.equal(
+    f
+      .all()
+      .some((row) =>
+        /^(Voice|Microphone):/.test(row.props.accessibilityLabel ?? ""),
+      ),
+    false,
+  );
+  f.harness.unmount();
+});
+
+test("before a call the screen names the saved voice and mode, set in Settings", () => {
+  const f = setup();
+  assert.match(f.text(), /Cedar voice/);
+  assert.match(f.text(), /Hands-free/);
+  assert.match(f.text(), /Settings › Voice/);
+  assert.match(f.text(), /Ready to talk/);
+  assert.equal(f.aura().phase, "resting");
+  f.harness.unmount();
+});
+
+test("captions scroll as one live transcript without a Show all toggle", () => {
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      captions: ["one", "two", "three"].map((text, index) => ({
+        id: `caption-${index}`,
+        speaker: index % 2 ? ("assistant" as const) : ("user" as const),
+        text,
+        sealed: true,
+        complete: index < 2,
+      })),
+    },
+  });
+  const text = f.text();
+  assert.match(text, /one/);
+  assert.match(text, /two/);
+  assert.match(text, /three/);
+  assert.doesNotMatch(text, /Show all|Show latest/);
+  f.harness.unmount();
+});
+
+test("the tasks tray shows the task that needs you and expands to all tasks", () => {
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      tasks: [
+        {
+          id: serviceId,
+          turn_id: "turn-1",
+          state: "claimed",
+          pending_acknowledgement_ids: [],
+          title: "Read messages",
+        },
+        {
+          id: sessionId,
+          turn_id: "turn-2",
+          state: "awaiting_confirmation",
+          pending_acknowledgement_ids: ["ack-2"],
+          title: "Send reply",
+        },
+      ],
+    },
+  });
+  assert.match(f.text(), /Agent tasks · 2/);
+  assert.equal(
+    f.all().some((row) => row.props.label === "Stop task"),
+    false,
+  );
+  assert.ok(f.button("Review in chat"));
+  f.button("Show all agent tasks").props.onPress();
+  f.harness.render();
+  f.button("Stop task").props.onPress();
+  assert.ok(f.button("View in chat"));
+  assert.equal(
+    f.button("Hide agent tasks").props.accessibilityState.expanded,
+    true,
+  );
+  assert.deepEqual(f.events, [["stopTask", serviceId]]);
+  f.harness.unmount();
+});
+
+test("a call without tasks shows no tasks tray", () => {
+  const f = setup({ active: true });
+  assert.doesNotMatch(f.text(), /Agent tasks/);
   f.harness.unmount();
 });
