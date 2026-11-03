@@ -31,6 +31,24 @@ describe("WizardShell", () => {
     expect(body.closest("main")).not.toBeNull()
   })
 
+  it("narrows to the connector column only for single-form steps", () => {
+    const { rerender } = render(
+      <WizardShell context="local">
+        <div data-testid="step-body">body</div>
+      </WizardShell>,
+    )
+    const column = () => screen.getByTestId("step-body").closest("main")?.parentElement
+    expect(column()).toHaveClass("max-w-[1040px]")
+
+    rerender(
+      <WizardShell context="local" narrow>
+        <div data-testid="step-body">body</div>
+      </WizardShell>,
+    )
+    expect(column()).toHaveClass("max-w-[640px]")
+    expect(column()).not.toHaveClass("max-w-[1040px]")
+  })
+
   it("renders the formatted step indicator in the header when a step is given", () => {
     render(
       <WizardShell context="local" step={sampleStep}>
@@ -75,7 +93,13 @@ describe("WizardShell", () => {
     expect(column).not.toHaveClass("min-h-screen")
     // Still capped, so content taller than the window scrolls in-card.
     expect(column).toHaveClass("max-h-screen")
-    expect(main).toHaveClass("overflow-y-auto")
+    // The inner region scrolls (and fades) so the card border stays crisp.
+    // It must be `relative`: absolutely positioned `sr-only` labels would
+    // otherwise resolve against the page and make it scroll too.
+    const region = screen.getByTestId("step-body").parentElement
+    expect(region).toHaveAttribute("data-scroll-fade")
+    expect(region).toHaveClass("overflow-y-auto", "relative")
+    expect(main).not.toHaveClass("overflow-y-auto")
   })
 
   it("passes context through to the footer (local trust copy)", () => {
