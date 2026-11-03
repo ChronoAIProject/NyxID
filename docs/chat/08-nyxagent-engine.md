@@ -2017,7 +2017,14 @@ feedback, including comments.
 to the last seven days, and rejects non-positive windows or windows longer than
 31 days. The upper bound is exclusive. The response includes the effective
 window, `generated_at`, `active_sessions`, `active_accounts`, `running_now`,
-`outcomes`, `daily_sessions`, and `daily_turns`. MongoDB reads have a ten-second
+`outcomes`, `daily_sessions`, `daily_turns`, and additive `real_work`. The optional
+`threshold` query parameter (1–1000, default 3) controls weekly merchant counts.
+Real work requires a completed turn/run and an observed 2xx through that owner’s
+own business connection, credential or node; model and platform traffic does not
+qualify. Weeks start Monday in Asia/Singapore, clipped to the selected range.
+Owner/internal breakdowns and the activation funnel are specified in
+[Weekly NyxBot real work](../BILLING_ANALYTICS.md#weekly-nyxbot-real-work).
+MongoDB reads have a ten-second
 execution limit and project only metadata, never transcript text.
 
 - Active sessions are distinct durable conversations with persisted `role=user`

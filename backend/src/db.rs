@@ -144,6 +144,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // Poll index groups and migrations sequentially without retaining the
     // large index-construction frame while a migration calls into MongoDB.
     Box::pin(ensure_core_indexes(db)).await?;
+    crate::services::admin_assistant_analytics::real_work::ensure_indexes(db).await?;
     db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
         .create_index(
             mongodb::IndexModel::builder()

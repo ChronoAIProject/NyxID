@@ -951,6 +951,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,
@@ -984,6 +985,7 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub business_system_success: bool,
     /// Explicitly bound collaboration thread; never a private memory/account lane.
     pub collaboration_thread: bool,
     pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
@@ -1512,6 +1514,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        business_system_success: live.is_some_and(|turn| turn.business_system_success),
         collaboration_thread: conversation.collaboration.is_some(),
         channel_adapter_origin: conversation
             .active_turn
@@ -2970,6 +2973,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        business_system_success: false,
         collaboration_thread: target.collaboration.is_some(),
         channel_adapter_origin: None,
         invocation_controlled: false,

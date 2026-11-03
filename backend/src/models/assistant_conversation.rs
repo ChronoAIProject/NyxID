@@ -321,6 +321,8 @@ pub struct StreamReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default)]
+    pub business_system_success: bool,
+    #[serde(default)]
     pub timing: super::assistant_message::TurnTiming,
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,

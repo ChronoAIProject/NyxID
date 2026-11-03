@@ -1,3 +1,5 @@
+import { NyxbotRealWork } from "./nyxbot-real-work";
+import { Input as ThresholdInput } from "@/components/ui/input";
 import { NyxbotModelUsage } from "./nyxbot-model-usage";
 import { useId, useState } from "react";
 import {
@@ -95,12 +97,13 @@ function Legend({ feedback = false }: { feedback?: boolean }) {
 }
 
 export function NyxbotUsage() {
+  const [threshold, setThreshold] = useState(3);
   const chartId = useId().replace(/:/g, "");
   const [dates, setDates] = useState(() => nyxbotDateRange(7));
   const window = nyxbotWindow(dates.from, dates.to);
   const from = window?.from ?? "";
   const to = window?.to ?? "";
-  const analytics = useAssistantAnalytics(from, to, Boolean(window));
+  const analytics = useAssistantAnalytics(from, to, Boolean(window), threshold);
   // Feedback uses an inclusive upper bound; analytics uses an exclusive one.
   const feedbackParams = new URLSearchParams(
     window ? { from, to: new Date(Date.parse(to) - 1).toISOString() } : {},
@@ -182,6 +185,36 @@ export function NyxbotUsage() {
         </p>
       ) : (
         <>
+          <div className="flex items-center gap-3 text-12">
+            <label className="flex items-center gap-2">
+              Weekly work threshold
+              <ThresholdInput
+                aria-label="Weekly work threshold"
+                type="number"
+                min={1}
+                max={1000}
+                className="w-20"
+                value={threshold}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  if (Number.isInteger(value) && value >= 1 && value <= 1000)
+                    setThreshold(value);
+                }}
+              />
+            </label>
+          </div>
+          {data?.real_work && <NyxbotRealWork data={data.real_work} />}
+          {data?.real_work_unavailable && (
+            <Card className="space-y-3 p-4">
+              <h3 className="font-display text-15 font-semibold">
+                Weekly real work
+              </h3>
+              <ErrorBanner
+                message="Weekly real work is unavailable."
+                onRetry={() => void analytics.refetch()}
+              />
+            </Card>
+          )}
           <NyxbotModelUsage from={from} to={to} />
           <div
             className="flex flex-wrap items-center gap-2 text-11 text-text-tertiary"
