@@ -154,6 +154,8 @@ pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
 pub mod nyxbot_channel;
+pub mod nyxbot_cma_agent;
+pub mod nyxbot_cma_sandbox;
 pub mod nyxbot_event_binding;
 pub mod nyxbot_gateway_response;
 pub mod nyxbot_image_delivery;

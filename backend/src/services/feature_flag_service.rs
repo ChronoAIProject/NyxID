@@ -187,6 +187,14 @@ const ASSISTANT_WORKSPACE_PREVIEW_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+/// Gates the owner-managed CMA Sandbox and Agent execution surfaces.
+pub const ASSISTANT_CMA_SANDBOXES_FLAG_KEY: &str = "assistant:cma-sandboxes";
+const ASSISTANT_CMA_SANDBOXES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+    description: "Enables owner-scoped CMA Sandbox management and Agent execution views after all replicas support the durable reference contract.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
@@ -374,6 +382,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
+    ASSISTANT_CMA_SANDBOXES_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
@@ -421,6 +430,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
+    ASSISTANT_CMA_SANDBOXES_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
@@ -2959,6 +2969,7 @@ mod tests {
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
                 "assistant:workspace-preview",
+                "assistant:cma-sandboxes",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
                 "nyxbot:relay-response-recovery",
@@ -3008,6 +3019,12 @@ mod tests {
                 .expect("model controls flag is registered")
                 .default_enabled,
             "advanced model controls must default to off"
+        );
+        assert!(
+            !find_flag(ASSISTANT_CMA_SANDBOXES_FLAG_KEY)
+                .expect("CMA Sandbox flag is registered")
+                .default_enabled,
+            "CMA Sandbox surfaces must default to off"
         );
         assert_eq!(
             AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
