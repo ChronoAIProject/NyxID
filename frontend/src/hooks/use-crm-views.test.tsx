@@ -3,8 +3,10 @@ import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  useCreateCrmView,
   useCrmView,
   useCrmViews,
+  useDeleteCrmView,
   useUpdateCrmView,
   useValidateCrmView,
 } from "@/hooks/use-crm-views";
@@ -113,16 +115,58 @@ describe("CRM saved-view hooks", () => {
       title: "Pipeline review",
       envelope,
       expectedRevision: 3,
+      idempotencyKey: "update-view-action",
     });
     expect(mockAssistantJson).toHaveBeenCalledWith(
       "/assistant/crm/views/view-1",
       {
         method: "PUT",
+        headers: { "Idempotency-Key": "update-view-action" },
         body: {
           title: "Pipeline review",
           envelope,
           expected_revision: 3,
         },
+      },
+    );
+  });
+
+  it("sends one Idempotency-Key for create and delete actions", async () => {
+    mockAssistantJson
+      .mockResolvedValueOnce(savedView)
+      .mockResolvedValueOnce(undefined);
+    const created = renderHook(() => useCreateCrmView(), {
+      wrapper: wrapper(),
+    });
+    await created.result.current.mutateAsync({
+      title: "Pipeline",
+      envelope,
+      idempotencyKey: "create-view-action",
+    });
+    expect(mockAssistantJson).toHaveBeenNthCalledWith(
+      1,
+      "/assistant/crm/views",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "create-view-action" },
+        body: { title: "Pipeline", envelope },
+      },
+    );
+
+    const deleted = renderHook(() => useDeleteCrmView(), {
+      wrapper: wrapper(),
+    });
+    await deleted.result.current.mutateAsync({
+      id: "view-1",
+      idempotencyKey: "delete-view-action",
+    });
+    expect(mockAssistantJson).toHaveBeenNthCalledWith(
+      2,
+      "/assistant/crm/views/view-1",
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": "delete-view-action" },
+        body: {},
       },
     );
   });

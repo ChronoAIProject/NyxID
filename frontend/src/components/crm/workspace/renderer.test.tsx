@@ -1,17 +1,28 @@
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CrmViewRenderer } from "@/components/crm/workspace/renderer";
 import type { CrmViewEnvelope } from "@/lib/crm/views/schema";
 
-const { mockAggregate, mockTable } = vi.hoisted(() => ({
+const { mockAggregate, mockTable, mockObject, mockRecordForm } = vi.hoisted(() => ({
   mockAggregate: vi.fn(),
   mockTable: vi.fn(),
+  mockObject: vi.fn(),
+  mockRecordForm: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-crm", () => ({
+  crmQueryKeys: { root: (owner: string | undefined) => ["crm", owner] },
   useCrmAggregate: mockAggregate,
   useCrmTableQuery: mockTable,
-  useCrmObject: vi.fn(),
+  useCrmObject: mockObject,
+}));
+
+vi.mock("@/components/crm/record-form", () => ({
+  CrmRecordForm: (props: { readonly title: string }) => {
+    mockRecordForm(props);
+    return <div>{props.title}</div>;
+  },
 }));
 
 const exampleEnvelope: CrmViewEnvelope = {
@@ -77,9 +88,17 @@ beforeEach(() => {
     isPending: false,
     isError: false,
     data: {
-      points: [{ key: "qualified", label: "Qualified", value: 125_000 }],
+      points: [
+        {
+          key: "qualified",
+          label: "Qualified",
+          value: 125_000,
+          archived: false,
+        },
+      ],
       unit: { format: "currency", currency: "USD" },
       total: 125_000,
+      truncated: false,
     },
   });
   mockTable.mockReturnValue({
@@ -153,6 +172,15 @@ beforeEach(() => {
       total_count: 1,
     },
   });
+  mockObject.mockReturnValue({
+    isPending: false,
+    isError: false,
+    data: {
+      key: "company",
+      access: "work",
+      fields: [{ key: "name", archived: false, required: true }],
+    },
+  });
 });
 
 describe("CrmViewRenderer", () => {
@@ -195,5 +223,104 @@ describe("CrmViewRenderer", () => {
       "Unknown query 'retiredPipeline'",
     );
     expect(screen.queryByText("Sales workspace")).not.toBeInTheDocument();
+  });
+
+  it("notes a truncated aggregate with an Other remainder", () => {
+    mockAggregate.mockReturnValue({
+      isPending: false,
+      isError: false,
+      data: {
+        points: [
+          {
+            key: "__other__",
+            label: "Other",
+            value: 25_000,
+            archived: false,
+          },
+        ],
+        unit: { format: "currency", currency: "USD" },
+        total: 25_000,
+        truncated: true,
+      },
+    });
+
+    render(<CrmViewRenderer envelope={exampleEnvelope} />);
+
+    expect(
+      screen.getByText("Additional groups are combined into Other."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders RecordForm for work access and invalidates CRM queries on create", async () => {
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const recordFormEnvelope: CrmViewEnvelope = {
+      formatVersion: 1,
+      renderer: "json-render",
+      rendererSpecVersion: "nyxid-crm-v1",
+      queries: {},
+      spec: {
+        root: "form",
+        elements: {
+          form: {
+            type: "RecordForm",
+            props: {
+              object: "company",
+              fields: ["name"],
+              title: "Add company",
+              submitLabel: "Add",
+            },
+            children: [],
+          },
+        },
+      },
+    };
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CrmViewRenderer envelope={recordFormEnvelope} ownerId="owner-1" />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText("Add company")).toBeInTheDocument();
+    const props = mockRecordForm.mock.calls[0]?.[0] as {
+      readonly onCreated: () => void;
+    };
+    props.onCreated();
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["crm", "owner-1"],
+    });
+  });
+
+  it("hides RecordForm for read access", () => {
+    mockObject.mockReturnValue({
+      isPending: false,
+      isError: false,
+      data: {
+        key: "company",
+        access: "read",
+        fields: [{ key: "name", archived: false, required: true }],
+      },
+    });
+    const recordFormEnvelope: CrmViewEnvelope = {
+      formatVersion: 1,
+      renderer: "json-render",
+      rendererSpecVersion: "nyxid-crm-v1",
+      queries: {},
+      spec: {
+        root: "form",
+        elements: {
+          form: {
+            type: "RecordForm",
+            props: { object: "company", title: "Add company" },
+            children: [],
+          },
+        },
+      },
+    };
+
+    render(<CrmViewRenderer envelope={recordFormEnvelope} />);
+
+    expect(screen.queryByText("Add company")).not.toBeInTheDocument();
+    expect(mockRecordForm).not.toHaveBeenCalled();
   });
 });

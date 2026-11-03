@@ -9,13 +9,35 @@ describe("aggregateResultToChartPoints", () => {
     expect(
       aggregateResultToChartPoints({
         points: [
-          { key: "qualified", label: "Qualified", value: 125_000 },
-          { key: null, label: "None", value: 500 },
+          {
+            key: "qualified",
+            label: "Qualified",
+            value: 125_000,
+            archived: true,
+          },
+          { key: null, label: "None", value: 500, archived: false },
+          {
+            key: "__other__",
+            label: "Other",
+            value: 250,
+            archived: false,
+          },
         ],
       }),
     ).toEqual([
-      { key: "qualified", label: "Qualified", value: 125_000 },
-      { key: "__none__", label: "None", value: 500 },
+      {
+        key: "qualified",
+        label: "Qualified (archived)",
+        value: 125_000,
+        archived: true,
+      },
+      { key: "__none__", label: "None", value: 500, archived: false },
+      {
+        key: "__other__",
+        label: "Other",
+        value: 250,
+        archived: false,
+      },
     ]);
   });
 });

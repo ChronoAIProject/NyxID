@@ -10,6 +10,7 @@ import {
   useCrmViews,
   type CrmSavedView,
 } from "@/hooks/use-crm-views";
+import { useCrmObjects } from "@/hooks/use-crm";
 
 export interface CrmViewsPanelProps {
   readonly ownerId?: string;
@@ -18,8 +19,11 @@ export interface CrmViewsPanelProps {
 export function CrmViewsPanel({ ownerId }: CrmViewsPanelProps) {
   const [selectedId, setSelectedId] = useState<string>();
   const [editorMode, setEditorMode] = useState<"create" | "edit">();
+  const objects = useCrmObjects(ownerId);
   const views = useCrmViews(ownerId);
   const selected = useCrmView(selectedId, ownerId);
+  const access = objects.data?.[0]?.access;
+  const canWork = access === "work" || access === "schema";
 
   async function reloadSelected() {
     await selected.refetch();
@@ -53,13 +57,15 @@ export function CrmViewsPanel({ ownerId }: CrmViewsPanelProps) {
           >
             <RefreshCw className={views.isFetching ? "animate-spin" : undefined} />
           </Button>
-          <Button
-            type="button"
-            onClick={() => setEditorMode("create")}
-          >
-            <Plus />
-            New view
-          </Button>
+          {canWork ? (
+            <Button
+              type="button"
+              onClick={() => setEditorMode("create")}
+            >
+              <Plus />
+              New view
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -88,19 +94,21 @@ export function CrmViewsPanel({ ownerId }: CrmViewsPanelProps) {
           </aside>
 
           <div className="min-w-0">
-            {editorMode === "create" ? (
+            {editorMode === "create" && canWork ? (
               <CrmViewEditor
                 ownerId={ownerId}
+                objects={objects.data}
                 onSaved={handleSaved}
                 onCancel={() => setEditorMode(undefined)}
               />
             ) : null}
 
-            {editorMode === "edit" && selected.data ? (
+            {editorMode === "edit" && canWork && selected.data ? (
               <CrmViewEditor
                 key={`${selected.data.id}:${String(selected.data.revision)}`}
                 view={selected.data}
                 ownerId={ownerId}
+                objects={objects.data}
                 onSaved={handleSaved}
                 onCancel={() => setEditorMode(undefined)}
                 onReload={() => void reloadSelected()}
@@ -140,14 +148,16 @@ export function CrmViewsPanel({ ownerId }: CrmViewsPanelProps) {
                       Revision {selected.data.revision.toLocaleString()}
                     </p>
                   </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setEditorMode("edit")}
-                  >
-                    <Edit3 />
-                    Edit
-                  </Button>
+                  {canWork ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setEditorMode("edit")}
+                    >
+                      <Edit3 />
+                      Edit
+                    </Button>
+                  ) : null}
                 </div>
                 <CrmViewRenderer
                   envelope={selected.data.envelope}

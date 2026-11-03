@@ -27,35 +27,35 @@ export function CrmViewList({
       {views.map((view) => {
         const selected = view.id === selectedId;
         return (
-          <button
-            key={view.id}
-            type="button"
-            role="listitem"
-            aria-current={selected ? "true" : undefined}
-            onClick={() => onSelect(view.id)}
-            className={cn(
-              "flex w-full items-start gap-2 rounded-lg border px-3 py-2.5 text-left transition-colors",
-              selected
-                ? "border-hairline-strong bg-overlay-strong"
-                : "border-transparent hover:border-hairline hover:bg-overlay",
-            )}
-          >
-            <LayoutDashboard className="mt-0.5 size-3.5 shrink-0 text-text-tertiary" />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-12 font-medium text-foreground">
-                {view.title}
+          <div key={view.id} role="listitem">
+            <button
+              type="button"
+              aria-current={selected ? "true" : undefined}
+              onClick={() => onSelect(view.id)}
+              className={cn(
+                "flex w-full items-start gap-2 rounded-lg border px-3 py-2.5 text-left transition-colors",
+                selected
+                  ? "border-hairline-strong bg-overlay-strong"
+                  : "border-transparent hover:border-hairline hover:bg-overlay",
+              )}
+            >
+              <LayoutDashboard className="mt-0.5 size-3.5 shrink-0 text-text-tertiary" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-12 font-medium text-foreground">
+                  {view.title}
+                </span>
+                <span className="mt-0.5 block text-10 text-text-tertiary">
+                  Revision {view.revision.toLocaleString()}
+                </span>
               </span>
-              <span className="mt-0.5 block text-10 text-text-tertiary">
-                Revision {view.revision.toLocaleString()}
-              </span>
-            </span>
-            {!view.valid ? (
-              <AlertTriangle
-                aria-label="View needs attention"
-                className="mt-0.5 size-3.5 shrink-0 text-warning"
-              />
-            ) : null}
-          </button>
+              {!view.valid ? (
+                <AlertTriangle
+                  aria-label="View needs attention"
+                  className="mt-0.5 size-3.5 shrink-0 text-warning"
+                />
+              ) : null}
+            </button>
+          </div>
         );
       })}
     </div>

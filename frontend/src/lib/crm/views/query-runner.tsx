@@ -1,11 +1,13 @@
 /* eslint-disable react-refresh/only-export-components -- the provider and its typed query hooks form one runtime boundary. */
 import { createContext, useContext, type ReactNode } from "react";
-import { useCrmAggregate } from "@/hooks/use-crm";
+import { useQueryClient } from "@tanstack/react-query";
+import { crmQueryKeys, useCrmAggregate } from "@/hooks/use-crm";
 import type {
   CrmNamedAggregateQuery,
   CrmNamedQuery,
   CrmNamedTableQuery,
 } from "@/lib/crm/views/schema";
+import { useAuthStore } from "@/stores/auth-store";
 
 interface CrmViewQueryContextValue {
   readonly ownerId?: string;
@@ -61,4 +63,17 @@ export function useCrmNamedAggregateQuery(queryId: string) {
     Boolean(namedQuery),
   );
   return { namedQuery, result };
+}
+
+export function useInvalidateCrmViewQueries() {
+  const context = useCrmViewQueryContext();
+  const actor = useAuthStore((state) => state.user?.id);
+  const owner = context.ownerId ?? actor;
+  const queryClient = useQueryClient();
+  return () =>
+    queryClient.invalidateQueries({ queryKey: crmQueryKeys.root(owner) });
+}
+
+export function useCrmViewOwnerId() {
+  return useCrmViewQueryContext().ownerId;
 }

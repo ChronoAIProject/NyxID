@@ -13,6 +13,14 @@ export type CrmViewValidationResult =
   | { readonly success: true; readonly data: CrmViewEnvelope }
   | { readonly success: false; readonly errors: readonly CrmValidationError[] };
 
+export interface CrmViewObjectMetadata {
+  readonly key: string;
+  readonly fields: readonly {
+    readonly key: string;
+    readonly archived: boolean;
+  }[];
+}
+
 function pathToString(path: PropertyKey[]): string {
   return path.map(String).join(".");
 }
@@ -127,8 +135,50 @@ function validateQueryBinding(
   }
 }
 
+function validateLiveFields(
+  envelope: CrmViewEnvelope,
+  elementId: string,
+  componentType: keyof typeof crmViewComponentCatalog,
+  props: Record<string, unknown>,
+  objects: readonly CrmViewObjectMetadata[] | undefined,
+  errors: CrmValidationError[],
+) {
+  if (!objects) return;
+  let objectKey: string | undefined;
+  let fieldProperty: "columns" | "fields" | undefined;
+  if (componentType === "ObjectTable") {
+    const queryId = props.queryId;
+    const query =
+      typeof queryId === "string" ? envelope.queries[queryId] : undefined;
+    if (query?.kind === "table") objectKey = query.query.object;
+    fieldProperty = "columns";
+  } else if (componentType === "RecordForm") {
+    if (typeof props.object === "string") objectKey = props.object;
+    fieldProperty = "fields";
+  }
+  if (!objectKey || !fieldProperty) return;
+  const selectedFields = props[fieldProperty];
+  if (!Array.isArray(selectedFields)) return;
+  const object = objects.find((candidate) => candidate.key === objectKey);
+  if (!object) return;
+  const liveFields = new Set(
+    object.fields
+      .filter((field) => !field.archived)
+      .map((field) => field.key),
+  );
+  selectedFields.forEach((field, index) => {
+    if (typeof field === "string" && !liveFields.has(field)) {
+      errors.push({
+        path: `spec.elements.${elementId}.props.${fieldProperty}.${String(index)}`,
+        message: `Must reference a live field on '${objectKey}'`,
+      });
+    }
+  });
+}
+
 export function validateCrmViewEnvelope(
   input: unknown,
+  objects?: readonly CrmViewObjectMetadata[],
 ): CrmViewValidationResult {
   const parsed = crmViewEnvelopeBaseSchema.safeParse(input);
   if (!parsed.success) {
@@ -160,6 +210,14 @@ export function validateCrmViewEnvelope(
         elementId,
         element.type,
         props.data,
+        errors,
+      );
+      validateLiveFields(
+        parsed.data,
+        elementId,
+        element.type,
+        props.data,
+        objects,
         errors,
       );
     }

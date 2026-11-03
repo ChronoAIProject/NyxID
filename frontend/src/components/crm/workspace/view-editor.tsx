@@ -19,6 +19,7 @@ import {
   type CrmViewEnvelope,
 } from "@/lib/crm/views/schema";
 import { validateCrmViewEnvelope } from "@/lib/crm/views/validation";
+import type { CrmViewObjectMetadata } from "@/lib/crm/views/validation";
 
 const validationDetailsSchema = z.object({
   errors: z.array(crmValidationErrorSchema),
@@ -64,12 +65,14 @@ export function CrmViewEditor({
   onSaved,
   onCancel,
   onReload,
+  objects,
 }: {
   readonly view?: CrmSavedView;
   readonly ownerId?: string;
   readonly onSaved: (view: CrmSavedView) => void;
   readonly onCancel: () => void;
   readonly onReload?: () => void;
+  readonly objects?: readonly CrmViewObjectMetadata[];
 }) {
   const initialTitle = view?.title ?? "";
   const initialJson = useMemo(
@@ -108,7 +111,7 @@ export function CrmViewEditor({
       return undefined;
     }
 
-    const parsed = validateCrmViewEnvelope(value);
+    const parsed = validateCrmViewEnvelope(value, objects);
     if (!parsed.success) {
       setErrors(parsed.errors);
       return undefined;
@@ -134,6 +137,7 @@ export function CrmViewEditor({
   }
 
   async function handleSave() {
+    const idempotencyKey = crypto.randomUUID();
     const envelope = await validateDraft();
     if (!envelope) return;
     try {
@@ -143,14 +147,20 @@ export function CrmViewEditor({
             title: title.trim(),
             envelope,
             expectedRevision: view.revision,
+            idempotencyKey,
           })
         : await createView.mutateAsync({
             title: title.trim(),
             envelope,
+            idempotencyKey,
           });
       onSaved(saved);
     } catch (cause) {
-      if (cause instanceof ApiError && cause.status === 409) {
+      if (
+        cause instanceof ApiError &&
+        cause.status === 409 &&
+        cause.errorResponse.error === "crm_revision_conflict"
+      ) {
         setConflict(true);
         return;
       }

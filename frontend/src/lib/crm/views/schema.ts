@@ -4,6 +4,13 @@ export const CRM_VIEW_FORMAT_VERSION = 1 as const;
 export const CRM_VIEW_RENDERER = "json-render" as const;
 export const CRM_VIEW_RENDERER_SPEC_VERSION = "nyxid-crm-v1" as const;
 
+export const crmViewIdentifierSchema = z
+  .string()
+  .regex(
+    /^[A-Za-z][A-Za-z0-9_-]{0,63}$/,
+    "Must start with a letter and contain at most 64 letters, numbers, underscores, or hyphens",
+  );
+
 export const crmFieldKeySchema = z
   .string()
   .regex(/^[a-z][a-z0-9_]{0,47}$/, "Must be a valid CRM field key");
@@ -91,14 +98,14 @@ export const crmViewElementSchema = z
   .object({
     type: z.string().min(1),
     props: z.record(z.string(), z.unknown()),
-    children: z.array(z.string()),
+    children: z.array(crmViewIdentifierSchema),
   })
   .strict();
 
 export const crmViewSpecSchema = z
   .object({
-    root: z.string().min(1),
-    elements: z.record(z.string(), crmViewElementSchema),
+    root: crmViewIdentifierSchema,
+    elements: z.record(crmViewIdentifierSchema, crmViewElementSchema),
   })
   .strict();
 
@@ -107,7 +114,7 @@ export const crmViewEnvelopeBaseSchema = z
     formatVersion: z.literal(CRM_VIEW_FORMAT_VERSION),
     renderer: z.literal(CRM_VIEW_RENDERER),
     rendererSpecVersion: z.literal(CRM_VIEW_RENDERER_SPEC_VERSION),
-    queries: z.record(z.string(), crmNamedQuerySchema),
+    queries: z.record(crmViewIdentifierSchema, crmNamedQuerySchema),
     spec: crmViewSpecSchema,
   })
   .strict()
@@ -144,6 +151,7 @@ export const crmAggregatePointSchema = z
     key: z.string().nullable(),
     label: z.string(),
     value: z.number().finite(),
+    archived: z.boolean(),
   })
   .strict();
 
@@ -157,6 +165,7 @@ export const crmAggregateResultSchema = z
       })
       .strict(),
     total: z.number().finite(),
+    truncated: z.boolean(),
   })
   .strict();
 

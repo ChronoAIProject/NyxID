@@ -67,6 +67,14 @@ function ownerBody<T extends object>(
   return owner && owner !== actor ? { ...body, owner_id: owner } : body;
 }
 
+function mutationHeaders(idempotencyKey?: string) {
+  const key = idempotencyKey ?? crypto.randomUUID();
+  if (!/^[\x20-\x7e]{1,128}$/.test(key)) {
+    throw new Error("Idempotency-Key must be 1-128 visible ASCII characters.");
+  }
+  return { "Idempotency-Key": key };
+}
+
 function useCrmViewMutationContext(ownerId?: string) {
   const { actor, owner } = useCrmViewOwner(ownerId);
   const queryClient = useQueryClient();
@@ -95,6 +103,7 @@ export function useCrmViews(ownerId?: string) {
       ).views,
     enabled: Boolean(actor && owner),
     retry: false,
+    refetchInterval: 30_000,
   });
 }
 
@@ -113,6 +122,7 @@ export function useCrmView(
       ),
     enabled: Boolean(actor && owner && viewId),
     retry: false,
+    refetchInterval: 30_000,
   });
 }
 
@@ -137,13 +147,16 @@ export function useCreateCrmView(ownerId?: string) {
     mutationFn: async ({
       title,
       envelope,
+      idempotencyKey,
     }: {
       readonly title: string;
       readonly envelope: CrmViewEnvelope;
+      readonly idempotencyKey?: string;
     }) =>
       crmSavedViewSchema.parse(
         await assistantJson(CRM_VIEWS_PATH, {
           method: "POST",
+          headers: mutationHeaders(idempotencyKey),
           body: ownerBody(
             { title, envelope },
             context.owner,
@@ -163,17 +176,20 @@ export function useUpdateCrmView(ownerId?: string) {
       title,
       envelope,
       expectedRevision,
+      idempotencyKey,
     }: {
       readonly id: string;
       readonly title: string;
       readonly envelope: CrmViewEnvelope;
       readonly expectedRevision: number;
+      readonly idempotencyKey?: string;
     }) =>
       crmSavedViewSchema.parse(
         await assistantJson(
           `${CRM_VIEWS_PATH}/${encodeURIComponent(id)}`,
           {
             method: "PUT",
+            headers: mutationHeaders(idempotencyKey),
             body: ownerBody(
               {
                 title,
@@ -193,9 +209,16 @@ export function useUpdateCrmView(ownerId?: string) {
 export function useDeleteCrmView(ownerId?: string) {
   const context = useCrmViewMutationContext(ownerId);
   return useMutation({
-    mutationFn: async (id: string) => {
+    mutationFn: async ({
+      id,
+      idempotencyKey,
+    }: {
+      readonly id: string;
+      readonly idempotencyKey?: string;
+    }) => {
       await assistantJson(`${CRM_VIEWS_PATH}/${encodeURIComponent(id)}`, {
         method: "DELETE",
+        headers: mutationHeaders(idempotencyKey),
         body: ownerBody({}, context.owner, context.actor),
       });
       return id;

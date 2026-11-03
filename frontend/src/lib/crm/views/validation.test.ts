@@ -75,4 +75,100 @@ describe("validateCrmViewEnvelope", () => {
       });
     }
   });
+
+  it("rejects invalid element and query ids at their key paths", () => {
+    const result = validateCrmViewEnvelope({
+      formatVersion: 1,
+      renderer: "json-render",
+      rendererSpecVersion: "nyxid-crm-v1",
+      queries: {
+        "1bad": {
+          kind: "table",
+          query: { object: "company", filters: [] },
+        },
+      },
+      spec: {
+        root: "1root",
+        elements: {
+          "1root": { type: "Text", props: { content: "Hi", variant: "body" }, children: [] },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.errors.map((error) => error.path)).toEqual(
+        expect.arrayContaining([
+          "queries.1bad",
+          "spec.root",
+          "spec.elements.1root",
+        ]),
+      );
+    }
+  });
+
+  it("rejects archived or missing fields selected by data components", () => {
+    const result = validateCrmViewEnvelope(
+      {
+        formatVersion: 1,
+        renderer: "json-render",
+        rendererSpecVersion: "nyxid-crm-v1",
+        queries: {
+          companies: {
+            kind: "table",
+            query: { object: "company", filters: [] },
+          },
+        },
+        spec: {
+          root: "main",
+          elements: {
+            main: {
+              type: "Stack",
+              props: { gap: "md" },
+              children: ["table", "form"],
+            },
+            table: {
+              type: "ObjectTable",
+              props: { queryId: "companies", columns: ["retired"] },
+              children: [],
+            },
+            form: {
+              type: "RecordForm",
+              props: {
+                object: "company",
+                fields: ["missing"],
+                title: "Add company",
+              },
+              children: [],
+            },
+          },
+        },
+      },
+      [
+        {
+          key: "company",
+          fields: [
+            { key: "name", archived: false },
+            { key: "retired", archived: true },
+          ],
+        },
+      ],
+    );
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.errors).toEqual(
+        expect.arrayContaining([
+          {
+            path: "spec.elements.table.props.columns.0",
+            message: "Must reference a live field on 'company'",
+          },
+          {
+            path: "spec.elements.form.props.fields.0",
+            message: "Must reference a live field on 'company'",
+          },
+        ]),
+      );
+    }
+  });
 });

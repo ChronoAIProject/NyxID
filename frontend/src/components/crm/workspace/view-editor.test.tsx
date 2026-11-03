@@ -123,6 +123,7 @@ describe("CrmViewEditor", () => {
         title: "Pipeline review",
         envelope,
         expectedRevision: 7,
+        idempotencyKey: expect.any(String),
       }),
     );
     expect(onSaved).toHaveBeenCalledWith({

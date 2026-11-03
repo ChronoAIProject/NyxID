@@ -14,6 +14,7 @@ import {
 import type { BaseComponentProps } from "@json-render/react";
 import { CrmObjectTable } from "@/components/crm/object-table";
 import { CrmPipelineBoard } from "@/components/crm/pipeline-board";
+import { CrmRecordForm } from "@/components/crm/record-form";
 import {
   ChartContainer,
   ChartTooltip,
@@ -27,12 +28,16 @@ import {
 } from "@/lib/crm/views/chart-adapters";
 import {
   crmFieldKeySchema,
+  crmViewIdentifierSchema,
   type CrmAggregateResult,
 } from "@/lib/crm/views/schema";
 import {
+  useCrmViewOwnerId,
+  useInvalidateCrmViewQueries,
   useCrmNamedAggregateQuery,
   useCrmNamedTableQuery,
 } from "@/lib/crm/views/query-runner";
+import { useCrmObject } from "@/hooks/use-crm";
 
 export type CrmViewQueryRequirement =
   | { readonly kind: "none" }
@@ -69,12 +74,21 @@ const textPropsSchema = z
   .strict();
 
 const metricPropsSchema = z
-  .object({ queryId: z.string().min(1), title: z.string().min(1) })
+  .object({ queryId: crmViewIdentifierSchema, title: z.string().min(1) })
+  .strict();
+
+const recordFormPropsSchema = z
+  .object({
+    object: crmFieldKeySchema,
+    fields: z.array(crmFieldKeySchema).optional(),
+    title: z.string().min(1),
+    submitLabel: z.string().min(1).optional(),
+  })
   .strict();
 
 const chartPropsSchema = z
   .object({
-    queryId: z.string().min(1),
+    queryId: crmViewIdentifierSchema,
     title: z.string().min(1),
     height: z.enum(["small", "medium", "large"]).optional(),
   })
@@ -82,13 +96,13 @@ const chartPropsSchema = z
 
 const objectTablePropsSchema = z
   .object({
-    queryId: z.string().min(1),
+    queryId: crmViewIdentifierSchema,
     columns: z.array(crmFieldKeySchema).optional(),
   })
   .strict();
 
 const pipelineBoardPropsSchema = z
-  .object({ queryId: z.string().min(1) })
+  .object({ queryId: crmViewIdentifierSchema })
   .strict();
 
 const gapClasses = {
@@ -194,6 +208,37 @@ function MetricComponent({
   );
 }
 
+function RecordFormComponent({
+  props,
+}: BaseComponentProps<z.infer<typeof recordFormPropsSchema>>) {
+  const ownerId = useCrmViewOwnerId();
+  const object = useCrmObject(props.object, ownerId);
+  const invalidateQueries = useInvalidateCrmViewQueries();
+  if (object.isPending) {
+    return (
+      <p role="status" className="text-12 text-text-tertiary">
+        Loading {props.title}...
+      </p>
+    );
+  }
+  if (object.isError || !object.data) {
+    return <ComponentQueryError message={`Could not load ${props.title}.`} />;
+  }
+  if (object.data.access === "read") {
+    return null;
+  }
+  return (
+    <CrmRecordForm
+      ownerId={ownerId}
+      object={object.data}
+      fields={props.fields}
+      title={props.title}
+      submitLabel={props.submitLabel}
+      onCreated={() => void invalidateQueries()}
+    />
+  );
+}
+
 const chartConfig = {
   value: { label: "Value", color: "var(--color-primary)" },
 } satisfies ChartConfig;
@@ -234,12 +279,19 @@ function AggregateChartFrame({
           No data matches this view.
         </div>
       ) : (
-        <ChartContainer
-          config={chartConfig}
-          className={cn("aspect-auto w-full", chartHeightClasses[height])}
-        >
-          {children(points)}
-        </ChartContainer>
+        <>
+          <ChartContainer
+            config={chartConfig}
+            className={cn("aspect-auto w-full", chartHeightClasses[height])}
+          >
+            {children(points)}
+          </ChartContainer>
+          {result.truncated ? (
+            <p className="mt-2 text-11 text-text-tertiary">
+              Additional groups are combined into Other.
+            </p>
+          ) : null}
+        </>
       )}
     </section>
   );
@@ -412,6 +464,14 @@ export const crmViewComponentCatalog = {
     query: { kind: "aggregate", grouped: false },
     allowsChildren: false,
     component: MetricComponent,
+  }),
+  RecordForm: defineCatalogEntry({
+    props: recordFormPropsSchema,
+    description: "A CRM record creation form",
+    slots: [],
+    query: { kind: "none" },
+    allowsChildren: false,
+    component: RecordFormComponent,
   }),
   BarChart: defineCatalogEntry({
     props: chartPropsSchema,

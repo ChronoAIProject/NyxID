@@ -7,6 +7,7 @@ export interface CrmChartPoint {
   readonly key: string;
   readonly label: string;
   readonly value: number;
+  readonly archived: boolean;
 }
 
 export function aggregatePointToChartPoint(
@@ -14,8 +15,12 @@ export function aggregatePointToChartPoint(
 ): CrmChartPoint {
   return {
     key: point.key ?? "__none__",
-    label: point.label,
+    label:
+      point.archived && point.key !== "__other__"
+        ? `${point.label} (archived)`
+        : point.label,
     value: point.value,
+    archived: point.archived,
   };
 }
 
