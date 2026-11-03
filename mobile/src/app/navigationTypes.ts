@@ -94,6 +94,9 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   AccountSettings: WorkspaceParamList["AccountSettings"];
   AccountSecurity: undefined;
   UsageCredits: UsageCreditsRouteParams | undefined;
+  NotificationSettings: undefined;
+  DisplaySettings: undefined;
+  PrivacySettings: undefined;
 };
 
 export type RootStackParamList = SharedEntryParamList & {
@@ -165,6 +168,9 @@ export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "AccountSettings",
   "AccountSecurity",
   "UsageCredits",
+  "NotificationSettings",
+  "DisplaySettings",
+  "PrivacySettings",
   "DeviceLogin",
   "AgentKeyLogin",
   "TermsOfService",

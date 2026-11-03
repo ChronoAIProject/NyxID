@@ -1,0 +1,84 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { elements, setupSettingsScreen, style } from "./settingsTestHarness";
+
+const setup = (connectedTelegram = false, pushDevices = 0) =>
+  setupSettingsScreen(
+    "./NotificationSettingsScreen.tsx",
+    "NotificationSettingsScreen",
+    { connectedTelegram, pushDevices },
+  );
+
+test("delivery rows keep live push and Telegram switches and stack under large text", () => {
+  const env = setup(true, 1);
+  const push = elements(env.row("Push Notifications")).find(
+    (node) => node.type === "Switch",
+  )!;
+  const telegram = elements(env.row("Telegram")).find(
+    (node) => node.type === "Switch",
+  )!;
+  assert.ok(push && telegram);
+  assert.ok(env.text("@a_very_long_telegram_username"));
+  push.props.onValueChange(true);
+  telegram.props.onValueChange(true);
+  assert.deepEqual(
+    env.mutations.map((value) => JSON.parse(JSON.stringify(value))),
+    [{ push_enabled: true }, { telegram_enabled: true }],
+  );
+  env.resize(402, 3.12);
+  const body = env.parent(env.parent(env.text("Push Notifications")));
+  assert.equal(style(body).flexDirection, "column");
+  assert.equal(style(body).alignItems, "flex-start");
+  assert.equal(style(body).maxWidth, "100%");
+  assert.ok(
+    elements(body).some((node) => node.type === "Switch"),
+    "the switch stays with its stacked label",
+  );
+  env.harness.unmount();
+});
+
+test("an unlinked Telegram row opens the link sheet and push offers a 44pt enable action", () => {
+  const env = setup(false, 0);
+  const telegram = env.row("Telegram");
+  assert.equal(telegram.type, "Pressable");
+  assert.ok(elements(telegram).some((node) => node.type === "ChevronRight"));
+  assert.ok(env.text("Link account"));
+  telegram.props.onPress();
+  env.harness.render();
+  assert.equal(
+    env.all().find((node) => node.type === "TelegramLinkModal")!.props.visible,
+    true,
+  );
+  const enable = env.parent(env.text("Enable on this device"));
+  assert.equal(enable.type, "Pressable");
+  assert.ok(style(enable).minHeight >= 44);
+  assert.equal(style(enable).maxWidth, "100%");
+  env.harness.unmount();
+});
+
+test("approval default is a radio list with a check on the selected mode", () => {
+  const env = setup(true, 1);
+  const options = ["Writes only (default)", "All requests", "Off"];
+  for (const label of options) {
+    const row = env.row(label);
+    assert.equal(row.props.accessibilityRole, "radio", label);
+    const checked = label === "Writes only (default)";
+    assert.equal(row.props.accessibilityState.checked, checked, label);
+    assert.equal(
+      elements(row).some((node) => node.type === "Check"),
+      checked,
+      label,
+    );
+    assert.equal(
+      elements(row).some((node) => node.type === "ChevronRight"),
+      false,
+      `${label} selects in place`,
+    );
+  }
+  env.row("All requests").props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(env.mutations.at(-1))), {
+    global_approval_mode: "all",
+  });
+  assert.ok(env.text("Per-service and organization policies still apply."));
+  env.harness.unmount();
+});
