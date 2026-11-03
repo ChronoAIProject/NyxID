@@ -168,11 +168,21 @@ pub async fn reserve_with_arguments(
             "Guests cannot create async watches".into(),
         ));
     }
+    if chat
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+    {
+        super::shared_agent_transport::require_ready(db).await?;
+    }
     let contract = endpoint.async_operation.clone().ok_or_else(invalid)?;
     validate_endpoints(&contract, service, endpoint)?;
     let cma = super::cma_operation::metadata(&contract, args);
     let db_ref_for_audit = db;
     let db = db.clone();
+    let mut registration = serde_json::json!({"conversation_id":chat.conversation_id,"turn_id":chat.turn_id,
+        "service_id":service.service_id});
+    super::shared_agent_transport::annotate_chat(&mut registration, chat);
     let chat = chat.clone();
     let service_id = service.service_id.clone();
     let endpoint_id = endpoint.endpoint_id.clone();
@@ -215,7 +225,7 @@ pub async fn reserve_with_arguments(
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
             }
             let now=Utc::now();
-            let watch=AsyncServiceOperation{cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
+            let watch=AsyncServiceOperation { shared_execution: None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
                 operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+if cma.is_some(){Duration::days(30)}else{Duration::hours(4)},result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;
@@ -223,7 +233,17 @@ pub async fn reserve_with_arguments(
         }).await;
         transactions::transaction_result(result)
     }).await.map_err(transactions::map_transaction_error)?;
-    audit(db_ref_for_audit, &watch, "registered", None);
+    registration["watch_id"] = watch.id.clone().into();
+    super::audit_service::log_async(
+        db_ref_for_audit.clone(),
+        Some(watch.user_id.clone()),
+        "assistant_async_operation_registered".into(),
+        Some(registration),
+        None,
+        None,
+        Some(watch.api_key_id.clone()),
+        None,
+    );
     Ok(watch)
 }
 
@@ -232,6 +252,12 @@ pub async fn submitted(
     watch: &AsyncServiceOperation,
     response: Option<&super::mcp_service::ToolResponse>,
 ) -> AppResult<()> {
+    // A server-authored consent/action card proves no provider dispatch took
+    // place. Do not turn a pending human decision into a failed async event.
+    // A downstream body or status can never select this cleanup path.
+    if response.is_some_and(super::mcp_service::ToolResponse::is_policy_refusal) {
+        return Box::pin(discard_policy_refusal(db, watch)).await;
+    }
     let parsed = response
         .filter(|r| (200..300).contains(&r.status))
         .and_then(|r| {
@@ -296,6 +322,44 @@ pub async fn submitted(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+async fn discard_policy_refusal(db: &Database, watch: &AsyncServiceOperation) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let watch = watch.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = Box::pin(async {
+                let removed = db
+                    .collection::<bson::Document>(WATCHES)
+                    .delete_one(doc! {"_id": &watch.id, "user_id": &watch.user_id,
+                    "conversation_id": &watch.conversation_id, "api_key_id": &watch.api_key_id,
+                    "state": {"$in": ["submitting", "cancelling"]},
+                    "operation_id": null, "execution_binding": null})
+                    .session(&mut *session)
+                    .await?
+                    .deleted_count;
+                if removed == 1
+                    && let Some(request) = &watch.delivery.voice_request_id
+                {
+                    let pending = pending_voice_in_session(&db, request, session).await?;
+                    db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+                        .update_one(
+                            doc! {"_id": request, "user_id": &watch.user_id},
+                            doc! {"$set": {"async_operation_pending": pending}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
+                Ok(())
+            })
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
 }
 
 pub async fn claim(db: &Database) -> AppResult<Option<AsyncServiceOperation>> {
@@ -873,14 +937,14 @@ pub async fn expire_results(db: &Database) -> AppResult<()> {
 }
 
 fn audit(db: &Database, w: &AsyncServiceOperation, transition: &str, reason: Option<&str>) {
+    let mut event = serde_json::json!({"watch_id":w.id,"conversation_id":w.conversation_id,
+        "turn_id":w.turn_id,"service_id":w.service_id,"reason":reason});
+    super::shared_agent_transport::annotate(&mut event, w.shared_execution.as_ref());
     super::audit_service::log_async(
         db.clone(),
         Some(w.user_id.clone()),
         format!("assistant_async_operation_{transition}"),
-        Some(
-            serde_json::json!({"watch_id":w.id,"conversation_id":w.conversation_id,
-            "turn_id":w.turn_id,"service_id":w.service_id,"reason":reason}),
-        ),
+        Some(event),
         None,
         None,
         Some(w.api_key_id.clone()),

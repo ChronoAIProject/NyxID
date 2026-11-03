@@ -89,7 +89,7 @@ async fn restore(
             owner_sender_ids.push(sender.clone());
         }
     }
-    channels.update_one(doc! {"_id":&row.id},doc! {"$set":{"owner_sender_ids":owner_sender_ids,"private_chats":&previous.private_chats,
+    channels.update_one(doc! {"_id":&row.id},doc! {"$set":{"owner_sender_ids":owner_sender_ids,"private_chats":&previous.private_chats,"private_chat_posts":previous.private_chat_posts,
         "continuity_from_channel_id":&previous.id,"continuity_restored_at":bson::DateTime::now()}}).session(&mut *session).await?;
     releases::audit(
         db,

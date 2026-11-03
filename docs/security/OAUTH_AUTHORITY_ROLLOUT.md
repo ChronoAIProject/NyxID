@@ -233,6 +233,23 @@ second. Old signed requests without the additive field use a conservative
 `iat <= revoked_at` compatibility fence (same-second requests restart review).
 Double submit before revocation is a no-op and can issue another working callback.
 
+### Optional Machine permission on consent
+
+An application may request `machine` together with identity, proxy and refresh
+scopes. On both ordinary and incremental consent, leaving every Machine
+unselected approves the other scopes and omits `machine` from the authorization
+code, access/refresh authority and token response `scope`. No Machine grant is
+created. This works with no eligible Machines and needs neither shared-legacy
+acknowledgement nor a saved selection. MCP remains usable for other permissions;
+Machine tool calls report that no Machine access was granted.
+
+A nonempty selection still requires explicit shared-legacy acknowledgement and
+Save Machine selection before Allow. The server validates and consumes the
+signed, bound selection in the existing consent transaction. Invalid or expired
+saved approvals remain errors. Later re-consent can add Machine permission using
+that same approval/revision contract; it never widens an older token. Declining
+Machine access on a new session does not revoke another session's existing grant.
+
 ### Browser delivery and native handoff
 
 Both SPA decision forms (including their Machine selection) send the hidden

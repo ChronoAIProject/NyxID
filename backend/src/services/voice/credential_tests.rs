@@ -990,3 +990,235 @@ async fn specialist_platform_voice_funding_new_personal_grant_immediately_allows
         f.state.db.drop().await.unwrap();
     }).await;
 }
+
+#[tokio::test]
+async fn shared_transports_voice_provider_revocation_and_actor_billing() {
+    use crate::models::assistant_sharing::{AgentConsent, ConsentDecision};
+    use crate::models::assistant_voice_session::{COLLECTION_NAME as CALLS, VoiceSession};
+    use crate::models::usage_meter::{COLLECTION_NAME as USAGE, UsageMeterRow};
+    use crate::services::{shared_agent_consent as consent, shared_agent_service as sharing};
+    use axum::{
+        Json, Router,
+        extract::{WebSocketUpgrade, ws::Message},
+        routing::{get, post},
+    };
+    for byok in [false, true] {
+        let (mut f, service) = fixture("shared_transport_voice_provider").await;
+        crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+        sharing::ensure_indexes(&f.state.db).await.unwrap();
+        flags::set_platform_override(
+            &f.state.db,
+            sharing::FLAG,
+            &flags::FlagTarget::Global,
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        let connection = connection(&f, &service, "shared-voice").await;
+        if !byok {
+            f.state
+                .db
+                .collection::<bson::Document>("user_services")
+                .update_one(
+                    doc! {"_id":&connection},
+                    doc! {"$set":{"credential_binding":"platform", "api_key_id":bson::Bson::Null}},
+                )
+                .await
+                .unwrap();
+        }
+        let publisher = Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection("users")
+            .insert_one(crate::test_utils::test_user(
+                &publisher,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        for user in [&publisher, &f.owner] {
+            f.state.db.collection::<bson::Document>("notification_channels").update_one(doc! {"user_id":user},
+                doc! {"$set":{"approval_required":false}, "$setOnInsert":{"_id":Uuid::new_v4().to_string(), "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now()}}).upsert(true).await.unwrap();
+        }
+        let (agent, _) = team::create_specialist(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &publisher,
+            team::CreateRequest {
+                name: "shared-voice".into(),
+                description: "Voice specialist".into(),
+                display_name: None,
+                persona: None,
+                targets: Default::default(),
+                account_read: false,
+                machines: None,
+                logins: None,
+                specialty: None,
+                created_by: "user",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let user = f
+            .state
+            .db
+            .collection::<crate::models::user::User>("users")
+            .find_one(doc! {"_id":&f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+        sharing::update(
+            &f.state.db,
+            &publisher,
+            &agent.id,
+            sharing::SharingUpdate {
+                expected_version: 0,
+                enabled: true,
+                audience: vec![
+                    serde_json::from_value(
+                        json!({"subject_kind":"person","email":user.email,"role":"user"}),
+                    )
+                    .unwrap(),
+                ],
+                shared_access: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        f.row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.owner, &agent)
+            .await
+            .unwrap();
+        let mut preferences = platform(&service);
+        if byok {
+            preferences.key_source = VoiceKeySource::Own;
+            preferences.connection_id = Some(connection);
+        }
+        let request = Uuid::new_v4().to_string();
+        assert!(
+            super::shared::admit(&f.state.db, &f.owner, &f.row, &request, &preferences)
+                .await
+                .is_err()
+        );
+        let card = f
+            .state
+            .db
+            .collection::<AgentConsent>("assistant_agent_consents")
+            .find_one(doc! {"decision":"pending"})
+            .await
+            .unwrap()
+            .unwrap();
+        consent::decide(&f.state.db, &f.owner, &card.id, ConsentDecision::Once)
+            .await
+            .unwrap();
+        let resolved = credentials::resolve(&f.state, &f.owner, &f.row.id, &preferences)
+            .await
+            .unwrap();
+        assert_eq!(resolved.billing.billing_owner_id, f.owner);
+        assert_eq!(resolved.token_billing.billing_owner_id, f.owner);
+        let provider_closed = Arc::new(tokio::sync::Notify::new());
+        let closed = provider_closed.clone();
+        let app = Router::new()
+            .route("/v1/live/sessions", post(move |headers:axum::http::HeaderMap| async move {
+                assert_eq!(headers["authorization"], if byok {"Bearer fixture-own-key"} else {"Bearer fixture-platform-key"});
+                Json(json!({"session":{"id":"live_shared"},"transport":{"type":"webrtc","sdp":"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"}}))
+            }))
+            .route("/v1/live/sessions/live_shared/attach", get(move |ws:WebSocketUpgrade| {
+                let closed = closed.clone();
+                async move { ws.on_upgrade(move |mut socket| async move {
+                    while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                        let event:Value = serde_json::from_str(&text).unwrap();
+                        if event["type"] == "session.close" {
+                            socket.send(Message::Text(json!({"type":"session.closed","usage":{"seconds":18.2}}).to_string().into())).await.unwrap();
+                            closed.notify_one();
+                            break;
+                        }
+                    }
+                }) }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let started = super::runtime::start_with_provider(
+            &f.state,
+            super::runtime::StartInput {
+                user: &f.owner,
+                conversation: &f.row.id,
+                client_request_id: &request,
+                preferences: preferences.clone(),
+                sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+            },
+            resolved.identity,
+            resolved.billing,
+            super::openai::OpenAi::fixture(resolved.key, address),
+            None,
+        )
+        .await
+        .unwrap();
+        sharing::update(
+            &f.state.db,
+            &publisher,
+            &agent.id,
+            sharing::SharingUpdate {
+                expected_version: 1,
+                enabled: false,
+                audience: vec![],
+                shared_access: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            provider_closed.notified(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let call = f
+                    .state
+                    .db
+                    .collection::<VoiceSession>(CALLS)
+                    .find_one(doc! {"_id":&started.session.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if !call.live_slot {
+                    assert!(call.billing_finalized && call.final_usage_confirmed);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let usage = f.state.db.collection::<UsageMeterRow>(USAGE).find_one(doc! {"billing_request_id":format!("voice:{}:0",started.session.id),"metric":"voice_seconds"}).await.unwrap().unwrap();
+        assert_eq!(usage.billing_owner_id, f.owner);
+        assert_eq!(usage.actor_user_id, f.owner);
+        assert_eq!(usage.quantity, Some(18));
+        assert_eq!(
+            usage.credential_class,
+            if byok {
+                CredentialClass::UserOwned
+            } else {
+                CredentialClass::NyxidManagedMaster
+            }
+        );
+        if !byok {
+            assert!(usage.wallet_id.is_some());
+        }
+        assert!(
+            credentials::resolve(&f.state, &f.owner, &f.row.id, &preferences)
+                .await
+                .is_err()
+        );
+        server.abort();
+        f.state.db.drop().await.unwrap();
+    }
+}

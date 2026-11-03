@@ -139,6 +139,7 @@ describe("feature flag catalog", () => {
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
       NYXBOT_ADAPTERS: "nyxbot:service-adapters",
       NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
+      NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",
       DISCORD_GATEWAY: "channel:discord-gateway",
       NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
       NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",

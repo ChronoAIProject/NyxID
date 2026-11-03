@@ -73,3 +73,25 @@ it("never preselects legacy consent, including while editing an existing grant",
   expect(warning).toHaveTextContent(/share the host kernel/);
   expect(warning).toHaveTextContent(/separate machine container or VM per agent/);
 });
+
+it("optional consent with no inventory needs neither acknowledgement nor save", () => {
+  mocks.nodes = [];
+  render(<MachineGrantEditor optional onSubmit={mocks.submit} />);
+  expect(screen.getByText(/No eligible personal Machines/)).toBeInTheDocument();
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Save Machine permissions" })).not.toBeInTheDocument();
+});
+it("optional consent requires acknowledgement only while a Machine is selected", async () => {
+  const changed = vi.fn();
+  render(<MachineGrantEditor optional onSubmit={mocks.submit} onSelectionChange={changed} />);
+  expect(screen.queryByRole("button", { name: "Save Machine permissions" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("checkbox", { name: "Allow this Machine" }));
+  expect(changed).toHaveBeenLastCalledWith(true);
+  await userEvent.click(screen.getByRole("button", { name: "Save Machine permissions" }));
+  expect(await screen.findByText(/External Machine access requires explicit shared legacy consent/)).toBeInTheDocument();
+  expect(mocks.submit).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("checkbox", { name: "Allow this Machine" }));
+  expect(changed).toHaveBeenLastCalledWith(false);
+  expect(screen.queryByRole("checkbox", { name: /I explicitly allow shared legacy/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Save Machine permissions" })).not.toBeInTheDocument();
+});

@@ -1,3 +1,4 @@
+import { captureGroupInvite } from "./lib/collaboration-invite";
 import "@/lib/platform-personal-handoff";
 import { PersonalLinkPage } from "@/pages/platform-personal-link";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
@@ -397,6 +398,7 @@ const standaloneAuthBeforeLoad = async ({
 }: {
   location: { pathname: string; searchStr: string };
 }) => {
+  captureGroupInvite();
   if (import.meta.env.DEV) {
     const { isMockMode, getMockUser } = await import("./lib/mock-data");
     if (isMockMode()) {

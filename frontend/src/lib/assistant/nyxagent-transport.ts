@@ -141,11 +141,10 @@ export function storedError(code: string | null, capacityWaitMs?: number | null,
   if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
   if (code === "output_too_large") return "The assistant reached its response limit.";
   if (code === "guest_model_route_required") {
-    const setup = ["request_shape", "unknown_field", "tool_shape", "agent_unavailable", "profile_unknown",
-      "connection_not_platform", "connection_override", "catalog_inactive_or_not_master", "target_mismatch",
-      "header_mismatch", "route_mismatch"].includes(modelRouteReason ?? "");
+    const setup = ["model_route_unavailable", "model_connection_unavailable", "credits_unavailable",
+      "setup_timeout", "setup_capacity"].includes(modelRouteReason ?? "");
     return setup
-      ? "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."
+      ? "Visitor setup could not finish. The owner has been notified. Please try again later."
       : "This assistant can't answer right now. Please try again later.";
   }
   if (code === "nyxid_error") return "NyxID could not authorize the assistant operation.";

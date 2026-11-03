@@ -400,6 +400,29 @@ pub async fn cmd_credentials(
             println!("Credential added for service '{service}'.");
             Ok(())
         }
+        NodeCredentialCommands::SetUrl { service, url } => {
+            let service = service.to_lowercase();
+            let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
+            // Validate before resolving the owner's login or making any request.
+            // This changes only our in-memory copy, never the local config file.
+            node_config.set_credential_target_url(&service, &url)?;
+            let auth = crate::cli::AuthArgs {
+                base_url: Some(super::ws_client::node_agent_api_base_url_from_ws_url(
+                    &node_config.server.url,
+                )),
+                access_token: None,
+                access_token_env: "NYXID_ACCESS_TOKEN".into(),
+                profile: std::env::var("NYXID_PROFILE").ok(),
+                output: crate::cli::OutputFormat::Table,
+            };
+            let mut api = crate::api::ApiClient::from_auth_checked(&auth).await
+                .map_err(|_| super::error::Error::Validation("Endpoint migration needs an owner login to this NyxID server; run nyxid login first".into()))?;
+            migrate_existing_node_endpoint(&mut api, &service, &node_config.node.id, &url).await?;
+            // The revision-checked node push is the sole local metadata writer;
+            // a second CLI save could race a newer target update.
+            println!("Backend endpoint updated; local credential preserved.");
+            Ok(())
+        }
         NodeCredentialCommands::Setup {
             service,
             additional_scopes,
@@ -2000,6 +2023,49 @@ fn find_existing_service(
     None
 }
 
+async fn migrate_existing_node_endpoint(
+    api: &mut crate::api::ApiClient,
+    slug: &str,
+    node: &str,
+    target: &str,
+) -> Result<()> {
+    let keys = api
+        .get_value("/keys")
+        .await
+        .map_err(|e| super::error::Error::Validation(format!("Cannot read owned services: {e}")))?;
+    let matches: Vec<_> = keys["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|key| key["slug"].as_str() == Some(slug) && key["node_id"].as_str() == Some(node))
+        .collect();
+    if matches.len() != 1 || matches[0]["credential_type"].as_str() != Some("node_managed") {
+        return Err(super::error::Error::Validation("URL-only migration requires exactly one owned node-managed service on this node; use PUT /keys/{id} with endpoint_url for an explicit service".into()));
+    }
+    let id = matches[0]["id"]
+        .as_str()
+        .ok_or_else(|| super::error::Error::Validation("Service ID missing".into()))?;
+    update_backend_endpoint(api, id, target).await
+}
+
+async fn update_backend_endpoint(
+    api: &mut crate::api::ApiClient,
+    id: &str,
+    target: &str,
+) -> Result<()> {
+    let result: serde_json::Value = api.put(&format!("/keys/{id}"), &serde_json::json!({"endpoint_url": target})).await
+        .map_err(|e| super::error::Error::Validation(format!("Endpoint migration was refused; the local credential was not changed. Upgrade an older NyxID server for endpoint-only PUT support: {e}")))?;
+    for sync in result["node_target_sync"].as_array().into_iter().flatten() {
+        if sync["status"].as_str() != Some("synced") {
+            eprintln!(
+                "Server endpoint committed; node target sync {}. Nonempty server URLs remain authoritative.",
+                sync["status"].as_str().unwrap_or("unconfirmed")
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn prepare_backend_service_registration(
     api: &mut crate::api::ApiClient,
     service_slug: &str,
@@ -2034,16 +2100,7 @@ async fn prepare_backend_service_registration(
 
         if let Some(url) = target_url.filter(|url| *url != existing.endpoint_url) {
             println!("Updating backend endpoint URL for '{service_slug}'...");
-            api.put::<serde_json::Value, _>(
-                &format!("/keys/{}", existing.id),
-                &serde_json::json!({ "endpoint_url": url }),
-            )
-            .await
-            .map_err(|e| {
-                super::error::Error::Validation(format!(
-                    "Failed to update backend endpoint URL for '{service_slug}': {e}"
-                ))
-            })?;
+            update_backend_endpoint(api, &existing.id, url).await?;
             println!("Backend endpoint updated.");
             return Ok(BackendRegistrationChange::UpdatedEndpoint {
                 id: existing.id,
@@ -3507,5 +3564,73 @@ mod tests {
         assert!(backend.load_auth_token(&config).is_err());
         assert!(backend.load_signing_secret(&config).is_err());
         assert!(backend.load_credential_value("openai", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod endpoint_migration_tests {
+    use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    #[tokio::test]
+    async fn node_endpoint_2126_registration_and_url_only_migration_send_metadata_only() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys":[{
+                "id":"existing-service", "slug":"monitor", "node_id":"node", "credential_type":"node_managed", "endpoint_url":"http://old-monitor"
+            }]}))).expect(2).mount(&server).await;
+        Mock::given(method("PUT")).and(path("/api/v1/keys/existing-service"))
+            .and(body_json(serde_json::json!({"endpoint_url":"http://new-monitor"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"existing-service", "endpoint_url":"http://new-monitor/canonical", "node_target_sync":[{"service_id":"existing-service", "status":"offline", "target_revision":3}]})))
+            .expect(2).mount(&server).await;
+        let mut api = crate::api::ApiClient::new(&server.uri(), uuid::Uuid::new_v4().to_string())
+            .unwrap()
+            .without_token_refresh();
+        migrate_existing_node_endpoint(&mut api, "monitor", "node", "http://new-monitor")
+            .await
+            .unwrap();
+        assert_eq!(
+            prepare_backend_service_registration(
+                &mut api,
+                "monitor",
+                "Monitor",
+                "node",
+                Some("http://new-monitor")
+            )
+            .await
+            .unwrap(),
+            BackendRegistrationChange::UpdatedEndpoint {
+                id: "existing-service".into(),
+                previous_endpoint_url: "http://old-monitor".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn node_endpoint_2126_registration_reports_old_server_refusal_without_promotion() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/existing"))
+            .and(body_json(serde_json::json!({"endpoint_url":"http://new"})))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                serde_json::json!({"message":"node-managed endpoint edits unsupported"}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut api = crate::api::ApiClient::new(&server.uri(), uuid::Uuid::new_v4().to_string())
+            .unwrap()
+            .without_token_refresh();
+        let error = update_backend_endpoint(&mut api, "existing", "http://new")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("local credential was not changed")
+        );
     }
 }

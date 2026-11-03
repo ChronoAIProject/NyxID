@@ -148,6 +148,12 @@ const DISCORD_GATEWAY_FLAG: FeatureFlagDef = FeatureFlagDef {
 };
 
 pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
+pub const NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY: &str = "nyxbot:relay-response-recovery";
+const NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY,
+    description: "Staged durable response recovery for relay-sourced NyxBot gateway channels. Requires fleet readiness and gateway support; enable for one owner before widening.",
+    default_enabled: false,
+};
 pub const NYXBOT_ADAPTERS_FLAG_KEY: &str = "nyxbot:service-adapters";
 const NYXBOT_ADAPTERS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXBOT_ADAPTERS_FLAG_KEY,
@@ -301,6 +307,10 @@ pub const NYXBOT_GATEWAY_FLAGS: &[(&str, &str)] = &[
     ("aurinko", "nyxbot:gateway-aurinko"),
 ];
 
+/// Independent CMA custom-event channels use the same default-off gateway
+/// rollout family, but have no chat platform to key their flag to.
+pub const NYXBOT_CUSTOM_EVENT_GATEWAY_FLAG_KEY: &str = "nyxbot:gateway-custom-event";
+
 const fn nyxbot_gateway_flag(key: &'static str, description: &'static str) -> FeatureFlagDef {
     FeatureFlagDef {
         key,
@@ -309,7 +319,7 @@ const fn nyxbot_gateway_flag(key: &'static str, description: &'static str) -> Fe
     }
 }
 
-const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
+const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
     nyxbot_gateway_flag(
         "nyxbot:gateway-lark",
         "NyxBot reaches personal and linked org Lark bots through the Agent Event Gateway once the gateway takes Lark (text only there); flag off returns them to NyxID's relay.",
@@ -338,6 +348,10 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
         "nyxbot:gateway-aurinko",
         "NyxBot reaches personal and linked org email (Aurinko) bots through the Agent Event Gateway once the gateway supports them; flag off returns them to NyxID's relay.",
     ),
+    nyxbot_gateway_flag(
+        NYXBOT_CUSTOM_EVENT_GATEWAY_FLAG_KEY,
+        "Allow owner-managed CMA custom-event channels to invoke an existing NyxBot or specialist.",
+    ),
 ];
 
 #[cfg(not(test))]
@@ -349,6 +363,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
@@ -379,6 +394,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_GATEWAY_FLAG_DEFS[4],
     NYXBOT_GATEWAY_FLAG_DEFS[5],
     NYXBOT_GATEWAY_FLAG_DEFS[6],
+    NYXBOT_GATEWAY_FLAG_DEFS[7],
 ];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
@@ -392,6 +408,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
@@ -422,6 +439,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_GATEWAY_FLAG_DEFS[4],
     NYXBOT_GATEWAY_FLAG_DEFS[5],
     NYXBOT_GATEWAY_FLAG_DEFS[6],
+    NYXBOT_GATEWAY_FLAG_DEFS[7],
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",
@@ -2926,6 +2944,7 @@ mod tests {
                 "assistant:workspace-preview",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
+                "nyxbot:relay-response-recovery",
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
@@ -2956,7 +2975,14 @@ mod tests {
                 "nyxbot:gateway-whatsapp",
                 "nyxbot:gateway-x",
                 "nyxbot:gateway-aurinko",
+                "nyxbot:gateway-custom-event",
             ]
+        );
+        assert!(
+            !find_flag(NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY)
+                .expect("relay response recovery flag is registered")
+                .default_enabled,
+            "relay response recovery must default to off"
         );
         assert!(
             !find_flag(ASSISTANT_MODEL_CONTROLS_FLAG_KEY)

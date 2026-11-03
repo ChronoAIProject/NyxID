@@ -186,6 +186,8 @@ pub async fn consents(
         .find(doc! {"actor_user_id": &actor, "agent_id": id, "decision": {"$in": ["pending", "always", "once"]},
             "$or": [{"expires_at": null}, {"expires_at": {"$gt": mongodb::bson::DateTime::now()}}]})
         .sort(doc! {"created_at": -1}).limit(100).await?.try_collect().await?;
+    let group_threads: Vec<crate::models::assistant_conversation::AssistantConversation> = state.db.collection(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find(doc! {"_id":{"$in":rows.iter().map(|r|&r.conversation_id).collect::<Vec<_>>()},"user_id":&actor,"collaboration":{"$ne":null}}).limit(100).await?.try_collect().await?;
     let connections: Vec<crate::models::user_service::UserService> = state.db.collection("user_services")
         .find(doc! {"user_id": &actor, "_id": {"$in": rows.iter().map(|r| &r.connection_id).collect::<Vec<_>>()}})
         .await?.try_collect().await?;
@@ -193,8 +195,10 @@ pub async fn consents(
         .into_iter()
         .map(|r| {
             let connection_name = connections.iter().find(|c| c.id == r.connection_id).map(|c| c.slug.as_str());
+            let group=group_threads.iter().find(|t|t.id==r.conversation_id).and_then(|t|t.collaboration.as_ref());
             json!({"id": r.id, "connection_id": r.connection_id, "connection_name": connection_name,
-        "catalog_service_id": r.catalog_service_id, "conversation_id": r.conversation_id,
+        "catalog_service_id": r.catalog_service_id, "conversation_id": group.is_none().then_some(&r.conversation_id),
+        "group_id":group.map(|g|&g.group_id), "audience":group.map(|_|"Everyone in this group can see the reply. Consent is invalidated when group membership changes."),
         "operation": r.operation_summary, "decision": r.decision, "expires_at": r.expires_at, "scope": if r.stateless_model { "stateless_model_turn" } else { "exact_operation" }})
         })
         .collect();

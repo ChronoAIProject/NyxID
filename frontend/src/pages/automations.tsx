@@ -853,6 +853,16 @@ function AutomationHistory({
                     {formatAutomationTime(run.missed.from, zone)} and{" "}
                     {formatAutomationTime(run.missed.through, zone)}.
                   </p>
+                ) : run.failure_reason ? (
+                  <p>
+                    {run.failure_reason.stage === "model_proxy"
+                      ? "Model request failed"
+                      : "Assistant request failed"}
+                    {": "}
+                    {run.failure_reason.code}
+                    {run.failure_reason.http_status != null &&
+                      ` (HTTP ${run.failure_reason.http_status})`}
+                  </p>
                 ) : (
                   run.reason && <p>{run.reason.replaceAll("_", " ")}</p>
                 )}

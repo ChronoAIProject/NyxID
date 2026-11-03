@@ -656,6 +656,7 @@ async fn real_gateway_connect_failure_records_evidence_and_selects_next_preferen
 }
 
 struct CallbackEgress {
+    mode_change: Option<(crate::AppState, String, AccessMode)>,
     callback_url: String,
     client: reqwest::Client,
     tool: String,
@@ -703,6 +704,18 @@ impl contract::NyxAgentEgress for CallbackEgress {
             .expect("tool callback after admitted model use must succeed");
         assert_eq!(result.status(), StatusCode::OK);
         assert!(result.bytes().await.unwrap().len() <= 4096);
+        if let Some((state, owner, mode)) = &self.mode_change {
+            crate::services::assistant_settings_service::update(
+                &state.db,
+                owner,
+                crate::services::assistant_settings_service::Update {
+                    access_mode: Some(*mode),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
         let next = self
             .client
             .post(format!(
@@ -786,6 +799,7 @@ async fn actual_bootstrap_card_allow_resumes_model_tool_model_and_new_turn_asks_
         axum::serve(listener, router).await.unwrap();
     }));
     let egress = CallbackEgress {
+        mode_change: None,
         callback_url,
         client: reqwest::Client::builder()
             .no_proxy()
@@ -1186,4 +1200,117 @@ async fn generic_gateway_org_primary_reaches_consent_before_legacy_codex_fallbac
         to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn model_2142_runtime_callbacks_continue_after_live_mode_changes() {
+    Box::pin(async {
+        for next in [AccessMode::Autopilot, AccessMode::AskEveryTime] {
+            let f = orchestrator_fixture("model_2142_callbacks").await;
+            mode(&f, AccessMode::Nyxmode).await;
+            let c = catalog(&f).await;
+            provider(&f, &c).await;
+            let id = connection(&f, &f.owner, "model", Some(&c)).await;
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices":[]})))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("page checked"))
+                .mount(&server)
+                .await;
+            endpoint(&f, &id, &server.uri()).await;
+            connected(&f.state.db, &f.owner, "tool", &server.uri()).await;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let callback_url = format!("http://{}", listener.local_addr().unwrap());
+            let (_, router) = crate::routes::build_router();
+            let app = router.with_state(f.state.clone());
+            let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            }));
+            let result = execute(
+                &f,
+                &f.row,
+                &CallbackEgress {
+                    mode_change: Some((f.state.clone(), f.owner.clone(), next)),
+                    callback_url: callback_url.clone(),
+                    client: reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(std::time::Duration::from_secs(15))
+                        .build()
+                        .unwrap(),
+                    tool: "tool".into(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(result.error.is_none(), "{:?}", result.error);
+            assert_eq!(server.received_requests().await.unwrap().len(), 3);
+            assert_eq!(
+                f.state.db.collection::<Document>(COLLECTION)
+                    .count_documents(doc! {"kind":"model_consent","connection_id":&id})
+                    .await.unwrap(),
+                1,
+                "later model rounds must reuse the original consent across mode changes"
+            );
+            // Full binding still changes: exact action receipts never inherit the model exception.
+            let before = connection_binding(&f.state.db, &id, &f.chat.api_key_id)
+                .await
+                .unwrap();
+            mode(&f, AccessMode::Nyxmode).await;
+            assert_ne!(
+                before,
+                connection_binding(&f.state.db, &id, &f.chat.api_key_id)
+                    .await
+                    .unwrap()
+            );
+            f.state
+                .db
+                .collection::<Document>("user_services")
+                .update_one(doc! {"_id":&id}, doc! {"$inc":{"state_version":1_i64}})
+                .await
+                .unwrap();
+            // Use the same real callback transport and headers: the direct test
+            // helper has a different operation identity and would admit new consent.
+            let credential = credentials::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.owner,
+                &f.row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap()
+                .post(format!("{callback_url}/api/v1/llm/openai/v1/chat/completions"))
+                .header("x-api-key", credential.raw_key.as_str())
+                .json(&generation("new round"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let error: Value = response.json().await.unwrap();
+            assert_eq!(error["error"], "model_authority_changed");
+            assert_eq!(error["error_code"], 12104);
+            let audits = f.state.db.collection::<Document>("audit_log");
+            let mut denied = None;
+            for _ in 0..100 {
+                denied = audits.find_one(doc!{"user_id":&f.owner,"event_type":"service_request",
+                    "event_data.user_service_id":&id,"event_data.outcome":"denied","event_data.response_status":403}).await.unwrap();
+                if denied.is_some() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let denied = denied.expect("deterministic model refusal must record denied, not unknown");
+            let metadata = denied.get_document("event_data").unwrap();
+            assert_eq!(metadata.get_str("dispatch_state").unwrap(), "not_dispatched");
+            assert!(!metadata.to_string().contains("new round"));
+            assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        }
+    })
+    .await;
 }

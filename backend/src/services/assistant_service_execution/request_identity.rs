@@ -260,7 +260,10 @@ pub(super) fn model_route_operation(
 
 /// Bind sanitized semantic headers. Correlation metadata can change at each
 /// transport hop and carries no account/action authority. Account/project and
-/// idempotency values remain bound. Cards expose only this private digest.
+/// idempotency values remain bound, as do write preconditions (If-Match and
+/// If-Unmodified-Since). A changed revision is a new exact action and requires
+/// fresh consent; removing the condition must never widen an approved write.
+/// Cards expose only this private digest.
 pub fn bind_headers(operation: &mut Value, headers: &[(String, String)]) {
     let mut semantic: Vec<_> = headers
         .iter()

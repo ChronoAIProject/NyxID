@@ -39,6 +39,8 @@ pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
     "assistant:shared-agents",
+    super::collaboration_group_service::READINESS,
+    super::shared_agent_transport::READINESS,
     "assistant:operation-scopes",
     "assistant:guest-operation-scopes",
     "assistant:machine-capabilities",
@@ -49,6 +51,7 @@ pub const CAPABILITIES: &[&str] = &[
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,
+    super::nyxbot_response_recovery::RELAY_READINESS,
 ];
 const MAX_AGE_SECS: i64 = 45;
 

@@ -79,6 +79,8 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]

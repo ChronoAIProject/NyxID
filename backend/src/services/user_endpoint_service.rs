@@ -213,7 +213,7 @@ pub enum RecommendedSkillsUpdate {
 }
 
 /// How the caller wants to treat the `openapi_spec_url` field on update.
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum OpenApiSpecUrlUpdate<'a> {
     /// Leave existing value untouched.
     #[default]

@@ -98,6 +98,29 @@ impl MachineConsentFixture {
         .0
         .token
     }
+    async fn unselected(&self, params: &AuthorizeQuery) -> String {
+        let mut params = params.clone();
+        params.consent_request_fence = Some(
+            consent_service::consent_request_fence(&self.state.db, &self.user, &self.client)
+                .await
+                .unwrap(),
+        );
+        sign_consent_request(
+            &self.state,
+            &self.user,
+            &params,
+            params.scope.as_deref().unwrap(),
+        )
+        .unwrap()
+    }
+    async fn token_response(&self, code: &str) -> TokenResponse {
+        token_inner(&self.state, &TelemetryContext::default(), &HeaderMap::new(),
+            serde_json::from_value(serde_json::json!({
+                "grant_type": "authorization_code", "code": code, "client_id": self.client,
+                "redirect_uri": "https://app.example/callback", "code_verifier": "machine-test-verifier"
+            })).unwrap(),
+        ).await.unwrap().0
+    }
     async fn decide(&self, token: &str) -> AppResult<Response> {
         let form = serde_json::from_value(serde_json::json!({
             "response_type":"code","client_id":"forged-client","redirect_uri":"https://evil.invalid",
@@ -665,7 +688,7 @@ async fn machine_oauth_pending_selection_cannot_cross_source_disable_reenable() 
 }
 
 #[tokio::test]
-async fn machine_oauth_requires_human_saved_selection_and_rejects_expired_request() {
+async fn machine_oauth_saved_selection_requires_human_and_rejects_expired_request() {
     let f = MachineConsentFixture::new().await;
     let signed = sign_consent_request(
         &f.state,
@@ -674,7 +697,6 @@ async fn machine_oauth_requires_human_saved_selection_and_rejects_expired_reques
         "openid proxy machine offline_access",
     )
     .unwrap();
-    assert!(f.decide(&signed).await.is_err());
     let mut caller = crate::test_utils::test_auth_user(&f.user);
     caller.oauth_client_id = Some(f.client.clone());
     assert!(
@@ -927,4 +949,316 @@ async fn machine_oauth_pending_source_invalidation_forces_reconsent_review() {
         .await
         .unwrap()
     );
+}
+
+// Exercise the protected consent handler and token endpoint, not a client-side
+// interpretation of the requested scopes. Inventory is irrelevant to opting out.
+#[tokio::test]
+async fn machine_oauth_optional_without_selection_narrows_tokens_and_keeps_mcp() {
+    use axum::extract::FromRequestParts;
+    use tower::ServiceExt;
+    for has_inventory in [false, true] {
+        let f = MachineConsentFixture::new().await;
+        if !has_inventory {
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>("nodes")
+                .delete_many(doc! {})
+                .await
+                .unwrap();
+        } else {
+            // Saving then clearing the UI selection submits the original ticket.
+            // A pending selection alone must never authorize Machine access.
+            let _unused_prepared_ticket = f.prepare().await;
+        }
+        let code = f.code(&f.unselected(&f.params).await).await;
+        let stored = f
+            .state
+            .db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .find_one(doc! {"code_hash": crate::crypto::token::hash_token(&code)})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.scope, "openid proxy offline_access");
+        let issued = f.token_response(&code).await;
+        assert_eq!(issued.scope.as_deref(), Some("openid proxy offline_access"));
+        let claims =
+            jwt::verify_token(&f.state.jwt_keys, &f.state.config, &issued.access_token).unwrap();
+        assert_eq!(claims.scope, "openid proxy offline_access");
+        assert!(crate::mw::auth::scope_allows_rest_proxy(&claims.scope));
+        let (mut parts, _) = axum::http::Request::builder()
+            .uri("/api/v1/proxy/test")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", issued.access_token),
+            )
+            .body(())
+            .unwrap()
+            .into_parts();
+        let auth = AuthUser::from_request_parts(&mut parts, &f.state)
+            .await
+            .unwrap();
+        assert_eq!(auth.oauth_client_id.as_deref(), Some(f.client.as_str()));
+        assert!(crate::services::machine_external_grant_service::VerifiedExternalSource::from_verified_oauth(&claims).is_err());
+        assert!(
+            crate::handlers::mcp_transport::external_machine_oauth_source_for_test(
+                &f.state,
+                &issued.access_token
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>("machine_external_grants")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let consent = consent_service::check_consent(&f.state.db, &f.user, &f.client, "proxy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!consent.scopes.split_whitespace().any(|s| s == "machine"));
+        assert!(
+            consent_service::validate_protected_reference(
+                &f.state.db,
+                &f.user,
+                &f.client,
+                "machine",
+                claims.protected_consent.as_ref()
+            )
+            .await
+            .is_err()
+        );
+        let app = axum::Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(crate::handlers::mcp_transport::mcp_post),
+            )
+            .layer(axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp,
+                ),
+            ))
+            .with_state(f.state.clone());
+        let mut session_id: Option<axum::http::HeaderValue> = None;
+        for (method, params) in [
+            (
+                "initialize",
+                serde_json::json!({"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"optional-machines-test","version":"1"}}),
+            ),
+            ("tools/list", serde_json::json!({})),
+            (
+                "tools/call",
+                serde_json::json!({"name":"nyx__machine_exec","arguments":{"machine": f.node,"command":"true"}}),
+            ),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", issued.access_token),
+                );
+            if let Some(id) = &session_id {
+                request = request.header("mcp-session-id", id);
+            }
+            let response = app.clone().oneshot(request
+                .body(axum::body::Body::from(serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}).to_string())).unwrap()
+            ).await.unwrap();
+            if method == "initialize" {
+                session_id = Some(
+                    response
+                        .headers()
+                        .get("mcp-session-id")
+                        .expect("OAuth initialize creates a session")
+                        .clone(),
+                );
+            }
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if method == "initialize" {
+                assert!(body["result"]["protocolVersion"].is_string());
+            } else if method == "tools/list" {
+                assert!(
+                    body["result"]["tools"].as_array().is_some(),
+                    "MCP discovery failed: {}",
+                    body["error"]
+                );
+            } else {
+                assert_eq!(body["result"]["isError"], true);
+                assert!(
+                    body["result"]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("No Machine access granted")
+                );
+            }
+        }
+        let refresh = issued.refresh_token.unwrap();
+        let refreshed = crate::services::token_service::refresh_tokens(
+            &f.state.db,
+            &f.state.config,
+            &f.state.jwt_keys,
+            &refresh,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            jwt::verify_token(&f.state.jwt_keys, &f.state.config, &refreshed.access_token)
+                .unwrap()
+                .scope,
+            claims.scope
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>("machine_jobs")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn machine_oauth_optional_reconsent_can_add_machine_without_widening_old_tokens() {
+    let f = MachineConsentFixture::new().await;
+    let old = f
+        .token_response(&f.code(&f.unselected(&f.params).await).await)
+        .await;
+    let old_claims =
+        jwt::verify_token(&f.state.jwt_keys, &f.state.config, &old.access_token).unwrap();
+    let selected = f.token_response(&f.code(&f.prepare().await).await).await;
+    let new_claims =
+        jwt::verify_token(&f.state.jwt_keys, &f.state.config, &selected.access_token).unwrap();
+    assert!(new_claims.scope.split_whitespace().any(|s| s == "machine"));
+    assert_ne!(old_claims.protected_consent, new_claims.protected_consent);
+    assert!(
+        crate::handlers::mcp_transport::external_machine_oauth_source_for_test(
+            &f.state,
+            &selected.access_token
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        crate::handlers::mcp_transport::external_machine_oauth_source_for_test(
+            &f.state,
+            &old.access_token
+        )
+        .await
+        .is_err()
+    );
+    // A later session can opt out without revoking the existing Machine grant.
+    let declined = f
+        .token_response(&f.code(&f.unselected(&f.params).await).await)
+        .await;
+    assert_eq!(
+        declined.scope.as_deref(),
+        Some("openid proxy offline_access")
+    );
+    assert!(
+        crate::handlers::mcp_transport::external_machine_oauth_source_for_test(
+            &f.state,
+            &declined.access_token
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::handlers::mcp_transport::external_machine_oauth_source_for_test(
+            &f.state,
+            &selected.access_token
+        )
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>("machine_external_grants")
+            .count_documents(doc! {"status":"active"})
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn machine_oauth_optional_incremental_consent_narrows_code_and_preserves_union() {
+    for existing_machine in [false, true] {
+        let f = MachineConsentFixture::new().await;
+        let first = if existing_machine {
+            f.prepare().await
+        } else {
+            f.unselected(&f.params).await
+        };
+        f.code(&first).await;
+        let original = consent_service::check_consent(&f.state.db, &f.user, &f.client, "")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut params = f.params.clone();
+        params.service_access_mode = Some(ServiceAccessMode::Incremental);
+        params.incremental_consent = Some(
+            incremental_consent_service::prepare(
+                &f.state.db,
+                &f.user,
+                &f.client,
+                "test",
+                Some("machine proxy"),
+                &[],
+                &[],
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let issued = f
+            .token_response(&f.code(&f.unselected(&params).await).await)
+            .await;
+        assert!(
+            !issued
+                .scope
+                .unwrap()
+                .split_whitespace()
+                .any(|s| s == "machine")
+        );
+        assert!(
+            crate::handlers::mcp_transport::external_machine_oauth_source_for_test(
+                &f.state,
+                &issued.access_token
+            )
+            .await
+            .is_err()
+        );
+        let unchanged = consent_service::check_consent(&f.state.db, &f.user, &f.client, "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.scopes, original.scopes);
+        assert_eq!(unchanged.revision, original.revision);
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>("machine_external_grants")
+                .count_documents(doc! {"status":"active"})
+                .await
+                .unwrap(),
+            u64::from(existing_machine)
+        );
+    }
 }

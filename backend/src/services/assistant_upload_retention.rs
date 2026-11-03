@@ -126,7 +126,7 @@ async fn ensure_settings(db: &Database) -> AppResult<()> {
 }
 
 fn projection() -> Document {
-    doc! {"_id":1, "user_id":1, "conversation_id":1, "group_id":1, "origin":1,
+    doc! {"_id":1, "user_id":1, "conversation_id":1, "group_id":1, "collaboration_group_id":1, "origin":1,
     "content_type":1, "message_id":1, "created_at":1, "bound_at":1, "expires_at":1,
     "first_used_turn_id":1, "first_used_conversation_id":1, "first_turn_settled_at":1}
 }
@@ -362,6 +362,7 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
             "user_id",
             "conversation_id",
             "group_id",
+            "collaboration_group_id",
             "origin",
             "message_id",
             "created_at",

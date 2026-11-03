@@ -135,6 +135,7 @@ export function SharedConsentCards({ agentId, conversationId }: { readonly agent
       <p>{row.operation}</p>
       <p className="break-all text-muted-foreground">Your connection: {row.connection_name ?? row.connection_id}. Model and metered-service usage bills you.</p>
       <p className="text-muted-foreground">Applies to this exact operation, or this turn's stateless model calls. Always remembers this scope until you revoke it or the agent or connection changes. Your connection is never shared with the owner.</p>
+      {row.audience && <p className="text-12 text-muted-foreground">{row.audience}</p>}
       {row.decision === "pending" ? <div className="flex flex-wrap gap-2">{(["once", "always", "skip"] as const).map((decision) => <Button key={decision} disabled={decide.isPending} onClick={() => decide.mutate({ consent: row.id, decision })}>{decision === "once" ? "Allow once" : decision === "always" ? "Always" : "Skip"}</Button>)}</div> : <div className="flex items-center justify-between gap-2"><span>{row.decision === "always" ? "Always allowed" : "Allowed once"}</span><Button disabled={decide.isPending} onClick={() => decide.mutate({ consent: row.id, decision: "revoked" })}>Revoke</Button></div>}
     </section>)}
     {decide.error ? <ErrorBanner message={decide.error.message} /> : null}

@@ -24,6 +24,8 @@ const eventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("stopped"), confirmed: z.boolean() }),
   z.object({
     type: z.literal("error"),
+    code: z.string().max(80).optional(),
+    stage: z.enum(["transport", "authority", "billing", "provider", "audio", "finalizing"]).optional(),
     error: z.object({ message: z.string() }),
   }),
 ]);
@@ -31,6 +33,22 @@ export type DictationText = {
   final: string;
   interim: string;
   parts?: { text: string; complete: boolean; order: number }[];
+};
+
+export type DictationClose = {
+  code: number;
+  wasClean: boolean;
+  reason: string;
+  stage: "connecting" | "capturing" | "finalizing";
+};
+const closeReasons = new Set(["dictation_stopped", "dictation_backpressure", "dictation_invalid_audio", "dictation_failed"]);
+const terminalMessages: Record<string, string> = {
+  dictation_backpressure: "Dictation could not keep up. Review the captured text and try again.",
+  dictation_provider_failed: "Transcription ended unexpectedly. Review the captured text and try again.",
+  dictation_access_changed: "Dictation access changed. Review the captured text and sign in again if needed.",
+  dictation_billing_failed: "Dictation billing could not continue. Review the captured text and check your credits.",
+  dictation_invalid_frame: "Dictation audio was not accepted. Review the captured text and start again.",
+  dictation_finalization_failed: "Final transcription was not confirmed. Review the captured text.",
 };
 
 /** Captions are local review text. This client has no chat send/history API. */
@@ -42,6 +60,8 @@ export class AssistantDictationClient {
   private finishing = false;
   private closed = false;
   private ready = false;
+  private closeStage: DictationClose["stage"] = "connecting";
+  closeDetails?: DictationClose;
   private timeout?: ReturnType<typeof setTimeout>;
   private items = new Map<
     string,
@@ -124,6 +144,7 @@ export class AssistantDictationClient {
           const event = eventSchema.parse(JSON.parse(data));
           if (event.type === "ready") {
             this.ready = true;
+            this.closeStage = "capturing";
             clearTimeout(this.timeout);
             if (this.finishing) {
               this.requestStop();
@@ -191,7 +212,9 @@ export class AssistantDictationClient {
                 .map((item) => item.text)
                 .join(" "),
             });
-          } else if (event.type === "error") this.fail(event.error.message);
+          } else if (event.type === "error") {
+            this.fail(terminalMessages[event.code ?? ""] ?? event.error.message);
+          }
           else if (event.type === "stopped") {
             this.dispose();
             this.callbacks.state("review");
@@ -202,14 +225,27 @@ export class AssistantDictationClient {
           );
         }
       };
-      socket.onclose = () => {
-        if (!this.closed)
-          this.fail("Dictation disconnected. Review the captured text.");
+      socket.onclose = (event) => {
+        this.closeDetails = {
+          code: event.code,
+          wasClean: event.wasClean,
+          reason: closeReasons.has(event.reason) ? event.reason : "unrecognized",
+          stage: this.closeStage,
+        };
+        if (!this.closed) {
+          const message = terminalMessages[this.closeDetails.reason] ??
+            (this.closeStage === "connecting"
+              ? "Dictation could not connect. Check your connection and try again."
+              : this.closeStage === "finalizing"
+                ? "Final transcription was not confirmed. Review the captured text."
+                : "Dictation connection ended. Review the captured text and try again.");
+          this.fail(`${message} (${event.code} · ${event.wasClean ? "clean close" : "connection lost"} · ${this.closeStage})`);
+        }
       };
-      socket.onerror = () =>
-        this.fail(
-          "Dictation is unavailable. Check your connection and billing settings.",
-        );
+      // Browsers report no useful details on error; the following close event
+      // owns diagnostics. The existing startup/finalization deadlines still bound waits.
+      socket.onerror = () => {};
+
     } catch (error) {
       if (this.finishing || this.closed) return;
       this.fail(
@@ -222,6 +258,7 @@ export class AssistantDictationClient {
   stop() {
     if (this.finishing || this.closed) return;
     this.finishing = true;
+    this.closeStage = "finalizing";
     this.releaseMedia();
     if (!this.socket) {
       this.dispose();

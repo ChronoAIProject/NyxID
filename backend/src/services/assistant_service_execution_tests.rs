@@ -818,3 +818,151 @@ fn guest_1995_codex_correlation_metadata_is_stateless_but_provider_handles_are_n
         assert!(!stateless_model_transport("v1/responses", &bad));
     }
 }
+
+#[tokio::test]
+async fn precondition_2113_http_projection_binds_exact_approval_to_write_revision() {
+    async fn write_gate(f: &Fixture, id: &str, operation: &Value, ack: Option<&str>) -> Decision {
+        check(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.chat,
+            id,
+            &f.owner,
+            operation,
+            acks::ActionFacts::of(acks::OwnerActionClass::Change),
+            ack,
+            "Update the selected rule",
+            false,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+    let f = orchestrator_fixture("execution_precondition_2113").await;
+    let id = connection(&f, &f.owner, "conditional-write", None).await;
+    mode(&f, AccessMode::AskEveryTime).await;
+    let target = target(&f, &id).await;
+    let projection = HttpProjection::default();
+    for name in ["if-match", "if-unmodified-since"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(name, "revision-one".parse().unwrap());
+        let operation = |headers: &HeaderMap| {
+            let mut op =
+                http_operation(&target, "PATCH", "/rules/one", None, br#"{"enabled":true}"#);
+            bind_headers(&mut op, &projection.headers(&target, headers));
+            op
+        };
+        let original = operation(&headers);
+        let ack = allow(
+            &f,
+            write_gate(&f, &id, &original, None).await.refusal.unwrap(),
+        )
+        .await;
+        headers.insert(name, "revision-two".parse().unwrap());
+        let changed = operation(&headers);
+        assert_ne!(original, changed);
+        assert_eq!(
+            write_gate(&f, &id, &changed, Some(&ack))
+                .await
+                .refusal
+                .unwrap()["error"],
+            "acknowledgement_invalid"
+        );
+        headers.remove(name);
+        let removed = operation(&headers);
+        assert_ne!(original, removed);
+        assert_eq!(
+            write_gate(&f, &id, &removed, Some(&ack))
+                .await
+                .refusal
+                .unwrap()["error"],
+            "acknowledgement_invalid"
+        );
+        // A fresh approval authorizes the retried operation at its new revision.
+        let new_ack = allow(
+            &f,
+            write_gate(&f, &id, &changed, None).await.refusal.unwrap(),
+        )
+        .await;
+        assert!(
+            write_gate(&f, &id, &changed, Some(&new_ack))
+                .await
+                .refusal
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn guest_model_2121_absent_preconditions_preserve_route_fingerprint() {
+    use crate::models::downstream_service::{InferenceWireProtocol, ServiceInference};
+    let mut service = test_utils::test_auto_connected_catalog_service();
+    service.id = "test-model-catalog".into();
+    service.inference = Some(ServiceInference {
+        wire_protocol: InferenceWireProtocol::OpenaiCompletions,
+        model_list: true,
+        realtime: false,
+        voice: None,
+    });
+    let target = super::super::proxy_service::ProxyTarget {
+        service,
+        base_url: "https://example.invalid".into(),
+        auth_method: "bearer".into(),
+        auth_key_name: "Authorization".into(),
+        credential: "test-only-model-key".to_owned().into(),
+        catalog_default_headers: Vec::new(),
+        user_service_default_headers: Vec::new(),
+        ws_frame_injections: Vec::new(),
+        connection_id: None,
+        target_id: None,
+        workspace_destinations_pending: false,
+    };
+    let headers = HeaderMap::from_iter([
+        (
+            axum::http::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        ),
+        (axum::http::header::ACCEPT, "*/*".parse().unwrap()),
+    ]);
+    let operation = |headers: &HeaderMap, model: &str| {
+        let body =
+            serde_json::to_vec(&json!({"model":model,"store":false,"input":"hello"})).unwrap();
+        let mut route =
+            request_identity::model_route_operation(&target, "POST", "responses", None, &body)
+                .unwrap();
+        bind_headers(
+            &mut route,
+            &HttpProjection::default().headers(&target, headers),
+        );
+        route
+    };
+    let original = operation(&headers, "gpt-6-astra");
+    // Frozen pre-#2113 identity for the bridge's ordinary JSON/Accept headers.
+    assert_eq!(
+        original["headers"],
+        "sha256:e383d1e648da73548f5163bf37478ebb24df62af7c576eb4934b2d8d8976b280"
+    );
+    assert_eq!(
+        selection_fingerprint(&original),
+        "sha256:345f6d1232ae1e109a566d4783bd73bea882008a4e641fd388caba3a4e80e5e9"
+    );
+    assert_ne!(
+        selection_fingerprint(&operation(&headers, "model-after-policy-change")),
+        selection_fingerprint(&original)
+    );
+    for (name, value) in [
+        ("if-match", "\"revision-one\""),
+        ("if-unmodified-since", "Wed, 21 Oct 2015 07:28:00 GMT"),
+    ] {
+        let mut conditional = headers.clone();
+        conditional.insert(name, value.parse().unwrap());
+        assert_ne!(
+            selection_fingerprint(&operation(&conditional, "gpt-6-astra")),
+            selection_fingerprint(&original)
+        );
+        conditional.remove(name);
+        assert_eq!(operation(&conditional, "gpt-6-astra"), original);
+    }
+}

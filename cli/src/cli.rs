@@ -4335,6 +4335,83 @@ mod tests {
     }
 
     #[test]
+    fn node_credentials_add_url_retains_interactive_add_arguments() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "credentials",
+            "add",
+            "--service",
+            "monitor",
+            "--url",
+            "http://new-monitor",
+        ])
+        .unwrap();
+        let Commands::Node {
+            command:
+                NodeCommands::Credentials {
+                    command:
+                        NodeCredentialCommands::Add {
+                            service,
+                            url,
+                            header,
+                            query_param,
+                            secret_format,
+                            value,
+                        },
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("add must retain the local credential flow");
+        };
+        assert_eq!(service, "monitor");
+        assert_eq!(url.as_deref(), Some("http://new-monitor"));
+        assert!(header.is_none() && query_param.is_none() && value.is_none());
+        assert_eq!(secret_format, CredentialSecretFormat::Raw);
+    }
+
+    #[test]
+    fn node_credentials_set_url_parses_explicit_target_and_clear() {
+        for target in ["http://new-monitor", ""] {
+            let cli = Cli::try_parse_from([
+                "nyxid",
+                "node",
+                "credentials",
+                "set-url",
+                "--service",
+                "monitor",
+                "--url",
+                target,
+            ])
+            .unwrap();
+            let Commands::Node {
+                command:
+                    NodeCommands::Credentials {
+                        command: NodeCredentialCommands::SetUrl { service, url },
+                        ..
+                    },
+            } = cli.command
+            else {
+                panic!("set-url must select the explicit migration flow");
+            };
+            assert_eq!(service, "monitor");
+            assert_eq!(url, target);
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "node",
+                "credentials",
+                "set-url",
+                "--service",
+                "monitor",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn node_credentials_accept_accepts_value_env() {
         let cli = Cli::try_parse_from([
             "nyxid",
@@ -4575,6 +4652,15 @@ pub enum NodeCredentialCommands {
         /// Inline secret value (skips interactive prompt; NOT recommended)
         #[arg(long, hide = true)]
         value: Option<String>,
+    },
+    /// Change a node-managed service's endpoint using your owner login, preserving its secret
+    SetUrl {
+        /// Existing service slug on this node
+        #[arg(long)]
+        service: String,
+        /// New endpoint URL; an empty string clears it only after the node acknowledges
+        #[arg(long)]
+        url: String,
     },
     /// Add an OAuth credential for a service (runs device code or authorization code flow)
     AddOauth {

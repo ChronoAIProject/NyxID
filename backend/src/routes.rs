@@ -130,6 +130,18 @@ macro_rules! proxy_billing_routes {
                 )
             ),
             (
+                // Same root as `/proxy/s/{slug}`: a catch-all never matches an
+                // empty tail, so without this the trailing-slash spelling fell
+                // through to `/proxy/{service_id}/{*path}` with service "s".
+                "/proxy/s/{slug}/",
+                "/api/v1/proxy/s/{slug}/",
+                "handlers::proxy::proxy_request_by_slug_root",
+                axum::routing::any(handlers::proxy::proxy_request_by_slug_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
                 "/proxy/{service_id}/{*path}",
                 "/api/v1/proxy/{service_id}/{*path}",
                 "handlers::proxy::proxy_request",
@@ -141,6 +153,15 @@ macro_rules! proxy_billing_routes {
             (
                 "/proxy/{service_id}",
                 "/api/v1/proxy/{service_id}",
+                "handlers::proxy::proxy_request_root",
+                axum::routing::any(handlers::proxy::proxy_request_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/proxy/{service_id}/",
+                "/api/v1/proxy/{service_id}/",
                 "handlers::proxy::proxy_request_root",
                 axum::routing::any(handlers::proxy::proxy_request_root),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
@@ -366,6 +387,15 @@ macro_rules! public_proxy_billing_routes {
             (
                 "/public/s/{slug}",
                 "/public/s/{slug}",
+                "handlers::public_proxy::public_proxy_request_root",
+                axum::routing::any(handlers::public_proxy::public_proxy_request_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "block-not-meter; billable anonymous services are invalid"
+                )
+            ),
+            (
+                "/public/s/{slug}/",
+                "/public/s/{slug}/",
                 "handlers::public_proxy::public_proxy_request_root",
                 axum::routing::any(handlers::public_proxy::public_proxy_request_root),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
@@ -2748,6 +2778,19 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
         .route(
+            "/nyxagent/custom-event-bindings",
+            get(handlers::nyxbot_event_bindings::list)
+                .post(handlers::nyxbot_event_bindings::create),
+        )
+        .route(
+            "/nyxagent/custom-event-bindings/{id}",
+            get(handlers::nyxbot_event_bindings::get),
+        )
+        .route(
+            "/nyxagent/custom-event-bindings/{id}/revoke",
+            post(handlers::nyxbot_event_bindings::revoke),
+        )
+        .route(
             "/nyxagent/groups",
             get(handlers::assistant_group::list_groups)
                 .post(handlers::assistant_group::create_group),
@@ -2762,6 +2805,63 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/groups/{id}/messages",
             get(handlers::assistant_group::list_messages)
                 .post(handlers::assistant_group::post_message),
+        )
+        .route(
+            "/nyxagent/groups/{id}/agents/{agent_id}/guest-requests",
+            post(handlers::collaboration_group::request_guest_access),
+        )
+        .route(
+            "/nyxagent/groups/{id}/agents/{agent_id}/guest-requests/{request_id}",
+            delete(handlers::collaboration_group::cancel_guest_request),
+        )
+        .route(
+            "/nyxagent/agents/{id}/group-access",
+            get(handlers::collaboration_group::owned_guest_groups),
+        )
+        .route(
+            "/nyxagent/collaboration",
+            get(handlers::collaboration_group::availability),
+        )
+        .route(
+            "/nyxagent/groups/{id}/invites",
+            post(handlers::collaboration_group::invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/invites/{invite}",
+            delete(handlers::collaboration_group::cancel_invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/participants/{person}",
+            post(handlers::collaboration_group::quick_add)
+                .delete(handlers::collaboration_group::remove_participant),
+        )
+        .route(
+            "/nyxagent/groups/{id}/leave",
+            post(handlers::collaboration_group::leave),
+        )
+        .route(
+            "/nyxagent/groups/{id}/agents/{agent}/guest-access",
+            put(handlers::collaboration_group::guest_access),
+        )
+        .route(
+            "/nyxagent/groups/{id}/membership",
+            post(handlers::collaboration_group::membership),
+        )
+        .route(
+            "/nyxagent/group-invites/preview",
+            post(handlers::collaboration_group::preview_invite),
+        )
+        .route(
+            "/nyxagent/group-invites/accept",
+            post(handlers::collaboration_group::accept_invite),
+        )
+        .route(
+            "/nyxagent/groups/{id}/requests/{request}/cancel",
+            post(handlers::collaboration_group::cancel),
+        )
+        .route(
+            "/nyxagent/groups/{id}/decisions/{decision}",
+            post(handlers::collaboration_group::decide),
         )
         .route(
             "/nyxagent/channels/{id}",
@@ -3593,6 +3693,9 @@ mod runtime_profile_tests;
 
 #[cfg(test)]
 mod service_inventory_tests;
+
+#[cfg(test)]
+mod proxy_root_tests;
 
 #[cfg(test)]
 mod retirement_tests {

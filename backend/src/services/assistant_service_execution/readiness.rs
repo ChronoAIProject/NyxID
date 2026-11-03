@@ -73,7 +73,7 @@ pub async fn guest_readiness_settings(
         )
         .map_err(|_| AppError::Internal("Invalid model route".into()))?;
         let rows: Vec<Document> = db.collection::<Document>("assistant_conversations")
-            .find(doc! {"user_id":owner,"agent_id":agent_id,"$or":[
+            .find(doc! {"user_id":owner,"agent_id":agent_id,"guest_model_setup":{"$ne":true},"$or":[
                 {"model":{"$ne":&agent.model}},
                 {"owner_model_route":{"$ne":bson::Bson::Null},"$expr":{"$ne":["$owner_model_route",{"$literal":bound}]}}
             ]})
@@ -130,6 +130,68 @@ pub async fn guest_readiness(
         .as_ref()
         .filter(|_| conversation_id.is_some())
         .map_or(agent.model.as_str(), |r| &r.model);
+    if let Some(setup) =
+        super::super::assistant_guest_model_setup::record(db, owner, &agent.id, profile).await?
+    {
+        match setup.get_str("status").unwrap_or("") {
+            "setting_up" => {
+                if setup
+                    .get_datetime("until")
+                    .is_ok_and(|at| at.to_chrono() <= Utc::now())
+                {
+                    return Ok(GuestReadiness {
+                        status: "not_ready",
+                        reason: Some("setup_timeout".into()),
+                        fix: Some(
+                            super::super::assistant_guest_model_setup::failure_fix("setup_timeout")
+                                .into(),
+                        ),
+                    });
+                }
+                return Ok(GuestReadiness {
+                    status: "setting_up",
+                    reason: None,
+                    fix: None,
+                });
+            }
+            "failed" => {
+                return Ok(GuestReadiness {
+                    status: "not_ready",
+                    reason: Some(
+                        setup
+                            .get_str("reason")
+                            .unwrap_or("model_connection_unavailable")
+                            .into(),
+                    ),
+                    fix: Some(
+                        super::super::assistant_guest_model_setup::failure_fix(
+                            setup.get_str("reason").unwrap_or(""),
+                        )
+                        .into(),
+                    ),
+                });
+            }
+            "ready" => {
+                if let Ok(route) = setup.get_document("route")
+                    && let Ok(route) = bson::from_document::<
+                        crate::models::assistant_agent::OwnerModelRoute,
+                    >(route.clone())
+                    && super::super::assistant_guest_model_setup::valid_route(
+                        db, keys, owner, &route,
+                    )
+                    .await?
+                {
+                    return Ok(GuestReadiness::ready());
+                }
+                return Ok(GuestReadiness {
+                    status: "setting_up",
+                    reason: None,
+                    fix: None,
+                });
+            }
+            _ => {}
+        }
+    }
     let bound = row
         .as_ref()
         .filter(|_| conversation_id.is_some())
@@ -259,7 +321,7 @@ pub async fn guest_readiness(
     Ok(GuestReadiness::ready())
 }
 
-async fn bound_target(
+pub(crate) async fn bound_target(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
     owner: &str,
@@ -288,13 +350,26 @@ async fn bound_target(
     {
         return Ok(None);
     }
-    proxy_service::authorize_master_credential(
-        db,
-        &service,
-        &proxy_service::EffectiveActor::from_user_id(owner),
-    )
-    .await?;
-    if platform_key_service::has_platform_key(&service) {
+    let no_auth = platform_key_service::no_auth_platform_service(&service);
+    if no_auth {
+        if service.requires_user_credential {
+            return Ok(None);
+        }
+        if service.platform_key.is_some() {
+            platform_key_service::require(db, &service, owner).await?;
+        }
+    } else {
+        proxy_service::authorize_master_credential(
+            db,
+            &service,
+            &proxy_service::EffectiveActor::from_user_id(owner),
+        )
+        .await?;
+    }
+    // Explicit platform bindings use effective provider auth. Legacy catalog
+    // master routes keep the catalog's exact auth fields in resolve_proxy_target;
+    // normalizing an empty header name here would invent a different digest.
+    if service.platform_key.is_some() && !no_auth {
         let (method, name) = platform_key_service::effective_auth(db, &service).await?;
         service.auth_method = method;
         service.auth_key_name = name;

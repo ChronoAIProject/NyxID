@@ -1763,6 +1763,10 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         super::agent_skills::preload_for_turn(&self.state, row, agent).await
     }
 
+    fn channel_typing(&self, row: &AssistantConversation) -> Option<tokio::task::JoinHandle<()>> {
+        super::nyxbot::typing::start(&self.state, row)
+    }
+
     fn checking_notice(&self, row: &AssistantConversation) -> Option<tokio::task::JoinHandle<()>> {
         let origin = crate::services::assistant_checking_notice::destination(row)?;
         let state = self.state.clone();
@@ -2051,7 +2055,10 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                 Ok(LiveEvent::OrgGroup { id, user_id: owner }) if owner == user_id => {
                     // The channel routes candidates; authority is live again at delivery,
                     // including the first delivery after subscribing.
-                    if crate::services::org_group_service::get(&state.db,&user_id,&id,None).await.is_err() { continue; }
+                    let eligible=if crate::services::collaboration_group_service::marked(&state.db,&id).await.unwrap_or(false) {
+                        crate::services::collaboration_group_service::get(&state.db,&user_id,&id).await.is_ok()
+                    } else {crate::services::org_group_service::get(&state.db,&user_id,&id,None).await.is_ok()};
+                    if !eligible {continue;}
                     ("group", json!({"type":"group","id":id}))
                 }
                 Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {

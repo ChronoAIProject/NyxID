@@ -62,6 +62,7 @@ pub(crate) async fn post(
     }
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
+        collaboration: None,
         id: id.clone(),
         group_id: access.group.id.clone(),
         user_id: access.group.user_id.clone(),
