@@ -70,6 +70,10 @@ export type AccountConsent = z.infer<typeof consentSchema>;
 export type BrokerAuthorization = z.infer<typeof bindingSchema>;
 export type AccountOrganization = z.infer<typeof organizationSchema>;
 type Request = (path: string, options?: RequestOptions) => Promise<unknown>;
+export type AccountSecurityRequestGuard = Pick<
+  RequestOptions,
+  "authorityGuard" | "signal"
+>;
 // Each call is fenced to the account shown in the UI, including transport retries.
 export function createAccountSecurityApi(request: Request) {
   const options = (
@@ -80,8 +84,12 @@ export function createAccountSecurityApi(request: Request) {
     ...extra,
   });
   return {
-    disableMfa: (input: z.infer<typeof disableMfaSchema>) =>
+    disableMfa: (
+      input: z.infer<typeof disableMfaSchema>,
+      guard: AccountSecurityRequestGuard = {},
+    ) =>
       request("/auth/mfa/disable", {
+        ...guard,
         method: "POST",
         body: disableMfaSchema.parse(input),
         ...credentialOptions,
@@ -89,21 +97,29 @@ export function createAccountSecurityApi(request: Request) {
     changePassword: (
       accountId: string,
       input: z.infer<typeof changePasswordSchema>,
+      guard: AccountSecurityRequestGuard = {},
     ) => {
       const { confirmation: _, ...body } = changePasswordSchema.parse(input);
       return request(
         "/auth/password/change",
-        options(accountId, { method: "POST", body, ...credentialOptions }),
+        options(accountId, {
+          ...guard,
+          method: "POST",
+          body,
+          ...credentialOptions,
+        }),
       );
     },
     async saveSecurityPreferences(
       accountId: string,
       input: z.infer<typeof securityPreferencesSchema>,
+      guard: AccountSecurityRequestGuard = {},
     ) {
       return securityPreferencesSchema.parse(
         await request(
           "/users/me/security",
           options(accountId, {
+            ...guard,
             method: "PUT",
             body: securityPreferencesSchema.parse(input),
             ...credentialOptions,
@@ -118,10 +134,14 @@ export function createAccountSecurityApi(request: Request) {
           await request("/users/me/consents", options(accountId, { signal })),
         ).consents;
     },
-    revokeConsent: (accountId: string, clientId: string) =>
+    revokeConsent: (
+      accountId: string,
+      clientId: string,
+      guard: AccountSecurityRequestGuard = {},
+    ) =>
       request(
         `/users/me/consents/${encodeURIComponent(required.parse(clientId))}`,
-        options(accountId, { method: "DELETE" }),
+        options(accountId, { ...guard, method: "DELETE" }),
       ),
     async brokerBindings(accountId: string, signal?: AbortSignal) {
       return z
@@ -133,31 +153,46 @@ export function createAccountSecurityApi(request: Request) {
           ),
         ).bindings;
     },
-    revokeBrokerBinding: (accountId: string, hash: string) =>
+    revokeBrokerBinding: (
+      accountId: string,
+      hash: string,
+      guard: AccountSecurityRequestGuard = {},
+    ) =>
       request(
         `/users/me/broker-bindings/${encodeURIComponent(required.parse(hash))}`,
-        options(accountId, { method: "DELETE" }),
+        options(accountId, { ...guard, method: "DELETE" }),
       ),
     async organizations(accountId: string, signal?: AbortSignal) {
       return z
         .object({ orgs: z.array(organizationSchema) })
         .parse(await request("/orgs", options(accountId, { signal }))).orgs;
     },
-    async createOrganization(accountId: string, name: string) {
+    async createOrganization(
+      accountId: string,
+      name: string,
+      guard: AccountSecurityRequestGuard = {},
+    ) {
       const body = z
         .object({ display_name: required.max(128) })
         .parse({ display_name: name });
       return organizationSchema.parse(
-        await request("/orgs", options(accountId, { method: "POST", body })),
+        await request(
+          "/orgs",
+          options(accountId, { ...guard, method: "POST", body }),
+        ),
       );
     },
-    async joinOrganization(accountId: string, nonce: string) {
+    async joinOrganization(
+      accountId: string,
+      nonce: string,
+      guard: AccountSecurityRequestGuard = {},
+    ) {
       return z
         .object({ org_id: required, role: organizationSchema.shape.your_role })
         .parse(
           await request(
             `/orgs/join/${encodeURIComponent(required.parse(nonce))}`,
-            options(accountId, { method: "POST" }),
+            options(accountId, { ...guard, method: "POST" }),
           ),
         );
     },

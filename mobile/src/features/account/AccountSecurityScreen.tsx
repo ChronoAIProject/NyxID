@@ -172,8 +172,10 @@ export function AccountSecurityScreen() {
       // Mask one-time output until foreground; discard it only on leaving
       // this screen or explicit acknowledgment. Clear reusable inputs now.
       if (state === "background") clearSensitiveInputs();
-      else if (state === "inactive") setRevealCodes(false);
-      else if (isFocused.current) {
+      else if (state === "inactive") {
+        privateEpoch.current += 1;
+        setRevealCodes(false);
+      } else if (isFocused.current) {
         void profile.refetch();
         void sessions.refetch();
       }
@@ -347,6 +349,7 @@ export function AccountSecurityScreen() {
   }
 
   function disableMfa() {
+    const epoch = privateEpoch.current;
     const result = disableMfaSchema.safeParse({
       code: disableCode,
       ...(passwordAccount ? { password } : {}),
@@ -368,8 +371,16 @@ export function AccountSecurityScreen() {
           text: "Turn off",
           style: "destructive",
           onPress: () => {
+            if (!currentEpoch(epoch)) return;
             void runPrivate("disable", async (epoch) => {
-              await accountApi.disableMfa(result.data);
+              await accountApi.disableMfa(result.data, {
+                authorityGuard: () => {
+                  if (!currentEpoch(epoch))
+                    throw Object.assign(new Error("Account action cancelled"), {
+                      name: "AbortError",
+                    });
+                },
+              });
               if (currentEpoch(epoch)) {
                 void refreshProfile();
                 clearPrivateState();
@@ -677,8 +688,9 @@ export function AccountSecurityScreen() {
                 {!passwordAccount ? (
                   <Label muted>
                     This account uses {profile.data.social_provider} sign-in.
-                    Turning off two-factor authentication later requires an
-                    account password.
+                    To turn off two-factor authentication later, use an
+                    authenticator or recovery code. No account password is
+                    required.
                   </Label>
                 ) : null}
                 <ActionButton

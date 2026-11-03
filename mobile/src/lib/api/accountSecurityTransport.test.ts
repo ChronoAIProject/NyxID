@@ -30,6 +30,60 @@ test("MFA disable sends a required authenticator/recovery code and only supplied
   assert.equal(calls.length, 2);
 });
 
+test("all security writes preserve lifecycle guard and cancellation signal", async () => {
+  const calls: RequestOptions[] = [];
+  const authorityGuard = () => {};
+  const controller = new AbortController();
+  const guard = { authorityGuard, signal: controller.signal };
+  const api = createAccountSecurityApi(async (path, options) => {
+    calls.push(options!);
+    if (path === "/users/me/security")
+      return { skip_mfa_for_approved_sign_ins: false };
+    if (path === "/orgs")
+      return {
+        id: "org",
+        slug: "team",
+        display_name: "Team",
+        your_role: "admin",
+      };
+    if (path.startsWith("/orgs/join/"))
+      return { org_id: "org", role: "member" };
+    return {};
+  });
+  await api.disableMfa({ code: "123456" }, guard);
+  await api.changePassword(
+    "owner",
+    {
+      current_password: "old",
+      new_password: "new password",
+      confirmation: "new password",
+    },
+    guard,
+  );
+  await api.saveSecurityPreferences(
+    "owner",
+    { skip_mfa_for_approved_sign_ins: false },
+    guard,
+  );
+  await api.revokeConsent("owner", "client", guard);
+  await api.revokeBrokerBinding("owner", "hash", guard);
+  await api.createOrganization("owner", "Team", guard);
+  await api.joinOrganization("owner", "nonce", guard);
+  assert.equal(calls.length, 7);
+  for (const options of calls) {
+    assert.equal(options.authorityGuard, authorityGuard);
+    assert.equal(options.signal, controller.signal);
+  }
+  assert.ok(
+    calls.slice(1).every((options) => options.expectedAccountId === "owner"),
+  );
+  assert.ok(
+    calls
+      .slice(0, 3)
+      .every((options) => options.invalidateSessionOnAuthFailure === false),
+  );
+});
+
 test("password validation preserves whitespace/UTF-8 limits, strips confirmation and fences to the current account", async () => {
   const calls: RequestOptions[] = [];
   const api = createAccountSecurityApi(async (_path, options) => {

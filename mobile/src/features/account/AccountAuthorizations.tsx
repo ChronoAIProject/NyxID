@@ -10,7 +10,10 @@ import {
 import { accountApi } from "../../lib/api/accountApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
-import { useAccountSecurityRefresh } from "./useAccountSecurityRefresh";
+import {
+  useAccountSecurityRefresh,
+  type AccountSecurityTicket,
+} from "./useAccountSecurityRefresh";
 
 export function AccountAuthorizations({ accountId }: { accountId: string }) {
   const client = useQueryClient();
@@ -34,25 +37,30 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
     void apps.refetch();
     void bindings.refetch();
   };
-  const current = useAccountSecurityRefresh(refresh);
-  async function revoke(kind: "app" | "binding", id: string) {
-    if (locked.current || !current()) return;
+  const current = useAccountSecurityRefresh(refresh, () => setFeedback(null));
+  async function revoke(
+    kind: "app" | "binding",
+    id: string,
+    ticket: AccountSecurityTicket,
+  ) {
+    if (locked.current || !ticket.isCurrent()) return;
     locked.current = true;
     setBusy(true);
     setFeedback(null);
     try {
-      if (kind === "app") await accountApi.revokeConsent(accountId, id);
-      else await accountApi.revokeBrokerBinding(accountId, id);
-      if (!current()) return;
+      const guard = { authorityGuard: ticket.assertCurrent };
+      if (kind === "app") await accountApi.revokeConsent(accountId, id, guard);
+      else await accountApi.revokeBrokerBinding(accountId, id, guard);
+      if (!ticket.isCurrent()) return;
       // Reset rather than remove one local row: the server decides the resulting authority.
       await client.resetQueries({ queryKey: key }, { throwOnError: true });
-      if (current())
+      if (ticket.isCurrent())
         setFeedback({
           message: "Access revoked. Lists refreshed from NyxID.",
           tone: "success",
         });
     } catch (error) {
-      if (current())
+      if (ticket.isCurrent())
         setFeedback({ message: resolveErrorMessage(error), tone: "error" });
     } finally {
       locked.current = false;
@@ -60,6 +68,7 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
     }
   }
   function confirm(kind: "app" | "binding", id: string, label: string) {
+    const ticket = current.capture();
     Alert.alert(
       `Revoke ${label}?`,
       kind === "app"
@@ -70,7 +79,7 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
         {
           text: "Revoke",
           style: "destructive",
-          onPress: () => void revoke(kind, id),
+          onPress: () => void revoke(kind, id, ticket),
         },
       ],
     );

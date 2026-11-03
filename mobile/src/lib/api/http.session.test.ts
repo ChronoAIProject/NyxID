@@ -9,11 +9,15 @@ import ts from "typescript";
 function setup() {
   let generation = 1;
   let invalidations = 0;
+  let sends = 0;
+  let sessionReadGate: Promise<void> | null = null;
   let afterRead = () => {};
   const filename = fileURLToPath(new URL("./http.ts", import.meta.url));
   const localRequire = createRequire(filename);
   const mocks: Record<string, unknown> = {
-    "./baseUrl": { buildApiUrl: (path: string) => `https://api.test/api/v1${path}` },
+    "./baseUrl": {
+      buildApiUrl: (path: string) => `https://api.test/api/v1${path}`,
+    },
     "expo-constants": {
       __esModule: true,
       default: { expoConfig: { version: "test" } },
@@ -26,7 +30,10 @@ function setup() {
     "../auth/sessionRefresh": { createSessionRefresh: () => async () => null },
     "../auth/sessionStore": {
       authSessionGeneration: () => generation,
-      loadStoredAuthSession: async () => ({ accessToken: "synthetic" }),
+      loadStoredAuthSession: async () => {
+        if (sessionReadGate) await sessionReadGate;
+        return { accessToken: "synthetic" };
+      },
       clearStoredAuthSession: async () => {
         invalidations++;
       },
@@ -51,14 +58,17 @@ function setup() {
         name in mocks ? mocks[name] : localRequire(name),
       process: { env: {} },
       __DEV__: false,
-      fetch: async () => ({
-        status: 401,
-        ok: false,
-        text: async () => {
-          afterRead();
-          return '{"error":"invalid_mfa_code","message":"Invalid code"}';
-        },
-      }),
+      fetch: async () => {
+        sends++;
+        return {
+          status: 401,
+          ok: false,
+          text: async () => {
+            afterRead();
+            return '{"error":"invalid_mfa_code","message":"Invalid code"}';
+          },
+        };
+      },
     },
     { filename },
   );
@@ -68,6 +78,14 @@ function setup() {
       options: Record<string, unknown>,
     ) => Promise<unknown>,
     invalidations: () => invalidations,
+    sends: () => sends,
+    blockSessionRead: () => {
+      let release!: () => void;
+      sessionReadGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return release;
+    },
     switchDuringRead: () => {
       afterRead = () => {
         generation++;
@@ -109,4 +127,29 @@ test("a late JSON 401 never invalidates a replacement session for either option"
     );
     assert.equal(env.invalidations(), 0);
   }
+});
+
+test("JSON authority guard cancels queued writes after the screen leaves and returns", async () => {
+  const env = setup();
+  const release = env.blockSessionRead();
+  let activation = 1;
+  const expected = activation;
+  const pending = env.request("/auth/password/change", {
+    method: "POST",
+    body: {
+      current_password: "synthetic old",
+      new_password: "synthetic replacement",
+    },
+    authorityGuard: () => {
+      if (activation !== expected)
+        throw Object.assign(new Error("Account action cancelled"), {
+          name: "AbortError",
+        });
+    },
+  });
+  activation++;
+  release();
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.equal(env.sends(), 0, "the password body must never reach fetch");
+  assert.equal(env.invalidations(), 0);
 });

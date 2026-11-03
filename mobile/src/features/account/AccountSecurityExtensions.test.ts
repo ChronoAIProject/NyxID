@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (root: Element): Element[] => [
   root,
@@ -20,6 +20,12 @@ function setup(
 ) {
   const calls: unknown[][] = [];
   let allowed = true;
+  let activation = 0;
+  let beforeDispatch: Promise<void> | null = null;
+  let afterDispatch: Promise<void> | null = null;
+  let stepUpRetry: (() => Promise<void>) | null = null;
+  let stepUpError = false;
+  let resets = 0;
   let confirm: (() => void) | undefined;
   const refetch = async () => {
     calls.push(["refetch"]);
@@ -32,7 +38,12 @@ function setup(
       get:
         (_target, name) =>
         async (...args: unknown[]) => {
+          if (beforeDispatch) await beforeDispatch;
+          const guard = args.at(-1) as { authorityGuard?: () => void };
+          guard?.authorityGuard?.();
           calls.push([name, ...args]);
+          if (afterDispatch) await afterDispatch;
+          if (stepUpError) throw new Error("Verification required");
           return name === "createOrganization"
             ? { id: "org" }
             : name === "joinOrganization"
@@ -86,11 +97,35 @@ function setup(
       useMfaStepUp: () => ({
         busy: false,
         prompt: null,
-        handle: async () => false,
+        handle: async (_error: unknown, retry: () => Promise<void>) => {
+          if (!stepUpError) return false;
+          stepUpRetry = retry;
+          return true;
+        },
+        reset: () => {
+          resets++;
+        },
       }),
     },
     "./useAccountSecurityRefresh": {
-      useAccountSecurityRefresh: () => () => allowed,
+      useAccountSecurityRefresh: () =>
+        Object.assign(() => allowed, {
+          capture: () => {
+            const expected = activation;
+            const admitted = allowed;
+            const isCurrent = () =>
+              admitted && allowed && expected === activation;
+            return {
+              isCurrent,
+              assertCurrent: () => {
+                if (!isCurrent())
+                  throw Object.assign(new Error("Cancelled"), {
+                    name: "AbortError",
+                  });
+              },
+            };
+          },
+        }),
     },
   });
   const loaded = harness.load(
@@ -113,8 +148,23 @@ function setup(
       confirm();
     },
     setAllowed: (value: boolean) => {
+      if (!value) activation++;
       allowed = value;
     },
+    queueDispatch: (promise: Promise<void> | null) => {
+      beforeDispatch = promise;
+    },
+    holdResponse: (promise: Promise<void> | null) => {
+      afterDispatch = promise;
+    },
+    requireStepUp: () => {
+      stepUpError = true;
+    },
+    retryStepUp: async () => {
+      assert.ok(stepUpRetry);
+      await stepUpRetry();
+    },
+    resets: () => resets,
     values,
   };
 }
@@ -268,5 +318,161 @@ test("organizations expose native create/join and owner-specific browser actions
       (call) => call[0] === "joinOrganization" && call[2] === "nonce",
     ),
   );
+  env.harness.unmount();
+});
+
+const securityProfile = {
+  id: "owner",
+  has_password: true,
+  mfa_enabled: true,
+  profile_config: { security: { skip_mfa_for_approved_sign_ins: false } },
+};
+function fillPassword(env: ReturnType<typeof setup>) {
+  for (const [field, value] of [
+    ["Current password for password change", "old password"],
+    ["New password", "new password"],
+    ["Confirm new password", "new password"],
+  ]) {
+    env.find(field).props.onChangeText(value);
+    env.harness.flush();
+  }
+}
+
+test("queued password changes cannot dispatch after leaving and returning", async () => {
+  const env = setup(
+    "AccountSecurityControls",
+    { profile: securityProfile },
+    {},
+  );
+  const queued = deferred<void>();
+  env.queueDispatch(queued.promise);
+  fillPassword(env);
+  env.find("Change password").props.onPress();
+  env.setAllowed(false);
+  env.setAllowed(true);
+  queued.resolve();
+  await env.harness.settle();
+  assert.equal(env.calls.length, 0);
+  assert.equal(env.find("Change password").props.loading, false);
+  env.harness.unmount();
+});
+
+test("late password responses never display success in a new activation", async () => {
+  const env = setup(
+    "AccountSecurityControls",
+    { profile: securityProfile },
+    {},
+  );
+  const response = deferred<void>();
+  env.holdResponse(response.promise);
+  fillPassword(env);
+  env.find("Change password").props.onPress();
+  assert.equal(env.calls.length, 1);
+  env.setAllowed(false);
+  env.setAllowed(true);
+  response.resolve();
+  await env.harness.settle();
+  assert.equal(
+    env.calls.length,
+    1,
+    "old response must not invalidate fresh profile data",
+  );
+  assert.equal(
+    nodes(env.harness.value()).some((node) => node.props.tone === "success"),
+    false,
+  );
+  env.harness.unmount();
+});
+
+test("old policy confirmation and step-up retries cannot become new writes after returning", async () => {
+  const env = setup(
+    "AccountSecurityControls",
+    { profile: securityProfile },
+    {},
+  );
+  const toggle = () =>
+    nodes(env.harness.value()).find((node) => node.type === "Switch")!;
+  toggle().props.onValueChange(true);
+  env.setAllowed(false);
+  env.setAllowed(true);
+  env.confirm();
+  await env.harness.settle();
+  assert.equal(env.calls.length, 0, "old warning confirmation is discarded");
+  env.requireStepUp();
+  toggle().props.onValueChange(true);
+  env.confirm();
+  await env.harness.settle();
+  assert.equal(env.calls.length, 1);
+  env.setAllowed(false);
+  env.setAllowed(true);
+  await env.retryStepUp();
+  await env.harness.settle();
+  assert.equal(
+    env.calls.length,
+    1,
+    "old MFA retry must retain its original ticket",
+  );
+  env.harness.unmount();
+});
+
+test("OAuth and Broker confirmations expire on leaving the screen", async () => {
+  const env = setup(
+    "AccountAuthorizations",
+    { accountId: "owner" },
+    {
+      apps: [
+        {
+          client_id: "client",
+          client_name: "App",
+          scopes: "openid",
+          allowed_services: [],
+          granted_at: "now",
+        },
+      ],
+      bindings: [
+        {
+          binding_hash: "hash",
+          client_name: "Broker",
+          scopes: [],
+          created_at: "now",
+        },
+      ],
+    },
+  );
+  for (const label of ["Revoke App", "Revoke Broker"]) {
+    env.find(label).props.onPress();
+    env.setAllowed(false);
+    env.setAllowed(true);
+    env.confirm();
+    await env.harness.settle();
+  }
+  assert.equal(env.calls.length, 0);
+  env.harness.unmount();
+});
+
+test("organization join confirmation and queued creation retain their originating activation", async () => {
+  const env = setup(
+    "AccountOrganizations",
+    { accountId: "owner", email: "person@example.test" },
+    { owner: [] },
+  );
+  env.find("Organization invitation code").props.onChangeText("nonce");
+  env.harness.flush();
+  env.find("Accept organization invitation").props.onPress();
+  env.setAllowed(false);
+  env.setAllowed(true);
+  env.confirm();
+  await env.harness.settle();
+  assert.equal(env.calls.length, 0);
+  const queued = deferred<void>();
+  env.queueDispatch(queued.promise);
+  env.find("New organization name").props.onChangeText("Team");
+  env.harness.flush();
+  env.find("Create organization").props.onPress();
+  env.setAllowed(false);
+  env.setAllowed(true);
+  queued.resolve();
+  await env.harness.settle();
+  assert.equal(env.calls.length, 0);
   env.harness.unmount();
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 
 type Element = { type: unknown; props: Record<string, any> };
 function elements(root: Element): Element[] {
@@ -21,6 +21,8 @@ function setup(passwordAccount: boolean) {
   let confirm: (() => void) | undefined;
   let failure = false;
   let refreshes = 0;
+  let appState: (state: string) => void = () => {};
+  let beforeDispatch: Promise<void> | null = null;
   const calls: unknown[] = [];
   const refetch = async () => {};
   const profile = {
@@ -43,7 +45,10 @@ function setup(passwordAccount: boolean) {
       View: "View",
       AppState: {
         currentState: "active",
-        addEventListener: () => ({ remove() {} }),
+        addEventListener: (_event: string, callback: typeof appState) => {
+          appState = callback;
+          return { remove() {} };
+        },
       },
       Alert: {
         alert: (_title: string, _text: string, actions: any[]) => {
@@ -72,7 +77,12 @@ function setup(passwordAccount: boolean) {
     },
     "../../lib/api/accountApi": {
       accountApi: {
-        disableMfa: async (input: unknown) => {
+        disableMfa: async (
+          input: unknown,
+          options: { authorityGuard: () => void },
+        ) => {
+          if (beforeDispatch) await beforeDispatch;
+          options.authorityGuard();
           calls.push(input);
           if (failure) throw new Error("Invalid code");
         },
@@ -119,6 +129,13 @@ function setup(passwordAccount: boolean) {
       failure = true;
     },
     refreshes: () => refreshes,
+    state: (value: string) => {
+      appState(value);
+      harness.flush();
+    },
+    queueDispatch: (promise: Promise<void>) => {
+      beforeDispatch = promise;
+    },
   };
 }
 
@@ -170,5 +187,39 @@ test("social account can disable MFA with a recovery code and no password field"
     { code: "recovery-code" },
   ]);
   assert.equal(env.refreshes(), 1);
+  env.harness.unmount();
+});
+
+test("MFA disable confirmation cannot revive after an inactive round trip", async () => {
+  const env = setup(false);
+  env
+    .find("Authenticator or recovery code")
+    .props.onChangeText("recovery-code");
+  env.harness.flush();
+  env.find("Turn off two-factor authentication").props.onPress();
+  env.state("inactive");
+  env.state("active");
+  env.confirm();
+  await env.harness.settle();
+  assert.equal(env.calls.length, 0);
+  env.harness.unmount();
+});
+
+test("MFA disable cannot dispatch after waiting across a background round trip", async () => {
+  const env = setup(false);
+  const queued = deferred<void>();
+  env.queueDispatch(queued.promise);
+  env
+    .find("Authenticator or recovery code")
+    .props.onChangeText("recovery-code");
+  env.harness.flush();
+  env.find("Turn off two-factor authentication").props.onPress();
+  env.confirm();
+  env.state("background");
+  env.state("active");
+  queued.resolve();
+  await env.harness.settle();
+  assert.equal(env.calls.length, 0);
+  assert.equal(env.refreshes(), 0);
   env.harness.unmount();
 });

@@ -13,7 +13,10 @@ import { accountApi } from "../../lib/api/accountApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { NYXID_FRONTEND_URL } from "../../lib/env";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
-import { useAccountSecurityRefresh } from "./useAccountSecurityRefresh";
+import {
+  useAccountSecurityRefresh,
+  type AccountSecurityTicket,
+} from "./useAccountSecurityRefresh";
 import { accountWebUrl, ORGANIZATION_WEB_ACTIONS } from "./accountWebHandoff";
 
 export function AccountOrganizations({
@@ -62,22 +65,27 @@ export function AccountOrganizations({
     : undefined;
   const admin =
     selected?.your_role === "owner" || selected?.your_role === "admin";
-  async function mutate(kind: "create" | "join") {
-    if (locked.current || !current()) return;
+  async function mutate(
+    kind: "create" | "join",
+    ticket: AccountSecurityTicket = current.capture(),
+  ) {
+    if (locked.current || !ticket.isCurrent()) return;
     locked.current = true;
     setBusy(true);
     setMessage(null);
     try {
+      const guard = { authorityGuard: ticket.assertCurrent };
       const id =
         kind === "create"
-          ? (await accountApi.createOrganization(accountId, name)).id
-          : (await accountApi.joinOrganization(accountId, nonce.trim())).org_id;
-      if (!current()) return;
+          ? (await accountApi.createOrganization(accountId, name, guard)).id
+          : (await accountApi.joinOrganization(accountId, nonce.trim(), guard))
+              .org_id;
+      if (!ticket.isCurrent()) return;
       setName("");
       setNonce("");
       setSelectedId(id);
       await refresh();
-      if (current())
+      if (ticket.isCurrent())
         setMessage({
           message:
             kind === "create"
@@ -86,7 +94,7 @@ export function AccountOrganizations({
           tone: "success",
         });
     } catch (error) {
-      if (current())
+      if (ticket.isCurrent())
         setMessage({ message: resolveErrorMessage(error), tone: "error" });
     } finally {
       locked.current = false;
@@ -207,16 +215,17 @@ export function AccountOrganizations({
       <ActionButton
         label="Accept organization invitation"
         disabled={disabled || !nonce.trim()}
-        onPress={() =>
+        onPress={() => {
+          const ticket = current.capture();
           Alert.alert(
             "Join organization?",
             `Accept this invitation as ${email}? The server will verify its validity and assigned role.`,
             [
               { text: "Cancel", style: "cancel" },
-              { text: "Join", onPress: () => void mutate("join") },
+              { text: "Join", onPress: () => void mutate("join", ticket) },
             ],
-          )
-        }
+          );
+        }}
       />
       <ActionButton
         label="Refresh memberships & permissions"
@@ -224,8 +233,9 @@ export function AccountOrganizations({
         loading={orgs.isFetching}
         disabled={busy || !isConnected}
         onPress={() => {
+          const ticket = current.capture();
           void refresh().catch((error) => {
-            if (current())
+            if (ticket.isCurrent())
               setMessage({
                 message: resolveErrorMessage(error),
                 tone: "error",

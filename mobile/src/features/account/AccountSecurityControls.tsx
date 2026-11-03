@@ -14,7 +14,10 @@ import type { AccountProfile } from "../../lib/api/types";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { useMfaStepUp } from "../auth/useMfaStepUp";
-import { useAccountSecurityRefresh } from "./useAccountSecurityRefresh";
+import {
+  useAccountSecurityRefresh,
+  type AccountSecurityTicket,
+} from "./useAccountSecurityRefresh";
 
 export function AccountSecurityControls({
   profile,
@@ -38,6 +41,7 @@ export function AccountSecurityControls({
     setNewPassword("");
     setConfirmation("");
     setMessage(null);
+    stepUp.reset();
   };
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ["account", "profile"] });
@@ -45,6 +49,7 @@ export function AccountSecurityControls({
   const current = useAccountSecurityRefresh(() => {}, clear);
   async function changePassword() {
     if (locked.current || !current()) return;
+    const ticket = current.capture();
     const parsed = changePasswordSchema.safeParse({
       current_password: currentPassword,
       new_password: newPassword,
@@ -61,40 +66,51 @@ export function AccountSecurityControls({
     setBusy(true);
     setMessage(null);
     try {
-      await accountApi.changePassword(profile.id, parsed.data);
-      if (current()) {
+      await accountApi.changePassword(profile.id, parsed.data, {
+        authorityGuard: ticket.assertCurrent,
+      });
+      if (ticket.isCurrent()) {
         clear();
         await refresh();
-        if (current())
+        if (ticket.isCurrent())
           setMessage({
             message: "Password changed successfully.",
             tone: "success",
           });
       }
     } catch (error) {
-      if (current())
+      if (ticket.isCurrent())
         setMessage({ message: resolveErrorMessage(error), tone: "error" });
     } finally {
       locked.current = false;
       setBusy(false);
     }
   }
-  async function savePolicy(enabled: boolean) {
-    if (locked.current || !current()) return;
+  async function savePolicy(
+    enabled: boolean,
+    ticket: AccountSecurityTicket = current.capture(),
+  ) {
+    if (locked.current || !ticket.isCurrent()) return;
     locked.current = true;
     setBusy(true);
     setMessage(null);
     try {
-      await accountApi.saveSecurityPreferences(profile.id, {
-        skip_mfa_for_approved_sign_ins: enabled,
-      });
-      if (current()) {
+      await accountApi.saveSecurityPreferences(
+        profile.id,
+        { skip_mfa_for_approved_sign_ins: enabled },
+        { authorityGuard: ticket.assertCurrent },
+      );
+      if (ticket.isCurrent()) {
         await refresh();
-        if (current())
+        if (ticket.isCurrent())
           setMessage({ message: "Sign-in policy saved", tone: "success" });
       }
     } catch (error) {
-      if (current() && !(await stepUp.handle(error, () => savePolicy(enabled))))
+      if (
+        ticket.isCurrent() &&
+        !(await stepUp.handle(error, () => savePolicy(enabled, ticket))) &&
+        ticket.isCurrent()
+      )
         setMessage({ message: resolveErrorMessage(error), tone: "error" });
     } finally {
       locked.current = false;
@@ -167,8 +183,9 @@ export function AccountSecurityControls({
         value={policy?.skip_mfa_for_approved_sign_ins ?? false}
         disabled={!policy || disabled}
         onValueChange={(enabled) => {
+          const ticket = current.capture();
           if (!enabled) {
-            void savePolicy(false);
+            void savePolicy(false, ticket);
             return;
           }
           Alert.alert(
@@ -176,7 +193,7 @@ export function AccountSecurityControls({
             "Anyone with access to your signed-in NyxID app or browser could approve sign-ins without another code.",
             [
               { text: "Cancel", style: "cancel" },
-              { text: "Enable", onPress: () => void savePolicy(true) },
+              { text: "Enable", onPress: () => void savePolicy(true, ticket) },
             ],
           );
         }}
