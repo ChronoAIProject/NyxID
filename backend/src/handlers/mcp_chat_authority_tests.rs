@@ -5997,6 +5997,10 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
     .await
     .unwrap();
     let mut catalog = public_connect_catalog(&f, "personal-github").await;
+    // A credentialed HTTP catalog, as in platform_key_service tests: a
+    // no-auth row would take the no-auth platform availability path instead.
+    catalog.auth_method = "bearer".into();
+    catalog.auth_key_name = "Authorization".into();
     catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
         enabled: true,
         audience: crate::models::downstream_service::PlatformKeyAudience::Public,

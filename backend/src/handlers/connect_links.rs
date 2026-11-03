@@ -812,6 +812,9 @@ mod tests {
         catalog.slug = "plugins-personal".into();
         catalog.visibility = "public".into();
         catalog.requires_user_credential = true;
+        // Credentialed HTTP catalog: a no-auth row takes the no-auth platform path.
+        catalog.auth_method = "bearer".into();
+        catalog.auth_key_name = "Authorization".into();
         catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
             enabled: true,
             audience: crate::models::downstream_service::PlatformKeyAudience::Public,

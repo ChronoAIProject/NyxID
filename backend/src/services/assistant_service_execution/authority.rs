@@ -172,6 +172,12 @@ pub(super) async fn model_bindings_match(
     bindings: &[&str],
 ) -> AppResult<bool> {
     let mut projection = connection_projection(db, id, key).await?;
+    // Organization-instruction (v2) bindings already omit the access mode, so
+    // they are compared as-is; re-adding a mode would never match them.
+    if projection["authority"].get("mode").is_none() {
+        let current = digest(projection);
+        return Ok(bindings.iter().all(|binding| *binding == current));
+    }
     let mut accepted = Vec::new();
     for mode in ["nyxmode", "autopilot", "ask_every_time"] {
         projection["authority"]["mode"] = json!(mode);
