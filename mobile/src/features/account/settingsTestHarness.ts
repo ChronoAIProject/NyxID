@@ -80,6 +80,7 @@ export function setupSettingsScreen(
   const mutations: unknown[] = [];
   const pushes: unknown[][] = [];
   const preferences: unknown[] = [];
+  const sheets: Array<{ options: string[]; pick: (index: number) => void }> = [];
   const jsx = (type: unknown, props: Element["props"], key?: number) => ({
     type,
     props,
@@ -122,6 +123,13 @@ export function setupSettingsScreen(
         create: (styles: unknown) => styles,
         hairlineWidth: 0.5,
       },
+      Platform: { OS: "ios" },
+      ActionSheetIOS: {
+        showActionSheetWithOptions: (
+          config: { options: string[] },
+          pick: (index: number) => void,
+        ) => sheets.push({ options: config.options, pick }),
+      },
       useWindowDimensions: () => dimensions,
     },
     "react-native-svg": {
@@ -157,6 +165,7 @@ export function setupSettingsScreen(
       }),
     },
     "../display/ChatPreview": { ChatPreview: "ChatPreview" },
+    "./AccountDeletionSheet": { AccountDeletionSheet: "AccountDeletionSheet" },
     "../display/ChatDisplaySettings": {
       ChatDisplaySettings: "ChatDisplaySettings",
     },
@@ -235,6 +244,7 @@ export function setupSettingsScreen(
     parent,
     row,
     mutations,
+    sheets,
     pushes,
     preferences,
     harness,

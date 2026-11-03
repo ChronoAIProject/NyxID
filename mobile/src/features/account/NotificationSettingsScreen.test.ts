@@ -56,26 +56,28 @@ test("an unlinked Telegram row opens the link sheet and push offers a 44pt enabl
   env.harness.unmount();
 });
 
-test("approval default is a radio list with a check on the selected mode", () => {
+test("approval default is one row with its value that opens a native menu", () => {
   const env = setup(true, 1);
-  const options = ["Writes only (default)", "All requests", "Off"];
-  for (const label of options) {
-    const row = env.row(label);
-    assert.equal(row.props.accessibilityRole, "radio", label);
-    const checked = label === "Writes only (default)";
-    assert.equal(row.props.accessibilityState.checked, checked, label);
+  const row = env.row("Request approval for");
+  assert.ok(env.text("Writes only (default)"), "the current mode is the row value");
+  assert.ok(elements(row).some((node) => node.type === "ChevronsUpDown"));
+  for (const label of ["All requests", "Off"])
     assert.equal(
-      elements(row).some((node) => node.type === "Check"),
-      checked,
-      label,
-    );
-    assert.equal(
-      elements(row).some((node) => node.type === "ChevronRight"),
+      env.all().some((node) => [node.props.children].flat().includes(label)),
       false,
-      `${label} selects in place`,
+      `${label} is not spread across the page`,
     );
-  }
-  env.row("All requests").props.onPress();
+  row.props.onPress();
+  const [sheet] = env.sheets;
+  assert.deepEqual(JSON.parse(JSON.stringify(sheet!.options)), [
+    "Writes only (default)",
+    "All requests",
+    "Off",
+    "Cancel",
+  ]);
+  sheet!.pick(3);
+  assert.equal(env.mutations.length, 0, "Cancel changes nothing");
+  sheet!.pick(1);
   assert.deepEqual(JSON.parse(JSON.stringify(env.mutations.at(-1))), {
     global_approval_mode: "all",
   });

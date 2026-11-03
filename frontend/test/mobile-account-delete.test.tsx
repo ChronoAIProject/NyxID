@@ -4,7 +4,7 @@ import { runInNewContext } from "node:vm";
 import * as React from "react";
 import * as jsxRuntime from "react/jsx-runtime";
 import * as query from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
@@ -46,7 +46,8 @@ function harness() {
     useWindowDimensions: () => ({ width: 390, height: 844, scale: 3, fontScale: 1 }),
     Image: () => null,
     Linking: { openSettings: vi.fn() },
-    Pressable: ({ children, disabled, onPress }: NativeProps) => <button disabled={disabled} onClick={onPress}>{children}</button>,
+    Pressable: ({ children, disabled, onPress, accessibilityLabel }: NativeProps & { accessibilityLabel?: string }) => <button aria-label={accessibilityLabel} disabled={disabled} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
+    Modal: ({ visible, children }: NativeProps & { visible?: boolean }) => (visible ? <div role="dialog">{children}</div> : null),
     ScrollView: box,
     SafeAreaView: box,
     StyleSheet: { create: (styles: unknown) => styles },
@@ -120,11 +121,14 @@ function harness() {
 }
 
 describe("actual mobile account deletion confirmation", () => {
-  it("discloses every managed Machine, paused workspace and retained record before the native confirmation", async () => {
-    const { alerts, transport, client } = harness();
+  const open = async () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete Account" }));
-    expect(alerts).toHaveLength(1);
-    const message = alerts[0]!.message;
+    return screen.getByRole("dialog");
+  };
+
+  it("discloses every managed Machine, paused workspace and retained record before confirmation", async () => {
+    const { transport, client } = harness();
+    const message = (await open()).textContent ?? "";
     expect(message).toMatch(/all (?:of your )?managed Machines/i);
     expect(message).toMatch(/paused \/workspace disks/i);
     expect(message).toMatch(/temporary (?:files|data)/i);
@@ -142,20 +146,22 @@ describe("actual mobile account deletion confirmation", () => {
   });
 
   it("keeps cancellation free of account deletion effects", async () => {
-    const { alerts, transport, client } = harness();
-    await userEvent.click(screen.getByRole("button", { name: "Delete Account" }));
-    const cancel = alerts[0]!.buttons.find((button) => button.style === "cancel");
-    expect(cancel).toBeDefined();
-    await act(async () => cancel?.onPress?.());
+    const { transport, client } = harness();
+    await open();
+    await userEvent.click(screen.getByRole("button", { name: "Keep my account" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(transport).not.toHaveBeenCalled();
+    await open();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(transport).not.toHaveBeenCalled();
     client.clear();
   });
 
-  it("sends the accepted policy through the real mobile HTTP helper only on explicit native confirmation", async () => {
-    const { alerts, transport, client } = harness();
-    await userEvent.click(screen.getByRole("button", { name: "Delete Account" }));
+  it("sends the accepted policy through the real mobile HTTP helper only on explicit confirmation", async () => {
+    const { transport, client } = harness();
+    await open();
     expect(transport).not.toHaveBeenCalled();
-    await act(async () => alerts[0]!.buttons.find((button) => button.style === "destructive")!.onPress!());
+    await userEvent.click(screen.getByRole("button", { name: "Delete Account permanently" }));
     await waitFor(() => expect(transport).toHaveBeenCalledWith("https://mobile.example.test/api/v1/users/me", expect.objectContaining({
       method: "DELETE",
       headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data-provider-revocation-v2" }),

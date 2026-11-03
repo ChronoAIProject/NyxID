@@ -13,8 +13,9 @@ import { ChatDisplaySettings } from "../display/ChatDisplaySettings";
 import { ChatPreview } from "../display/ChatPreview";
 
 /**
- * Settings › Display, in the shape of iOS Display & Brightness: a live preview,
- * Light/Dark tiles with a radio under each, then the per-chat choices.
+ * Settings › Display, in the shape of iOS Display & Brightness: Light/Dark
+ * tiles (each a live preview with the chosen bubble) and a radio under each,
+ * then the per-chat choices.
  */
 export function DisplaySettingsScreen(
   _props: SheetScreenProps<"DisplaySettings">,
@@ -31,7 +32,6 @@ export function DisplaySettingsScreen(
   };
   return (
     <SettingsPage>
-      <ChatPreview />
       <SettingsGroup title="Appearance" inset={false}>
         <View accessibilityRole="radiogroup" style={styles.tiles}>
           {(["light", "dark"] as const).map((value) => {

@@ -2,17 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { elements, setupSettingsScreen, style } from "./settingsTestHarness";
 
-test("Display leads with a live preview, Light/Dark tiles with radios, then the Automatic switch", () => {
+test("Display previews appearance only in its Light/Dark tiles, with radios and the Automatic switch", () => {
   const env = setupSettingsScreen(
     "./DisplaySettingsScreen.tsx",
     "DisplaySettingsScreen",
   );
-  const all = env.all();
-  const preview = all.findIndex((node) => node.type === "ChatPreview");
-  const group = all.findIndex(
-    (node) => node.props.accessibilityRole === "radiogroup",
+  const previews = env.all().filter((node) => node.type === "ChatPreview");
+  assert.deepEqual(
+    previews.map((node) => node.props.mode),
+    ["light", "dark"],
+    "no separate preview above the tiles",
   );
-  assert.ok(preview >= 0 && preview < group, "the preview leads the page");
   const tile = (label: string) =>
     env.all().find((node) => node.props.accessibilityLabel === label)!;
   assert.equal(tile("Light appearance").props.accessibilityRole, "radio");

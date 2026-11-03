@@ -37,7 +37,7 @@ import { useAuthSession } from "../auth/AuthSessionContext";
 import { capture } from "../../lib/telemetry";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
-import { ACCOUNT_DELETION_DISCLOSURE } from "../../lib/accountDeletionPolicy";
+import { AccountDeletionSheet } from "./AccountDeletionSheet";
 import { isApiError } from "../../lib/api/ApiError";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
@@ -244,11 +244,11 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     ]);
   };
 
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const handleDeleteAccount = () => {
-    // Opening a native confirm counts as opening the
-    // delete_account_confirm dialog. If the user cancels, the dialog
-    // ends on step 1 without an abandonment event (native Alert hides
-    // its lifecycle from us); the confirm path emits destructive_confirmed.
+    // Opening the confirmation sheet counts as opening the
+    // delete_account_confirm dialog. Cancelling ends it on step 1 without an
+    // abandonment event; the confirm path emits destructive_confirmed.
     capture({
       name: "ui.mobile_dialog_opened",
       props: {
@@ -256,21 +256,16 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         entry_point: "account_settings",
       },
     });
-    Alert.alert("Delete Account", ACCOUNT_DELETION_DISCLOSURE, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: () => {
-          capture({
-            name: "ui.mobile_destructive_confirmed",
-            props: { domain: "account", action: "delete_account" },
-          });
-          setToast(null);
-          deleteAccountMutation.mutate();
-        },
-      },
-    ]);
+    setConfirmingDelete(true);
+  };
+  const confirmDeleteAccount = () => {
+    setConfirmingDelete(false);
+    capture({
+      name: "ui.mobile_destructive_confirmed",
+      props: { domain: "account", action: "delete_account" },
+    });
+    setToast(null);
+    deleteAccountMutation.mutate();
   };
 
   const initials = getInitials(profile?.display_name, profile?.email);
@@ -428,6 +423,11 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           />
         </SettingsGroup>
       </SettingsPage>
+      <AccountDeletionSheet
+        visible={confirmingDelete}
+        onCancel={() => setConfirmingDelete(false)}
+        onConfirm={confirmDeleteAccount}
+      />
       <ToastOverlay toast={toast} />
     </>
   );

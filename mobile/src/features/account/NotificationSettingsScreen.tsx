@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  ActionSheetIOS,
   Alert,
   Linking,
+  Platform,
   Pressable,
   StyleSheet,
   Switch,
   View,
 } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Check, Send } from "lucide-react-native";
+import { Bell, ChevronsUpDown, Send } from "lucide-react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { OfflineBanner } from "../../components/OfflineBanner";
@@ -319,6 +321,34 @@ export function NotificationSettingsScreen(
 
   const switchTrack = { false: colors.borderSoft, true: colors.success };
 
+  // One row with its value; the choice opens a native menu, as iOS pop-up
+  // buttons do, instead of spreading every option across the page.
+  function chooseApprovalMode() {
+    const options = APPROVAL_MODES.map(([, label]) => label);
+    const pick = (index: number) => {
+      const mode = APPROVAL_MODES[index]?.[0];
+      if (mode && mode !== selectedApprovalMode)
+        notifMutation.mutate({ global_approval_mode: mode });
+    };
+    if (Platform.OS === "ios") {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title: "Request approval for",
+          options: [...options, "Cancel"],
+          cancelButtonIndex: options.length,
+        },
+        (index) => {
+          if (index < options.length) pick(index);
+        },
+      );
+      return;
+    }
+    Alert.alert("Request approval for", undefined, [
+      ...options.map((label, index) => ({ text: label, onPress: () => pick(index) })),
+      { text: "Cancel", style: "cancel" as const },
+    ]);
+  }
+
   return (
     <>
       <SettingsPage>
@@ -420,30 +450,19 @@ export function NotificationSettingsScreen(
                 </View>
               }
             >
-              {APPROVAL_MODES.map(([value, label]) => (
-                <SettingsRow
-                  key={value}
-                  label={label}
-                  accessibilityRole="radio"
-                  accessibilityState={{
-                    checked: selectedApprovalMode === value,
-                  }}
-                  disabled={notifMutation.isPending}
-                  chevron={false}
-                  accessory={
-                    selectedApprovalMode === value ? (
-                      <Check
-                        size={18}
-                        color={colors.primary}
-                        strokeWidth={2.5}
-                      />
-                    ) : null
-                  }
-                  onPress={() =>
-                    notifMutation.mutate({ global_approval_mode: value })
-                  }
-                />
-              ))}
+              <SettingsRow
+                label="Request approval for"
+                value={
+                  APPROVAL_MODES.find(([value]) => value === selectedApprovalMode)?.[1] ??
+                  "Writes only (default)"
+                }
+                disabled={notifMutation.isPending}
+                accessibilityHint="Opens a menu to choose which requests need approval"
+                accessory={
+                  <ChevronsUpDown size={16} color={colors.textMuted} />
+                }
+                onPress={chooseApprovalMode}
+              />
             </SettingsGroup>
           </>
         )}
