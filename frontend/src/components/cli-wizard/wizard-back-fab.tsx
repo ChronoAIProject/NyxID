@@ -9,14 +9,15 @@ export function WizardBackFab({ onBack }: { readonly onBack: () => void }) {
   return (
     // Sticky offsets are measured from the card's content edge (inside its
     // padding), so `top-0` keeps the button in the same corner spot before
-    // and after the step scrolls.
+    // and after the step scrolls. Sitting 20px in keeps it clear of the
+    // card's 20px top scroll fade, which would otherwise dim its edge.
     <div className="sticky top-0 z-20 h-0">
       <button
         type="button"
         onClick={onBack}
         aria-label="Back"
         title="Back"
-        className="absolute -left-4 -top-4 flex size-9 items-center justify-center rounded-full border border-border bg-card text-foreground shadow-sm transition-colors hover:bg-overlay"
+        className="absolute -left-3 -top-3 flex size-9 items-center justify-center rounded-full border border-border bg-card text-foreground shadow-sm transition-colors hover:bg-overlay"
       >
         <ChevronLeft className="size-4" aria-hidden="true" />
       </button>

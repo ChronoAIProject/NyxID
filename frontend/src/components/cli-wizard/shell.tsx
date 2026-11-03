@@ -18,10 +18,11 @@
  *   --primary     → text-primary-text
  */
 
-import type { ReactNode } from "react"
+import { useRef, type ReactNode } from "react"
 import { WizardFooter } from "./wizard-footer"
 import { formatStepLabel, type WizardStep } from "./step-label"
 import { useApplyTheme } from "@/hooks/use-theme"
+import { useScrollFades } from "@/hooks/use-scroll-fades"
 import { NyxidLogo } from "@/components/brand/nyxid-logo"
 
 export interface WizardShellProps {
@@ -44,6 +45,8 @@ export function WizardShell({
   children,
 }: WizardShellProps) {
   useApplyTheme()
+  const mainRef = useRef<HTMLElement>(null)
+  useScrollFades(mainRef)
   return (
     <div className="min-h-screen bg-background text-foreground">
     <div
@@ -66,9 +69,23 @@ export function WizardShell({
         same property, so only one can win. 240px still lets main shrink
         far below its content height, so a tall step scrolls internally
         inside the column's `max-h-screen`.
+
+        The card chrome stays on main and the scrolling moves to the inner
+        region, so the edge fades dim the content but never the border.
+        `relative` makes the region the containing block for absolutely
+        positioned descendants (`sr-only` labels): otherwise they resolve
+        against the page and stretch it into a second scrollbar.
       */}
-      <main className="min-h-[240px] overflow-y-auto overscroll-contain rounded-xl border border-border bg-card p-8">
-        {children}
+      <main
+        ref={mainRef}
+        className="flex min-h-[240px] flex-col overflow-hidden rounded-xl border border-border bg-card"
+      >
+        <div
+          data-scroll-fade=""
+          className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain p-8"
+        >
+          {children}
+        </div>
       </main>
       <WizardFooter context={context} localOrigin={localOrigin} />
     </div>

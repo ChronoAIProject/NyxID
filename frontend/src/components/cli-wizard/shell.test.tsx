@@ -93,7 +93,13 @@ describe("WizardShell", () => {
     expect(column).not.toHaveClass("min-h-screen")
     // Still capped, so content taller than the window scrolls in-card.
     expect(column).toHaveClass("max-h-screen")
-    expect(main).toHaveClass("overflow-y-auto")
+    // The inner region scrolls (and fades) so the card border stays crisp.
+    // It must be `relative`: absolutely positioned `sr-only` labels would
+    // otherwise resolve against the page and make it scroll too.
+    const region = screen.getByTestId("step-body").parentElement
+    expect(region).toHaveAttribute("data-scroll-fade")
+    expect(region).toHaveClass("overflow-y-auto", "relative")
+    expect(main).not.toHaveClass("overflow-y-auto")
   })
 
   it("passes context through to the footer (local trust copy)", () => {
