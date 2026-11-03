@@ -21,6 +21,7 @@ const MIN_SEND_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct ImageSendPlan {
+    pub delegated: Vec<crate::models::assistant_delegated_image::DeliveryReference>,
     pub attachments: Vec<TurnAttachment>,
 }
 impl std::fmt::Debug for ImageSendPlan {
@@ -300,16 +301,10 @@ pub(super) async fn send_turn_images_with_stop(
         automation: matches!(ctx.anchor, ImageAnchor::Initiated { .. }),
         ..Default::default()
     };
-    let mut seen = std::collections::HashSet::new();
-    let attachments: Vec<_> = plan
-        .attachments
-        .iter()
-        .filter(|attachment| {
-            engine::chat_tool_image(attachment) && seen.insert(attachment.id.as_str())
-        })
-        .take(engine::MAX_TURN_ATTACHMENTS)
-        .cloned()
-        .collect();
+    // Delegated images stay in their source thread in the app, never under the
+    // receiving reply's owned attachments.
+    report.app_visible &= plan.delegated.is_empty();
+    let attachments = candidates(plan);
     if attachments.is_empty() {
         return Ok(report);
     }
@@ -344,7 +339,20 @@ pub(super) async fn send_turn_images_with_stop(
     let mut last_send: Option<Instant> = None;
     let mut stop = initial_stop;
     let mut cancelled = false;
-    for (index, attachment) in attachments.into_iter().enumerate() {
+    for (index, (attachment, delegated)) in attachments.into_iter().enumerate() {
+        if !delegated_allowed(state, &ctx, delegated).await {
+            report.record(ImageOutcome::Skipped("delegated_image_unavailable"));
+            report.outcomes.push(ImageItemResult {
+                attachment_id: attachment.id,
+                status: "skipped".into(),
+                code: Some("delegated_image_unavailable".into()),
+            });
+            continue;
+        }
+        let source_conversation = delegated.map_or(ctx.conversation_id, |r| {
+            r.assignment.source_conversation.as_str()
+        });
+        let source_turn = delegated.map_or(ctx.turn_id, |r| r.assignment.source_turn.as_str());
         if cancelled || !live(state, &ctx).await? {
             cancelled = true;
             report.outcomes.push(ImageItemResult {
@@ -357,8 +365,8 @@ pub(super) async fn send_turn_images_with_stop(
         let (id, attempt) = match claims::claim_for_turn(
             &state.db,
             ctx.owner,
-            ctx.conversation_id,
-            ctx.turn_id,
+            source_conversation,
+            source_turn,
             &ctx.channel.id,
             &attachment.id,
             &key,
@@ -390,8 +398,8 @@ pub(super) async fn send_turn_images_with_stop(
         let source_exists = claims::source_exists(
             &state.db,
             ctx.owner,
-            ctx.conversation_id,
-            ctx.turn_id,
+            source_conversation,
+            source_turn,
             &attachment.id,
         )
         .await;
@@ -422,8 +430,8 @@ pub(super) async fn send_turn_images_with_stop(
                 &state.db,
                 &state.encryption_keys,
                 ctx.owner,
-                ctx.conversation_id,
-                ctx.turn_id,
+                source_conversation,
+                source_turn,
                 std::slice::from_ref(&attachment),
             )
             .await;
@@ -438,7 +446,7 @@ pub(super) async fn send_turn_images_with_stop(
                     )
                     .await;
                 }
-                if !live(state, &ctx).await? {
+                if !live(state, &ctx).await? || !delegated_allowed(state, &ctx, delegated).await {
                     cancelled = true;
                     ImageOutcome::Skipped("cancelled")
                 } else if end.saturating_duration_since(Instant::now()) < MIN_SEND_WINDOW {
@@ -836,7 +844,7 @@ pub(super) async fn report_or_failure_with_stop(
     plan: &ImageSendPlan,
     stop: Option<&'static str>,
 ) -> ImageReport {
-    let app_visible = ctx.audience.owner_private;
+    let app_visible = ctx.audience.owner_private && plan.delegated.is_empty();
     let automation = matches!(ctx.anchor, ImageAnchor::Initiated { .. });
     let result = match stop {
         None => send_turn_images(state, ctx, plan).await,
@@ -849,7 +857,6 @@ pub(super) async fn report_or_failure_with_stop(
                 code = error.error_code(),
                 "Tool image delivery preparation failed"
             );
-            let mut seen = std::collections::HashSet::new();
             let outcome = classify_outcome(&error);
             let (status, code) = match outcome {
                 ImageOutcome::Unknown => ("unknown", None),
@@ -858,14 +865,9 @@ pub(super) async fn report_or_failure_with_stop(
                 }
                 ImageOutcome::Sent => unreachable!(),
             };
-            let outcomes: Vec<_> = plan
-                .attachments
-                .iter()
-                .filter(|attachment| {
-                    engine::chat_tool_image(attachment) && seen.insert(attachment.id.as_str())
-                })
-                .take(engine::MAX_TURN_ATTACHMENTS)
-                .map(|attachment| ImageItemResult {
+            let outcomes: Vec<_> = candidates(plan)
+                .into_iter()
+                .map(|(attachment, _)| ImageItemResult {
                     attachment_id: attachment.id.clone(),
                     status: status.into(),
                     code: code.clone(),
@@ -888,4 +890,81 @@ pub(super) async fn report_or_failure_with_stop(
 pub fn append_failure(text: &str, report: &ImageReport) -> String {
     let note = failure_note(report);
     format!("{text}{note}")
+}
+
+async fn delegated_allowed(
+    state: &AppState,
+    ctx: &ImageSendContext<'_>,
+    reference: Option<&crate::models::assistant_delegated_image::DeliveryReference>,
+) -> bool {
+    let Some(reference) = reference else {
+        return true;
+    };
+    crate::services::assistant_delegated_images::authorize_send(
+        &state.db,
+        ctx.owner,
+        ctx.conversation_id,
+        ctx.turn_id,
+        reference,
+        &ctx.channel.id,
+        &ctx.thread.partition,
+        &ctx.thread.id,
+    )
+    .await
+    .unwrap_or(false)
+}
+
+impl ImageSendPlan {
+    pub async fn settled(
+        db: &mongodb::Database,
+        owner: &str,
+        conversation: &str,
+        turn: &str,
+    ) -> AppResult<Self> {
+        use crate::models::assistant_message::{AssistantMessage, COLLECTION_NAME};
+        let message=db.collection::<AssistantMessage>(COLLECTION_NAME).find_one(bson::doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn,"role":"assistant"}).await?;
+        Ok(match message {
+            Some(message) => Self {
+                // Match turn_tool_attachments for the answering turn's images.
+                attachments: message
+                    .attachments
+                    .into_iter()
+                    .filter(|a| a.origin == "tool" && a.content_type.starts_with("image/"))
+                    .take(engine::MAX_TURN_ATTACHMENTS)
+                    .collect(),
+                delegated: message.delegated_images.references,
+            },
+            None => Self {
+                attachments: Vec::new(),
+                delegated: Vec::new(),
+            },
+        })
+    }
+}
+
+type ImageCandidate<'a> = (
+    TurnAttachment,
+    Option<&'a crate::models::assistant_delegated_image::DeliveryReference>,
+);
+
+fn candidates(plan: &ImageSendPlan) -> Vec<ImageCandidate<'_>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut items: Vec<_> = plan
+        .attachments
+        .iter()
+        .filter(|a| engine::chat_tool_image(a) && seen.insert(a.id.clone()))
+        .take(engine::MAX_TURN_ATTACHMENTS)
+        .cloned()
+        .map(|a| (a, None))
+        .collect();
+    items.extend(
+        plan.delegated
+            .iter()
+            .filter(|r| {
+                engine::chat_tool_image(&r.attachment) && seen.insert(r.attachment.id.clone())
+            })
+            .take(crate::services::assistant_delegated_images::MAX_REFERENCES)
+            .map(|r| (r.attachment.clone(), Some(r))),
+    );
+    items
 }

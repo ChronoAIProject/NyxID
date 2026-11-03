@@ -976,7 +976,8 @@ thread's native topic (`NyxbotThread.platform_thread_id`, e.g. a Telegram forum
 topic or Slack root thread) for text and images. Optional `include_images`
 (default false; `nyxbot_chats::post_current_turn`) also sends the calling
 turn's own tool images (trusted `TurnAttachment` metadata of the exact live
-turn, `chat_tool_image` only, deduplicated, at most 8) before the text: the
+turn, `chat_tool_image` only, deduplicated, at most 8), plus server-adopted
+delegated images authorized for this original destination, before the text: the
 limiter token is taken once with the text validation, each image rechecks the
 turn fence immediately before dispatch and takes a per-(image, audience)
 delivery claim (`services/channel_image_delivery.rs`, audience from
@@ -1741,3 +1742,41 @@ Gateway completion is separate from platform delivery: `recovery_ready` means
 the answer is durable and CMA can retrieve it; `streamed` means it was offered
 to the live observer. Neither claims confirmed delivery. The gateway contract
 lists the required CMA journal/replay behavior and the remaining receipt gap.
+
+### Delegated specialist image results (#1897)
+
+An assignment made by a live, owner-authorized NyxBot turn captures its exact
+source specialist/turn and original reply destinations. The specialist's
+settlement publishes an exact result event transactionally when the receiving
+queue accepts it. A business refusal records a stable metadata-only code on the
+saved reply and falls back to the existing best-effort, text-only settlement
+notice; it never rolls back the specialist's reply or grants image authority.
+Database/transport errors still abort settlement. Delegated results follow the
+original FIFO eviction rule alongside ordinary notices, so they cannot
+monopolize the bounded event queue. Source questions and invocation fences keep
+their existing protections. Both event drain
+and `nyxid__wait_for_subagents` adopt the same authorized result into the live
+receiving turn before consuming its event ID. Wait exposes only server-adopted
+image references; arbitrary IDs in model text cannot export another thread's
+images, and a newer assignment to the same agent cannot replace the result.
+
+At most 16 delegated image references persist separately from owned attachments
+on the receiving reply. They retain source identity and original retention;
+the app's attachment APIs remain source-scoped. Replies through stream, late
+recovery, Event and trigger delivery use this projection and the existing
+per-source-image/per-audience claims. Tool images qualify; machine screenshots
+never do. Images remain in the specialist's app thread rather than becoming
+new attachments on NyxBot's reply.
+
+Source use access (`require_use`, including live org/group membership), source
+existence/retention, receiver authority and destination policy are checked at
+adoption and immediately before sending. Stop/failure cancels image forwarding;
+recipient reset, source deletion, guest mode and revoked membership refuse it.
+Clearing the owner's direct-message destination in the app prevents the prior
+assignment's images from following the owner into another chat. A specialist's
+later direct message or changed report target neither grants newer images nor
+revokes its completed assignment. Source and receiver turns, not mutable agent
+home/report pointers, define the result.
+
+The storage and claim contract is in
+[Channel bot relay — assigned specialist images](../CHANNEL_BOT_RELAY.md#images-from-an-assigned-specialist-1897).

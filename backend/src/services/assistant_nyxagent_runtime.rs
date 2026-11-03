@@ -533,6 +533,21 @@ pub(crate) async fn turn_notes(
     if row.guest_turn || row.collaboration.is_some() {
         return notes;
     }
+    if let Some(turn) = row.active_turn.as_ref() {
+        let refs = &turn.delegated_images.references;
+        if !refs.is_empty() {
+            notes.push_str("\n\nNyxID adopted these delegated tool images into this turn. They retain their source lifetime and may accompany this reply only at the assignment's original authorized chat. Do not invent foreign IDs or claim confirmed delivery:");
+            for reference in refs
+                .iter()
+                .take(super::assistant_delegated_images::MAX_REFERENCES)
+            {
+                notes.push_str(&format!(
+                    "\n- image {} (specialist {})",
+                    reference.attachment.id, reference.assignment.source_agent
+                ));
+            }
+        }
+    }
     if let Some(agent) = agent {
         // Only the agent's own threads hear about its other chats.
         if row.channel.is_none() && row.group_request_id.is_none() {

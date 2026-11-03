@@ -2446,7 +2446,13 @@ pub(crate) async fn begin_owner_turn_in_session(
     let admitted =
         super::assistant_access_policy::admit_skill_events_in_session(db, user_id, events, session)
             .await?;
-    let events = admitted.eligible;
+    let events = Box::pin(super::assistant_delegated_images::filter_events_in_session(
+        db,
+        session,
+        &row,
+        admitted.eligible,
+    ))
+    .await?;
     if start.origin == TurnOrigin::Event && events.is_empty() {
         collection
             .update_one(
@@ -2668,6 +2674,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -2865,6 +2872,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        delegated_images: Default::default(),
         timing: Default::default(),
         collaboration: row.collaboration.clone(),
         channel_adapter_origin: None,
@@ -2956,6 +2964,24 @@ pub(crate) async fn begin_owner_turn_in_session(
             .flatten(),
         also_deliver: Vec::new(),
     });
+    Box::pin(super::assistant_delegated_images::assign_in_session(
+        db, session, &mut row,
+    ))
+    .await?;
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|t| t.events.iter().any(|e| e.delegated_result.is_some()))
+    {
+        let delegated_events = row.active_turn.as_ref().unwrap().events.clone();
+        Box::pin(super::assistant_delegated_images::adopt_in_session(
+            db,
+            session,
+            &mut row,
+            &delegated_events,
+        ))
+        .await?;
+    }
     if let Some(event_id) = start.channel_event_id.as_deref() {
         Box::pin(
             super::channel_turn_delivery::validate_guest_setup_in_session(
@@ -3217,6 +3243,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids,
         media_queue_notice_id: None,
         media_pending: (media_declared > 0).then_some(media_declared),
@@ -3442,8 +3469,10 @@ pub async fn push_events(
 }
 
 /// Ordinary notices can be evicted only when no invocation continuation is
-/// queued. Accepted source questions are never evicted. Capacity refusal aborts
-/// transactional producers so their work remains available for retry.
+/// queued. Delegated results follow the same FIFO eviction as ordinary notices;
+/// images must not monopolize the queue. Accepted source questions are never
+/// evicted. Capacity refusal aborts transactional producers unless they
+/// explicitly degrade optional publication without discarding their source work.
 pub async fn append_events_in_session(
     db: &Database,
     user_id: &str,
@@ -4002,7 +4031,12 @@ async fn finish_turn_inner(
                     current.nyxagent_last_response_id = result.response_id.clone();
                     current.credential_api_key_id = credential_id.clone();
                 }
-                let message = AssistantMessage {
+                let mut message = AssistantMessage {
+                    delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
+                        assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
+                        publication_refusal: None,
+                        references: if error.is_none() { settled_turn.as_ref().map(|t| t.delegated_images.references.clone()).unwrap_or_default() } else { Vec::new() },
+                    },
                     media_event_ids: Vec::new(),
                     media_queue_notice_id: None,
                     media_pending: None,
@@ -4070,6 +4104,10 @@ async fn finish_turn_inner(
                     Box::pin(super::collaboration_group_service::runtime::publish_reply(&db,&current,turn,&message,session)).await?;
                 }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
+                if let Some(turn) = settled_turn.as_ref() {
+                    message.delegated_images.publication_refusal =
+                        Box::pin(super::assistant_delegated_images::publish_in_session(&db, session, &message, turn)).await?.map(str::to_owned);
+                }
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
                     .session(&mut *session)
