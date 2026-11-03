@@ -174,14 +174,14 @@ export function ThreadHeader({
             // The name line is as tall as the controls so both share one top
             // line; the @handle sits under it.
             <div className="min-w-0">
-              <div className="flex h-7 min-w-0 items-center gap-2">
+              <div className="flex min-h-7 min-w-0 flex-wrap items-center gap-2">
                 <h2 className="truncate text-13 font-semibold text-foreground">{name}</h2>
                 <span className="flex shrink-0 items-center gap-2 whitespace-nowrap">
                   {loading ? null : <AgentKindBadge kind={kind} />}
                   {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
                 </span>
               </div>
-              {handle ? <p className="truncate text-11 leading-4 text-text-tertiary">{handle}</p> : null}
+              {handle ? <p className="max-w-full text-11 leading-normal text-text-tertiary [overflow-wrap:anywhere]">{handle}</p> : null}
             </div>
           )}
         </HeaderItem>
@@ -193,11 +193,10 @@ export function ThreadHeader({
             {controls}
             {onOpenDetails ? (
               <Button
-                size="sm"
+                size={compact ? "icon" : "sm"}
                 variant="ghost"
                 aria-label="Agent details"
                 title="Agent details"
-                className={compact ? "h-7 w-7 px-0" : undefined}
                 onClick={onOpenDetails}
               >
                 <PanelRightOpen aria-hidden="true" />

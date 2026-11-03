@@ -474,10 +474,11 @@ pub(crate) async fn after_turn(
     }
     if row.is_subagent()
         && !row.guest_turn
-        && let Some(target) = match settled_report_target(state, row, turn).await {
-            Ok(target) => target,
-            Err(_) => return,
-        }
+        && let Some((target, published_assignment)) =
+            match settled_report_target(state, row, turn).await {
+                Ok(target) => target,
+                Err(_) => return,
+            }
     {
         let agent = match team::agent_for_conversation(&state.db, row).await {
             Ok(agent) => agent,
@@ -494,17 +495,29 @@ pub(crate) async fn after_turn(
             excerpt(text, 1200).replace('"', "'"),
             agent.id
         );
-        let queued = engine::push_events(
-            &state.db,
-            owner,
-            &target,
-            vec![
-                team::event("subagent_settled", note, Some(&agent.id))
-                    .for_invocation(turn.invocation_id.as_deref()),
-            ],
-        )
-        .await;
+        let queued = if published_assignment {
+            // The exact assignment result was queued in the settlement transaction.
+            Ok(None)
+        } else {
+            engine::push_events(
+                &state.db,
+                owner,
+                &target,
+                vec![
+                    team::event("subagent_settled", note, Some(&agent.id))
+                        .for_invocation(turn.invocation_id.as_deref()),
+                ],
+            )
+            .await
+        };
         if queued.is_err() {
+            if turn.delegated_images.assignment.is_some() {
+                tracing::warn!(target: "nyxid::assistant_delegated_images",
+                    actor_id = owner, source_agent_id = %agent.id,
+                    source_conversation_id = %row.id, source_turn_id = %turn.turn_id,
+                    recipient_conversation_id = %target, code = "text_fallback_unavailable",
+                    "Delegated text-only settlement notice could not be queued");
+            }
             return;
         }
         Box::pin(wake(state, owner, &target)).await;
@@ -536,11 +549,13 @@ pub(crate) async fn after_turn(
         let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
         return;
     }
-    let plan = super::nyxbot::images::ImageSendPlan {
-        attachments: engine::turn_tool_attachments(&state.db, owner, &row.id, &turn.turn_id)
+    let plan =
+        super::nyxbot::images::ImageSendPlan::settled(&state.db, owner, &row.id, &turn.turn_id)
             .await
-            .unwrap_or_default(),
-    };
+            .unwrap_or_else(|_| super::nyxbot::images::ImageSendPlan {
+                attachments: Vec::new(),
+                delegated: Vec::new(),
+            });
     // Keep the answer destination in lockstep with the model note and image
     // delivery. Channel turns answer their admitted event; event turns wake
     // their bound chats (or the configured home chat).
@@ -571,7 +586,7 @@ async fn settled_report_target(
     state: &AppState,
     row: &AssistantConversation,
     turn: &crate::models::assistant_conversation::ActiveTurn,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<(String, bool)>> {
     let settled = state
         .db
         .collection::<crate::models::assistant_message::AssistantMessage>(
@@ -583,8 +598,14 @@ async fn settled_report_target(
         })
         .await?;
     Ok(match settled {
-        Some(message) => message.report_to,
-        None => turn.report_to.clone(),
+        Some(message) => message.report_to.map(|target| {
+            (
+                target,
+                message.delegated_images.assignment.is_some()
+                    && message.delegated_images.publication_refusal.is_none(),
+            )
+        }),
+        None => turn.report_to.clone().map(|target| (target, false)),
     })
 }
 
@@ -2933,6 +2954,13 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
         .await?
         .active_turn
         .map(|turn| turn.turn_id);
+    if chat
+        .turn_id
+        .as_ref()
+        .is_some_and(|id| own_turn.as_ref().is_some_and(|live| live != id))
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
     loop {
         let running = team::running_agents(db, owner).await?;
@@ -2943,7 +2971,7 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
             None => false,
         };
         if !busy || !requests.is_empty() || stopped || tokio::time::Instant::now() >= deadline {
-            let summaries =
+            let mut summaries =
                 team::tool_delegation_summaries(db, owner, true, team::REPLY_EXCERPT_CHARS)
                     .await?
                     .into_iter()
@@ -2954,8 +2982,24 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
                 .filter(|summary| summary.status != "running")
                 .map(|summary| summary.id.clone())
                 .collect();
-            team::consume_settled_events(db, owner, caller, &settled).await?;
+            let adopted = match own_turn.as_deref() {
+                Some(turn) if !stopped => {
+                    crate::services::assistant_delegated_images::consume_wait(
+                        db, owner, caller, turn, &settled,
+                    )
+                    .await?
+                }
+                _ => Default::default(),
+            };
+            for (agent, reply) in adopted.results {
+                if let Some(summary) = summaries.iter_mut().find(|s| s.id == agent) {
+                    summary.last_reply = reply;
+                }
+            }
+            let references = adopted.references;
             return Ok(json!({
+                "delegated_images": references.iter().map(|r| json!({"id":r.attachment.id,"source_agent":r.assignment.source_agent})).collect::<Vec<_>>(),
+                "image_delivery": "Only the listed server-authorized image references may accompany this reply; NyxID sends them to the assignment's original chat when still authorized. Do not invent image IDs or claim delivery.",
                 "settled": summaries.iter().filter(|s| s.status != "running").map(|s| json!({
                     "id": s.id, "name": s.delegation_name(), "status": s.status, "reply": s.last_reply,
                 })).collect::<Vec<_>>(),
