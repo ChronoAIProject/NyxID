@@ -18,7 +18,15 @@ import type {
   WorkspaceContentParamList,
   WorkspaceScreenProps,
 } from "../../app/navigationTypes";
-import { useOpenWorkspaceChat } from "../../app/WorkspaceHeader";
+import {
+  useOpenWorkspaceChat,
+  useWorkspaceSheet,
+} from "../../app/WorkspaceHeader";
+import { workspaceChatNavigationAction } from "../../app/workspaceChatNavigation";
+import {
+  assistantDraftKey,
+  assistantDraftStore,
+} from "../assistant/assistantDraftStore";
 import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import {
@@ -123,6 +131,37 @@ function AutomationRetry({
   );
 }
 
+// One blank, at the end: the reader finishes the sentence with when and what.
+export const AUTOMATION_SETUP_PROMPT =
+  "Hi NyxBot, I'd like help setting up an automation that runs every ";
+
+/**
+ * Open a new NyxBot chat as the main chat (not a page pushed over this one)
+ * with its composer already holding a starter message the owner completes.
+ */
+function useStartNyxBotChat(navigation: {
+  getParent: () => { getState: () => any } | undefined;
+  dispatch: (action: any) => void;
+}) {
+  const sheet = useWorkspaceSheet();
+  return (prompt: string) => {
+    const params = newAssistantChatParams();
+    assistantDraftStore.set(
+      `text:${assistantDraftKey(undefined, undefined, params.draftId)}`,
+      prompt,
+    );
+    if (sheet) {
+      sheet.onOpenChat(params);
+      return;
+    }
+    const action = workspaceChatNavigationAction(
+      navigation.getParent()?.getState(),
+      { kind: "new", params },
+    );
+    if (action) navigation.dispatch(action);
+  };
+}
+
 const STATUS_OPTIONS = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
@@ -135,7 +174,7 @@ export function AutomationsScreen({
 }: WorkspaceScreenProps<"Automations">) {
   const { colors } = useTheme();
   const runtime = useAutomationRuntime();
-  const openChat = useOpenWorkspaceChat();
+  const startChat = useStartNyxBotChat(navigation);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<(typeof STATUSES)[number]>("all");
   const [agentId, setAgentId] = useState(route.params?.agentId ?? "");
@@ -179,7 +218,7 @@ export function AutomationsScreen({
     <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
       <AskNyxBotCard
         colors={colors}
-        onPress={() => openChat(newAssistantChatParams())}
+        onPress={() => startChat(AUTOMATION_SETUP_PROMPT)}
       />
       <View style={styles.filters}>
         <View style={[styles.search, { backgroundColor: colors.segmentTrack }]}>
@@ -299,7 +338,7 @@ function AskNyxBotCard({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel="Ask NyxBot"
-      accessibilityHint="Opens a new NyxBot chat to create, run or change an automation"
+      accessibilityHint="Opens a new NyxBot chat with a message to finish describing your automation"
       onPress={onPress}
       style={({ pressed }) => [
         styles.ask,
@@ -318,8 +357,8 @@ function AskNyxBotCard({
           Ask NyxBot
         </Text>
         <Text style={[styles.cardMeta, { color: colors.textSecondary }]}>
-          Describe what should run and when. NyxBot creates, runs or changes
-          automations for you.
+          Start a chat to set up an automation. Just finish the sentence with
+          when it runs and what it does.
         </Text>
       </View>
       <ChevronRight size={18} color={colors.textMuted} />
@@ -671,7 +710,7 @@ export function AutomationDetailScreen({
               />
             </SettingsGroup>
           )}
-          <AutomationGuidance />
+          <AutomationGuidance label={row.label} navigation={navigation} />
         </>
       )}
     </SettingsPage>
@@ -680,8 +719,14 @@ export function AutomationDetailScreen({
 
 /** Ask NyxBot: the one way to create, run or change an automation. */
 /** Details are read-only here; changes go through NyxBot. */
-function AutomationGuidance() {
-  const openChat = useOpenWorkspaceChat();
+function AutomationGuidance({
+  label,
+  navigation,
+}: {
+  label: string;
+  navigation: Parameters<typeof useStartNyxBotChat>[0];
+}) {
+  const startChat = useStartNyxBotChat(navigation);
   return (
     <SettingsGroup
       inset={false}
@@ -690,7 +735,9 @@ function AutomationGuidance() {
       <SettingsRow
         tone="action"
         label="Ask NyxBot"
-        onPress={() => openChat(newAssistantChatParams())}
+        onPress={() =>
+          startChat(`Hi NyxBot, I'd like to change my automation "${label}": `)
+        }
       />
     </SettingsGroup>
   );

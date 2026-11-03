@@ -45,6 +45,7 @@ const trigger = automationSchema.parse({
   updated_at: at,
 });
 type Element = { type: any; props: Record<string, any> };
+const ROOT_STATE = { key: "root" };
 /** Walk the tree, rendering the screen's own hook-free helper components. */
 function elements(root: Element): Element[] {
   if (!root || typeof root !== "object" || !root.props) return [];
@@ -71,6 +72,8 @@ function setup(
 ) {
   const routes: any[] = [];
   const menus: any[] = [];
+  const drafts = new Map<string, string>();
+  const dispatched: any[] = [];
   const pops: any[] = [];
   const chats: any[] = [];
   const queries: any[] = [];
@@ -117,6 +120,18 @@ function setup(
     },
     "../../app/WorkspaceHeader": {
       useOpenWorkspaceChat: () => (params: any) => chats.push(params),
+      useWorkspaceSheet: () => null,
+    },
+    "../../app/workspaceChatNavigation": {
+      workspaceChatNavigationAction: (state: unknown, target: any) =>
+        state === ROOT_STATE ? { type: "RESET_TO_CHAT", target } : null,
+    },
+    "../assistant/assistantDraftStore": {
+      assistantDraftKey: (agentId?: string, _c?: string, draftId?: string) =>
+        JSON.stringify(["private", agentId ?? "nyxbot", draftId ?? "new"]),
+      assistantDraftStore: {
+        set: (key: string, value: string) => drafts.set(key, value),
+      },
     },
     "../../components/workspace/WorkspaceUI": { Notice: "Notice" },
     "../../lib/api/agentsApi": { agentsApi: {} },
@@ -192,6 +207,8 @@ function setup(
           routes.push({ name, params: { ...params } }),
         popTo: (name: any, params: any, options: any) =>
           pops.push([name, { ...params }, { ...options }]),
+        getParent: () => ({ getState: () => ROOT_STATE }),
+        dispatch: (action: any) => dispatched.push(action),
       },
     }),
   );
@@ -230,6 +247,8 @@ function setup(
     pops,
     chats,
     menus,
+    drafts,
+    dispatched,
     queries,
     cursor,
     nextPages: () => nextPages,
@@ -390,23 +409,52 @@ test("automation next, latest and history times use the owner timezone with one 
   }
 });
 
-test("Ask NyxBot leads the list and starts an empty normal NyxBot chat with a fresh draft identity", () => {
+test("Ask NyxBot opens a new main NyxBot chat whose composer holds a one-blank setup message", () => {
   const env = setup("AutomationsScreen", { params: {} });
   try {
     const ask = env.control("Ask NyxBot");
     assert.equal(ask.type, "Pressable");
-    assert.match(ask.props.accessibilityHint, /create, run or change/);
     ask.props.onPress();
     ask.props.onPress();
-    for (const chat of env.chats) {
+    // Not a chat pushed over this page: the root chat reset the drawer uses.
+    assert.equal(env.chats.length, 0);
+    assert.equal(env.dispatched.length, 2);
+    const params = env.dispatched.map((action) => action.target.params);
+    for (const [index, action] of env.dispatched.entries()) {
+      assert.equal(action.type, "RESET_TO_CHAT");
+      assert.equal(action.target.kind, "new");
+      const chat = params[index];
       assert.equal(chat.home, false);
       assert.equal(chat.draft, true);
       assert.equal(chat.agentId, undefined);
       assert.equal(chat.conversationId, undefined);
-      assert.equal(chat.openLatest, false);
-      assert.equal(chat.message, undefined);
+      assert.equal(
+        env.drafts.get(`text:${JSON.stringify(["private", "nyxbot", chat.draftId])}`),
+        "Hi NyxBot, I'd like help setting up an automation that runs every ",
+      );
     }
-    assert.notEqual(env.chats[0].draftId, env.chats[1].draftId);
+    assert.notEqual(params[0].draftId, params[1].draftId);
+  } finally {
+    env.harness.unmount();
+  }
+});
+
+test("Ask NyxBot on a detail page names the automation in its starter message", () => {
+  const env = setup("AutomationDetailScreen");
+  try {
+    const guidance = env
+      .all()
+      .find((item) => item.type?.name === "AutomationGuidance")!;
+    const group = guidance.type(guidance.props);
+    const ask = [group.props.children]
+      .flat()
+      .find((child: any) => child?.props?.label === "Ask NyxBot");
+    ask.props.onPress();
+    const chat = env.dispatched[0].target.params;
+    assert.equal(
+      env.drafts.get(`text:${JSON.stringify(["private", "nyxbot", chat.draftId])}`),
+      'Hi NyxBot, I\'d like to change my automation "Morning release check": ',
+    );
   } finally {
     env.harness.unmount();
   }
