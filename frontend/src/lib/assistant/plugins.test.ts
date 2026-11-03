@@ -186,6 +186,11 @@ describe("deriveConnectorItems", () => {
       "api key",
     ]);
     expect(available.map((i) => i.category)).toContain("Connector · SSH");
+    // SSH cannot use a hosted link: it links to Studio with its slug instead.
+    const ssh = available.find((i) => i.id === "catalog:f");
+    expect(ssh?.connectSlug).toBeUndefined();
+    expect(ssh?.advancedSetupSlug).toBe("f");
+    expect(available.find((i) => i.id === "catalog:g")?.connectSlug).toBe("g");
   });
 });
 

@@ -128,6 +128,7 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        delegated_result: None,
         media_event_ids: Vec::new(),
         media_declared: None,
         media_sent_at: None,
@@ -3017,28 +3018,6 @@ pub async fn tool_delegation_summaries(
         rows.push(shared);
     }
     Ok(rows)
-}
-
-/// Remove settled-report events for the given agents from a NyxBot thread's
-/// queue once `wait_for_subagents` has delivered them in-turn.
-pub async fn consume_settled_events(
-    db: &Database,
-    owner: &str,
-    conversation_id: &str,
-    agent_ids: &[String],
-) -> AppResult<()> {
-    if agent_ids.is_empty() {
-        return Ok(());
-    }
-    db.collection::<AssistantConversation>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id": conversation_id, "user_id": owner},
-            doc! {"$pull": {"pending_events": {
-                "kind": "subagent_settled", "agent_id": {"$in": agent_ids},
-            }}},
-        )
-        .await?;
-    Ok(())
 }
 
 /// Idle threads with queued events whose wake-up was deferred (full pool or

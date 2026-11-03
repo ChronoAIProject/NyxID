@@ -61,6 +61,7 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -2699,6 +2700,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        connect_own: None,
         activity_id: None,
         invocation_id: None,
         routing: None,

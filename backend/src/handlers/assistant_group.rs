@@ -355,6 +355,7 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
         invocation_id: None,

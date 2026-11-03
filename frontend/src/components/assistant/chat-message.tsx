@@ -245,7 +245,7 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
     <span
       title={decisionTitle(row)}
       className={cn(
-        "shrink-0 rounded border px-1 font-sans text-9 leading-4",
+        "shrink-0 rounded border px-1 font-sans text-9 leading-normal",
         denied
           ? "border-warning/30 bg-warning/10 text-warning"
           : "border-hairline bg-overlay text-text-tertiary",
@@ -628,8 +628,8 @@ export function ChatMessageBubble({
   }
   if (message.role === "user") {
     return (
-      <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
-        <UserMessageBubble>
+      <div className="group/message ml-auto flex min-w-0 max-w-[90%] flex-col items-end gap-1 sm:max-w-[78%]">
+        <UserMessageBubble className="max-w-full text-16 [overflow-wrap:anywhere]">
           {message.steering && (
             <p className="mb-1 text-11" role="note">
               Steering ·{" "}

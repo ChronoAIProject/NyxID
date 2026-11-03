@@ -307,6 +307,7 @@ pub async fn retire_full_access_confirmations(
     let sweep_time = bson::DateTime::now();
     let mut filter = doc! {
         "kind": "action", "decider": "user", "status": "pending",
+        "confirmation.reason": {"$nin":["org_connection","delegation"]},
         "created_at": {"$lte": sweep_time},
     };
     if let Some(user) = user {
@@ -354,7 +355,7 @@ pub async fn retire_full_access_confirmations(
         if !ids.is_empty() {
             collection
                 .update_many(
-                    doc! {"_id": {"$in": ids}, "status": "pending"},
+                    doc! {"_id": {"$in": ids}, "status": "pending", "confirmation.reason":{"$nin":["org_connection","delegation"]}},
                     doc! {"$set": {"status": "expired", "expires_at": sweep_time}},
                 )
                 .await?;
@@ -496,6 +497,7 @@ pub fn service_action_class(read_only: bool, destructive: bool) -> OwnerActionCl
 /// reason at once, and is consumed exactly once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConfirmationNeed {
+    pub org_instruction: OrgInstructionRequirement,
     pub class: OwnerActionClass,
     /// The owner's access mode asks for this class.
     pub mode: Option<crate::models::assistant_settings::AccessMode>,
@@ -506,6 +508,13 @@ pub struct ConfirmationNeed {
     /// Sharing an owner's services or agent access is always an owner decision,
     /// including Full access. This floor is narrower than general policy floors.
     pub delegation: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OrgInstructionRequirement {
+    #[default]
+    None,
+    Required,
 }
 
 /// Effects of one action as seen by the webhook confirmation policy, which
@@ -575,22 +584,44 @@ pub async fn confirmation_needed(
     facts: ActionFacts,
     policy_floor: bool,
 ) -> AppResult<Gate> {
+    confirmation_needed_with_org(
+        db,
+        chat,
+        facts,
+        policy_floor,
+        OrgInstructionRequirement::None,
+    )
+    .await
+}
+
+pub async fn confirmation_needed_with_org(
+    db: &Database,
+    chat: &ChatAuthority,
+    facts: ActionFacts,
+    policy_floor: bool,
+    org_instruction: OrgInstructionRequirement,
+) -> AppResult<Gate> {
     let webhook = webhook_confirmation_required(chat, facts.read_only, facts.destructive);
     let effective = if chat.guest
-        || (facts.class == OwnerActionClass::Read && !webhook && !policy_floor && !facts.delegation)
+        || (facts.class == OwnerActionClass::Read
+            && !webhook
+            && !policy_floor
+            && !facts.delegation
+            && org_instruction == OrgInstructionRequirement::None)
     {
         None
     } else {
         Some(effective_access_mode(db, chat).await?)
     };
     if effective == Some(crate::models::assistant_settings::AccessMode::Autopilot) {
-        if facts.delegation {
+        if facts.delegation || org_instruction == OrgInstructionRequirement::Required {
             return Ok(Gate::Ask(ConfirmationNeed {
+                org_instruction,
                 class: facts.class,
                 mode: effective,
                 webhook,
                 policy: policy_floor,
-                delegation: true,
+                delegation: facts.delegation,
             }));
         }
         let reason = if webhook {
@@ -616,8 +647,13 @@ pub async fn confirmation_needed(
         return Ok(Gate::Proceed);
     }
     let mode = effective.filter(|mode| owner_confirmation_required(*mode, facts.class));
-    if webhook || policy_floor || mode.is_some() {
+    if webhook
+        || policy_floor
+        || mode.is_some()
+        || org_instruction == OrgInstructionRequirement::Required
+    {
         return Ok(Gate::Ask(ConfirmationNeed {
+            org_instruction,
             class: facts.class,
             mode,
             webhook,
@@ -674,6 +710,7 @@ pub async fn record_auto_allowed_for_activity(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        connect_own: None,
         activity_id,
         invocation_id: None,
         id: Uuid::new_v4().to_string(),
@@ -807,7 +844,9 @@ pub async fn confirm_action_with(
             crate::models::assistant_acknowledgement::ActionConfirmation {
                 risk: need.class.as_str().into(),
                 access_mode: need.mode,
-                reason: if need.delegation {
+                reason: if need.org_instruction == OrgInstructionRequirement::Required {
+                    "org_connection"
+                } else if need.delegation {
                     "delegation"
                 } else if need.webhook {
                     "webhook"
@@ -1238,6 +1277,7 @@ async fn notify_nyxbot_denied(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
                 let message = AssistantMessage {
+                    delegated_images: Default::default(),
                     media_event_ids: Vec::new(),
                     media_queue_notice_id: None,
         media_pending: None,
@@ -2116,6 +2156,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        connect_own: None,
         activity_id: super::machine_activity_service::activity_id(),
         invocation_id: None,
         authored_skill: if request.tool == Some(super::assistant_agent_learning_review::TOOL) {

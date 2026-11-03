@@ -16,7 +16,6 @@ export function ComposerDictationButton({
 }) {
   const { colors } = useTheme();
   const held = useRef(false);
-  const suppressTap = useRef(false);
   const busy =
     dictation.phase === "permission" ||
     dictation.phase === "connecting" ||
@@ -36,7 +35,6 @@ export function ComposerDictationButton({
       onLongPress={() => {
         if (!dictation.active) {
           held.current = true;
-          suppressTap.current = true;
           void dictation.start();
         }
       }}
@@ -47,10 +45,6 @@ export function ComposerDictationButton({
         }
       }}
       onPress={() => {
-        if (suppressTap.current) {
-          suppressTap.current = false;
-          return;
-        }
         if (dictation.recording) dictation.stop();
         else void dictation.start();
       }}

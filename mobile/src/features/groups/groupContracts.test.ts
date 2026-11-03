@@ -130,9 +130,18 @@ test("posts validate attachments and explicit recipients before HTTP admission",
     groupPostRequestSchema.parse({ text: " ", attachment_ids: [ACK] }),
     { text: "", attachment_ids: [ACK] },
   );
+  // [] is an explicit people-only message; it cannot carry attachments.
   assert.equal(
     groupPostRequestSchema.safeParse({ text: "hello", recipient_agent_ids: [] })
       .success,
+    true,
+  );
+  assert.equal(
+    groupPostRequestSchema.safeParse({
+      text: "hello",
+      recipient_agent_ids: [],
+      attachment_ids: [ACK],
+    }).success,
     false,
   );
   assert.equal(
@@ -233,7 +242,9 @@ test("transport refuses invalid outgoing bodies and cross-group responses", asyn
       lead_agent_id: "a",
     } as GroupCreate),
   );
-  await assert.rejects(api.post(ID, { text: "hi", recipient_agent_ids: [] }));
+  await assert.rejects(
+    api.post(ID, { text: "hi", recipient_agent_ids: ["a", "a"] }),
+  );
   assert.equal(calls, 0);
   await assert.rejects(api.detail(ID), /different crew/);
   await assert.rejects(api.update(ID, { name: "X" }), /different crew/);

@@ -1,4 +1,5 @@
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
+import { OAuthClientSourceChoice } from "@/components/shared/oauth-client-source-choice";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   KEY_AUTH_ACTIVE,
@@ -47,11 +48,9 @@ import {
   AlertCircle,
   Server,
   Terminal,
-  KeyRound,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icon";
-import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { StepHeader } from "@/components/dashboard/step-header";
 import {
   ConnectVerifyStep,
@@ -710,50 +709,10 @@ function RoutingStep({
       </div>
 
       {showClientChoice && (
-        <div className="space-y-3">
-          <Label>Which OAuth app authorizes this?</Label>
-          <div
-            role="radiogroup"
-            aria-label="OAuth client"
-            className="grid grid-cols-2 gap-3"
-          >
-            <button
-              type="button"
-              role="radio"
-              aria-checked={clientSource === "managed"}
-              onClick={() => onClientSourceChange("managed")}
-              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
-                clientSource === "managed"
-                  ? "border-primary bg-primary/5"
-                  : "border-border hover:border-hairline-strong"
-              }`}
-            >
-              <NyxidIcon className="h-5 w-5" />
-              <span className="text-xs font-medium">NyxID managed</span>
-              <span className="text-10 text-muted-foreground">
-                One click. NyxID’s OAuth app handles authorization. Curated
-                scopes.
-              </span>
-            </button>
-            <button
-              type="button"
-              role="radio"
-              aria-checked={clientSource === "self"}
-              onClick={() => onClientSourceChange("self")}
-              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
-                clientSource === "self"
-                  ? "border-primary bg-primary/5"
-                  : "border-border hover:border-hairline-strong"
-              }`}
-            >
-              <KeyRound className="h-5 w-5" />
-              <span className="text-xs font-medium">Your own OAuth app</span>
-              <span className="text-10 text-muted-foreground">
-                Use your own client credentials. Full scope control.
-              </span>
-            </button>
-          </div>
-        </div>
+        <OAuthClientSourceChoice
+          value={clientSource}
+          onChange={onClientSourceChange}
+        />
       )}
 
       <Button

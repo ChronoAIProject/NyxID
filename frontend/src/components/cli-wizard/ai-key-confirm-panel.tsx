@@ -1,4 +1,10 @@
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
+import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
+import { ConnectLinkDetailRow } from "@/components/shared/connection-detail-row";
+import {
+  OAuthClientSourceChoice,
+  type OAuthClientSource,
+} from "@/components/shared/oauth-client-source-choice";
 import type { LanePricingView } from "@/schemas/platform-keys";
 // ai-key (service-add) pairing panel.
 //
@@ -11,19 +17,27 @@ import type { LanePricingView } from "@/schemas/platform-keys";
 // OAuth/device-code sub-flows live in `./ai-key-auth-flows.tsx` to
 // keep this file focused on catalog lookup + dispatch.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
+import { cn } from "@/lib/utils";
 import type { ScopeCatalogEntry } from "@/types/keys";
-import { Building2, ExternalLink } from "lucide-react";
+import { ArrowRight, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
 import {
@@ -31,6 +45,8 @@ import {
   withRewindOnError,
 } from "@/pages/cli-pair/reserve-action";
 import { CatalogGrid } from "./catalog-grid";
+import { WizardBackFab } from "./wizard-back-fab";
+import { WizardHeading } from "./wizard-heading";
 
 /**
  * Catalog response shape we care about. Fields beyond these are
@@ -77,10 +93,19 @@ interface CatalogEntryShape {
   /**
    * `system` / `user` / `both` — whether this provider uses the
    * NyxID-admin-registered OAuth app, the user's own OAuth app, or
-   * accepts both. When `user` or `both`, the OAuth pre-step collects
-   * client_id / client_secret before the popup.
+   * accepts both. The OAuth pre-step collects client_id / client_secret
+   * for `user`, and for `both` when the user picks their own app or
+   * NyxID has none (see `requiresOwnOAuthApp`).
    */
   readonly credential_mode?: string;
+  /**
+   * NyxID has its own OAuth app for this provider, so `both`-mode sign-in
+   * can go through it (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md). Absent on
+   * older servers, which keeps the own-app form.
+   */
+  readonly has_platform_oauth_credentials?: boolean;
+  /** Scopes NyxID's OAuth app may request; `null`/absent = ungated. */
+  readonly platform_scope_allowlist?: readonly string[] | null;
   /** Admin-provided docs URL shown inside the user-OAuth-app step. */
   readonly documentation_url?: string;
   /**
@@ -270,17 +295,48 @@ export function AiKeyConfirm({
       ? "Custom / self-hosted service"
       : "Connect service";
   const subtitle = onCatalogStep
-    ? "Pick a service to connect. Simple-bearer APIs (OpenAI, Anthropic, Gemini) land in the guided form. Anything else — self-hosted, OAuth, device code, custom endpoint — goes to the power-user form."
+    ? "Pick a service to connect to NyxID."
     : onCustomStep
       ? "For services not in the catalog — paste your own endpoint URL and credential."
       : `Your CLI wants to add ${trimmedSlug || "a service"} to NyxID. Confirm the details here.`;
 
+  // A resolved catalog service gets the hosted connector's identity heading.
+  const serviceStep = !onCatalogStep && !onCustomStep && !entryErrorMessage;
+
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{title}</h2>
-        <p className="text-12 text-muted-foreground">{subtitle}</p>
-      </div>
+    <div>
+      {serviceStep || onCustomStep ? (
+        <WizardBackFab
+          onBack={() => {
+            setSlug("");
+          }}
+        />
+      ) : null}
+    <div
+      className={cn(
+        "flex flex-col gap-4",
+        // Same reading column as the hosted connector and OAuth consent pages.
+        serviceStep && "mx-auto w-full max-w-[560px] gap-5",
+      )}
+    >
+      {serviceStep && entry ? (
+        <>
+          <ConnectionIdentityHeading
+            serviceSlug={entry.slug}
+            serviceName={entry.name}
+            iconUrl={entry.icon_url}
+            title={`Connect ${entry.name} to NyxID`}
+            subtitle="Your CLI asked to add this service. Review the details, then continue."
+          />
+          <div className="space-y-1 border-y border-border py-4">
+            <ConnectLinkDetailRow label="Requested by" value="Your NyxID CLI" />
+          </div>
+        </>
+      ) : (
+        <WizardHeading title={title}>
+          {subtitle}
+        </WizardHeading>
+      )}
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
 
@@ -298,9 +354,6 @@ export function AiKeyConfirm({
           targetOrgId={targetOrgId}
           pairingId={pairingId}
           onSuccess={onSuccess}
-          onBack={() => {
-            setSlug("");
-          }}
         />
       ) : entryLoading ? (
         <Skeleton className="h-24 w-full" />
@@ -322,6 +375,7 @@ export function AiKeyConfirm({
           onSuccess={onSuccess}
         />
       ) : null}
+    </div>
     </div>
   );
 }
@@ -444,8 +498,8 @@ function ManageScopesPanel({
   // provider, openai-codex, has fixed scopes — nothing to manage.)
   if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
+      <div className="flex flex-col gap-4">
+        <WizardHeading title="Manage permissions" />
         <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name} doesn't support managing scopes here — its permissions
           are fixed by the provider.
@@ -466,7 +520,6 @@ function ManageScopesPanel({
         slug={key.slug}
         label={key.label}
         pairingId={pairingId}
-        credentialMode={entry.credential_mode}
         documentationUrl={entry.documentation_url}
         scopeOverride={scopeOverride}
         reconnectKeyId={keyId}
@@ -480,23 +533,17 @@ function ManageScopesPanel({
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
-        <p className="text-12 text-muted-foreground">
-          Adjust what {key.label} can do, then re-authorize at the provider.
-          Your CLI is waiting for you to finish here.
-        </p>
-      </div>
-
-      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
-        {entry.icon_url ? (
-          <img src={entry.icon_url} alt="" className="h-8 w-8 rounded" loading="lazy" />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          <h3 className="font-medium">{entry.name}</h3>
-          <p className="text-xs text-muted-foreground">{key.slug}</p>
-        </div>
+    <div className="flex flex-col gap-5">
+      <ConnectionIdentityHeading
+        serviceSlug={entry.slug}
+        serviceName={entry.name}
+        iconUrl={entry.icon_url}
+        title="Manage permissions"
+        subtitle={`Adjust what ${key.label} can do, then re-authorize at the provider. Your CLI is waiting for you to finish here.`}
+      />
+      <div className="space-y-1 border-y border-border py-4">
+        <ConnectLinkDetailRow label="Requested by" value="Your NyxID CLI" />
+        <ConnectLinkDetailRow label="Connection" value={key.label} />
       </div>
 
       <UpstreamScopePicker
@@ -510,8 +557,15 @@ function ManageScopesPanel({
         idPrefix="pair-manage-scope"
       />
 
-      <Button variant="primary" onClick={() => setAuthFlowActive(true)}>
-        Re-authorize with these permissions
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={() => setAuthFlowActive(true)}
+      >
+        Re-authorize with these permissions{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
       </Button>
     </div>
   );
@@ -525,20 +579,21 @@ function OwnerPicker({
   readonly onChange: (orgId: string | null) => void;
 }) {
   const { data: orgs } = useOrgs();
+  const id = useId();
   const hasAdminOrg = (orgs ?? []).some((o) => o.your_role === "admin");
   if (!hasAdminOrg) return null;
+  // Same label / control / hint shape as every other wizard field.
   return (
-    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          <Building2 className="h-3.5 w-3.5" />
-          Owner
-        </div>
-        <div className="w-[220px]">
-          <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
-        </div>
-      </div>
-      <p className="mt-1 text-11 text-muted-foreground">
+    <div className="flex flex-col gap-1.5">
+      <FieldLabel htmlFor={id}>Owner</FieldLabel>
+      <OrgScopeSelect
+        id={id}
+        aria-describedby={`${id}-hint`}
+        value={value}
+        onChange={onChange}
+        label="Owner"
+      />
+      <p id={`${id}-hint`} className="text-xs text-muted-foreground">
         Org-owned services are shared with every admin of that organization
         and can be proxied by its members.
       </p>
@@ -563,6 +618,21 @@ type CustomAuthMethod =
   | "bot_bearer"
   | "ifttt_webhook"
   | "none";
+
+const AUTH_METHOD_OPTIONS: readonly {
+  readonly value: CustomAuthMethod;
+  readonly label: string;
+}[] = [
+  { value: "bearer", label: "bearer (Authorization: Bearer …)" },
+  { value: "bot_bearer", label: "bot_bearer (Authorization: Bot …)" },
+  { value: "header", label: "header (custom header)" },
+  { value: "query", label: "query (?key=…)" },
+  { value: "path", label: "path (path-prefix injection)" },
+  { value: "ifttt_webhook", label: "IFTTT Webhooks (raw key)" },
+  { value: "basic", label: "basic (Authorization: Basic …)" },
+  { value: "body", label: "body (JSON-body field injection)" },
+  { value: "none", label: "none (no auth injection)" },
+];
 
 /** Sensible default auth-key-name per method. Mirrors the CLI's
  *  `default_auth_key_name` in `cli/src/commands/service.rs:1437`. */
@@ -623,11 +693,33 @@ interface CustomServiceFormProps {
   readonly targetOrgId: string | null;
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
-  readonly onBack: () => void;
 }
 
 function RequiredMarker() {
-  return <span aria-hidden="true" className="text-destructive ml-0.5">*</span>;
+  return <span aria-hidden="true" className="ml-0.5 leading-none text-destructive">*</span>;
+}
+
+/**
+ * A wizard field's label row. The fixed height gives every field the same
+ * label-to-control gap whether or not it carries the required marker, and
+ * the wrapper keeps the control from being the label's adjacent sibling,
+ * which app.css's global `label + input` rule would push 0.75rem down.
+ */
+function FieldLabel({
+  htmlFor,
+  required = false,
+  children,
+}: {
+  readonly htmlFor: string;
+  readonly required?: boolean;
+  readonly children: React.ReactNode;
+}) {
+  return (
+    <div className="flex h-4 items-center">
+      <Label htmlFor={htmlFor}>{children}</Label>
+      {required ? <RequiredMarker /> : null}
+    </div>
+  );
 }
 
 function CustomServiceForm({
@@ -635,7 +727,6 @@ function CustomServiceForm({
   targetOrgId,
   pairingId,
   onSuccess,
-  onBack,
 }: CustomServiceFormProps) {
   // Issue #414: when the CLI passed `--auth-method`, `--auth-key-name`,
   // `--slug`, `--via-node`, etc. alongside `--custom`, those values
@@ -738,10 +829,7 @@ function CustomServiceForm({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-label">Label</Label>
-            <RequiredMarker />
-          </div>
+          <FieldLabel htmlFor="pair-custom-label" required>Label</FieldLabel>
           <Input
             id="pair-custom-label"
             value={label}
@@ -758,10 +846,7 @@ function CustomServiceForm({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-endpoint">Endpoint URL</Label>
-            <RequiredMarker />
-          </div>
+          <FieldLabel htmlFor="pair-custom-endpoint" required>Endpoint URL</FieldLabel>
           <Input
             id="pair-custom-endpoint"
             value={endpointUrl}
@@ -777,15 +862,11 @@ function CustomServiceForm({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-auth-method">Auth method</Label>
-            <RequiredMarker />
-          </div>
-          <select
-            id="pair-custom-auth-method"
+          <FieldLabel htmlFor="pair-custom-auth-method" required>Auth method</FieldLabel>
+          <Select
             value={authMethod}
-            onChange={(e) => {
-              const next = e.target.value as CustomAuthMethod;
+            onValueChange={(value) => {
+              const next = value as CustomAuthMethod;
               setAuthMethod(next);
               // Reset the key-name to the new method's default if the
               // user hadn't customized it yet — saves them re-typing
@@ -803,19 +884,18 @@ function CustomServiceForm({
                 setAuthKeyName(defaultAuthKeyName(next));
               }
             }}
-            className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-13 text-foreground focus-visible:outline-none focus-visible:border-input-focus"
-            aria-required="true"
           >
-            <option value="bearer">bearer (Authorization: Bearer …)</option>
-            <option value="bot_bearer">bot_bearer (Authorization: Bot …)</option>
-            <option value="header">header (custom header)</option>
-            <option value="query">query (?key=…)</option>
-            <option value="path">path (path-prefix injection)</option>
-            <option value="ifttt_webhook">IFTTT Webhooks (raw key)</option>
-            <option value="basic">basic (Authorization: Basic …)</option>
-            <option value="body">body (JSON-body field injection)</option>
-            <option value="none">none (no auth injection)</option>
-          </select>
+            <SelectTrigger id="pair-custom-auth-method" aria-required="true">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {AUTH_METHOD_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <p className="text-xs text-muted-foreground">
             How NyxID attaches the credential to outgoing requests.
           </p>
@@ -823,10 +903,7 @@ function CustomServiceForm({
 
         {needsCredential ? (
           <div className="flex flex-col gap-1.5">
-            <div className="flex items-center">
-              <Label htmlFor="pair-custom-credential">{credentialLabel}</Label>
-              <RequiredMarker />
-            </div>
+            <FieldLabel htmlFor="pair-custom-credential" required>{credentialLabel}</FieldLabel>
             <Input
               id="pair-custom-credential"
               type="password"
@@ -849,7 +926,7 @@ function CustomServiceForm({
 
         {needsKeyName ? (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-custom-auth-key-name">
+            <FieldLabel htmlFor="pair-custom-auth-key-name">
               {authMethod === "header"
                 ? "Header name"
                 : authMethod === "query"
@@ -857,7 +934,7 @@ function CustomServiceForm({
                   : authMethod === "path"
                     ? "Path prefix segment"
                     : "Body field name"}
-            </Label>
+            </FieldLabel>
             <Input
               id="pair-custom-auth-key-name"
               value={authKeyName}
@@ -887,7 +964,7 @@ function CustomServiceForm({
         ) : null}
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-slug">Custom slug (optional)</Label>
+          <FieldLabel htmlFor="pair-custom-slug">Custom slug (optional)</FieldLabel>
           <Input
             id="pair-custom-slug"
             value={slug}
@@ -905,14 +982,17 @@ function CustomServiceForm({
 
       {error ? <ErrorLine message={error} /> : null}
 
-      <div className="flex items-center justify-between gap-2">
-        <Button variant="outline" onClick={onBack} disabled={loading}>
-          ← Back
-        </Button>
-        <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
-          {loading ? "Connecting…" : "Connect service"}
-        </Button>
-      </div>
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={() => void submit()}
+        disabled={submitDisabled}
+      >
+        {loading ? "Connecting…" : "Connect service"}{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
+      </Button>
     </div>
   );
 }
@@ -937,6 +1017,19 @@ function CatalogConfirmForm({
   const [platformChoice, setPlatformChoice] = useState(true);
   const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
   const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
+  // Which OAuth app authorizes the connection. NyxID's app is the
+  // one-click default whenever it exists; the user's own app stays
+  // available for `both`-mode providers.
+  const [oauthClientSource, setOAuthClientSource] =
+    useState<OAuthClientSource>("managed");
+  const oauthClientChoice = shape === "oauth" && offersOAuthClientChoice(entry);
+  const ownOAuthApp =
+    requiresOwnOAuthApp(entry) ||
+    (oauthClientChoice && oauthClientSource === "self");
+  const platformScopeAllowlist =
+    shape === "oauth" && !ownOAuthApp
+      ? (entry.platform_scope_allowlist ?? null)
+      : null;
   const [label, setLabel] = useState(prefill.label ?? entry.name);
   const [credential, setCredential] = useState("");
   const [endpointUrl, setEndpointUrl] = useState(prefill.endpoint_url ?? "");
@@ -959,6 +1052,18 @@ function CatalogConfirmForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const viaNode = prefill.via_node?.trim() ?? "";
+
+  function chooseOAuthClient(source: OAuthClientSource) {
+    setOAuthClientSource(source);
+    // NyxID's app can only request its allowlist; drop anything picked for
+    // the user's own app so initiation isn't rejected.
+    const allowlist = entry.platform_scope_allowlist;
+    if (source === "managed" && allowlist) {
+      setSelectedScopes((current) =>
+        current.filter((scope) => allowlist.includes(scope)),
+      );
+    }
+  }
   // Set once the user clicks "Continue" for an OAuth / device-code
   // flow; drops the confirm UI and mounts the sub-flow panel. Reset
   // to `null` if the sub-flow reports cancel so the user can edit
@@ -1167,7 +1272,7 @@ function CatalogConfirmForm({
         targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
-        credentialMode={entry.credential_mode}
+        ownOAuthApp={ownOAuthApp}
         documentationUrl={entry.documentation_url}
         scopeOverride={scopeOverride}
         onSuccess={onSuccess}
@@ -1235,27 +1340,15 @@ function CatalogConfirmForm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
-        {entry.icon_url ? (
-          <img
-            src={entry.icon_url}
-            alt=""
-            className="h-8 w-8 rounded"
-            loading="lazy"
-          />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          <h3 className="font-medium">{entry.name}</h3>
-          {entry.description ? (
-            <p className="text-xs text-muted-foreground">{entry.description}</p>
-          ) : null}
-          <p className="text-xs text-muted-foreground">
-            Auth: <code>{entry.auth_method}</code>
-          </p>
-        </div>
-      </div>
 
-      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
+      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} showPricing={false} />}
+      {oauthClientChoice ? (
+        <OAuthClientSourceChoice
+          value={oauthClientSource}
+          onChange={chooseOAuthClient}
+          disabled={loading}
+        />
+      ) : null}
       <div className="flex flex-col gap-3">
         <Field label="Label" htmlFor="pair-aikey-label">
           <Input
@@ -1351,6 +1444,7 @@ function CatalogConfirmForm({
               shape === "oauth" ? "e.g. media.write" : "e.g. repo,read:org"
             }
             idPrefix="pair-aikey-scope"
+            platformAllowlist={platformScopeAllowlist}
           />
         ) : shape === "device-code" ? (
           <p className="text-xs text-muted-foreground">
@@ -1372,20 +1466,46 @@ function CatalogConfirmForm({
           </div>
         ) : null}
 
-        {shape === "no-auth" ? (
+        {/* With NyxID's key the selected card already says there is nothing to paste. */}
+        {shape === "no-auth" && !usePlatformKey ? (
           <p className="text-xs text-muted-foreground">
-            This service doesn't need a credential. Click Connect to
-            add it to your services.
+            This service doesn't need a credential. Click Connect to add it
+            to your services.
           </p>
         ) : null}
       </div>
 
       {error ? <ErrorLine message={error} /> : null}
 
-      <Button variant="primary" onClick={handleSubmit} disabled={submitDisabled}>
-        {submitLabel}
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={handleSubmit}
+        disabled={submitDisabled}
+      >
+        {submitLabel}{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
       </Button>
     </div>
+  );
+}
+
+/** `both`-mode providers NyxID also has an OAuth app for offer a choice of app. */
+function offersOAuthClientChoice(entry: CatalogEntryShape): boolean {
+  return (
+    entry.credential_mode === "both" &&
+    entry.has_platform_oauth_credentials === true
+  );
+}
+
+/** Sign-in needs the user's own OAuth app because NyxID has none to offer. */
+function requiresOwnOAuthApp(entry: CatalogEntryShape): boolean {
+  return (
+    entry.credential_mode === "user" ||
+    (entry.credential_mode === "both" &&
+      entry.has_platform_oauth_credentials !== true)
   );
 }
 
@@ -1400,7 +1520,7 @@ function Field({
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <Label htmlFor={htmlFor}>{label}</Label>
+      <FieldLabel htmlFor={htmlFor}>{label}</FieldLabel>
       {children}
     </div>
   );

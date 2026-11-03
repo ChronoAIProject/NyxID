@@ -1,4 +1,5 @@
 import { mfaPrompt } from "./mfaPrompt";
+import { accountWebUrl } from "../account/accountWebHandoff";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as WebBrowser from "expo-web-browser";
 import { useIsFocused } from "@react-navigation/native";
@@ -233,6 +234,9 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
   const socialLoginLock = useRef(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [registrationNotice, setRegistrationNotice] = useState<string | null>(null);
+  const [registrationPending, setRegistrationPending] = useState(false);
+  const registrationLock = useRef(false);
   const { signInWithSession } = useAuthSession();
   const isMountedRef = useRef(true);
   const emailLoginLock = useRef(false);
@@ -440,13 +444,20 @@ export function AuthHomeScreen({ navigation }: Props) {
   const isAnyPending = isSocialAuthPending || isEmailAuthPending;
 
   const openRegistration = async () => {
-    if (!loginConfig?.emailAuthEnabled || isAnyPending || mfaChallenge) return;
+    if (!loginConfig?.emailAuthEnabled || isAnyPending || mfaChallenge || registrationPending || registrationLock.current) return;
+    registrationLock.current = true;
+    setRegistrationPending(true);
+    setRegistrationNotice("Registration opens on the NyxID website. Close the browser to return here and sign in after verifying your email.");
     try {
       await WebBrowser.openBrowserAsync(
-        new URL("/register", NYXID_FRONTEND_URL).href,
+        accountWebUrl(NYXID_FRONTEND_URL, "/register"),
       );
+      if (isMountedRef.current) setRegistrationNotice("Returned from registration. Registration is not verified by closing the browser. Complete any email verification, then sign in below.");
     } catch (error) {
       setLoginError(resolveAuthError(error));
+    } finally {
+      registrationLock.current = false;
+      if (isMountedRef.current) setRegistrationPending(false);
     }
   };
 
@@ -652,6 +663,7 @@ export function AuthHomeScreen({ navigation }: Props) {
           </Text>
         </View>
 
+        {registrationNotice ? <Text accessibilityRole="alert" style={{ color: colors.textSecondary }}>{registrationNotice}</Text> : null}
         {loginError && (
           <View style={styles.errorBanner}>
             {loginError === "WAITLIST" ? (

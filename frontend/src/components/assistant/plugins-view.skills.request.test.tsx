@@ -19,6 +19,12 @@ const roster = vi.hoisted(() => ({
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useNyxBotAgents: () => ({ data: { agents: roster.agents }, isPending: false, error: null }),
 }));
+// The connectors tab's Advanced setup link is a router Link.
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, className }: { readonly children?: import("react").ReactNode; readonly className?: string }) => (
+    <a href="#" className={className}>{children}</a>
+  ),
+}));
 vi.mock("@/hooks/use-keys", () => ({
   useCatalog: () => ({ data: [], isLoading: false, error: null, refetch: vi.fn() }),
   useKeys: () => ({ data: [], isLoading: false, error: null, refetch: vi.fn() }),

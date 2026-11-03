@@ -201,15 +201,25 @@ export function createDesktopViewer(deps: {
     returnControl();
     deps.state({ phase: 'watching', controls: false, label: 'Returning control…' });
   };
-  const input = (value: unknown) => {
-    if (!requireActive()) return;
-    if (!intent || !controls || !session || socket?.readyState !== 1 || (socket.bufferedAmount ?? 0) > 65536) return;
+  // True means queued on this socket, not acknowledged or executed remotely.
+  const input = (value: unknown): boolean => {
+    if (!requireActive()) return false;
+    if (!intent || !controls || !session || socket?.readyState !== 1 || (socket.bufferedAmount ?? 0) > 65536) return false;
     const command = desktopInputValue(value);
-    if (!command) return;
+    if (!command) return false;
     if (clock.now() - inputWindow >= 1000) { inputWindow = clock.now(); inputCount = 0; }
-    if (inputCount >= 60) return;
-    try { const frame = desktopInput(session, sequence + 1n, command); inputCount++; sequence++; socket.send(frame); }
-    catch { /* Invalid/oversized input never leaves the client. */ }
+    if (inputCount >= 60) return false;
+    let frame: ArrayBuffer;
+    try { frame = desktopInput(session, sequence + 1n, command); }
+    catch { return false; /* Invalid/oversized input never leaves the client. */ }
+    try {
+      socket.send(frame); inputCount++; sequence++;
+      return true;
+    } catch {
+      // Delivery is unknown; clear authority and never replay the input.
+      reconnect();
+      return false;
+    }
   };
   const stopTask = () => {
     if (!active() || !intent || !controls || socket?.readyState !== 1) return;

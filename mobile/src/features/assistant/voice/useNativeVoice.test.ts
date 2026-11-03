@@ -275,6 +275,90 @@ test("duplicate Start presses share the same pending preflight and create one cl
   assert.equal(e.clients[0]!.starts, 1);
 });
 
+for (const change of ["thread", "account", "unmount"] as const) {
+  test(`a retained Start callback after ${change} cannot begin another call`, async (context) => {
+    const e = setup(context);
+    const retainedStart = e.harness.value().start;
+    if (change === "thread") e.replaceScope(secondThread);
+    else if (change === "account") e.replaceScope(firstThread, 2);
+    else e.harness.unmount();
+    await retainedStart(preferences, "openai_live");
+    assert.equal(e.counts().optionCalls, 0);
+    assert.equal(e.counts().savedCalls, 0);
+    assert.equal(e.counts().permissionCalls, 0);
+    assert.equal(e.clients.length, 0);
+  });
+}
+
+test("starting while backgrounded or after account invalidation performs no preflight", async (context) => {
+  const e = setup(context);
+  e.appState("background");
+  await e.start();
+  assert.equal(e.counts().optionCalls, 0);
+  e.appState("active");
+  e.setEpoch(2);
+  await e.start();
+  assert.equal(e.counts().optionCalls, 0);
+  assert.equal(e.counts().savedCalls, 0);
+  assert.equal(e.counts().permissionCalls, 0);
+});
+
+test("retained controls from another chat cannot affect the current call", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const retained = e.harness.value();
+  e.replaceScope(secondThread);
+  await e.connect();
+  const current = e.clients[1]!;
+  retained.hold(true);
+  await retained.mute(true);
+  retained.muteSpeaker(true);
+  await retained.resumeAudio();
+  await retained.stopTask(firstId);
+  await retained.end();
+  assert.deepEqual(current.holds, []);
+  assert.deepEqual(current.mutes, []);
+  assert.deepEqual(current.speaker, []);
+  assert.deepEqual(current.stops, []);
+  assert.equal(current.resumed, 0);
+  assert.equal(current.ends, 0);
+  assert.equal(e.harness.flush().connected, true);
+});
+
+test("after an account change the same chat can still silence and end its open call", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  e.setEpoch(2);
+  const controls = e.harness.value();
+  controls.hold(true);
+  await controls.mute(false);
+  assert.deepEqual(client.holds, []);
+  assert.deepEqual(client.mutes, []);
+  await controls.mute(true);
+  controls.muteSpeaker(true);
+  assert.deepEqual(client.mutes, [true]);
+  assert.deepEqual(client.speaker, [true]);
+  await controls.end();
+  assert.equal(client.ends, 1);
+  assert.equal(e.harness.flush().connected, false);
+  assert.equal(e.counts().refreshCalls, 0);
+});
+
+test("a retained conflict action cannot end a call after switching chats", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(session());
+    client.closed();
+  };
+  await e.start();
+  const retainedEnd = e.harness.value().endConflict;
+  e.replaceScope(secondThread);
+  await retainedEnd();
+  assert.deepEqual(e.controls, []);
+  assert.deepEqual(e.activeReads, []);
+});
+
 test("saving preferences must succeed before any microphone permission or media acquisition", async (context) => {
   const e = setup(context);
   e.responses.save = async () => {
