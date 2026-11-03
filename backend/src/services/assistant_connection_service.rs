@@ -183,14 +183,18 @@ pub async fn facts_for(
             .await?
             .try_collect()
             .await?;
-        for catalog in rows {
-            if super::retired_service_service::is_retired(&catalog)
-                || super::catalog_service::enforce_catalog_read_access(db, actor, &catalog)
+        let checks = rows.into_iter().map(|catalog| async move {
+            let visible = !super::retired_service_service::is_retired(&catalog)
+                && super::catalog_service::enforce_catalog_read_access(db, actor, &catalog)
                     .await
-                    .is_err()
-            {
-                continue;
-            }
+                    .is_ok();
+            visible.then_some(catalog)
+        });
+        for catalog in futures::future::join_all(checks)
+            .await
+            .into_iter()
+            .flatten()
+        {
             catalogs.insert(catalog.id.clone(), catalog);
         }
     }
@@ -221,7 +225,7 @@ fn project(actor: &str, owner: &User, catalog: Option<&DownstreamService>) -> Va
 pub async fn mcp_facts(
     db: &Database,
     actor: &str,
-    services: &[super::mcp_service::McpToolService],
+    services: &[&super::mcp_service::McpToolService],
 ) -> AppResult<std::collections::HashMap<String, Value>> {
     use futures::TryStreamExt;
     let ids: Vec<(&str, &str)> = services

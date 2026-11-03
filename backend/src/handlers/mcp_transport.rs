@@ -3745,7 +3745,7 @@ async fn authorize_mcp_operation(
 
 /// Tells the assistant what each `chat_access` value means so it calls gated
 /// tools instead of telling the user it lacks permission.
-const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = scope allows a call; organization connections still require explicit owner instruction this turn or an exact approved card, including Full access. \
+const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = scope allows a call; NyxID may still ask the owner to confirm a specific call (for example an organization connection). \
     acknowledgement_required (subagents only) = call the tool now; NyxID asks your \
     orchestrator for permission and tells you to end your turn; you are resumed with \
     the decision. source meanings: user_service = a personal or organization connection; \
@@ -5030,10 +5030,18 @@ async fn handle_meta_search(
     } else {
         mcp_service::rank_search_candidates(candidates, query)
     };
+    // Facts only for the services this search returns.
+    let mut returned_ids = std::collections::HashSet::new();
+    let returned: Vec<&mcp_service::McpToolService> = ranked_candidates
+        .iter()
+        .filter_map(|tool| mcp_service::resolve_tool_call(&tool.name, &services))
+        .map(|(service, _)| service)
+        .filter(|service| returned_ids.insert(service.service_id.clone()))
+        .collect();
     let connection_facts = match crate::services::assistant_connection_service::mcp_facts(
         &state.db,
         &auth.user_id,
-        &services,
+        &returned,
     )
     .await
     {
@@ -5176,10 +5184,22 @@ async fn handle_meta_list_connected(
         }
     };
 
+    let mut result =
+        mcp_service::list_connected_services_ranked(&services, query, &ranks, &auth.user_id);
+    // Facts only for the rows this listing returns.
+    let returned: Vec<&mcp_service::McpToolService> = services
+        .iter()
+        .filter(|service| {
+            result["services"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["service_id"] == service.service_id)
+            })
+        })
+        .collect();
     let connection_facts = match crate::services::assistant_connection_service::mcp_facts(
         &state.db,
         &auth.user_id,
-        &services,
+        &returned,
     )
     .await
     {
@@ -5190,8 +5210,6 @@ async fn handle_meta_list_connected(
             Default::default()
         }
     };
-    let mut result =
-        mcp_service::list_connected_services_ranked(&services, query, &ranks, &auth.user_id);
     if let Some(rows) = result["services"].as_array_mut() {
         for row in rows {
             row["connection"] = row["service_id"]

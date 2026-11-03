@@ -29,8 +29,7 @@ pub async fn resolve_implicit_for_request(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
             )
-            .with_assistant_access(auth.org_agent_access.as_deref())
-            .with_assistant_chat(auth.assistant_chat.as_deref()),
+            .with_assistant_access(auth.org_agent_access.as_deref()),
         )
         .await;
     };
@@ -186,8 +185,7 @@ pub async fn resolve_implicit_for_request(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
             )
-            .with_assistant_access(auth.org_agent_access.as_deref())
-            .with_assistant_chat(auth.assistant_chat.as_deref()),
+            .with_assistant_access(auth.org_agent_access.as_deref()),
         )
         .await
         {

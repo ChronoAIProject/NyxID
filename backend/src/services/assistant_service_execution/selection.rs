@@ -210,12 +210,21 @@ pub async fn bind_owner_selection(
             let connection_id = binding
                 .get_str("connection_id")
                 .map_err(|_| AppError::Conflict("Invalid service confirmation".into()))?;
-            if binding.get_str("binding")
-                != Ok(
-                    connection_binding(db, connection_id, &row.credential_api_key_id)
-                        .await?
-                        .as_str(),
-                )
+            // Organization cards store the mode-free card identity; every
+            // other card stores the mode-sensitive connection binding.
+            let stored = binding.get_str("binding").unwrap_or_default();
+            if stored
+                != connection_binding(db, connection_id, &row.credential_api_key_id)
+                    .await?
+                    .as_str()
+                && stored
+                    != super::authority::org_card_binding(
+                        db,
+                        connection_id,
+                        &row.credential_api_key_id,
+                    )
+                    .await?
+                    .as_str()
             {
                 return Err(AppError::Conflict(
                     "Confirmed service changed; request a new confirmation".into(),

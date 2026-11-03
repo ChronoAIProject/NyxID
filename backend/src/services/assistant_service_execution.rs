@@ -37,7 +37,7 @@ pub use pools::pinned_pool_member;
 mod bootstrap;
 pub use bootstrap::{begin_model_attempt, finish_model_attempt};
 mod authority;
-pub use authority::connection_binding;
+pub use authority::{connection_binding, org_card_binding};
 mod availability;
 pub(crate) mod guest_model;
 pub(crate) mod model_diagnostic;
@@ -392,6 +392,8 @@ async fn check_inner(
             return Err(AppError::Forbidden("Use the person's exact selected connection; choose a new connection before changing accounts".into()));
         }
         let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
+        let approval =
+            approval_binding(db, chat, connection_id, &binding, instruction_covered).await?;
         let needs_connection_consent = service.user_id == chat.user_id
             && !shared_platform_model(chat, &service, operation, target);
         if pool {
@@ -424,14 +426,14 @@ async fn check_inner(
         )
         .await?;
         if let Some(need) = gate.ask() {
-            let args = json!({"connection_id": connection_id, "execution_binding": binding,
+            let args = json!({"connection_id": connection_id, "execution_binding": approval,
                 "operation": operation, "acknowledgement_id": acknowledgement});
             if let Some(refusal) =
                 acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, summary)
                     .await?
             {
                 let refusal = if instruction_required {
-                    attach_org_offer(db, chat, &service, &binding, operation, refusal).await?
+                    attach_org_offer(db, chat, &service, &approval, operation, refusal).await?
                 } else {
                     refusal
                 };
@@ -507,6 +509,7 @@ async fn check_inner(
         return Err(AppError::Forbidden("Service access revoked".into()));
     }
     let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
+    let approval = approval_binding(db, chat, connection_id, &binding, instruction_covered).await?;
     if pool
         && let Some(failure) =
             availability::pool_predispatch_failure(db, chat, connection_id, &binding, operation)
@@ -533,7 +536,7 @@ async fn check_inner(
         Vec::new()
     };
     let mut args = json!({"connection_id": connection_id, "effective_owner_id": effective_owner,
-        "execution_binding": binding, "operation": operation});
+        "execution_binding": approval, "operation": operation});
     let mut continuation = None;
     if acknowledgement.is_none() && !model_consent && !resource_replay {
         // Only a server-validated owner continuation may present a card implicitly
@@ -555,7 +558,7 @@ async fn check_inner(
         let bound = db.collection::<Document>(COLLECTION).find_one(doc! {
             "_id": id, "kind": "card_binding", "user_id": &chat.user_id,
             "conversation_id": &chat.conversation_id, "api_key_id": &chat.api_key_id,
-            "connection_id": connection_id, "binding": &binding,
+            "connection_id": connection_id, "binding": &approval,
             "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
             "expires_at": {"$gt": bson::DateTime::now()},
         }).await?;
@@ -609,7 +612,7 @@ async fn check_inner(
         if (same_group || selected_id == connection_id)
             && !pool_fallback
             && applies
-            && (selected_id != connection_id || !selection_matches(selected, &service, &binding))
+            && (selected_id != connection_id || !selection_matches(selected, &service, &approval))
         {
             let (reason, instructions) = match selected_service.as_ref() {
                 None => (
@@ -635,7 +638,7 @@ async fn check_inner(
     }
     let explicit = selected.as_ref().is_some_and(|row| {
         row.get_str("connection_id") == Ok(connection_id)
-            && selection_matches(row, &service, &binding)
+            && selection_matches(row, &service, &approval)
             && row
                 .get("operation")
                 .is_none_or(|bound| bson::to_bson(operation).is_ok_and(|current| current == *bound))
@@ -875,13 +878,13 @@ async fn check_inner(
                             "kind": "card_binding", "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                             "api_key_id": &chat.api_key_id, "turn_id": &chat.turn_id, "connection_id": connection_id,
                             "owner_id": effective_owner, "catalog_service_id": &service.catalog_service_id,
-                            "binding": &binding, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
+                            "binding": &approval, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
                             "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
                         }}).upsert(true).await?;
             }
             let mut refusal = refusal;
             if instruction_required {
-                refusal = attach_org_offer(db, chat, &service, &binding, operation, refusal).await?;
+                refusal = attach_org_offer(db, chat, &service, &approval, operation, refusal).await?;
             }
             return Ok(Decision { refusal: Some(refusal), admission: None, automatic: None });
         }
@@ -909,6 +912,22 @@ async fn check_inner(
         })
     })
     .await
+}
+
+/// Card arguments, card records and card-derived selections for an org
+/// connection use the mode-free card identity; execution keeps `binding`.
+async fn approval_binding(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    connection_id: &str,
+    binding: &str,
+    instruction_covered: bool,
+) -> AppResult<String> {
+    if instruction_covered {
+        org_card_binding(db, connection_id, &chat.api_key_id).await
+    } else {
+        Ok(binding.to_owned())
+    }
 }
 
 async fn attach_org_offer(

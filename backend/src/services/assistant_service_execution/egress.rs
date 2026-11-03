@@ -464,9 +464,6 @@ impl<'a> HttpEgressGuard<'a> {
 impl AssistantEgressGuard<'_> {
     async fn revalidate_inner(&self) -> AppResult<()> {
         self.target.require_credential_materialized()?;
-        self.admission
-            .revalidate(self.db, &self.admission.connection, Some(self.target))
-            .await?;
         let projection = HttpProjection::default();
         super::http::verify_resolved_projected_inner(
             self.db,

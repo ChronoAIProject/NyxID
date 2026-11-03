@@ -111,20 +111,8 @@ fn connection_projection<'a>(
         } else {
             Value::Null
         };
-        let mut authority = json!({"owner":key.user_id,"expires":key.expires_at,"scopes":key.assistant_operation_scopes,
+        let authority = json!({"owner":key.user_id,"expires":key.expires_at,"scopes":key.assistant_operation_scopes,
         "allowed":allowed,"all_services":key.allow_all_services,"nodes":nodes,"mode":mode});
-        // Only another owner's row can need organization instruction; the
-        // actor's own connections skip the chat lookup entirely.
-        if service.user_id != key.user_id
-            && let Some(chat) = acks::for_key(db, &key.user_id, Some(api_key_id)).await?
-            && instruction::covered(db, &chat, &service).await?
-        {
-            authority
-                .as_object_mut()
-                .expect("authority object")
-                .remove("mode");
-            authority["binding_version"] = json!(2);
-        }
         let mut service = serde_json::to_value(service)
             .map_err(|_| AppError::Internal("Connection projection failed".into()))?;
         if platform {
@@ -165,6 +153,25 @@ pub fn connection_binding<'a>(
     Box::pin(async move { Ok(digest(connection_projection(db, id, api_key_id).await?)) })
 }
 
+/// Identity of an organization-instruction card. It omits only the access-mode
+/// preference, so a pending org card stays redeemable across a mode switch.
+/// Execution admissions keep the mode-sensitive `connection_binding`, so a
+/// mode change after admission still fences the action before egress.
+pub fn org_card_binding<'a>(
+    db: &'a Database,
+    id: &'a str,
+    api_key_id: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<String>> {
+    Box::pin(async move {
+        let mut projection = connection_projection(db, id, api_key_id).await?;
+        if let Some(authority) = projection["authority"].as_object_mut() {
+            authority.remove("mode");
+            authority.insert("binding_version".into(), json!(2));
+        }
+        Ok(digest(projection))
+    })
+}
+
 /// Model consent is independent of the owner's action-confirmation mode. Compare
 /// legacy digests against the same live projection under the three known modes;
 /// every other authority field must still match. No approval or tool path uses this.
@@ -175,12 +182,6 @@ pub(super) async fn model_bindings_match(
     bindings: &[&str],
 ) -> AppResult<bool> {
     let mut projection = connection_projection(db, id, key).await?;
-    // Organization-instruction (v2) bindings already omit the access mode, so
-    // they are compared as-is; re-adding a mode would never match them.
-    if projection["authority"].get("mode").is_none() {
-        let current = digest(projection);
-        return Ok(bindings.iter().all(|binding| *binding == current));
-    }
     let mut accepted = Vec::new();
     for mode in ["nyxmode", "autopilot", "ask_every_time"] {
         projection["authority"]["mode"] = json!(mode);

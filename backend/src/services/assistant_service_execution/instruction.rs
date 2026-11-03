@@ -10,6 +10,30 @@ pub(crate) async fn active(db: &Database, actor: &str) -> AppResult<bool> {
     .await
 }
 
+/// Turn guidance for the organization-instruction rule. Added to the stable
+/// instructions only when the rule applies to this owner and agent.
+pub(crate) const PROMPT_GUIDANCE: &str = "\nOrganization connections need this turn's owner selection (/service) or an approved card in every access mode, including Full access. Ask before using one; prefer offering nyx__connect_service for the owner's own account.\n";
+
+/// Whether the organization-instruction rule applies to this owner's agent
+/// (personal agents only; organization-owned specialists are excluded).
+pub(crate) async fn prompt_applies(
+    db: &Database,
+    owner: &str,
+    agent: Option<&crate::models::assistant_agent::AssistantAgent>,
+) -> AppResult<bool> {
+    if !active(db, owner).await? {
+        return Ok(false);
+    }
+    let Some(agent) = agent else {
+        return Ok(true);
+    };
+    Ok(db
+        .collection::<User>("users")
+        .find_one(doc! {"_id":&agent.user_id,"is_active":true})
+        .await?
+        .is_none_or(|owner| owner.user_type != UserType::Org))
+}
+
 /// Agent ownership is independent of the shared-personal access branch.
 pub(crate) async fn personal_agent(db: &Database, chat: &acks::ChatAuthority) -> AppResult<bool> {
     if chat.agent_id.is_empty() {

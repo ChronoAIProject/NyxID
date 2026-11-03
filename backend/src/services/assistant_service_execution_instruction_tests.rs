@@ -236,6 +236,68 @@ async fn org_card_survives_auto_to_full_and_redeems_exactly_once() {
 }
 
 #[tokio::test]
+async fn org_admission_stays_mode_sensitive_while_card_identity_ignores_mode() {
+    let f = orchestrator_fixture("instruction_binding_split").await;
+    activate(&f).await;
+    let owner = org(&f).await;
+    let id = connection(&f, &owner, "github", None).await;
+    mode(&f, AccessMode::Nyxmode).await;
+    let operation = json!({"kind":"http","method":"GET","path":"/user/repos"});
+    let refusal = gate(&f, &id, &owner, &operation, None)
+        .await
+        .refusal
+        .unwrap();
+    let card = refusal["acknowledgement_id"].as_str().unwrap().to_owned();
+    allow(&f, refusal).await;
+    let admission = gate(&f, &id, &owner, &operation, Some(&card))
+        .await
+        .admission
+        .unwrap();
+    let card_identity = org_card_binding(&f.state.db, &id, &f.chat.api_key_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        admission.binding,
+        connection_binding(&f.state.db, &id, &f.chat.api_key_id)
+            .await
+            .unwrap(),
+        "execution keeps the mode-sensitive binding"
+    );
+    assert_ne!(admission.binding, card_identity);
+    // Tightening the access mode after admission fences the admitted action.
+    mode(&f, AccessMode::AskEveryTime).await;
+    assert!(admission.revalidate(&f.state.db, &id, None).await.is_err());
+    // The organization card identity does not depend on the mode.
+    assert_eq!(
+        card_identity,
+        org_card_binding(&f.state.db, &id, &f.chat.api_key_id)
+            .await
+            .unwrap()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_instruction_flag_does_not_change_connection_bindings() {
+    // Model consent and other persisted grants bind connection_binding; turning
+    // the rule on or off must not invalidate them.
+    let f = orchestrator_fixture("instruction_binding_flag").await;
+    let owner = org(&f).await;
+    let id = connection(&f, &owner, "model", None).await;
+    let before = connection_binding(&f.state.db, &id, &f.chat.api_key_id)
+        .await
+        .unwrap();
+    activate(&f).await;
+    assert_eq!(
+        before,
+        connection_binding(&f.state.db, &id, &f.chat.api_key_id)
+            .await
+            .unwrap()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn trusted_selection_allows_org_reads_but_not_independent_destructive_confirmation() {
     let f = orchestrator_fixture("instruction_selection_gate").await;
     activate(&f).await;
