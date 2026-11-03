@@ -22,6 +22,7 @@ import {
   useAppForm,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   connectLinkStorageKey,
@@ -48,6 +49,11 @@ import {
   validateConnectOAuthForm,
 } from "@/schemas/connect-links";
 import { useAuthStore } from "@/stores/auth-store";
+import type { CredentialFieldSpec } from "@/types/keys";
+import {
+  composeTokenExchangeCredential,
+  parseTokenExchangeCredential,
+} from "@/lib/token-exchange-credential";
 
 const CLICK_THROTTLE_MS = 750;
 
@@ -538,6 +544,7 @@ export function ConnectLinkContent({
                   preview.data.connect_method === "api_key" ? (
                     <CredentialForm
                       preview={preview.data}
+                      fields={catalog?.token_exchange_credential_fields ?? []}
                       pending={actionPending}
                       onSubmit={handleCredentialSubmit}
                     />
@@ -784,10 +791,14 @@ export function ConnectLinkReturnPage() {
 
 function CredentialForm({
   preview,
+  fields,
   pending,
   onSubmit,
 }: {
   readonly preview: ConnectLinkPreview;
+  /** Declared token-exchange fields; when present each gets its own input
+   * and the values compose the JSON credential the backend validates. */
+  readonly fields: readonly CredentialFieldSpec[];
   readonly pending: boolean;
   readonly onSubmit: (values: ConnectCredentialForm) => void;
 }) {
@@ -811,10 +822,24 @@ function CredentialForm({
   });
   const credential = form.watch("credential").trim();
   const endpointUrl = form.watch("endpoint_url").trim();
+  const structured = fields.length > 0;
+  const fieldValues = parseTokenExchangeCredential(credential);
   const submitDisabled =
     pending ||
     credential.length === 0 ||
+    (structured &&
+      fields.some((field) => !(fieldValues[field.name] ?? "").trim())) ||
     (preview.requires_gateway_url && endpointUrl.length === 0);
+  const setFieldValue = (name: string, value: string) =>
+    form.setValue(
+      "credential",
+      composeTokenExchangeCredential({
+        ...Object.fromEntries(
+          fields.map((field) => [field.name, fieldValues[field.name] ?? ""]),
+        ),
+        [name]: value,
+      }),
+    );
   const credentialLabel =
     preview.auth_key_name.trim() ||
     (preview.requires_gateway_url
@@ -827,24 +852,42 @@ function CredentialForm({
   return (
     <Form {...form}>
       <form className="space-y-4" onSubmit={(event) => void submit(event)}>
-        <FormField
-          control={form.control}
-          name="credential"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{credentialLabel}</FormLabel>
-              <FormControl>
-                <Input
-                  type="password"
-                  autoComplete="off"
-                  placeholder={credentialPlaceholder}
-                  {...field}
-                />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
+        {structured ? (
+          fields.map((spec) => (
+            <div key={spec.name} className="space-y-1.5">
+              <Label htmlFor={`connect-te-${spec.name}`}>{spec.label}</Label>
+              <Input
+                id={`connect-te-${spec.name}`}
+                type={spec.secret ? "password" : "text"}
+                autoComplete="off"
+                placeholder={
+                  spec.placeholder ?? `Enter ${spec.label.toLowerCase()}`
+                }
+                value={fieldValues[spec.name] ?? ""}
+                onChange={(event) => setFieldValue(spec.name, event.target.value)}
+              />
+            </div>
+          ))
+        ) : (
+          <FormField
+            control={form.control}
+            name="credential"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{credentialLabel}</FormLabel>
+                <FormControl>
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    placeholder={credentialPlaceholder}
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        )}
         {connectLinkShowsEndpointUrl(preview) ? (
           <FormField
             control={form.control}

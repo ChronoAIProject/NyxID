@@ -24,6 +24,9 @@ const mocks = vi.hoisted(() => ({
   requiresGatewayUrl: false,
   authKeyName: "Authorization",
   connectMethod: "api_key",
+  fields: null as
+    | { name: string; label: string; secret: boolean }[]
+    | null,
 }));
 vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ token: "hosted-token" }),
@@ -41,6 +44,7 @@ vi.mock("@/hooks/use-keys", () => ({
     data: {
       platform_key: { available: mocks.available, pricing: null },
       byok_pricing: null,
+      token_exchange_credential_fields: mocks.fields,
     },
   }),
 }));
@@ -88,6 +92,7 @@ beforeEach(() => {
   mocks.requiresGatewayUrl = false;
   mocks.authKeyName = "Authorization";
   mocks.connectMethod = "api_key";
+  mocks.fields = null;
   sessionStorage.clear();
   mocks.preview.mockResolvedValue({});
   mocks.complete.mockResolvedValue({ status: "completed" });
@@ -289,6 +294,27 @@ it("prefills an editable gateway URL and submits it with the credential", async 
     token: "hosted-token",
     values: expect.objectContaining({
       endpoint_url: "https://another.example.test",
+    }),
+  });
+});
+
+it("collects declared token-exchange fields and submits them as one JSON credential", async () => {
+  mocks.available = false;
+  mocks.fields = [
+    { name: "app_id", label: "App ID", secret: false },
+    { name: "app_secret", label: "App Secret", secret: true },
+  ];
+  render(<ConnectLinkPage />);
+  const approve = screen.getByRole("button", { name: "Approve & connect" });
+  await userEvent.type(screen.getByLabelText("App ID"), "cli_app");
+  expect(approve).toBeDisabled();
+  expect(screen.getByLabelText("App Secret")).toHaveAttribute("type", "password");
+  await userEvent.type(screen.getByLabelText("App Secret"), "app-secret");
+  await userEvent.click(approve);
+  expect(mocks.complete).toHaveBeenCalledWith({
+    token: "hosted-token",
+    values: expect.objectContaining({
+      credential: JSON.stringify({ app_id: "cli_app", app_secret: "app-secret" }),
     }),
   });
 });

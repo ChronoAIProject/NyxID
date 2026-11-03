@@ -6240,43 +6240,55 @@ async fn public_connect_catalog(
     catalog
 }
 
-#[tokio::test]
-async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already_connected() {
-    // GitHub-style catalogs get their credential from an OAuth provider, so
-    // requires_user_credential is false. A chat must still receive a hosted
-    // link (adding another account), never the legacy "Already connected".
-    let f = orchestrator_fixture("assistant_provider_connect").await;
+async fn seeded_github(f: &Fixture) -> crate::models::downstream_service::DownstreamService {
     crate::services::provider_service::seed_default_providers(
         &f.state.db,
         &f.state.encryption_keys,
     )
     .await
     .unwrap();
-    let provider = f
-        .state
-        .db
-        .collection::<bson::Document>("provider_configs")
-        .find_one(doc! {"slug":"github"})
-        .await
-        .unwrap()
-        .expect("seeded GitHub provider");
-    let mut catalog = public_connect_catalog(&f, "github-oauth").await;
-    catalog.requires_user_credential = false;
-    catalog.auth_method = "bearer".into();
-    catalog.auth_key_name = "Authorization".into();
-    catalog.provider_config_id = Some(provider.get_str("_id").unwrap().to_owned());
-    f.state
-        .db
-        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
-        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+    crate::services::provider_service::seed_default_services(&f.state.db, &f.state.encryption_keys)
         .await
         .unwrap();
     f.state
         .db
-        .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .find_one(doc! {"slug":"api-github"})
+        .await
+        .unwrap()
+        .expect("seeded GitHub catalog")
+}
+
+#[tokio::test]
+async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already_connected() {
+    // Production case: the seeded GitHub catalog gets its credential from an
+    // OAuth provider (requires_user_credential=false) and the owner already
+    // has a legacy GitHub connection. The legacy connector refused with
+    // "Already connected"; a chat must receive a hosted link instead.
+    let f = orchestrator_fixture("assistant_provider_connect").await;
+    let catalog = seeded_github(&f).await;
+    assert!(!catalog.requires_user_credential && catalog.provider_config_id.is_some());
+    let now = chrono::Utc::now();
+    f.state
+        .db
+        .collection::<crate::models::user_service_connection::UserServiceConnection>(
+            crate::models::user_service_connection::COLLECTION_NAME,
+        )
         .insert_one(
-            doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,
-            "service_id":&catalog.id,"is_active":true},
+            crate::models::user_service_connection::UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: f.owner.clone(),
+                service_id: catalog.id.clone(),
+                credential_encrypted: None,
+                secret_context_versions: Default::default(),
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                state_version: 1,
+                created_at: now,
+                updated_at: now,
+            },
         )
         .await
         .unwrap();
@@ -6286,7 +6298,7 @@ async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already
             &f.state,
             &auth,
             None,
-            &json!({"service_slug":catalog.slug}),
+            &json!({"service_slug":"api-github"}),
             None,
             false,
         )
@@ -6309,6 +6321,47 @@ async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already
         .unwrap()
         .unwrap();
     assert_eq!(stored.use_platform_key, Some(false));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_connect_reports_an_inactive_provider_instead_of_a_dead_link() {
+    let f = orchestrator_fixture("assistant_provider_inactive").await;
+    let catalog = seeded_github(&f).await;
+    f.state
+        .db
+        .collection::<bson::Document>("provider_configs")
+        .update_one(
+            doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
+            doc! {"$set":{"is_active":false}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_slug":"api-github"}),
+            None,
+            false,
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(value["error"], "connect_unavailable", "{value}");
+    assert_eq!(value["reason"], "provider_unavailable");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
     f.state.db.drop().await.unwrap();
 }
 

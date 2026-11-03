@@ -2643,9 +2643,8 @@ pub async fn seed_default_providers(
             device_verification_url: None,
             hosted_callback_url: None,
             api_key_instructions: Some(
-                "Create a custom app at https://open.larksuite.com/app, then copy the \
-                 App Secret. The App ID is sent in your request body when calling \
-                 /auth/v3/tenant_access_token/internal."
+                "Create a custom app at https://open.larksuite.com/app, then enter its \
+                 App ID and App Secret. NyxID exchanges them for a tenant access token."
                     .to_string(),
             ),
             api_key_url: Some("https://open.larksuite.com/app".to_string()),
@@ -2703,9 +2702,8 @@ pub async fn seed_default_providers(
             device_verification_url: None,
             hosted_callback_url: None,
             api_key_instructions: Some(
-                "Create a custom app at https://open.feishu.cn/app, then copy the \
-                 App Secret. The App ID is sent in your request body when calling \
-                 /auth/v3/tenant_access_token/internal."
+                "Create a custom app at https://open.feishu.cn/app, then enter its \
+                 App ID and App Secret. NyxID exchanges them for a tenant access token."
                     .to_string(),
             ),
             api_key_url: Some("https://open.feishu.cn/app".to_string()),

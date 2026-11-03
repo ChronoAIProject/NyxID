@@ -5448,6 +5448,29 @@ async fn handle_meta_connect(
             && !use_platform_key
             && crate::services::assistant_connection_service::personal_hosted_connect(catalog)
     });
+    if let Some(catalog) = personal_hosted {
+        match crate::services::assistant_connection_service::hosted_connect_ready(
+            &state.db, catalog,
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => {
+                return tool_result(
+                    request_id,
+                    &serde_json::json!({
+                        "error": "connect_unavailable",
+                        "reason": reason,
+                        "service_slug": catalog.slug,
+                        "instructions": "This service's sign-in is not available in NyxID right now: a platform admin must enable or configure its provider. Tell the owner plainly; do not send a page link instead.",
+                    })
+                    .to_string(),
+                    true,
+                );
+            }
+            Err(error) => return app_error_to_rpc(request_id, &error),
+        }
+    }
     let connected = if let Some(catalog) = personal_hosted {
         crate::services::assistant_connection_service::hosted(
             &state.db,

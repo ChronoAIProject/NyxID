@@ -570,6 +570,7 @@ test("real native connection card exposes web credential/device/terminal control
     busy: false,
     disabled: false,
     platformAvailable: true,
+    credentialFields: [] as { name: string; label: string; secret: boolean }[],
     usePlatformKey: false,
     device: undefined as any,
     oauth: undefined as any,

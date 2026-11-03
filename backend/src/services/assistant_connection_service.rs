@@ -64,6 +64,32 @@ pub fn personal_hosted_connect(catalog: &DownstreamService) -> bool {
         && (catalog.requires_user_credential || catalog.provider_config_id.is_some())
 }
 
+/// Whether a hosted personal link for `catalog` can actually be completed:
+/// its provider must be active, and an admin-only OAuth provider needs the
+/// platform client configured. `Err` carries a stable reason code.
+pub async fn hosted_connect_ready(
+    db: &Database,
+    catalog: &DownstreamService,
+) -> AppResult<Result<(), &'static str>> {
+    let Some(provider_id) = catalog.provider_config_id.as_deref() else {
+        return Ok(Ok(()));
+    };
+    let Some(provider) = db
+        .collection::<crate::models::provider_config::ProviderConfig>("provider_configs")
+        .find_one(doc! {"_id":provider_id,"is_active":true})
+        .await?
+    else {
+        return Ok(Err("provider_unavailable"));
+    };
+    if provider.provider_type == "oauth2"
+        && provider.credential_mode == "admin"
+        && !super::user_credentials_service::provider_has_admin_oauth_credentials(&provider)
+    {
+        return Ok(Err("provider_not_configured"));
+    }
+    Ok(Ok(()))
+}
+
 /// Unsupported flows never advertise a link that cannot be completed personally.
 pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -> AppResult<Value> {
     let Some(id) = connection.catalog_service_id.as_deref() else {
@@ -80,6 +106,11 @@ pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -
         }
         Err(error) => return Err(error),
     };
+    if let Err(reason) = hosted_connect_ready(db, &catalog).await? {
+        return Ok(
+            json!({"supported":false,"reason":reason,"instructions":"This service's sign-in is not available in NyxID right now (a platform admin must enable or configure its provider). Ask the owner whether to approve this exact organization operation instead."}),
+        );
+    }
     if !personal_hosted_connect(&catalog) {
         return Ok(
             json!({"supported":false,"reason":if catalog.service_type == "ssh" {"ssh_requires_advanced_setup"} else {"personal_account_not_supported"},"instructions":"Ask the owner whether to approve this exact organization operation. This service cannot be connected through a hosted link."}),
