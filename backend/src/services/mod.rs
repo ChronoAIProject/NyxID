@@ -530,6 +530,7 @@ pub mod telegram_manager_registry;
 pub(crate) mod nyxbot_channel_continuity_service;
 pub(crate) mod nyxbot_chat_settings_service;
 pub(crate) mod nyxbot_event_binding_service;
+pub(crate) mod nyxbot_gateway_host_move;
 pub(crate) mod nyxbot_gateway_release_service;
 
 pub mod discord_gateway;
