@@ -119,10 +119,10 @@ function CrmObjectTableState({
   const [showFilters, setShowFilters] = useState(query.filters.length > 0);
   const cursor = cursors.at(-1);
   const metadata = useCrmObject(query.object, ownerId);
-  const object = metadata.data;
+  const metadataObject = metadata.data;
   const activeFilters = useMemo(
-    () => (object ? executableCrmFilters(object, filters) : []),
-    [filters, object],
+    () => (metadataObject ? executableCrmFilters(metadataObject, filters) : []),
+    [filters, metadataObject],
   );
   const pageQuery: CrmTableQuery = {
     ...query,
@@ -131,8 +131,9 @@ function CrmObjectTableState({
     cursor,
   };
   const result = useCrmTableQuery(pageQuery, ownerId, {
-    enabled: Boolean(object),
+    enabled: Boolean(metadataObject),
   });
+  const object = result.data?.object ?? metadataObject;
   const fields = useMemo(() => {
     if (!object) return [];
     const selected = columns ?? query.select ?? object.default_columns;
@@ -157,14 +158,14 @@ function CrmObjectTableState({
     setCursors([undefined]);
   }
 
-  if (metadata.isPending && !object) {
+  if (metadata.isPending && !metadataObject) {
     return (
       <p role="status" className="text-12 text-text-tertiary">
         Loading record fields...
       </p>
     );
   }
-  if (metadata.isError || !object) {
+  if (metadata.isError || !metadataObject || !object) {
     return (
       <div className="space-y-2" role="alert">
         <p className="text-12 text-destructive">
