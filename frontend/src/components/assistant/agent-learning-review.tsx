@@ -1,8 +1,12 @@
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+} from "@/components/ui/grouped-list";
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useAgentLearningReview } from "@/hooks/use-agent-learning-review";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -31,7 +35,10 @@ export function AgentLearningReview({
   const review = useAgentLearningReview(agentId, enabled);
   const [open, setOpen] = useState<string | undefined>(proposalId);
   useEffect(() => {
-    if (proposalId && review.data) document.getElementById(`learning-proposal-${proposalId}`)?.scrollIntoView?.({ block: "nearest" });
+    if (proposalId && review.data)
+      document
+        .getElementById(`learning-proposal-${proposalId}`)
+        ?.scrollIntoView?.({ block: "nearest" });
   }, [proposalId, review.data]);
   const [cards, setCards] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -56,8 +63,9 @@ export function AgentLearningReview({
           Learning proposals
         </h3>
         <p className="text-12 text-muted-foreground">
-          Completed work can produce private, untrusted Ornn skill drafts.
-          Full access publishes and attaches automatically; other modes require your confirmation.
+          Completed work can produce private, untrusted Ornn skill drafts. Full
+          access publishes and attaches automatically; other modes require your
+          confirmation.
         </p>
       </div>
       {review.error ? (
@@ -98,43 +106,47 @@ export function AgentLearningReview({
         ))}
 
       {!readOnly ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3">
-          <label className="flex items-center gap-2 text-12">
-            <Switch
-              checked={learningEnabled}
-              disabled={review.configure.isPending}
-              onCheckedChange={(checked) =>
-                review.configure.mutate({
-                  enabled: checked,
-                  threshold: Math.min(50, Math.max(1, threshold)),
-                })
-              }
-            />
-            Enable automatic learning
-          </label>
-          <label className="flex items-center gap-2 text-12">
-            <span>Threshold</span>
-            <Input
-              aria-label="Learning threshold"
-              className="w-16"
-              type="number"
-              min={1}
-              max={50}
-              value={threshold}
-              onChange={(event) =>
-                setThreshold(Number(event.target.value) || 15)
-              }
-              onBlur={() => {
-                if (learningEnabled) {
+        <GroupedList title="Automatic learning">
+          <GroupedRow>
+            <label className="flex items-center gap-2 text-12">
+              <Switch
+                checked={learningEnabled}
+                disabled={review.configure.isPending}
+                onCheckedChange={(checked) =>
                   review.configure.mutate({
-                    enabled: true,
+                    enabled: checked,
                     threshold: Math.min(50, Math.max(1, threshold)),
-                  });
+                  })
                 }
-              }}
-            />
-          </label>
-        </div>
+              />
+              Enable automatic learning
+            </label>
+          </GroupedRow>
+          <GroupedRow asChild>
+            <label className="flex items-center justify-between gap-2 text-12">
+              <span>Threshold</span>
+              <GroupedInput
+                aria-label="Learning threshold"
+                className="w-16"
+                type="number"
+                min={1}
+                max={50}
+                value={threshold}
+                onChange={(event) =>
+                  setThreshold(Number(event.target.value) || 15)
+                }
+                onBlur={() => {
+                  if (learningEnabled) {
+                    review.configure.mutate({
+                      enabled: true,
+                      threshold: Math.min(50, Math.max(1, threshold)),
+                    });
+                  }
+                }}
+              />
+            </label>
+          </GroupedRow>
+        </GroupedList>
       ) : null}
 
       {proposals.length === 0 ? (
@@ -171,46 +183,58 @@ export function AgentLearningReview({
           <article
             key={proposal.id}
             id={`learning-proposal-${proposal.id}`}
-            className="space-y-3 rounded-lg border border-border/50 p-3"
+            className="space-y-3"
           >
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-12 font-medium">
-                {draft?.name ?? "Learning proposal"}
-              </p>
-              <Badge variant="secondary">{proposal.status}</Badge>
-            </div>
-            <p className="text-12 text-muted-foreground">
-              {draft?.description}
-            </p>
-            <p className="text-11 text-text-tertiary">
-              {proposal.evidence_count} evidence items ·{" "}
-              {proposal.body_bytes.toLocaleString()} bytes
-            </p>
-            {proposal.published_version ? (
-              <p className="text-11 text-success">
-                Published version: {proposal.published_version}
-              </p>
-            ) : null}
-            {proposal.failure_code ? (
-              <p role="alert" className="text-11 text-destructive">
-                {publicationFailureText(proposal.failure_code, proposal.status, proposal.source)}
-              </p>
-            ) : null}
-            {errors[proposal.id] ? (
-              <p role="alert" className="text-11 text-destructive">
-                {errors[proposal.id]}
-              </p>
-            ) : null}
-            {checkOnly ? (
-              <p role="status" className="text-11 text-warning">
-                Learning evidence or consent is no longer available. NyxID can
-                only check whether this publication reached Ornn; it will not
-                attach it to the agent.
-              </p>
-            ) : null}
-
-            {isOpen && proposal.source === "authored" && proposal.auto_allowed ? (
-              <AuthoredSkillScopePreview agentId={agentId} proposalId={proposal.id} />
+            <GroupedList title="Proposal">
+              <GroupedRow className="block space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-12 font-medium">
+                    {draft?.name ?? "Learning proposal"}
+                  </p>
+                  <Badge variant="secondary">{proposal.status}</Badge>
+                </div>
+                <p className="text-12 text-muted-foreground">
+                  {draft?.description}
+                </p>
+                <p className="text-11 text-text-tertiary">
+                  {proposal.evidence_count} evidence items ·{" "}
+                  {proposal.body_bytes.toLocaleString()} bytes
+                </p>
+                {proposal.published_version ? (
+                  <p className="text-11 text-success">
+                    Published version: {proposal.published_version}
+                  </p>
+                ) : null}
+                {proposal.failure_code ? (
+                  <p role="alert" className="text-11 text-destructive">
+                    {publicationFailureText(
+                      proposal.failure_code,
+                      proposal.status,
+                      proposal.source,
+                    )}
+                  </p>
+                ) : null}
+                {errors[proposal.id] ? (
+                  <p role="alert" className="text-11 text-destructive">
+                    {errors[proposal.id]}
+                  </p>
+                ) : null}
+                {checkOnly ? (
+                  <p role="status" className="text-11 text-warning">
+                    Learning evidence or consent is no longer available. NyxID
+                    can only check whether this publication reached Ornn; it
+                    will not attach it to the agent.
+                  </p>
+                ) : null}
+              </GroupedRow>
+            </GroupedList>
+            {isOpen &&
+            proposal.source === "authored" &&
+            proposal.auto_allowed ? (
+              <AuthoredSkillScopePreview
+                agentId={agentId}
+                proposalId={proposal.id}
+              />
             ) : null}
             {isOpen && draft ? (
               <LearningDraftEditor
@@ -230,11 +254,15 @@ export function AgentLearningReview({
               >
                 {isOpen ? "Hide draft" : "Review draft"}
               </Button>
-              {proposal.source === "authored" && proposal.status !== "pinned" ? (
+              {proposal.source === "authored" &&
+              proposal.status !== "pinned" ? (
                 proposal.card_conversation_id ? (
                   <Link
                     to="/assistant"
-                    search={{ c: proposal.card_conversation_id, card: proposal.acknowledgement_id ?? undefined }}
+                    search={{
+                      c: proposal.card_conversation_id,
+                      card: proposal.acknowledgement_id ?? undefined,
+                    }}
                     className="text-11 text-primary hover:underline"
                   >
                     Open the confirmation card
@@ -313,7 +341,8 @@ export function AgentLearningReview({
                   publication that may have reached Ornn is refused, and the
                   reason appears in the error line above. */}
               {proposal.status === "pending" ||
-              proposal.status === "publication_failed" || (proposal.auto_allowed && proposal.status === "pinned") ? (
+              proposal.status === "publication_failed" ||
+              (proposal.auto_allowed && proposal.status === "pinned") ? (
                 <Button
                   size="sm"
                   disabled={readOnly || review.reject.isPending}
@@ -332,7 +361,9 @@ export function AgentLearningReview({
                     }
                   }}
                 >
-                  {proposal.auto_allowed && proposal.status === "pinned" ? "Discard and detach" : "Reject"}
+                  {proposal.auto_allowed && proposal.status === "pinned"
+                    ? "Discard and detach"
+                    : "Reject"}
                 </Button>
               ) : null}
             </div>

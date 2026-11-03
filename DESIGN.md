@@ -224,6 +224,46 @@ NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside t
 - **Padding:** `px-3 py-1.5`
 - **Text:** `text-xs`
 
+### Grouped lists (assistant forms)
+
+NyxBot forms use iOS inset grouped lists from
+`components/ui/grouped-list.tsx`. Stack sibling groups with `space-y-6` on the
+`bg-background` canvas. Each group has an optional sentence-case `text-12
+text-text-tertiary` heading above, one `rounded-xl bg-card border
+border-border/50` surface, and an optional `text-11 text-text-tertiary` footer
+below. The subtle border provides contrast in light mode and also works with
+custom theme tokens. Headings and footers use `px-4`.
+
+`GroupedRow` provides a `min-h-11` touch target, `px-4 py-2.5`, wrapping titles
+and accessories, and a hairline before adjacent rows inset by `left-4` (or `left-11` after a leading icon).
+Optional leading icons use `1.125em`. Use `asChild` to retain the native
+button, link, label or form-item element. Only interactive rows receive hover,
+pressed and focus-visible styles. `GroupedDisclosure` is a native button with
+a trailing chevron; buttons and links must keep accessible names.
+
+Groups never contain another group, card or outlined control. Use borderless
+`GroupedInput`, `GroupedTextarea` and `GroupedSelectTrigger` inside rows.
+Short fields can pair a leading label and trailing value; longer fields grow
+under their label. Validation text is destructive and linked with
+`aria-describedby` (the shared Form primitives provide these links). Put
+explanations below the group, never in another bordered box. Destructive
+actions are destructive-colored rows in their own neutral group.
+
+Selection lists use checkmark or switch rows, search when there are more than
+eight items, and scroll internally only for long lists. Every logical form has
+one Save action, with its existing dirty/pending/permission guards.
+`GroupedSaveBar` provides a sticky footer for Discard and Save. Immediate
+controls remain immediate only where their existing behavior requires it.
+
+`components/ui/segmented-control.tsx` wraps Radix Tabs: a `bg-muted` track,
+raised `bg-card shadow-sm` selected segment, `text-12` labels, arrow-key
+navigation and associated tab panels. Segments size to their labels and wrap
+onto another line when the assistant text scale needs more space. Keep inactive form panels mounted and
+hidden so switching tabs or returning from a detail view preserves drafts.
+Drawer deep links focus the selected panel heading; detail Back restores focus
+to its disclosure. Keep the drawer full width on mobile and `sm:max-w-lg` on
+desktop. All spacing, text and icons follow the assistant display scale.
+
 ### Sheet (slide-over panel)
 - Used for inline detail/edit on list pages where a full route is overkill (e.g. `admin-invite-codes` row detail). `sm:max-w-lg`, otherwise inherits Dialog tokens. Prefer Sheet over Dialog when the panel contains substantial reading content alongside actions.
 
@@ -512,6 +552,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | NyxBot inset grouped forms and segmented navigation | One neutral card per group, inset hairlines, borderless controls and external helper text replace nested boxes. Mounted tabs preserve drafts; detail navigation keeps independent revision-fenced saves. The subtle `border-border/50` edge preserves light-theme contrast. |
 | 2026-04-01 | Initial design system created | Created by /design-consultation + /design-shotgun. User reviewed 7 directions and chose refined purple with warm neutrals. |
 | 2026-04-01 | Keep purple, shift accent | User chose to keep purple identity but shift from #8b5cf6 to #9775fa (warmer, less saturated). |
 | 2026-04-01 | Sidebar reorganization | Collapsed from 20 items to functional zones. Approvals unified into single nav group. |

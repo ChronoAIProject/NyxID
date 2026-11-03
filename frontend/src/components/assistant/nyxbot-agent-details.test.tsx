@@ -16,8 +16,8 @@ vi.mock("@/hooks/use-keys", () => ({
   useKeys: () => ({
     isPending: false,
     data: [
-      { slug: "github", label: "GitHub", is_active: true },
-      { slug: "slack", label: "Slack", is_active: true },
+      { id: "github-key", slug: "github", label: "GitHub", is_active: true },
+      { id: "slack-key", slug: "slack", label: "Slack", is_active: true },
     ],
   }),
 }));
@@ -190,7 +190,7 @@ const NYXBOT_TAKEOVER =
   /asks NyxBot for anything|ask NyxBot for access|reports the need to NyxBot|tells NyxBot in its reply|needs NyxBot|NyxBot (needs to|will|must) take over|hands? (it|the work) (over )?to NyxBot/;
 
 it("forgets a memory note", async () => {
-  const { user } = renderSheet();
+  const { user } = renderSheet({ tab: "memory" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const notes = await within(sheet).findByRole("list", { name: "researcher memory" });
   expect(notes).toHaveTextContent("Weekly digests on Mondays");
@@ -204,7 +204,7 @@ it("forgets a memory note", async () => {
 });
 
 it("replaces a specialist's grants with a dirty-gated save", async () => {
-  const { user } = renderSheet();
+  const { user } = renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const grants = await within(sheet).findByRole("form", { name: "Grants" });
   const save = within(grants).getByRole("button", { name: "Save grants" });
@@ -233,7 +233,7 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
 });
 
 it("lets the owner choose what others in the agent's chats may do with each service", async () => {
-  const { user } = renderSheet();
+  const { user } = renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const grants = await within(sheet).findByRole("form", { name: "Grants" });
   const save = within(grants).getByRole("button", { name: "Save grants" });
@@ -357,6 +357,7 @@ it("lets NyxBot get a display name and persona, with full access and no grants o
       body: { display_name: "Nyx", persona: "Warm and concise." },
     }),
   );
+  await user.click(within(sheet).getByRole("tab", { name: "Access" }));
   expect(within(sheet).getByRole("region", { name: "Access" })).toHaveTextContent("full access");
   expect(within(sheet).queryByRole("form", { name: "Grants" })).not.toBeInTheDocument();
   expect(within(sheet).queryByRole("region", { name: "Danger zone" })).not.toBeInTheDocument();
@@ -399,7 +400,7 @@ it("lets an organization Member edit shared memory with the privacy note and bac
     can_maintain: true,
     can_use: true,
   });
-  const { user } = renderSheet();
+  const { user } = renderSheet({ tab: "memory" });
   const form = await screen.findByRole("form", { name: "Shared memory" });
   expect(screen.getByText(/Never save private member content/)).toBeVisible();
   const input = within(form).getByRole("textbox", { name: "Add shared note" });
@@ -428,7 +429,7 @@ it("lets an organization Member edit shared memory with the privacy note and bac
 
 it("explains the specialist sandbox and who approves in each request policy", async () => {
   agent = agentRow({ owner_kind: "person", can_maintain: true, can_use: true });
-  renderSheet();
+  renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const authority = await screen.findByRole("region", { name: "Access authority" });
   await waitFor(() =>
@@ -446,7 +447,7 @@ it("explains the specialist sandbox and who approves in each request policy", as
   cleanup();
   requestMode = "routed_to_nyxbot";
   client.clear();
-  renderSheet();
+  renderSheet({ tab: "grants" });
   const routed = await screen.findByRole("region", { name: "Access authority" });
   await waitFor(() =>
     expect(routed).toHaveTextContent(
@@ -458,12 +459,15 @@ it("explains the specialist sandbox and who approves in each request policy", as
 });
 
 it.each([
-  ["grants", "Grants"],
+  ["overview", "Overview"],
+  ["grants", "Access"],
   ["skills", "Skills"],
+  ["memory", "Memory"],
+  ["channels", "Channels"],
 ] as const)("lands a linked sheet on its %s section and focuses it", async (tab, name) => {
   renderSheet({ tab });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  const section = await within(sheet).findByRole("region", { name });
+  const section = await within(sheet).findByRole("heading", { name, level: 2 });
   await waitFor(() => expect(section).toHaveFocus());
   // A specialist's grants form is there to edit; nothing in it is a NyxBot handover.
   expect(section).not.toHaveTextContent(NYXBOT_TAKEOVER);
@@ -497,7 +501,7 @@ it("keeps the retryable banner for a transient agent read failure", async () => 
 
 it("explains that a destroyed specialist is read-only when a link lands on its grants", async () => {
   agent = agentRow({ status: "destroyed", destroyed_at: at });
-  renderSheet({ tab: "grants" });
+  const { user } = renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const note = await within(sheet).findByRole("note", { name: "Agent destroyed" });
   expect(note).toHaveTextContent("researcher was destroyed on");
@@ -505,6 +509,7 @@ it("explains that a destroyed specialist is read-only when a link lands on its g
   const grants = within(sheet).getByRole("form", { name: "Grants" });
   expect(within(grants).getByRole("checkbox", { name: /GitHub/ })).toBeDisabled();
   expect(within(grants).queryByRole("button", { name: "Save grants" })).not.toBeInTheDocument();
+  await user.click(within(sheet).getByRole("tab", { name: "Overview" }));
   expect(within(sheet).getByRole("textbox", { name: "Role" })).toBeDisabled();
 });
 
@@ -517,10 +522,12 @@ it("explains that an organization viewer can see but not change grants and skill
     can_maintain: false,
     can_use: false,
   });
-  renderSheet({ tab: "skills" });
+  const { user } = renderSheet({ tab: "skills" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const note = await within(sheet).findByRole("note", { name: "Read-only" });
   expect(note).toHaveTextContent("Only a maintainer of Team (an Admin or Member) can change its grants, skills and settings. You can view them.");
+  expect(within(sheet).getByRole("region", { name: "Skills" })).toBeVisible();
+  await user.click(within(sheet).getByRole("tab", { name: "Access" }));
   expect(within(sheet).getByRole("region", { name: "Grants" })).toBeVisible();
   expect(within(sheet).queryByRole("button", { name: "Save grants" })).not.toBeInTheDocument();
   expect(within(sheet).queryByRole("note", { name: "Agent destroyed" })).not.toBeInTheDocument();
@@ -528,7 +535,7 @@ it("explains that an organization viewer can see but not change grants and skill
 });
 
 it("shows no read-only note for a maintainable live specialist", async () => {
-  renderSheet();
+  renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   await within(sheet).findByRole("form", { name: "Grants" });
   expect(within(sheet).queryByRole("note")).not.toBeInTheDocument();
@@ -543,7 +550,7 @@ it("names an organization maintainer as the approver for an organization viewer"
     can_maintain: false,
     can_use: false,
   });
-  renderSheet();
+  renderSheet({ tab: "grants" });
   const authority = await screen.findByRole("region", { name: "Access authority" });
   expect(authority).toHaveTextContent(
     "Only a maintainer of Team (an Admin or Member) can approve or grant its access",
@@ -625,4 +632,91 @@ it("fetches visitor readiness only in the open owner Grants settings", async () 
   renderSheet({ tab: "grants" });
   expect(await screen.findByText("Send one message to this assistant yourself.")).toBeVisible();
   expect(readinessReads).toBe(1);
+});
+
+it("preserves independent profile and grants drafts across tabs and a profile save", async () => {
+  const { user } = renderSheet();
+  const profile = await screen.findByRole("form", { name: "Profile" });
+  const role = within(profile).getByRole("textbox", { name: "Role" });
+  await user.clear(role);
+  await user.type(role, "Unsaved profile");
+  await user.click(screen.getByRole("tab", { name: "Access" }));
+  const grants = screen.getByRole("form", { name: "Grants" });
+  await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
+  await user.click(screen.getByRole("tab", { name: "Overview" }));
+  expect(role).toHaveValue("Unsaved profile");
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(within(profile).getByRole("button", { name: "Save" })).toBeDisabled());
+  await user.click(screen.getByRole("tab", { name: "Access" }));
+  expect(within(grants).getByRole("checkbox", { name: /Slack/ })).toBeChecked();
+  expect(within(grants).getByRole("button", { name: "Save grants" })).toBeEnabled();
+  expect(writes).toHaveLength(1);
+  expect(writes[0]?.method).toBe("PATCH");
+  expect(document.querySelector("[data-grouped-list] [data-grouped-list]")).toBeNull();
+});
+
+it("refreshes pristine fields without replacing a dirty profile draft", async () => {
+  const { user } = renderSheet();
+  const profile = await screen.findByRole("form", { name: "Profile" });
+  const role = within(profile).getByRole("textbox", { name: "Role" });
+  await user.clear(role);
+  await user.type(role, "My draft");
+  agent = { ...agent, description: "Remote role", display_name: "Remote name" };
+  await client.invalidateQueries();
+  await waitFor(() => expect(within(profile).getByRole("textbox", { name: "Display name" })).toHaveValue("Remote name"));
+  expect(role).toHaveValue("My draft");
+  expect(within(profile).getByRole("button", { name: "Save" })).toBeEnabled();
+  await user.click(within(profile).getByRole("button", { name: "Discard" }));
+  expect(role).toHaveValue("Remote role");
+});
+
+it("keeps arrow navigation on the tablist after switching sections", async () => {
+  const { user } = renderSheet();
+  const first = await screen.findByRole("tab", { name: "Overview" });
+  first.focus();
+  await user.keyboard("{ArrowRight}{ArrowRight}");
+  expect(screen.getByRole("tab", { name: "Skills" })).toHaveFocus();
+  expect(screen.getByRole("tab", { name: "Skills" })).toHaveAttribute("aria-selected", "true");
+});
+
+it("falls back to Overview for an unavailable Channels deep link", async () => {
+  agent = agentRow({ owner_kind: "org", owner_id: "team", can_maintain: false });
+  renderSheet({ tab: "channels" });
+  const overview = await screen.findByRole("heading", { name: "Overview", level: 2 });
+  await waitFor(() => expect(overview).toHaveFocus());
+  expect(screen.queryByRole("tab", { name: "Channels" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Memory" })).not.toBeInTheDocument();
+});
+
+it("offers personal add-note and prevents every memory write after destruction", async () => {
+  const { user } = renderSheet({ tab: "memory" });
+  const note = await screen.findByRole("textbox", { name: "Note" });
+  await user.type(note, "A personal convention");
+  await user.click(screen.getByRole("button", { name: "Save note" }));
+  await waitFor(() => expect(writes).toContainEqual({ method: "POST", endpoint: "/assistant/nyxagent/agents/agent-researcher/memory", body: { text: "A personal convention" } }));
+  agent = { ...agent, status: "destroyed", destroyed_at: at };
+  await client.invalidateQueries();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Save note" })).not.toBeInTheDocument());
+  for (const button of screen.getAllByRole("button", { name: /^Forget:/ })) expect(button).toBeDisabled();
+  expect(screen.queryByRole("tab", { name: "Channels" })).not.toBeInTheDocument();
+});
+
+it.each(["user", "manager"] as const)("maps a shared %s's profile, consent and notes into the same tabs", async (share_role) => {
+  agent = agentRow({ share_role, can_maintain: false, owner_name: "Alex" });
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (/\/(private-notes|shared-memory)$/.test(request.endpoint)) return new Response(JSON.stringify({ revision: 1, notes: [] }));
+    if (request.endpoint.endsWith("/consents")) return new Response(JSON.stringify({ consents: [] }));
+    return original(request);
+  };
+  const { user } = renderSheet();
+  await screen.findByRole("tab", { name: "Overview" });
+  expect(screen.queryByRole("note", { name: "Read-only" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Channels" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Persona" }) !== null).toBe(share_role === "manager");
+  await user.click(screen.getByRole("tab", { name: "Access" }));
+  expect(screen.queryByRole("form", { name: "Grants" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Memory" }));
+  expect(await screen.findByRole("heading", { name: "Your private notes" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Published team memory" })).toBeVisible();
 });

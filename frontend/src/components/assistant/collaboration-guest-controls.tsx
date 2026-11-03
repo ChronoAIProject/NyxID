@@ -1,3 +1,4 @@
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
@@ -30,8 +31,10 @@ const schema = z.object({
 });
 export function CollaborationGuestControls({
   agentId,
+  disabled = false,
 }: {
   readonly agentId: string;
+  readonly disabled?: boolean;
 }) {
   const flag = useFeature(FEATURE_FLAG.SHARED_AGENTS);
   const actor = useAuthStore((s) => s.user?.id);
@@ -78,64 +81,62 @@ export function CollaborationGuestControls({
   if (!query.data?.length) return null;
   return (
     <section className="space-y-2 text-12" aria-label="Group guest replies">
-      <p className="font-medium">Group guest replies</p>
-      <p className="text-muted-foreground">
-        Allow guests separately for each group. This gives you no access to its
-        transcript or participants.
-      </p>
-      {query.data.map((row) => (
-        <div
-          className="space-y-2 rounded-lg border border-border p-3"
-          key={row.group_id}
-        >
-          <p className="min-w-0 break-all">Group {row.group_id}</p>
-          {row.request ? (
-            <Badge variant="secondary">Request {row.request.status}</Badge>
-          ) : null}
-          {row.request?.status === "pending" && !row.enabled ? (
-            <>
-              <p className="text-muted-foreground">
-                Allow current and future participants without use rights to use
-                this agent under your guest service policy. They use your
-                identity and billing; they cannot approve cards or use private
-                account tools.
-              </p>
-              <p className="text-muted-foreground">
-                Expires {new Date(row.request.expires_at).toLocaleString()}
-              </p>
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={cancel.isPending}
-                  isLoading={mutation.isPending}
-                  onClick={() => mutation.mutate(row)}
-                >
-                  Approve participant access
-                </Button>
-                <Button
-                  size="sm"
-                  disabled={mutation.isPending}
-                  isLoading={cancel.isPending}
-                  onClick={() => cancel.mutate(row)}
-                >
-                  Cancel request
-                </Button>
-              </div>
-            </>
-          ) : (
-            <Button
-              size="sm"
-              isLoading={mutation.isPending}
-              onClick={() =>
-                row.enabled ? mutation.mutate(row) : setConfirm(row)
-              }
-            >
-              {row.enabled ? "Disable guests" : "Enable guests"}
-            </Button>
-          )}
-        </div>
-      ))}
+      <GroupedList
+        title="Group guest replies"
+        footer="Allow guests separately for each group. This gives you no access to its transcript or participants."
+      >
+        {query.data.map((row) => (
+          <GroupedRow key={row.group_id} className="block space-y-2">
+            <p className="min-w-0 break-all">Group {row.group_id}</p>
+            {row.request ? (
+              <Badge variant="secondary">Request {row.request.status}</Badge>
+            ) : null}
+            {row.request?.status === "pending" && !row.enabled ? (
+              <>
+                <p className="text-muted-foreground">
+                  Allow current and future participants without use rights to
+                  use this agent under your guest service policy. They use your
+                  identity and billing; they cannot approve cards or use private
+                  account tools.
+                </p>
+                <p className="text-muted-foreground">
+                  Expires {new Date(row.request.expires_at).toLocaleString()}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={disabled || cancel.isPending}
+                    isLoading={mutation.isPending}
+                    onClick={() => mutation.mutate(row)}
+                  >
+                    Approve participant access
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={disabled || mutation.isPending}
+                    isLoading={cancel.isPending}
+                    onClick={() => cancel.mutate(row)}
+                  >
+                    Cancel request
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <Button
+                size="sm"
+                isLoading={mutation.isPending}
+                disabled={disabled}
+                onClick={() =>
+                  row.enabled ? mutation.mutate(row) : setConfirm(row)
+                }
+              >
+                {row.enabled ? "Disable guests" : "Enable guests"}
+              </Button>
+            )}
+          </GroupedRow>
+        ))}
+      </GroupedList>
       {mutation.error || cancel.error ? (
         <p role="alert" className="text-destructive">
           {(mutation.error ?? cancel.error)?.message}

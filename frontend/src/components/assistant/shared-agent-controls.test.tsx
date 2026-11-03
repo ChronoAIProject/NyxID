@@ -55,3 +55,19 @@ it("limits manager controls and puts recipients in Shared with me", () => {
   expect(screen.queryByText("Grants")).not.toBeInTheDocument();
   expect(agentOwnerSections([agent, manager]).map((s) => s.label)).toEqual(["Personal", "Shared with me"]);
 });
+
+it("refreshes a manager's pristine profile fields while retaining drafts until Discard", async () => {
+  const user = userEvent.setup();
+  const manager = { ...agent, share_role: "manager" as const, persona: "Original tone", description: "Original role" };
+  const view = render(<SharedAgentProfile agent={manager} />);
+  const persona = screen.getByLabelText("Persona");
+  await user.clear(persona);
+  await user.type(persona, "Draft tone");
+  view.rerender(<SharedAgentProfile agent={{ ...manager, persona: "Remote tone", description: "Remote role" }} />);
+  await waitFor(() => expect(screen.getByLabelText("Description")).toHaveValue("Remote role"));
+  expect(persona).toHaveValue("Draft tone");
+  expect(screen.getByRole("button", { name: "Save profile" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  expect(persona).toHaveValue("Remote tone");
+  expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled();
+});

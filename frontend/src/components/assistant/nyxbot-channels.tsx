@@ -1,3 +1,8 @@
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedSelectTrigger,
+} from "@/components/ui/grouped-list";
 import { useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -6,7 +11,6 @@ import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -23,7 +27,10 @@ import {
   useNyxBotChannels,
 } from "@/hooks/use-nyxbot-agents";
 import { agentTitle, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
-import { nyxBotChannelError, nyxBotChannelMutationError } from "@/lib/assistant/nyxbot-channel-errors";
+import {
+  nyxBotChannelError,
+  nyxBotChannelMutationError,
+} from "@/lib/assistant/nyxbot-channel-errors";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils";
 import type {
   AssistantAgent,
@@ -37,12 +44,14 @@ function errorMessage(error: unknown, fallback: string): string {
     : fallback;
 }
 
-const channelStatus: Record<string, { label: string; variant: "success" | "warning" | "destructive" }> =
-  {
-    active: { label: "Active", variant: "success" },
-    pending: { label: "Pending", variant: "warning" },
-    failed: { label: "Failed", variant: "destructive" },
-  };
+const channelStatus: Record<
+  string,
+  { label: string; variant: "success" | "warning" | "destructive" }
+> = {
+  active: { label: "Active", variant: "success" },
+  pending: { label: "Pending", variant: "warning" },
+  failed: { label: "Failed", variant: "destructive" },
+};
 
 function agentLabel(agent: AssistantAgent): string {
   return agentTitle(agent);
@@ -62,10 +71,14 @@ function AgentSelect({
   readonly onChange: (agentId: string) => void;
 }) {
   return (
-    <Select value={value} onValueChange={onChange} disabled={disabled || !agents.length}>
-      <SelectTrigger aria-label={label} className="h-7 w-[140px] rounded-md px-2">
+    <Select
+      value={value}
+      onValueChange={onChange}
+      disabled={disabled || !agents.length}
+    >
+      <GroupedSelectTrigger aria-label={label} className="max-w-full">
         <SelectValue placeholder="Choose agent" />
-      </SelectTrigger>
+      </GroupedSelectTrigger>
       <SelectContent>
         {agents.map((agent) => (
           <SelectItem key={agent.id} value={agent.id}>
@@ -109,7 +122,9 @@ export function ChannelBotsManager({
     readonly link: NyxAgentChannelLink;
   }>();
   const [confirming, setConfirming] = useState<string>();
-  const [connectTargets, setConnectTargets] = useState<Record<string, string>>({});
+  const [connectTargets, setConnectTargets] = useState<Record<string, string>>(
+    {},
+  );
   const [error, setError] = useState<string>();
   const nyxbot = nyxBotOf(agents);
   // Only live personal agents can receive bots or chats; organization specialists are private.
@@ -120,15 +135,24 @@ export function ChannelBotsManager({
   const connected = (channels.data ?? []).filter(
     (row) => !agent || agentOf(row) === agent.id,
   );
-  const connectedBotIds = new Set((channels.data ?? []).map((row) => row.channel_bot_id));
-  const available = (bots.data ?? []).filter((bot) => !connectedBotIds.has(bot.id));
+  const connectedBotIds = new Set(
+    (channels.data ?? []).map((row) => row.channel_bot_id),
+  );
+  const available = (bots.data ?? []).filter(
+    (bot) => !connectedBotIds.has(bot.id),
+  );
   const busy = connect.isPending || disconnect.isPending || link.isPending;
 
   async function requestLink(botId: string, agentId: string | undefined) {
     setError(undefined);
     try {
       const result = await connect.mutateAsync({ botId, agentId });
-      setOwnerLink({ botId, agentId, label: result.channel_agent.bot_label, link: result.link });
+      setOwnerLink({
+        botId,
+        agentId,
+        label: result.channel_agent.bot_label,
+        link: result.link,
+      });
     } catch (cause) {
       setError(errorMessage(cause, "Could not connect this bot. Try again."));
     }
@@ -144,7 +168,12 @@ export function ChannelBotsManager({
     try {
       await link.mutateAsync({ channelAgentId: row.id, agentId });
     } catch (cause) {
-      setError(errorMessage(cause, "Could not move this bot to that agent. Try again."));
+      setError(
+        errorMessage(
+          cause,
+          "Could not move this bot to that agent. Try again.",
+        ),
+      );
     }
   }
 
@@ -155,7 +184,9 @@ export function ChannelBotsManager({
       setConfirming(undefined);
       if (ownerLink?.botId === row.channel_bot_id) setOwnerLink(undefined);
     } catch (cause) {
-      setError(errorMessage(cause, "Could not disconnect this bot. Try again."));
+      setError(
+        errorMessage(cause, "Could not disconnect this bot. Try again."),
+      );
     }
   }
 
@@ -173,54 +204,74 @@ export function ChannelBotsManager({
         </p>
       ) : null}
       {connected.length ? (
-        <ul aria-label="Connected channel bots" className="space-y-2">
+        <ul aria-label="Connected channel bots" className="space-y-6">
           {connected.map((row) => {
             const status = channelStatus[row.status];
-            const target = targets.find((candidate) => candidate.id === agentOf(row));
+            const target = targets.find(
+              (candidate) => candidate.id === agentOf(row),
+            );
             const live = row.status === "pending" || row.status === "active";
             return (
-              <li key={row.id} className="space-y-2 rounded-lg border border-border px-3 py-2.5">
-                <div className="flex items-start justify-between gap-3 @max-[480px]/channel-bots:flex-col">
-                  <div className="min-w-0 space-y-1">
-                    <p className="truncate text-12 font-medium text-foreground">
-                      {row.bot_label}
-                      {row.bot_username ? (
-                        <span className="ml-1.5 font-normal text-text-tertiary">
-                          @{row.bot_username}
-                        </span>
-                      ) : null}
-                    </p>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <Badge variant="secondary">{channelPlatformName(row.platform)}</Badge>
-                      {row.org_id ? <Badge variant="secondary">{orgName(row.org_id)}</Badge> : null}
-                      <Badge variant={status?.variant ?? "secondary"}>
-                        {status?.label ?? row.status}
-                      </Badge>
-                      <Badge variant={row.owner_linked ? "success" : "warning"}>
-                        {row.owner_linked ? "Owner linked" : "Owner not linked"}
-                      </Badge>
+              <li key={row.id} className="space-y-3">
+                <GroupedList title="Connected bot">
+                  <GroupedRow className="items-start">
+                    <div className="min-w-0 space-y-1">
+                      <p className="break-words text-12 font-medium text-foreground">
+                        {row.bot_label}
+                        {row.bot_username ? (
+                          <span className="ml-1.5 font-normal text-text-tertiary">
+                            @{row.bot_username}
+                          </span>
+                        ) : null}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge variant="secondary">
+                          {channelPlatformName(row.platform)}
+                        </Badge>
+                        {row.org_id ? (
+                          <Badge variant="secondary">
+                            {orgName(row.org_id)}
+                          </Badge>
+                        ) : null}
+                        <Badge variant={status?.variant ?? "secondary"}>
+                          {status?.label ?? row.status}
+                        </Badge>
+                        <Badge
+                          variant={row.owner_linked ? "success" : "warning"}
+                        >
+                          {row.owner_linked
+                            ? "Owner linked"
+                            : "Owner not linked"}
+                        </Badge>
+                      </div>
                     </div>
-                  </div>
-                  <AgentSelect
-                    agents={targets}
-                    value={agentOf(row)}
-                    label={`Agent for ${row.bot_label}`}
-                    disabled={busy}
-                    onChange={(agentId) => void relink(row, agentId)}
-                  />
-                </div>
+                    <AgentSelect
+                      agents={targets}
+                      value={agentOf(row)}
+                      label={`Agent for ${row.bot_label}`}
+                      disabled={busy}
+                      onChange={(agentId) => void relink(row, agentId)}
+                    />
+                  </GroupedRow>
+                </GroupedList>
                 {row.last_error ? (
                   <div className="space-y-1">
                     <p className="text-11 text-destructive">
                       Last error: {nyxBotChannelError(row.last_error)}
                     </p>
-                    <p className="text-11 text-text-tertiary">{row.last_error}</p>
+                    <p className="text-11 text-text-tertiary">
+                      {row.last_error}
+                    </p>
                   </div>
                 ) : null}
                 {!row.owner_linked && row.inbound_hint ? (
-                  <p className="text-11 text-muted-foreground">{row.inbound_hint}</p>
+                  <p className="text-11 text-muted-foreground">
+                    {row.inbound_hint}
+                  </p>
                 ) : null}
-                {["failing", "interrupted", "media_failed"].includes(row.delivery_status ?? "") ? (
+                {["failing", "interrupted", "media_failed"].includes(
+                  row.delivery_status ?? "",
+                ) ? (
                   <p className="text-11 text-destructive">
                     {row.delivery_status === "failing"
                       ? "Messages are not reaching the agent: "
@@ -237,7 +288,9 @@ export function ChannelBotsManager({
                     channel={row}
                     agents={targets}
                     botAgentName={(() => {
-                      const current = agents.find((candidate) => candidate.id === agentOf(row));
+                      const current = agents.find(
+                        (candidate) => candidate.id === agentOf(row),
+                      );
                       return current ? agentLabel(current) : "NyxBot";
                     })()}
                   />
@@ -247,7 +300,11 @@ export function ChannelBotsManager({
                     <span className="mr-auto text-12 text-muted-foreground">
                       Stop answering through {row.bot_label}?
                     </span>
-                    <Button size="sm" variant="ghost" onClick={() => setConfirming(undefined)}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setConfirming(undefined)}
+                    >
                       Cancel
                     </Button>
                     <Button
@@ -266,7 +323,9 @@ export function ChannelBotsManager({
                         size="sm"
                         variant="primary"
                         disabled={busy || !target}
-                        onClick={() => void requestLink(row.channel_bot_id, target?.id)}
+                        onClick={() =>
+                          void requestLink(row.channel_bot_id, target?.id)
+                        }
                       >
                         Reconnect
                       </Button>
@@ -275,9 +334,13 @@ export function ChannelBotsManager({
                         size="sm"
                         variant="outline"
                         disabled={busy}
-                        onClick={() => void requestLink(row.channel_bot_id, agentOf(row))}
+                        onClick={() =>
+                          void requestLink(row.channel_bot_id, agentOf(row))
+                        }
                       >
-                        {row.owner_linked ? "Link another account" : "Link account"}
+                        {row.owner_linked
+                          ? "Link another account"
+                          : "Link account"}
                       </Button>
                     ) : null}
                     <Button
@@ -304,57 +367,67 @@ export function ChannelBotsManager({
         />
       ) : null}
       {bots.isPending ? (
-        <p className="text-12 text-text-tertiary">Loading your channel bots...</p>
+        <p className="text-12 text-text-tertiary">
+          Loading your channel bots...
+        </p>
       ) : bots.error ? (
         <ErrorBanner
           message="Could not load your channel bots."
           onRetry={() => void bots.refetch()}
         />
       ) : available.length ? (
-        <ul aria-label="Channel bots you can connect" className="space-y-2">
-          {available.map((bot) => {
-            const target = agent?.id ?? connectTargets[bot.id] ?? nyxbot?.id;
-            const targetName = agent ? agentLabel(agent) : undefined;
-            return (
-              <li
-                key={bot.id}
-                className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2.5 @max-[480px]/channel-bots:flex-col @max-[480px]/channel-bots:items-start"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-12 font-medium text-foreground">{bot.label}</p>
-                  <p className="text-11 text-text-tertiary">
-                    {channelPlatformName(bot.platform)}
-                    {bot.user_id !== currentUserId ? ` · ${orgName(bot.user_id) ?? ""}` : ""}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center gap-1.5 @max-[480px]/channel-bots:flex-wrap">
-                  {agent ? null : (
-                    <AgentSelect
-                      agents={targets}
-                      value={target}
-                      label={`Agent for ${bot.label}`}
-                      disabled={busy}
-                      onChange={(agentId) =>
-                        setConnectTargets((current) => ({ ...current, [bot.id]: agentId }))
-                      }
-                    />
-                  )}
-                  <Button
-                    size="sm"
-                    variant="default"
-                    disabled={busy || !target}
-                    aria-label={`Connect ${bot.label}${targetName ? ` to ${targetName}` : ""}`}
-                    onClick={() => void requestLink(bot.id, target)}
-                  >
-                    Connect
-                  </Button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+        <GroupedList title="Available bots">
+          <ul aria-label="Channel bots you can connect">
+            {available.map((bot) => {
+              const target = agent?.id ?? connectTargets[bot.id] ?? nyxbot?.id;
+              const targetName = agent ? agentLabel(agent) : undefined;
+              return (
+                <GroupedRow key={bot.id} asChild>
+                  <li>
+                    <div className="min-w-0 flex-1">
+                      <p className="break-words text-12 font-medium text-foreground">
+                        {bot.label}
+                      </p>
+                      <p className="text-11 text-text-tertiary">
+                        {channelPlatformName(bot.platform)}
+                        {bot.user_id !== currentUserId
+                          ? ` · ${orgName(bot.user_id) ?? ""}`
+                          : ""}
+                      </p>
+                    </div>
+                    <div className="flex max-w-full flex-wrap items-center gap-1.5">
+                      {agent ? null : (
+                        <AgentSelect
+                          agents={targets}
+                          value={target}
+                          label={`Agent for ${bot.label}`}
+                          disabled={busy}
+                          onChange={(agentId) =>
+                            setConnectTargets((current) => ({
+                              ...current,
+                              [bot.id]: agentId,
+                            }))
+                          }
+                        />
+                      )}
+                      <Button
+                        size="sm"
+                        variant="default"
+                        disabled={busy || !target}
+                        aria-label={`Connect ${bot.label}${targetName ? ` to ${targetName}` : ""}`}
+                        onClick={() => void requestLink(bot.id, target)}
+                      >
+                        Connect
+                      </Button>
+                    </div>
+                  </li>
+                </GroupedRow>
+              );
+            })}
+          </ul>
+        </GroupedList>
       ) : connected.length ? null : (
-        <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+        <p className="px-4 py-3 text-12 text-text-tertiary">
           {bots.data?.length
             ? "All your channel bots are connected to other agents. Move one here with its agent selector in NyxBot settings."
             : "You have no channel bots yet. Register one under Channel Bots, then connect it here."}
@@ -376,13 +449,11 @@ function OwnerLink({
   readonly onRenew: () => void;
 }) {
   return (
-    <div
-      role="region"
-      aria-label="Owner link"
-      className="space-y-3 rounded-xl border border-info/15 bg-info/[0.04] px-4 py-3"
-    >
+    <div role="region" aria-label="Owner link" className="space-y-3 px-4 py-3">
       <div className="space-y-1">
-        <p className="text-12 font-medium text-foreground">Verify your account for {label}</p>
+        <p className="text-12 font-medium text-foreground">
+          Verify your account for {label}
+        </p>
         <p className="text-12 text-muted-foreground">{link.instructions}</p>
       </div>
       {link.url ? (

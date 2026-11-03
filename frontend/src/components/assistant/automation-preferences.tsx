@@ -1,3 +1,4 @@
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Link } from "@tanstack/react-router";
 import { TimezoneSelect } from "@/components/shared/timezone-select";
 import { browserTimezone, formatAutomationTime } from "@/lib/automation-time";
@@ -30,27 +31,28 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
       (t) => t.delivery.type === "assistant" && t.delivery.agent_id === agentId,
     ) ?? [];
   return (
-    <section className="space-y-2">
-      <h3 className="text-13 font-semibold">Automations</h3>
+    <GroupedList title="Automations">
       {rows.map((row) => (
-        <p key={row.id} className="text-12">
-          {row.label} ·{" "}
-          {row.status === "active"
-            ? formatAutomationTime(
-                row.next_run_at,
-                settings.data?.timezone ?? browserTimezone(),
-              )
-            : "Paused"}
-        </p>
+        <GroupedRow key={row.id} asChild interactive>
+          <Link to="/assistant/automations" search={{ agent: agentId }}>
+            <span className="min-w-0 flex-1 break-words">{row.label}</span>
+            <span className="text-11 text-text-tertiary">
+              {row.status === "active"
+                ? formatAutomationTime(
+                    row.next_run_at,
+                    settings.data?.timezone ?? browserTimezone(),
+                  )
+                : "Paused"}
+            </span>
+          </Link>
+        </GroupedRow>
       ))}
-      <Link
-        className="text-12 text-primary-text underline"
-        to="/assistant/automations"
-        search={{ agent: agentId }}
-      >
-        Manage automations ({rows.length})
-      </Link>
-    </section>
+      <GroupedRow asChild interactive>
+        <Link to="/assistant/automations" search={{ agent: agentId }}>
+          Manage automations ({rows.length})
+        </Link>
+      </GroupedRow>
+    </GroupedList>
   );
 }
 

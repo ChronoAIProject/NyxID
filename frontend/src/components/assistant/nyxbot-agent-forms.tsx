@@ -11,7 +11,12 @@ import {
 } from "@/components/ui/select";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Check } from "lucide-react";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+} from "@/components/ui/grouped-list";
 import {
   Dialog,
   DialogBody,
@@ -68,21 +73,31 @@ export function ServiceGrantPicker({
   readonly disabled?: boolean;
 }) {
   const keys = useKeys({ includeTools: true });
-  const services = (keys.data ?? [])
-    .filter((key) => key.is_active &&
+  const [search, setSearch] = useState("");
+  const inventory = (keys.data ?? [])
+    .filter(
+      (key) =>
+        key.is_active &&
         (!org ||
           (key.credential_source?.type === "org" &&
             key.credential_source.org_id === org &&
             key.credential_source.allowed)),
     )
     .map((key) => ({ slug: org ? key.id : key.slug, label: key.label }));
+  const services = [
+    ...new Map(inventory.map((service) => [service.slug, service])).values(),
+  ];
   const known = new Set(services.map((service) => service.slug));
   const rows = [
     ...services,
-    ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug })),
+    ...value
+      .filter((slug) => !known.has(slug))
+      .map((slug) => ({ slug, label: slug })),
   ];
   function toggle(slug: string, checked: boolean) {
-    onChange(checked ? [...value, slug] : value.filter((item) => item !== slug));
+    onChange(
+      checked ? [...value, slug] : value.filter((item) => item !== slug),
+    );
   }
   if (keys.isPending) {
     return (
@@ -91,42 +106,86 @@ export function ServiceGrantPicker({
   }
   if (!rows.length) {
     return (
-      <p className="rounded-lg border border-dashed border-border px-3 py-2 text-12 text-muted-foreground">
-        You have no connected services yet. Connect a service first, then grant it
-        here; the agent uses only what you grant.
+      <p className="px-4 py-3 text-12 text-text-tertiary">
+        You have no connected services yet. Connect a service first, then grant
+        it here; the agent uses only what you grant.
       </p>
     );
   }
   return (
-    <ul
-      aria-label="Services"
-      className="assistant-scrollbar relative max-h-44 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1"
+    <GroupedList
+      title="Services"
+      footer={
+        keys.error ? (
+          <span role="alert" className="text-destructive">
+            Could not refresh services. Your selections are kept.
+          </span>
+        ) : undefined
+      }
     >
-      {rows.map((service) => {
-        const id = `grant-${service.slug}`;
-        return (
-          <li key={service.slug}>
-            <label
-              htmlFor={id}
-              className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-12 hover:bg-overlay"
-            >
-              <Checkbox
-                id={id}
-                checked={value.includes(service.slug)}
+      {rows.length > 8 ? (
+        <GroupedRow>
+          <GroupedInput
+            aria-label="Search services"
+            placeholder="Search services"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </GroupedRow>
+      ) : null}
+      <div
+        role="group"
+        aria-label="Services"
+        className={
+          rows.length > 12
+            ? "assistant-scrollbar max-h-80 overflow-y-auto"
+            : undefined
+        }
+      >
+        {rows
+          .filter((service) =>
+            `${service.label} ${service.slug}`
+              .toLowerCase()
+              .includes(search.toLowerCase()),
+          )
+          .map((service) => (
+            <GroupedRow key={service.slug} asChild interactive>
+              <button
+                type="button"
+                role="checkbox"
+                aria-checked={value.includes(service.slug)}
                 disabled={disabled}
-                onCheckedChange={(checked) => toggle(service.slug, checked === true)}
-              />
-              <span className="min-w-0 flex-1 truncate text-foreground">
-                {service.label}
-              </span>
-              <span className="shrink-0 font-mono text-10 text-text-tertiary">
-                {service.slug}
-              </span>
-            </label>
-          </li>
-        );
-      })}
-    </ul>
+                onClick={() =>
+                  toggle(service.slug, !value.includes(service.slug))
+                }
+              >
+                <span className="min-w-0 flex-1 break-words text-foreground">
+                  {service.label}
+                  <span className="mt-0.5 block font-mono text-10 text-text-tertiary">
+                    {service.slug}
+                  </span>
+                </span>
+                <Check
+                  aria-hidden
+                  className={
+                    value.includes(service.slug)
+                      ? "size-[1.125em] shrink-0 text-primary"
+                      : "invisible size-[1.125em] shrink-0"
+                  }
+                />
+              </button>
+            </GroupedRow>
+          ))}
+        {search &&
+        !rows.some((service) =>
+          `${service.label} ${service.slug}`
+            .toLowerCase()
+            .includes(search.toLowerCase()),
+        ) ? (
+          <GroupedRow title="No matching services" />
+        ) : null}
+      </div>
+    </GroupedList>
   );
 }
 

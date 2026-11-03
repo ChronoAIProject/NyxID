@@ -1,3 +1,4 @@
+import { GroupedSelectTrigger } from "@/components/ui/grouped-list";
 import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -73,7 +74,12 @@ export function AccessModeSwitcher({
   const workspace = settings.data?.access_mode;
   if (!workspace) return null;
   if (agentOverride) {
-    return <AccessModeBadge mode={effectiveAccessMode(workspace, agentOverride)} overridden />;
+    return (
+      <AccessModeBadge
+        mode={effectiveAccessMode(workspace, agentOverride)}
+        overridden
+      />
+    );
   }
   return (
     <div className="flex items-center gap-1">
@@ -85,11 +91,16 @@ export function AccessModeSwitcher({
           update
             .mutateAsync({ access_mode: nyxAgentAccessModeSchema.parse(value) })
             .catch((cause: unknown) => {
-              setError(errorMessage(cause, "Could not change the access mode."));
+              setError(
+                errorMessage(cause, "Could not change the access mode."),
+              );
             });
         }}
       >
-        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-11">
+        <SelectTrigger
+          aria-label="Access mode"
+          className="h-7 w-auto gap-1 px-2 text-11"
+        >
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -134,24 +145,37 @@ export function ModelSelect({
   disabled,
   label = "Model",
   className,
+  grouped = false,
 }: {
+  readonly grouped?: boolean;
   readonly value: string | undefined;
   readonly onChange: (model: string) => void;
   readonly disabled?: boolean;
   readonly label?: string;
   readonly className?: string;
 }) {
+  const Trigger = grouped ? GroupedSelectTrigger : SelectTrigger;
   const models = useNyxAgentModels();
   const options = modelOptions(models.data, value);
   return (
-    <Select value={value ?? ""} disabled={disabled || models.isPending} onValueChange={onChange}>
-      <SelectTrigger aria-label={label} className={className}>
-        <SelectValue placeholder={models.isPending ? "Loading models..." : "Choose a model"} />
-      </SelectTrigger>
+    <Select
+      value={value ?? ""}
+      disabled={disabled || models.isPending}
+      onValueChange={onChange}
+    >
+      <Trigger aria-label={label} className={className}>
+        <SelectValue
+          placeholder={
+            models.isPending ? "Loading models..." : "Choose a model"
+          }
+        />
+      </Trigger>
       <SelectContent>
         {options.map((row) => (
           <SelectItem key={row.id} value={row.id} disabled={!row.available}>
-            {row.available ? modelDisplayName(row) : `${modelDisplayName(row)} (unavailable)`}
+            {row.available
+              ? modelDisplayName(row)
+              : `${modelDisplayName(row)} (unavailable)`}
           </SelectItem>
         ))}
       </SelectContent>
@@ -180,9 +204,11 @@ export function ThreadModelSelect({
         onChange={(next) => {
           if (next === model) return;
           setError(undefined);
-          change.mutateAsync({ conversationId, model: next }).catch((cause: unknown) => {
-            setError(errorMessage(cause, "Could not change the model."));
-          });
+          change
+            .mutateAsync({ conversationId, model: next })
+            .catch((cause: unknown) => {
+              setError(errorMessage(cause, "Could not change the model."));
+            });
         }}
       />
       {error ? (

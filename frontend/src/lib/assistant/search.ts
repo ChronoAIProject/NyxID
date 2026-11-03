@@ -1,4 +1,7 @@
-import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel-search";
+import {
+  withAccountPanelSearch,
+  type AccountPanelSearch,
+} from "./account-panel-search";
 
 /**
  * The `/assistant` search contract, in one place: the router validates with
@@ -13,8 +16,8 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
  *   thread starts with; alone it lands on that agent's latest thread.
  * - `g`     opens a NyxBot group chat. With no `c`, `draft`, `agent` or `g`
  *   the NyxAgent engine shows the NyxBot home.
- * - `details` opens the agent details sheet on one section (`grants` or
- *   `skills`) for `agent`, else the open thread's agent. The sheet is URL
+ * - `details` opens the agent details sheet on one tab (`grants` is Access; `skills`,
+ *   `overview`, `memory` and `channels` keep their names) for `agent`, else the open thread's agent. The sheet is URL
  *   state, so a server link (`AssistantPage::AgentDetails`) survives reload
  *   and Back closes it; an inaccessible or destroyed agent shows an explicit
  *   no-access state instead of falling back to NyxBot.
@@ -24,7 +27,13 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
  * search parser hands back a real boolean for its own round-tripped links,
  * but a hand-typed or copy-pasted URL arrives as a string.
  */
-export const AGENT_DETAILS_TABS = ["grants", "skills"] as const;
+export const AGENT_DETAILS_TABS = [
+  "overview",
+  "grants",
+  "skills",
+  "memory",
+  "channels",
+] as const;
 export type AgentDetailsTab = (typeof AGENT_DETAILS_TABS)[number];
 
 export interface AssistantSearch extends AccountPanelSearch {
@@ -47,11 +56,18 @@ function parseChatSearch(
 ): Omit<AssistantSearch, keyof AccountPanelSearch> {
   return {
     ...(typeof search.c === "string" ? { c: search.c } : {}),
-    ...(typeof search.card === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.card)
+    ...(typeof search.card === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      search.card,
+    )
       ? { card: search.card }
       : {}),
-    ...(typeof search.proposal === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.proposal)
-      ? { proposal: search.proposal } : {}),
+    ...(typeof search.proposal === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      search.proposal,
+    )
+      ? { proposal: search.proposal }
+      : {}),
     ...(search.draft === true || search.draft === "true"
       ? { draft: true }
       : {}),
@@ -62,9 +78,7 @@ function parseChatSearch(
       ? { details: agentDetailsTab(search.details) }
       : {}),
     ...(typeof search.g === "string" && search.g ? { g: search.g } : {}),
-    ...(search.mock === 1 || search.mock === "1"
-      ? { mock: 1 as const }
-      : {}),
+    ...(search.mock === 1 || search.mock === "1" ? { mock: 1 as const } : {}),
   };
 }
 

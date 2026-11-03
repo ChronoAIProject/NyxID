@@ -1,3 +1,8 @@
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedSelectTrigger,
+} from "@/components/ui/grouped-list";
 import { GuestReadiness } from "./guest-readiness";
 import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
@@ -8,7 +13,6 @@ import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -40,9 +44,12 @@ export function ChatKindIcon({
   readonly kind: string | null | undefined;
   readonly className?: string;
 }) {
-  if (kind === "private") return <User aria-hidden="true" className={className} />;
-  if (kind === "group") return <Users aria-hidden="true" className={className} />;
-  if (kind === "channel") return <Megaphone aria-hidden="true" className={className} />;
+  if (kind === "private")
+    return <User aria-hidden="true" className={className} />;
+  if (kind === "group")
+    return <Users aria-hidden="true" className={className} />;
+  if (kind === "channel")
+    return <Megaphone aria-hidden="true" className={className} />;
   return null;
 }
 
@@ -64,10 +71,14 @@ function SettingSelect<T extends string>({
   readonly onChange: (value: T) => void;
 }) {
   return (
-    <Select value={value} onValueChange={(next) => onChange(next as T)} disabled={disabled}>
-      <SelectTrigger aria-label={label} className="h-7 w-full max-w-[220px] rounded-md px-2 text-12">
+    <Select
+      value={value}
+      onValueChange={(next) => onChange(next as T)}
+      disabled={disabled}
+    >
+      <GroupedSelectTrigger aria-label={label} className="max-w-full">
         <SelectValue />
-      </SelectTrigger>
+      </GroupedSelectTrigger>
       <SelectContent>
         {options.map((option) => (
           <SelectItem key={option.value} value={option.value}>
@@ -92,13 +103,23 @@ function ChatRow({
   readonly botAgentName: string;
   readonly onError: (message: string | undefined) => void;
 }) {
-  const agentId = chat.agent_id ?? channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
+  const agentId =
+    chat.agent_id ??
+    channel.agent_id ??
+    agents.find((a) => a.kind === "nyxbot")?.id;
   const agentReadiness = useGuestReadiness(agentId, true);
-  const scoped = Boolean(chat.conversation_id && (
-    agentReadiness.data?.conversation_overrides_truncated ||
-    agentReadiness.data?.conversation_overrides.includes(chat.conversation_id)
-  ));
-  const chatReadiness = useGuestReadiness(agentId, scoped, chat.conversation_id ?? undefined);
+  const scoped = Boolean(
+    chat.conversation_id &&
+    (agentReadiness.data?.conversation_overrides_truncated ||
+      agentReadiness.data?.conversation_overrides.includes(
+        chat.conversation_id,
+      )),
+  );
+  const chatReadiness = useGuestReadiness(
+    agentId,
+    scoped,
+    chat.conversation_id ?? undefined,
+  );
   const update = useUpdateNyxBotChannelChat();
   const [notice, setNotice] = useState<string>();
   const title = channelChatTitle(chat.kind, chat.title, channel.platform);
@@ -120,7 +141,11 @@ function ChatRow({
   }
 
   const kindLabel =
-    chat.kind === "private" ? "Private chat" : chat.kind === "channel" ? "Channel" : "Group";
+    chat.kind === "private"
+      ? "Private chat"
+      : chat.kind === "channel"
+        ? "Channel"
+        : "Group";
   const summary = group
     ? `${chat.reply_mode === "all" ? "Answers every message" : "Answers when mentioned or replied to"} · ${
         chat.members === "everyone"
@@ -134,82 +159,132 @@ function ChatRow({
       : `A private chat with ${title}, as a guest`;
 
   return (
-    <div className="space-y-2 rounded-md bg-overlay px-2.5 py-2">
-      <div className="flex items-center gap-2">
-        <ChatKindIcon kind={chat.kind} className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-        <p className="min-w-0 flex-1 truncate text-12 font-medium text-foreground">{title}</p>
-        {chat.kind ? (
-          <span className="shrink-0 rounded-md border border-hairline px-1 text-10 text-text-tertiary">
-            {kindLabel}
-          </span>
-        ) : null}
-        {chat.last_message_at ? (
-          <span className="shrink-0 text-11 text-text-tertiary">
-            {formatRelativeTime(chat.last_message_at)}
-          </span>
-        ) : null}
-      </div>
-      <p className="text-11 text-muted-foreground">{summary}</p>
-      <div className="grid grid-cols-[auto_1fr] @max-[480px]/channel-bots:grid-cols-1 items-center gap-x-3 gap-y-1.5 text-11 text-muted-foreground">
+    <div className="space-y-3">
+      <GroupedList footer={summary}>
+        <GroupedRow className="block space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <ChatKindIcon
+              kind={chat.kind}
+              className="h-3.5 w-3.5 shrink-0 text-text-tertiary"
+            />
+            <p className="min-w-0 flex-1 break-words text-12 font-medium text-foreground">
+              {title}
+            </p>
+            {chat.kind ? (
+              <span className="text-10 text-text-tertiary">{kindLabel}</span>
+            ) : null}
+            {chat.last_message_at ? (
+              <span className="shrink-0 text-11 text-text-tertiary">
+                {formatRelativeTime(chat.last_message_at)}
+              </span>
+            ) : null}
+          </div>
+        </GroupedRow>
         {group ? (
           <>
-            <span>Answers</span>
-            <SettingSelect
-              label={`Replies in ${title}`}
-              value={chat.reply_mode}
-              disabled={update.isPending}
-              options={[
-                { value: "mention", label: "When mentioned" },
-                { value: "all", label: "Every message" },
-              ]}
-              onChange={(reply_mode) => void change({ reply_mode })}
+            <GroupedRow
+              title="Answers"
+              accessory={
+                <SettingSelect
+                  label={`Replies in ${title}`}
+                  value={chat.reply_mode}
+                  disabled={update.isPending}
+                  options={[
+                    { value: "mention", label: "When mentioned" },
+                    { value: "all", label: "Every message" },
+                  ]}
+                  onChange={(reply_mode) => void change({ reply_mode })}
+                />
+              }
             />
-            {chat.thread_capabilities?.thread_follow ? <>
-              <span>Threads</span>
-              <SettingSelect label={`Thread follow in ${title}`} value={chat.threads ?? "off"} disabled={update.isPending}
-                options={[{ value: "follow", label: "Follow when addressed" }, { value: "off", label: "Off" }]}
-                onChange={(threads) => void change({ threads })} />
-            </> : null}
-            <span>Who can talk</span>
+            {chat.thread_capabilities?.thread_follow ? (
+              <GroupedRow
+                title="Threads"
+                accessory={
+                  <SettingSelect
+                    label={`Thread follow in ${title}`}
+                    value={chat.threads ?? "off"}
+                    disabled={update.isPending}
+                    options={[
+                      { value: "follow", label: "Follow when addressed" },
+                      { value: "off", label: "Off" },
+                    ]}
+                    onChange={(threads) => void change({ threads })}
+                  />
+                }
+              />
+            ) : null}
+            <GroupedRow
+              title="Who can talk"
+              accessory={
+                <SettingSelect
+                  label={`Who can talk in ${title}`}
+                  value={chat.members_setting ?? "default"}
+                  disabled={update.isPending}
+                  options={[
+                    {
+                      value: "default",
+                      label: chat.owner_seen
+                        ? "Everyone (you talk here)"
+                        : "You, until you talk here",
+                    },
+                    { value: "everyone", label: "Everyone there" },
+                    { value: "owner", label: "Only you" },
+                  ]}
+                  onChange={(members) => void change({ members })}
+                />
+              }
+            />
+          </>
+        ) : null}
+        <GroupedRow
+          title="Answered by"
+          accessory={
             <SettingSelect
-              label={`Who can talk in ${title}`}
-              value={chat.members_setting ?? "default"}
+              label={`Agent for ${title}`}
+              value={chat.agent_id ?? "default"}
               disabled={update.isPending}
               options={[
                 {
                   value: "default",
-                  label: chat.owner_seen ? "Everyone (you talk here)" : "You, until you talk here",
+                  label: `${botAgentName} (the bot's agent)`,
                 },
-                { value: "everyone", label: "Everyone there" },
-                { value: "owner", label: "Only you" },
+                ...agents.map((agent) => ({
+                  value: agent.id,
+                  label: agentTitle(agent),
+                })),
               ]}
-              onChange={(members) => void change({ members })}
+              onChange={(agent_id) => void change({ agent_id })}
             />
-          </>
-        ) : null}
-        <span>Answered by</span>
-        <SettingSelect
-          label={`Agent for ${title}`}
-          value={chat.agent_id ?? "default"}
-          disabled={update.isPending}
-          options={[
-            { value: "default", label: `${botAgentName} (the bot's agent)` },
-            ...agents.map((agent) => ({ value: agent.id, label: agentTitle(agent) })),
-          ]}
-          onChange={(agent_id) => void change({ agent_id })}
+          }
         />
-        <span>Posts on its own</span>
-        <Switch
-          checked={chat.allow_posts}
-          disabled={update.isPending}
-          aria-label={`Let the agent post in ${title} on its own`}
-          onCheckedChange={(allow_posts) => void change({ allow_posts })}
+        <GroupedRow
+          title="Posts on its own"
+          accessory={
+            <Switch
+              checked={chat.allow_posts}
+              disabled={update.isPending}
+              aria-label={`Let the agent post in ${title} on its own`}
+              onCheckedChange={(allow_posts) => void change({ allow_posts })}
+            />
+          }
         />
-      </div>
-      <GuestReadiness readiness={scoped ? chatReadiness.data : agentReadiness.data} />
-      {group && chat.follow_guidance ? <p className="text-11 text-muted-foreground">{chat.follow_guidance}</p> : null}
-      {group && (chat.thread_capabilities?.thread_follow || chat.has_thread_history || (chat.followed_thread_count ?? 0) > 0) ? <ChannelThreads chat={chat} /> : null}
-      {notice ? <p className="text-11 text-muted-foreground">{notice}</p> : null}
+      </GroupedList>
+      <GuestReadiness
+        readiness={scoped ? chatReadiness.data : agentReadiness.data}
+      />
+      {group && chat.follow_guidance ? (
+        <p className="text-11 text-muted-foreground">{chat.follow_guidance}</p>
+      ) : null}
+      {group &&
+      (chat.thread_capabilities?.thread_follow ||
+        chat.has_thread_history ||
+        (chat.followed_thread_count ?? 0) > 0) ? (
+        <ChannelThreads chat={chat} />
+      ) : null}
+      {notice ? (
+        <p className="text-11 text-muted-foreground">{notice}</p>
+      ) : null}
     </div>
   );
 }
@@ -231,27 +306,38 @@ export function ChannelChats({
   const [shown, setShown] = useState(CHATS_SHOWN);
   const [error, setError] = useState<string>();
   const chats = useNyxBotChannelChats(channel.id, open);
-  const agentId = channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
+  const agentId =
+    channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
   const readiness = useGuestReadiness(agentId, open);
   const access = useSetNyxBotPrivateChats();
   const posts = useSetNyxBotPrivateChatPosts();
   const [applyToExisting, setApplyToExisting] = useState(false);
   const rows = chats.data ?? [];
-  const roots = rows.filter((chat) => !chat.parent_chat_id || !rows.some((parent) => parent.id === chat.parent_chat_id));
+  const roots = rows.filter(
+    (chat) =>
+      !chat.parent_chat_id ||
+      !rows.some((parent) => parent.id === chat.parent_chat_id),
+  );
 
   async function setAccess(privateChats: "owner" | "everyone") {
     setError(undefined);
     try {
       await access.mutateAsync({ channelAgentId: channel.id, privateChats });
     } catch (cause) {
-      setError(errorMessage(cause, "Could not change who can talk in private chats."));
+      setError(
+        errorMessage(cause, "Could not change who can talk in private chats."),
+      );
     }
   }
 
   async function setPosts(enabled: boolean) {
     setError(undefined);
     try {
-      await posts.mutateAsync({ channelAgentId: channel.id, enabled, applyToExisting });
+      await posts.mutateAsync({
+        channelAgentId: channel.id,
+        enabled,
+        applyToExisting,
+      });
       setApplyToExisting(false);
     } catch (cause) {
       setError(errorMessage(cause, "Could not change private chat posting."));
@@ -264,7 +350,7 @@ export function ChannelChats({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="flex items-center gap-1 text-12 text-muted-foreground transition-colors hover:text-foreground"
+        className="flex min-h-11 w-full items-center gap-2 rounded-lg px-4 py-2.5 text-left text-12 text-muted-foreground transition-colors hover:bg-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <ChevronRight
           aria-hidden="true"
@@ -274,59 +360,73 @@ export function ChannelChats({
       </button>
       {open ? (
         <div className="space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-11 text-muted-foreground">Private chats with the bot</span>
-            <SettingSelect
-              label={`Who can talk to ${channel.bot_label} in private chats`}
-              value={channel.private_chats}
-              disabled={access.isPending}
-              options={[
-                { value: "owner", label: "Only you" },
-                { value: "everyone", label: "Anyone" },
-              ]}
-              onChange={(value) => void setAccess(value)}
-            />
-          </div>
-          <p className="text-11 text-text-tertiary">
-            People other than you talk to the agent as guests: it never acts on your account for
-            them, NyxBot uses none of your services for them, and a chat&apos;s own specialist
-            only reads with its services. Members of a group can talk to it once you have talked
-            to the bot there. In groups it answers when mentioned or replied to unless set to
-            every message.
-          </p>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-11 text-muted-foreground">Allow posts in new private chats</span>
-            <Switch
-              aria-label={`Allow posts in new private chats with ${channel.bot_label}`}
-              checked={channel.private_chat_posts}
-              disabled={posts.isPending}
-              onCheckedChange={(value) => void setPosts(value)}
-            />
-          </div>
-          <p className="text-11 text-text-tertiary">
-            The agent can send updates after a customer first messages this bot. Existing chats
-            keep their settings; you can still turn posting off for individual chats. Groups and
-            topics need their own permission. This does not change who can talk to the bot.
-          </p>
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id={`apply-existing-posts-${channel.id}`}
-              checked={applyToExisting}
-              disabled={posts.isPending}
-              onCheckedChange={(checked) => setApplyToExisting(checked === true)}
-            />
-            <label
-              htmlFor={`apply-existing-posts-${channel.id}`}
-              className="text-11 text-muted-foreground"
-            >
-              Also apply to existing private chats
-            </label>
-          </div>
+          <GroupedList title="Private chats">
+            <GroupedRow>
+              <span className="text-11 text-muted-foreground">
+                Private chats with the bot
+              </span>
+              <SettingSelect
+                label={`Who can talk to ${channel.bot_label} in private chats`}
+                value={channel.private_chats}
+                disabled={access.isPending}
+                options={[
+                  { value: "owner", label: "Only you" },
+                  { value: "everyone", label: "Anyone" },
+                ]}
+                onChange={(value) => void setAccess(value)}
+              />
+            </GroupedRow>
+            <GroupedRow className="block">
+              <p className="text-11 text-text-tertiary">
+                People other than you talk to the agent as guests: it never acts
+                on your account for them, NyxBot uses none of your services for
+                them, and a chat&apos;s own specialist only reads with its
+                services. Members of a group can talk to it once you have talked
+                to the bot there. In groups it answers when mentioned or replied
+                to unless set to every message.
+              </p>
+            </GroupedRow>
+            <GroupedRow>
+              <span className="text-11 text-muted-foreground">
+                Allow posts in new private chats
+              </span>
+              <Switch
+                aria-label={`Allow posts in new private chats with ${channel.bot_label}`}
+                checked={channel.private_chat_posts}
+                disabled={posts.isPending}
+                onCheckedChange={(value) => void setPosts(value)}
+              />
+            </GroupedRow>
+            <GroupedRow className="block">
+              <p className="text-11 text-text-tertiary">
+                The agent can send updates after a customer first messages this
+                bot. Existing chats keep their settings; you can still turn
+                posting off for individual chats. Groups and topics need their
+                own permission. This does not change who can talk to the bot.
+              </p>
+            </GroupedRow>
+            <GroupedRow>
+              <Checkbox
+                id={`apply-existing-posts-${channel.id}`}
+                checked={applyToExisting}
+                disabled={posts.isPending}
+                onCheckedChange={(checked) =>
+                  setApplyToExisting(checked === true)
+                }
+              />
+              <label
+                htmlFor={`apply-existing-posts-${channel.id}`}
+                className="text-11 text-muted-foreground"
+              >
+                Also apply to existing private chats
+              </label>
+            </GroupedRow>
+          </GroupedList>
           {applyToExisting ? (
             <div className="flex items-center gap-2">
               <p className="text-11 text-text-tertiary">
-                Applies the current setting to up to 1,000 changed private chats, including
-                individual overrides.
+                Applies the current setting to up to 1,000 changed private
+                chats, including individual overrides.
               </p>
               <Button
                 size="sm"
@@ -352,27 +452,43 @@ export function ChannelChats({
           ) : chats.isPending ? (
             <p className="text-11 text-text-tertiary">Loading chats...</p>
           ) : rows.length ? (
-            <ul aria-label={`Chats of ${channel.bot_label}`} className="space-y-1.5">
+            <ul
+              aria-label={`Chats of ${channel.bot_label}`}
+              className="space-y-6"
+            >
               {roots.slice(0, shown).map((chat) => (
                 <li key={chat.id}>
-                <ChatRow
-                  key={chat.id}
-                  channel={channel}
-                  chat={chat}
-                  agents={agents}
-                  botAgentName={botAgentName}
-                  onError={setError}
-                />
-                {rows.filter((child) => child.parent_chat_id === chat.id).map((child) => <div key={child.id} className="ml-3 mt-1 border-l border-hairline pl-2">
-                  <p className="mb-1 text-11 text-text-tertiary">Earlier thread settings</p>
-                  <ChatRow channel={channel} chat={child} agents={agents} botAgentName={botAgentName} onError={setError} />
-                </div>)}
+                  <ChatRow
+                    key={chat.id}
+                    channel={channel}
+                    chat={chat}
+                    agents={agents}
+                    botAgentName={botAgentName}
+                    onError={setError}
+                  />
+                  {rows
+                    .filter((child) => child.parent_chat_id === chat.id)
+                    .map((child) => (
+                      <div key={child.id} className="mt-4 space-y-2">
+                        <p className="mb-1 text-11 text-text-tertiary">
+                          Earlier thread settings
+                        </p>
+                        <ChatRow
+                          channel={channel}
+                          chat={child}
+                          agents={agents}
+                          botAgentName={botAgentName}
+                          onError={setError}
+                        />
+                      </div>
+                    ))}
                 </li>
               ))}
             </ul>
           ) : (
             <p className="text-11 text-text-tertiary">
-              No chats yet. Message the bot, or add it to a group and mention it.
+              No chats yet. Message the bot, or add it to a group and mention
+              it.
             </p>
           )}
           {roots.length > shown ? (

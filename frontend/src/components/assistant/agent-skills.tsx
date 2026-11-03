@@ -1,11 +1,16 @@
+import { ChevronDown } from "lucide-react";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+  GroupedSelectTrigger,
+} from "@/components/ui/grouped-list";
 import { useState, type ReactNode } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
-  SelectTrigger,
   SelectValue,
   SelectContent,
   SelectItem,
@@ -42,7 +47,11 @@ const HISTORY_LABELS: Record<string, string> = {
   assistant_learning_skill_pinned: "Published skill attached",
 };
 
-function SkillHistory({ items }: { readonly items: readonly AgentSkillHistoryItem[] }) {
+function SkillHistory({
+  items,
+}: {
+  readonly items: readonly AgentSkillHistoryItem[];
+}) {
   return (
     <div className="space-y-1">
       <p className="text-12 font-medium">Skill history</p>
@@ -110,7 +119,7 @@ function TestResult({
       {data.excerpt ? (
         <pre
           aria-label={`${data.name} SKILL.md excerpt`}
-          className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-2 text-11"
+          className="max-h-60 overflow-auto whitespace-pre-wrap break-words py-2 text-11"
         >
           {data.excerpt}
         </pre>
@@ -153,68 +162,84 @@ function AttachedSkill({
   const versions = useSkillVersions(skill.skill_id);
   const latest = versions.data?.items[0]?.version;
   return (
-    <div className="space-y-2 rounded-lg border border-border/50 p-3">
-      <p className="text-12 font-medium">
-        {skill.name}{" "}
-        <span className="font-mono text-text-tertiary">{skill.version}</span>
-      </p>
-      <p className="text-12 text-muted-foreground">{description}</p>
-      {size !== undefined && (
-        <p className="text-11 text-text-tertiary">
-          {size.toLocaleString()} bytes
-        </p>
-      )}
-      {versions.error && (
-        <p className="text-11 text-text-tertiary">
-          Could not check for updates. Your pinned version is unchanged.
-        </p>
-      )}
-      <div className="flex flex-wrap gap-2">
-        <Button size="sm" disabled={disabled} onClick={review}>
-          {latest && latest !== skill.version
-            ? `Newer version available: ${latest}`
-            : "Choose version"}
-        </Button>
-        <Button size="sm" disabled={disabled} onClick={remove}>
-          Remove {skill.name}
-        </Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          aria-label={`Test ${skill.name}`}
-          disabled={testResult?.isFetching}
-          onClick={test}
-        >
-          Test
-        </Button>
-        {canEdit ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            aria-label={`Edit ${skill.name}`}
-            disabled={disabled}
-            onClick={edit}
-          >
-            Edit
-          </Button>
-        ) : null}
-        {canDisable ? (
-          <label className="flex items-center gap-2 text-11">
-            <Switch
-              checked={!skill.disabled}
-              disabled={disabled}
-              aria-label={`Use ${skill.name}`}
-              onCheckedChange={toggle}
-            />
-            {skill.disabled ? "Disabled" : "Enabled"}
-          </label>
-        ) : skill.disabled ? (
-          <span className="text-11 text-text-tertiary">Disabled</span>
-        ) : null}
-      </div>
-      {testResult ? <TestResult result={testResult} /> : null}
+    <details className="space-y-3">
+      <GroupedRow
+        asChild
+        interactive
+        className="rounded-xl border border-border/50 bg-card"
+      >
+        <summary className="list-none [&::-webkit-details-marker]:hidden">
+          <span className="min-w-0 flex-1 break-words">
+            <span className="block font-medium">{skill.name}</span>
+            <span className="text-11 text-text-tertiary">
+              {skill.disabled ? "Disabled" : description}
+            </span>
+          </span>
+          <span className="font-mono text-text-tertiary">{skill.version}</span>
+          <ChevronDown
+            aria-hidden
+            className="size-[1.125em] text-text-tertiary"
+          />
+        </summary>
+      </GroupedRow>
+      <GroupedList title="Pinned skill">
+        <GroupedRow className="block space-y-3">
+          {size !== undefined && (
+            <p className="text-11 text-text-tertiary">
+              {size.toLocaleString()} bytes
+            </p>
+          )}
+          {versions.error && (
+            <p className="text-11 text-text-tertiary">
+              Could not check for updates. Your pinned version is unchanged.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={disabled} onClick={review}>
+              {latest && latest !== skill.version
+                ? `Newer version available: ${latest}`
+                : "Choose version"}
+            </Button>
+            <Button size="sm" disabled={disabled} onClick={remove}>
+              Remove {skill.name}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              aria-label={`Test ${skill.name}`}
+              disabled={testResult?.isFetching}
+              onClick={test}
+            >
+              Test
+            </Button>
+            {canEdit ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                aria-label={`Edit ${skill.name}`}
+                disabled={disabled}
+                onClick={edit}
+              >
+                Edit
+              </Button>
+            ) : null}
+            {canDisable ? (
+              <label className="flex items-center gap-2 text-11">
+                <Switch
+                  checked={!skill.disabled}
+                  disabled={disabled}
+                  aria-label={`Use ${skill.name}`}
+                  onCheckedChange={toggle}
+                />
+                {skill.disabled ? "Enable skill" : "Enabled"}
+              </label>
+            ) : null}
+          </div>
+          {testResult ? <TestResult result={testResult} /> : null}
+        </GroupedRow>
+      </GroupedList>
       {children}
-    </div>
+    </details>
   );
 }
 
@@ -339,7 +364,15 @@ export function AgentSkills({
           testResult={testing === skill.skill_id ? tested : undefined}
           edit={() => edit(skill.skill_id)}
           review={() => choose(skill.skill_id, skill.name)}
-          toggle={(enabled) => save(current.data!.skills.map((item) => item.skill_id === skill.skill_id ? { ...item, disabled: !enabled } : item))}
+          toggle={(enabled) =>
+            save(
+              current.data!.skills.map((item) =>
+                item.skill_id === skill.skill_id
+                  ? { ...item, disabled: !enabled }
+                  : item,
+              ),
+            )
+          }
           remove={() =>
             save(
               current.data.skills.filter((s) => s.skill_id !== skill.skill_id),
@@ -356,7 +389,7 @@ export function AgentSkills({
             disabled={disabled || improve.isPending || Boolean(skill.disabled)}
           />
           {improving?.skillId === skill.skill_id ? (
-            <div className="space-y-2 border-t border-border/50 pt-2">
+            <div className="space-y-3">
               <p className="text-11 text-muted-foreground">
                 Editing a copy of {skill.name} {skill.version}. Saving changes
                 only the draft; the attached version stays in use until you
@@ -381,45 +414,49 @@ export function AgentSkills({
       ) : null}
       {!readOnly && (
         <>
-          <form
-            className="flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              setQuery(input.trim());
-              setPage(1);
-            }}
-          >
-            <Input
-              aria-label="Search Ornn skills"
-              placeholder="Search Ornn skills"
-              value={input}
-              maxLength={200}
-              onChange={(e) => setInput(e.target.value)}
-            />
-            <Button
-              type="submit"
-              disabled={disabled}
-              isLoading={search.isFetching}
-            >
-              Search
-            </Button>
-          </form>
-          {search.data?.items.map((item) => (
-            <div
-              key={item.id}
-              className="space-y-1 rounded-lg border border-border/50 p-3"
-            >
-              <Button
-                variant="ghost"
-                disabled={disabled}
-                onClick={() => choose(item.id, item.name)}
+          <GroupedList title="Find skills">
+            <GroupedRow>
+              <form
+                className="flex w-full flex-wrap gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setQuery(input.trim());
+                  setPage(1);
+                }}
               >
-                {item.name}
-              </Button>
-              <p className="text-12 text-muted-foreground">
-                {item.description}
-              </p>
-            </div>
+                <GroupedInput
+                  className="min-w-0 flex-1 basis-32"
+                  aria-label="Search Ornn skills"
+                  placeholder="Search Ornn skills"
+                  value={input}
+                  maxLength={200}
+                  onChange={(e) => setInput(e.target.value)}
+                />
+                <Button
+                  type="submit"
+                  disabled={disabled}
+                  isLoading={search.isFetching}
+                >
+                  Search
+                </Button>
+              </form>
+            </GroupedRow>
+          </GroupedList>
+          {search.data?.items.map((item) => (
+            <GroupedList key={item.id}>
+              <GroupedRow className="block space-y-1">
+                <Button
+                  variant="ghost"
+                  disabled={disabled}
+                  onClick={() => choose(item.id, item.name)}
+                >
+                  {item.name}
+                </Button>
+                <p className="text-12 text-muted-foreground">
+                  {item.description}
+                </p>
+              </GroupedRow>
+            </GroupedList>
           ))}
           {search.data?.items.length === 0 && (
             <p className="text-12 text-muted-foreground">
@@ -441,89 +478,89 @@ export function AgentSkills({
             </div>
           )}
           {selected && (
-            <div className="space-y-3 rounded-lg border border-border/50 p-3">
-              <p className="text-12 font-medium">{selected.name}</p>
-              <Select value={version} onValueChange={setVersion}>
-                <SelectTrigger aria-label="Skill version">
-                  <SelectValue placeholder="Choose an exact version" />
-                </SelectTrigger>
-                <SelectContent>
-                  {versions.data?.items.map((v) => (
-                    <SelectItem key={v.version} value={v.version}>
-                      {v.version}
-                      {v.deprecated ? " (Deprecated)" : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {versions.data && versions.data.total_pages > 1 && (
-                <div className="flex items-center gap-2">
-                  <Button
-                    disabled={versionPage <= 1}
-                    onClick={() => {
-                      setVersionPage(versionPage - 1);
-                      setVersion("");
-                    }}
-                  >
-                    Newer versions
-                  </Button>
-                  <span className="text-11">
-                    Version page {versionPage}
-                  </span>
-                  <Button
-                    disabled={versionPage >= versions.data.total_pages}
-                    onClick={() => {
-                      setVersionPage(versionPage + 1);
-                      setVersion("");
-                    }}
-                  >
-                    Older versions
-                  </Button>
-                </div>
-              )}
-              {preview.isFetching && (
-                <p className="text-12 text-muted-foreground">
-                  Verifying package...
-                </p>
-              )}
-              {preview.data && (
-                <>
+            <GroupedList title="Choose version">
+              <GroupedRow className="block space-y-3">
+                <p className="text-12 font-medium">{selected.name}</p>
+                <Select value={version} onValueChange={setVersion}>
+                  <GroupedSelectTrigger aria-label="Skill version">
+                    <SelectValue placeholder="Choose an exact version" />
+                  </GroupedSelectTrigger>
+                  <SelectContent>
+                    {versions.data?.items.map((v) => (
+                      <SelectItem key={v.version} value={v.version}>
+                        {v.version}
+                        {v.deprecated ? " (Deprecated)" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {versions.data && versions.data.total_pages > 1 && (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      disabled={versionPage <= 1}
+                      onClick={() => {
+                        setVersionPage(versionPage - 1);
+                        setVersion("");
+                      }}
+                    >
+                      Newer versions
+                    </Button>
+                    <span className="text-11">Version page {versionPage}</span>
+                    <Button
+                      disabled={versionPage >= versions.data.total_pages}
+                      onClick={() => {
+                        setVersionPage(versionPage + 1);
+                        setVersion("");
+                      }}
+                    >
+                      Older versions
+                    </Button>
+                  </div>
+                )}
+                {preview.isFetching && (
                   <p className="text-12 text-muted-foreground">
-                    {preview.data.description}
+                    Verifying package...
                   </p>
-                  <p className="text-11 text-text-tertiary">
-                    {preview.data.size_bytes.toLocaleString()} bytes ·{" "}
-                    {preview.data.reference.dependencies.length} pinned
-                    dependencies
-                  </p>
-                </>
-              )}
-              <p className="text-11 text-text-tertiary">
-                Attaching external guidance changes how this agent works.
-              </p>
-              <Button
-                variant="primary"
-                isLoading={write.isPending}
-                disabled={
-                  disabled ||
-                  !preview.data ||
-                  preview.isFetching ||
-                  Boolean(unchanged) ||
-                  (!replacement && (current.data?.skills.length ?? 16) >= 16)
-                }
-                onClick={() => {
-                  if (preview.data && current.data)
-                    save([
-                      ...current.data.skills.filter(
-                        (s) => s.skill_id !== selected.id,
-                      ),
-                      preview.data.reference,
-                    ]);
-                }}
-              >
-                {replacement ? "Re-pin skill" : "Attach skill"}
-              </Button>
-            </div>
+                )}
+                {preview.data && (
+                  <>
+                    <p className="text-12 text-muted-foreground">
+                      {preview.data.description}
+                    </p>
+                    <p className="text-11 text-text-tertiary">
+                      {preview.data.size_bytes.toLocaleString()} bytes ·{" "}
+                      {preview.data.reference.dependencies.length} pinned
+                      dependencies
+                    </p>
+                  </>
+                )}
+                <p className="text-11 text-text-tertiary">
+                  Attaching external guidance changes how this agent works.
+                </p>
+                <Button
+                  variant="primary"
+                  isLoading={write.isPending}
+                  disabled={
+                    disabled ||
+                    !preview.data ||
+                    preview.isFetching ||
+                    Boolean(unchanged) ||
+                    (!replacement && (current.data?.skills.length ?? 16) >= 16)
+                  }
+                  onClick={() => {
+                    if (preview.data && current.data)
+                      save([
+                        ...current.data.skills.filter(
+                          (s) => s.skill_id !== selected.id,
+                        ),
+                        preview.data.reference,
+                      ]);
+                  }}
+                >
+                  {replacement ? "Re-pin skill" : "Attach skill"}
+                </Button>
+              </GroupedRow>
+            </GroupedList>
           )}
         </>
       )}

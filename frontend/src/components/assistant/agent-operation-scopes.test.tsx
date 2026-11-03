@@ -245,3 +245,58 @@ it("saves a guest-only catalog selection and preserves its revision", async () =
     selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["read", "marked"], rules: [] },
   }));
 });
+
+it("pushes a service editor, preserves its draft on Back and restores disclosure focus", async () => {
+  feature.mockReturnValue(true);
+  const user = userEvent.setup();
+  render(<div role="dialog"><button>Covered sheet control</button><AgentOperationScopes agentId="agent" drillIn /></div>);
+  const disclosure = screen.getByRole("button", { name: /Example.*selected operations/ });
+  await user.click(disclosure);
+  expect(screen.getByRole("heading", { name: "Example · Operations" })).toHaveFocus();
+  expect(screen.queryByRole("button", { name: "Covered sheet control" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("checkbox", { name: "GET /items" }));
+  await user.click(screen.getByRole("button", { name: "Back to Access" }));
+  expect(disclosure).toHaveFocus();
+  expect(screen.getByRole("button", { name: "Covered sheet control" })).toBeVisible();
+  await user.click(disclosure);
+  expect(screen.getByRole("checkbox", { name: "GET /items" })).toBeChecked();
+  await user.click(screen.getByRole("button", { name: "Save operations" }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith({ serviceId: "svc", selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["write", "read"], rules: [] } }));
+});
+
+it("places pushed content outside the scrolled panel and hides it when its tab is inactive", async () => {
+  feature.mockReturnValue(true);
+  const container = document.createElement("div");
+  container.setAttribute("role", "dialog");
+  document.body.appendChild(container);
+  const content = (visible: boolean) => <><button>Sheet control</button><div style={{ overflow: "auto" }}><AgentOperationScopes agentId="agent" drillIn visible={visible} detailContainer={container} /></div></>;
+  const view = render(content(true), { container });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: /Example.*selected operations/ }));
+  const detail = screen.getByRole("region", { name: "Example operation details" });
+  expect(detail.parentElement).toBe(container);
+  expect(screen.getByRole("heading", { name: "Example · Operations" })).toHaveFocus();
+  view.rerender(content(false));
+  expect(screen.queryByRole("region", { name: "Example operation details" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Sheet control" })).toBeVisible();
+  view.rerender(content(true));
+  expect(screen.getByRole("region", { name: "Example operation details" })).toBeVisible();
+});
+
+it.each(["flag", "service"] as const)("restores the covered drawer when the pushed editor loses its %s", async (change) => {
+  feature.mockReturnValue(true);
+  const container = document.createElement("div");
+  container.setAttribute("role", "dialog");
+  document.body.appendChild(container);
+  const content = () => <><button role="tab" aria-selected="true">Access</button><button>Sheet control</button><AgentOperationScopes agentId="agent" drillIn detailContainer={container} /></>;
+  const view = render(content(), { container });
+  await userEvent.setup().click(screen.getByRole("button", { name: /Example.*selected operations/ }));
+  expect(screen.queryByRole("button", { name: "Sheet control" })).not.toBeInTheDocument();
+  if (change === "flag") feature.mockReturnValue(false);
+  else query.mockReturnValue({ data: [] });
+  view.rerender(content());
+  expect(screen.queryByRole("region", { name: "Example operation details" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Sheet control" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Sheet control" }).inert).toBe(false);
+  expect(screen.getByRole("tab", { name: "Access" })).toHaveFocus();
+});

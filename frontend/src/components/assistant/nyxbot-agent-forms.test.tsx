@@ -112,7 +112,7 @@ it("creates a specialist with its role, services and account read, then opens it
   const create = within(dialog).getByRole("button", { name: "Create agent" });
   expect(create).toBeDisabled();
   // Only connected, active services are offered.
-  const services = within(dialog).getByRole("list", { name: "Services" });
+  const services = within(dialog).getByRole("group", { name: "Services" });
   expect(services).not.toHaveTextContent("Old API");
   await user.type(within(dialog).getByRole("textbox", { name: "Name" }), "Researcher");
   expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveValue("researcher");

@@ -1,3 +1,4 @@
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
@@ -65,7 +66,7 @@ export function AgentConnections({
         <ConnectionGroups groups={groupServiceConnections(connections)} />
       )}
       {!keys.isPending && !keys.isError && !connections.length && (
-        <p className="rounded-lg border border-dashed border-border p-3 text-12 text-muted-foreground">
+        <p className="px-4 py-3 text-12 text-text-tertiary">
           {agent.kind === "nyxbot"
             ? "Connect a service to choose the accounts NyxBot uses."
             : "Grant services in Access to make their connections available here."}
@@ -139,108 +140,105 @@ function ConnectionGroups({
   readonly disabled?: boolean;
 }) {
   return (
-    <div className="space-y-3">
+    <div className="space-y-6">
       {groups.map((group) => {
         const editing = order?.groupId === group.id;
         const rows = editing ? order.connections : group.connections;
         return (
-          <details
-            key={group.id}
-            className="rounded-lg border border-border p-3"
-            open={editing || undefined}
-          >
-            <summary className="cursor-pointer break-words text-12 font-medium">
-              {group.name}
-              <span className="ml-2 text-11 font-normal text-muted-foreground">
-                {group.connections.length}{" "}
-                {group.connections.length === 1 ? "account" : "accounts"}
-              </span>
-            </summary>
-            <div className="mt-3 space-y-3">
-              <ol
-                aria-label={`${group.name} connections`}
-                className="space-y-2"
-              >
-                {rows.map((key, index) => (
-                  <li key={key.id} className="flex items-center gap-2 text-12">
-                    <span className="min-w-0 flex-1 break-words">
-                      <span className="block font-medium">{key.label}</span>
-                      <span className="text-11 text-muted-foreground">
-                        {connectionOwnerLabel(key)} · {key.slug}
-                        {connectionAvailable(key) ? "" : " · Unavailable"}
-                      </span>
-                    </span>
-                    {editing && (
-                      <>
-                        <Button
+          <GroupedList key={group.id}>
+            <details open={editing || undefined}>
+              <summary className="cursor-pointer px-4 py-3 text-12 font-medium transition-colors hover:bg-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+                {group.name}
+                <span className="ml-2 text-11 font-normal text-muted-foreground">
+                  {group.connections.length}{" "}
+                  {group.connections.length === 1 ? "account" : "accounts"}
+                </span>
+              </summary>
+              <div className="space-y-3 pb-3">
+                <ol aria-label={`${group.name} connections`}>
+                  {rows.map((key, index) => (
+                    <GroupedRow asChild key={key.id}>
+                      <li>
+                        <span className="min-w-0 flex-1 break-words">
+                          <span className="block font-medium">{key.label}</span>
+                          <span className="text-11 text-muted-foreground">
+                            {connectionOwnerLabel(key)} · {key.slug}
+                            {connectionAvailable(key) ? "" : " · Unavailable"}
+                          </span>
+                        </span>
+                        {editing && (
+                          <>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Move ${key.label} up`}
+                              disabled={
+                                disabled ||
+                                order.busy ||
+                                order.blocked ||
+                                index === 0
+                              }
+                              onClick={() => {
+                                const ids = rows.map((row) => row.id);
+                                [ids[index - 1], ids[index]] = [
+                                  ids[index]!,
+                                  ids[index - 1]!,
+                                ];
+                                order.update(ids);
+                              }}
+                            >
+                              <ArrowUp aria-hidden className="size-3.5" />
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Move ${key.label} down`}
+                              disabled={
+                                disabled ||
+                                order.busy ||
+                                order.blocked ||
+                                index === rows.length - 1
+                              }
+                              onClick={() => {
+                                const ids = rows.map((row) => row.id);
+                                [ids[index], ids[index + 1]] = [
+                                  ids[index + 1]!,
+                                  ids[index]!,
+                                ];
+                                order.update(ids);
+                              }}
+                            >
+                              <ArrowDown aria-hidden className="size-3.5" />
+                            </Button>
+                          </>
+                        )}
+                      </li>
+                    </GroupedRow>
+                  ))}
+                </ol>
+                {order &&
+                  (editing ? (
+                    <ConnectionOrderForm order={order} disabled={disabled} />
+                  ) : (
+                    group.id.startsWith("catalog:") &&
+                    rows.length > 1 && (
+                      <GroupedRow asChild interactive>
+                        <button
                           type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Move ${key.label} up`}
-                          disabled={
-                            disabled ||
-                            order.busy ||
-                            order.blocked ||
-                            index === 0
-                          }
-                          onClick={() => {
-                            const ids = rows.map((row) => row.id);
-                            [ids[index - 1], ids[index]] = [
-                              ids[index]!,
-                              ids[index - 1]!,
-                            ];
-                            order.update(ids);
-                          }}
+                          disabled={disabled || Boolean(order.reason)}
+                          title={order.reason}
+                          onClick={() => order.start(group)}
                         >
-                          <ArrowUp aria-hidden className="size-3.5" />
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Move ${key.label} down`}
-                          disabled={
-                            disabled ||
-                            order.busy ||
-                            order.blocked ||
-                            index === rows.length - 1
-                          }
-                          onClick={() => {
-                            const ids = rows.map((row) => row.id);
-                            [ids[index], ids[index + 1]] = [
-                              ids[index + 1]!,
-                              ids[index]!,
-                            ];
-                            order.update(ids);
-                          }}
-                        >
-                          <ArrowDown aria-hidden className="size-3.5" />
-                        </Button>
-                      </>
-                    )}
-                  </li>
-                ))}
-              </ol>
-              {order &&
-                (editing ? (
-                  <ConnectionOrderForm order={order} disabled={disabled} />
-                ) : (
-                  group.id.startsWith("catalog:") &&
-                  rows.length > 1 && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={disabled || Boolean(order.reason)}
-                      title={order.reason}
-                      onClick={() => order.start(group)}
-                    >
-                      Edit connection order
-                    </Button>
-                  )
-                ))}
-            </div>
-          </details>
+                          Edit connection order
+                        </button>
+                      </GroupedRow>
+                    )
+                  ))}
+              </div>
+            </details>
+          </GroupedList>
         );
       })}
     </div>
@@ -255,7 +253,7 @@ function ConnectionOrderForm({
   readonly disabled: boolean;
 }) {
   return (
-    <form onSubmit={order.save} className="space-y-3">
+    <form onSubmit={order.save} className="space-y-3 px-4">
       {order.message && (
         <p role="status" className="text-12 text-muted-foreground">
           {order.message}
