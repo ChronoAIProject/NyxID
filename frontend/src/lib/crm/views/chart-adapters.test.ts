@@ -3,6 +3,7 @@ import {
   aggregateResultToChartPoints,
   formatAggregateValue,
 } from "@/lib/crm/views/chart-adapters";
+import { crmAggregateResultSchema } from "@/lib/crm/views/schema";
 
 describe("aggregateResultToChartPoints", () => {
   it("maps literal aggregate points to literal Recharts data", () => {
@@ -39,6 +40,34 @@ describe("aggregateResultToChartPoints", () => {
         archived: false,
       },
     ]);
+  });
+
+  it("labels boolean groups and preserves absent measurements", () => {
+    const result = crmAggregateResultSchema.parse({
+      points: [
+        { key: true, label: "true", value: 3, archived: false },
+        { key: false, label: "false", value: null, archived: false },
+      ],
+      unit: { format: "number" },
+      total: null,
+      truncated: false,
+    });
+
+    expect(aggregateResultToChartPoints(result)).toEqual([
+      {
+        key: "boolean:true",
+        label: "Yes",
+        value: 3,
+        archived: false,
+      },
+      {
+        key: "boolean:false",
+        label: "No",
+        value: null,
+        archived: false,
+      },
+    ]);
+    expect(formatAggregateValue(result.total, result.unit)).toBe("No value");
   });
 });
 

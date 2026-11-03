@@ -148,9 +148,9 @@ export const crmValidationErrorSchema = z
 
 export const crmAggregatePointSchema = z
   .object({
-    key: z.string().nullable(),
+    key: z.union([z.string(), z.boolean()]).nullable(),
     label: z.string(),
-    value: z.number().finite(),
+    value: z.number().finite().nullable(),
     archived: z.boolean(),
   })
   .strict();
@@ -164,7 +164,7 @@ export const crmAggregateResultSchema = z
         currency: z.string().optional(),
       })
       .strict(),
-    total: z.number().finite(),
+    total: z.number().finite().nullable(),
     truncated: z.boolean(),
   })
   .strict();
