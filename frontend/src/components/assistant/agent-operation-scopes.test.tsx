@@ -150,6 +150,21 @@ describe("agent operation scopes", () => {
     );
     expect(screen.getByRole("checkbox", { name: "GET /items" })).toBeChecked();
   });
+
+  it("surfaces the readiness rollout copy when saving is unavailable", async () => {
+    save.mockRejectedValue(
+      new Error(
+        "This setting is unavailable until an administrator completes the security rollout. Your current permissions were not changed.",
+      ),
+    );
+    render(<ServiceOperationForm agentId="agent" service={service} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "GET /items" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This setting is unavailable until an administrator completes the security rollout",
+    );
+    expect(screen.getByRole("checkbox", { name: "GET /items" })).toBeChecked();
+  });
   it("edits explicit rules only when there are no catalog operations", async () => {
     render(
       <ServiceOperationForm
