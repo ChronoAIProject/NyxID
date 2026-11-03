@@ -802,6 +802,18 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::org_invite::COLLECTION_NAME)
         .delete_many(doc! { "org_user_id": org_user_id })
         .await?;
+    for collection in [
+        crate::models::crm_object::COLLECTION_NAME,
+        crate::models::crm_record::COLLECTION_NAME,
+        crate::models::crm_link::COLLECTION_NAME,
+        crate::models::crm_activity::COLLECTION_NAME,
+        crate::models::crm_saved_view::COLLECTION_NAME,
+        crate::models::crm_mutation_receipt::COLLECTION_NAME,
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(doc! {"owner_id": org_user_id})
+            .await?;
+    }
     // Hard-delete the org user record itself
     db.collection::<User>(USERS)
         .delete_one(doc! { "_id": org_user_id })

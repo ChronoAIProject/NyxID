@@ -11,6 +11,15 @@ const PAGE: i64 = 32;
 fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![
+        (m::crm_object::COLLECTION_NAME, doc! {"owner_id":owner}),
+        (m::crm_record::COLLECTION_NAME, doc! {"owner_id":owner}),
+        (m::crm_link::COLLECTION_NAME, doc! {"owner_id":owner}),
+        (m::crm_activity::COLLECTION_NAME, doc! {"owner_id":owner}),
+        (m::crm_saved_view::COLLECTION_NAME, doc! {"owner_id":owner}),
+        (
+            m::crm_mutation_receipt::COLLECTION_NAME,
+            doc! {"owner_id":owner},
+        ),
         (
             super::preparation::PREPARATIONS,
             doc! {"$or":[{"_id":owner},{"user_id":owner}]},
