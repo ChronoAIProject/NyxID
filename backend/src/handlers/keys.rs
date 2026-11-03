@@ -413,6 +413,9 @@ impl std::fmt::Debug for CreateKeyRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyResponse {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(required = false)]
+    pub node_target_sync: Vec<crate::services::node_target_service::TargetSync>,
     pub offering_kind: crate::models::downstream_service::OfferingKind,
     /// Whether the current caller may inspect and edit connection configuration.
     pub can_edit_configuration: bool,
@@ -2319,6 +2322,39 @@ pub async fn update_key(
         .await?;
     }
 
+    let spec_url_update = match body.openapi_spec_url.as_deref() {
+        Some(s) if s.trim().is_empty() => user_endpoint_service::OpenApiSpecUrlUpdate::Clear,
+        Some(s) => user_endpoint_service::OpenApiSpecUrlUpdate::Set(s),
+        None => user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
+    };
+    let skills_update = match body.recommended_skills.clone() {
+        None => user_endpoint_service::RecommendedSkillsUpdate::Leave,
+        Some(skills) if skills.is_empty() => user_endpoint_service::RecommendedSkillsUpdate::Clear,
+        Some(skills) => user_endpoint_service::RecommendedSkillsUpdate::Set(skills),
+    };
+
+    let target_migration = if let Some(url) = body.endpoint_url.as_deref() {
+        // Validate accompanying endpoint metadata before a strict local clear.
+        user_endpoint_service::build_endpoint_update(
+            Some(url),
+            None,
+            spec_url_update,
+            skills_update.clone(),
+        )?;
+        let migration = crate::services::node_target_service::Migration::prepare(
+            &state.db,
+            &actor,
+            &user_id_str,
+            &view.endpoint_id,
+            url,
+        )
+        .await?;
+        migration.before_commit(&state.node_ws_manager).await?;
+        Some(migration)
+    } else {
+        None
+    };
+
     // Deferred label write. See the matching note at the top of the
     // handler: committing the label up front would break the atomic
     // semantics we now guarantee for node-routed credential updates —
@@ -2369,16 +2405,6 @@ pub async fn update_key(
     // notes where the early `update_endpoint` calls used to live.
     // Combined into a single `update_endpoint` call so the two fields
     // land atomically rather than in two separate writes.
-    let spec_url_update = match body.openapi_spec_url.as_deref() {
-        Some(s) if s.trim().is_empty() => user_endpoint_service::OpenApiSpecUrlUpdate::Clear,
-        Some(s) => user_endpoint_service::OpenApiSpecUrlUpdate::Set(s),
-        None => user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
-    };
-    let skills_update = match body.recommended_skills.clone() {
-        None => user_endpoint_service::RecommendedSkillsUpdate::Leave,
-        Some(skills) if skills.is_empty() => user_endpoint_service::RecommendedSkillsUpdate::Clear,
-        Some(skills) => user_endpoint_service::RecommendedSkillsUpdate::Set(skills),
-    };
     let url_update = body.endpoint_url.as_deref();
     if url_update.is_some()
         || !matches!(
@@ -2390,16 +2416,22 @@ pub async fn update_key(
             user_endpoint_service::RecommendedSkillsUpdate::Leave
         )
     {
-        user_endpoint_service::update_endpoint(
-            &state.db,
-            &user_id_str,
-            &view.endpoint_id,
-            url_update,
-            None,
-            spec_url_update,
-            skills_update,
-        )
-        .await?;
+        if let Some(migration) = &target_migration {
+            migration
+                .commit(&state.db, None, spec_url_update, skills_update)
+                .await?;
+        } else {
+            user_endpoint_service::update_endpoint(
+                &state.db,
+                &user_id_str,
+                &view.endpoint_id,
+                url_update,
+                None,
+                spec_url_update,
+                skills_update,
+            )
+            .await?;
+        }
     }
 
     // Update UserService fields if any are provided.
@@ -2596,6 +2628,18 @@ pub async fn update_key(
     // the service untouched and the PUT is retry-idempotent (see
     // comment at the strict push site for the full rationale).
 
+    let node_target_sync = if let Some(migration) = target_migration {
+        migration
+            .after_commit(
+                &state.db,
+                &state.node_ws_manager,
+                crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+            )
+            .await
+    } else {
+        Vec::new()
+    };
+
     // Return refreshed view
     let updated =
         unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
@@ -2604,6 +2648,7 @@ pub async fn update_key(
     let catalog_slug = updated.catalog_service_slug.clone();
     let api_key_id = updated.api_key_id.clone();
     let mut response = key_response_from_view(updated);
+    response.node_target_sync = node_target_sync;
     let (permission_url, permission_scopes) = derive_lark_permission_for_key(
         &state,
         &user_id_str,
@@ -2763,6 +2808,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
     .to_string();
 
     KeyResponse {
+        node_target_sync: Vec::new(),
         offering_kind: Default::default(),
         can_edit_configuration: true,
         preference_rank: None,
@@ -2916,6 +2962,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
     let credential_source: crate::handlers::user_services_handler::CredentialSourceResponse =
         view.credential_source.clone().into();
     KeyResponse {
+        node_target_sync: Vec::new(),
         offering_kind: view.offering_kind,
         can_edit_configuration: !view.auto_connected && credential_source.can_edit_configuration(),
         preference_rank: None,
@@ -5917,3 +5964,7 @@ mod tests {
         assert!(req.target_org_id.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "keys_update_regression_tests.rs"]
+mod update_regression_tests;

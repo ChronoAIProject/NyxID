@@ -21,7 +21,7 @@ class Socket {
   readyState = 1;
   bufferedAmount = 0;
   onopen?: () => void;
-  onclose?: () => void;
+  onclose?: (event: CloseEvent) => void;
   onerror?: () => void;
   onmessage?: ({ data }: { data: string }) => void;
   send = vi.fn();
@@ -230,4 +230,44 @@ it("real PCM startup failure while capture is requested still fails visibly and 
   );
   expect(callbacks.state).toHaveBeenLastCalledWith("review");
   expect(ws.close).toHaveBeenCalledOnce();
+});
+
+it("2138 preserves partial text and close metadata without echoing an arbitrary close reason", async () => {
+  const { client, callbacks } = fixture();
+  await client.start("thread", voicePreferences);
+  const ws = Socket.current;
+  ws.event({ type: "ready", model: "gpt-live-transcribe", session_id: sid });
+  ws.event({ type: "delta", item_id: "A", order: 0, text: "keep this draft" });
+  ws.onclose?.({ code: 1006, reason: "private provider text", wasClean: false } as CloseEvent);
+  expect(client.closeDetails).toEqual({ code: 1006, reason: "unrecognized", wasClean: false, stage: "capturing" });
+  expect(callbacks.error).toHaveBeenLastCalledWith(expect.stringContaining("1006 · connection lost · capturing"));
+  expect(callbacks.error.mock.lastCall![0]).not.toContain("private provider");
+  expect(callbacks.text.mock.lastCall![0].interim).toBe("keep this draft");
+  expect(callbacks.state).toHaveBeenLastCalledWith("review");
+});
+it("2138 preserves server terminal errors and records the following close without replacing them", async () => {
+  const { client, callbacks } = fixture();
+  await client.start("thread", voicePreferences);
+  const ws = Socket.current;
+  ws.event({ type: "ready", model: "gpt-live-transcribe", session_id: sid });
+  ws.event({ type: "error", stage: "transport", code: "dictation_backpressure", error: { message: "safe fallback" } });
+  ws.onclose?.({ code: 1013, reason: "dictation_backpressure", wasClean: true } as CloseEvent);
+  expect(callbacks.error).toHaveBeenCalledOnce();
+  expect(callbacks.error.mock.lastCall![0]).toContain("could not keep up");
+  expect(client.closeDetails).toMatchObject({ code: 1013, wasClean: true });
+});
+it("2138 distinguishes a finalization disconnect and a successful stop", async () => {
+  const { client, callbacks } = fixture();
+  await client.start("thread", voicePreferences);
+  const ws = Socket.current;
+  ws.event({ type: "ready", model: "gpt-live-transcribe", session_id: sid });
+  client.stop();
+  ws.onclose?.({ code: 1006, reason: "", wasClean: false } as CloseEvent);
+  expect(client.closeDetails?.stage).toBe("finalizing");
+  expect(callbacks.error.mock.lastCall![0]).toContain("Final transcription was not confirmed");
+  const next = fixture();
+  await next.client.start("thread", voicePreferences);
+  Socket.current.event({ type: "stopped", confirmed: true });
+  Socket.current.onclose?.({ code: 1000, reason: "dictation_stopped", wasClean: true } as CloseEvent);
+  expect(next.callbacks.error).not.toHaveBeenCalled();
 });

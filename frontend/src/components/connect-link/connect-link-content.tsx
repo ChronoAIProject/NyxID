@@ -1,7 +1,7 @@
 import { useCatalogEntry } from "@/hooks/use-keys";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
-import { ConnectionArc } from "@/components/shared/connection-arc";
-import { ServiceIcon } from "@/components/service-icon";
+import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
+import { ConnectLinkDetailRow } from "@/components/shared/connection-detail-row";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useEffect, useRef, useState } from "react";
@@ -48,7 +48,6 @@ import {
   validateConnectOAuthForm,
 } from "@/schemas/connect-links";
 import { useAuthStore } from "@/stores/auth-store";
-import { cn } from "@/lib/utils";
 
 const CLICK_THROTTLE_MS = 750;
 
@@ -98,7 +97,9 @@ export function ConnectLinkContent({
   );
   const usePlatformKey =
     platformAvailable &&
-    (platformChoice ?? preview.data?.use_platform_key ?? true);
+    (preview.data?.assistant_intent_locked
+      ? preview.data.use_platform_key === true
+      : (platformChoice ?? preview.data?.use_platform_key ?? true));
   const complete = useCompleteConnectLink();
   const completeConnect = complete.mutateAsync;
   const cancel = useCancelHostedConnectLink();
@@ -490,45 +491,20 @@ export function ConnectLinkContent({
               </div>
             ) : (
               <>
-                <div className="connection-card-heading space-y-5 text-center">
-                  <div
-                    className="flex items-start justify-center"
-                    role="img"
-                    aria-label={`NyxID connects to ${preview.data.service_name}`}
-                  >
-                    <div className="flex w-20 flex-col items-center gap-2.5">
-                      <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
-                        <NyxidIcon className="size-9" alt="" />
-                      </div>
-                      <span className="text-xs font-medium">NyxID</span>
-                    </div>
-                    <ConnectionArc />
-                    <div className="flex w-20 flex-col items-center gap-2.5">
-                      <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
-                        <ServiceIcon
-                          slug={preview.data.service_slug}
-                          iconUrl={catalog?.icon_url}
-                          size="xl"
-                          className="text-foreground"
-                        />
-                      </div>
-                      <span className="text-xs font-medium">
-                        {preview.data.service_name}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <h1 className="text-xl font-semibold leading-tight text-foreground sm:text-2xl">
-                      NyxID wants to connect to your {preview.data.service_name}
-                    </h1>
-                    <p className="text-sm text-muted-foreground">
-                      Add your connection details and approve the request.
-                    </p>
-                  </div>
-                </div>
+                {preview.data.assistant_intent_locked ? (
+                  <p className="text-12 text-muted-foreground">{preview.data.use_platform_key ? "Use the NyxID platform connection. This link's intent is fixed." : "Connect your own personal account. This link's intent is fixed."}</p>
+                ) : null}
+                <ConnectionIdentityHeading
+                  className="connection-card-heading"
+                  serviceSlug={preview.data.service_slug}
+                  serviceName={preview.data.service_name}
+                  iconUrl={catalog?.icon_url}
+                  title={`NyxID wants to connect to your ${preview.data.service_name}`}
+                  subtitle="Add your connection details and approve the request."
+                />
                 {submitError ? <ErrorBanner message={submitError} /> : null}
                 <RequestDetails preview={preview.data} />
-                {platformAvailable &&
+                {!preview.data.assistant_intent_locked && platformAvailable &&
                   catalog?.platform_key &&
                   preview.data.status === "pending" && (
                     <CredentialBindingChoice
@@ -1059,29 +1035,6 @@ export function RequestDetails({
   );
 }
 
-export function ConnectLinkDetailRow({
-  label,
-  value,
-  capitalizeValue = false,
-}: {
-  readonly label: string;
-  readonly value: string;
-  readonly capitalizeValue?: boolean;
-}) {
-  return (
-    <div className="flex justify-between gap-4 px-4 py-1 text-xs">
-      <span className="text-muted-foreground">{label}</span>
-      <span
-        className={cn(
-          "min-w-0 break-words text-right font-medium text-foreground",
-          capitalizeValue && "capitalize",
-        )}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
 
 function DeviceCodePanel({
   code,
@@ -1202,3 +1155,5 @@ function StandaloneConnectShell({ children }: { children: React.ReactNode }) {
     </main>
   );
 }
+
+export { ConnectLinkDetailRow };

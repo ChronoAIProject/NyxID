@@ -1302,6 +1302,7 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             gateway_ready(&state, &key).await;
         }
         let provider = ingestion_provider(&state, &row, native_png()).await;
+        let mut owner_conversation = None;
         for (n, sender, text) in [
             (0, "human", ""),
             (1, "human", "yes 4821"),
@@ -1311,9 +1312,7 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             let id = format!("media-{n}");
             let mut source = media_source(&state, &row, &id, &id, text).await;
             source.sender_platform_id = Some(sender.into());
-            if transport == "direct" {
-                source.platform_conversation_id = Some(format!("oc_{sender}"));
-            }
+            source.platform_conversation_id = Some(format!("oc_{sender}"));
             state
                 .db
                 .collection::<ChannelMessage>(MESSAGES)
@@ -1338,10 +1337,24 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
                     .unwrap()
                     .unwrap();
             } else {
-                let body = cma_media_event(text, sender, &id);
+                let mut body = cma_media_event(text, sender, &id);
+                body["event_context"]["activity"]["conversation"]["id"] =
+                    json!(format!("oc_{sender}"));
+                if sender == "guest" {
+                    // Match the gateway's conversation_and_sender partition:
+                    // another person's DM must never reuse the owner's home.
+                    let partition = "conv_00000000000000000000000000000009";
+                    ensure_partition(&state, &key, partition).await;
+                    body["conversation"] = json!(partition);
+                    body["event_context"]["conversation_id"] = json!(partition);
+                }
                 let response = respond(&state, &key, &body, &id).await;
                 assert_eq!(response.status(), StatusCode::OK);
-                assert!(body_text(response).await.contains("Here is your answer"));
+                let response = body_text(response).await;
+                assert!(
+                    response.contains("Here is your answer"),
+                    "{transport}/{n}: {response}"
+                );
             }
             let written = state
                 .db
@@ -1367,6 +1380,8 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             let captured = calls.lock().await.last().unwrap().clone();
             assert!(current.active_turn.is_none());
             if sender == "guest" {
+                assert!(current.guest_turn);
+                assert_ne!(Some(&current.id), owner_conversation.as_ref());
                 assert!(written.media.is_none());
                 assert!(message.attachments.is_empty());
                 assert!(
@@ -1385,6 +1400,7 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
                     downloads_before
                 );
             } else {
+                owner_conversation = Some(current.id.clone());
                 assert!(written.media.is_some());
                 assert_eq!(
                     message.attachments.len(),

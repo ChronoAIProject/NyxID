@@ -1278,6 +1278,7 @@ pub async fn artifact_delivery(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    connect_own: Option<serde_json::Value>,
     creation_turn_id: Option<String>,
     /// The tool call (turn activity ID) this card or receipt belongs to.
     activity_id: Option<String>,
@@ -1325,6 +1326,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             decided_by: row.decided_by,
             reason: row.reason,
             confirmation: row.confirmation,
+            connect_own: row.connect_own,
             service_slug: row.service_slug,
             service_name: row.service_name,
             tool_name: row.tool_name,
@@ -1858,6 +1860,10 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         super::agent_skills::preload_for_turn(&self.state, row, agent).await
     }
 
+    fn channel_typing(&self, row: &AssistantConversation) -> Option<tokio::task::JoinHandle<()>> {
+        super::nyxbot::typing::start(&self.state, row)
+    }
+
     fn checking_notice(&self, row: &AssistantConversation) -> Option<tokio::task::JoinHandle<()>> {
         let origin = crate::services::assistant_checking_notice::destination(row)?;
         let state = self.state.clone();
@@ -1953,6 +1959,9 @@ pub async fn turns(
     let policy = parts.extensions.get::<BillingRoutePolicy>().copied();
     let mut start = engine::TurnStart::from(&input);
     start.org_access = org_access;
+    if super::login_client_context::require_first_party_human(&auth).is_ok() {
+        start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);
+    }
     if start.conversation_id.is_none() && start.agent_id.is_none() && start.model.is_none() {
         start.model = Some(
             crate::services::assistant_profile_routing::model_for(
@@ -2147,7 +2156,10 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                 Ok(LiveEvent::OrgGroup { id, user_id: owner }) if owner == user_id => {
                     // The channel routes candidates; authority is live again at delivery,
                     // including the first delivery after subscribing.
-                    if crate::services::org_group_service::get(&state.db,&user_id,&id,None).await.is_err() { continue; }
+                    let eligible=if crate::services::collaboration_group_service::marked(&state.db,&id).await.unwrap_or(false) {
+                        crate::services::collaboration_group_service::get(&state.db,&user_id,&id).await.is_ok()
+                    } else {crate::services::org_group_service::get(&state.db,&user_id,&id,None).await.is_ok()};
+                    if !eligible {continue;}
                     ("group", json!({"type":"group","id":id}))
                 }
                 Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {

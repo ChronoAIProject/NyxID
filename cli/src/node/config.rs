@@ -119,6 +119,9 @@ pub struct CredentialConfig {
     /// Used when NyxID sends an empty base_url (node-resolved routing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_url: Option<String>,
+    /// Last server metadata migration; rejects delayed updates after a clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<i64>,
     /// For header injection: the header name (e.g. "Authorization")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_name: Option<String>,
@@ -291,6 +294,7 @@ impl CredentialConfig {
         Self {
             injection_method: "header".to_string(),
             target_url,
+            target_revision: None,
             header_name: Some(header_name),
             header_value_encrypted,
             param_name: None,
@@ -318,6 +322,7 @@ impl CredentialConfig {
         Self {
             injection_method: "query_param".to_string(),
             target_url,
+            target_revision: None,
             header_name: None,
             header_value_encrypted: None,
             param_name: Some(param_name),
@@ -347,6 +352,7 @@ impl CredentialConfig {
         Self {
             injection_method: "path_prefix".to_string(),
             target_url,
+            target_revision: None,
             header_name: Some(prefix),
             header_value_encrypted: credential_encrypted,
             param_name: None,
@@ -376,6 +382,7 @@ impl CredentialConfig {
         Self {
             injection_method: "none".to_string(),
             target_url,
+            target_revision: None,
             header_name: None,
             header_value_encrypted: None,
             param_name: None,
@@ -406,6 +413,7 @@ impl CredentialConfig {
         Self {
             injection_method: "aws_sigv4".to_string(),
             target_url,
+            target_revision: None,
             header_name: None,
             header_value_encrypted: credential_json_encrypted,
             param_name: None,
@@ -426,6 +434,63 @@ impl CredentialConfig {
 }
 
 impl NodeConfig {
+    /// Reject delayed server metadata after a newer migration (especially a clear).
+    pub fn set_credential_target_revision(
+        &mut self,
+        slug: &str,
+        target: &str,
+        revision: i64,
+    ) -> Result<()> {
+        if revision <= 0 {
+            return Err(Error::Validation(
+                "Target update requires a positive revision".into(),
+            ));
+        }
+        if let Some(credential) = self.credentials.get(slug)
+            && let Some(previous) = credential.target_revision
+            && (revision < previous
+                || (revision == previous
+                    && credential.target_url.as_deref().unwrap_or("") != target))
+        {
+            return Err(Error::Validation("Stale target update".into()));
+        }
+        self.set_credential_target_url(slug, target)?;
+        self.credentials
+            .get_mut(slug)
+            .expect("validated credential")
+            .target_revision = Some(revision);
+        Ok(())
+    }
+
+    /// Update routing metadata without touching encrypted values or the keychain.
+    pub fn set_credential_target_url(&mut self, slug: &str, target: &str) -> Result<()> {
+        if !target.is_empty() {
+            let parsed = url::Url::parse(target)
+                .map_err(|_| Error::Validation("Invalid target URL".into()))?;
+            if !matches!(parsed.scheme(), "http" | "https" | "ssh")
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.fragment().is_some()
+            {
+                return Err(Error::Validation(
+                    "Target URL must be HTTP(S) or SSH without userinfo".into(),
+                ));
+            }
+        }
+        let credential = self.credentials.get_mut(slug).ok_or_else(|| {
+            Error::Validation(
+                "No local credential for this service; install it on this node first".into(),
+            )
+        })?;
+        if credential.injection_method == "ifttt_webhook" {
+            nyxid_service_adapters::ifttt::validate_destination(target)
+                .map_err(|_| Error::Validation("IFTTT target URL is fixed".into()))?;
+        }
+        credential.target_url = (!target.is_empty()).then(|| target.to_string());
+        Ok(())
+    }
+
     /// Create a new config after registration (no credentials yet).
     pub fn new(server_url: String, node_id: String, storage_backend: String) -> Self {
         Self {

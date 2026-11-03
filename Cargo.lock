@@ -4299,7 +4299,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.76.0"
+version = "0.78.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4335,6 +4335,8 @@ dependencies = [
  "http 1.4.0",
  "http-body-util",
  "httpdate",
+ "hyper 1.8.1",
+ "hyper-util",
  "image",
  "jsonwebtoken 10.3.0",
  "libc",
@@ -4394,7 +4396,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.76.0"
+version = "0.78.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

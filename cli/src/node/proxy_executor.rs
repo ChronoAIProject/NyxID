@@ -337,7 +337,7 @@ async fn execute_proxy_request_inner(
                         request_id,
                         &format!(
                             "No target URL configured for service '{service_slug}'. \
-                             Run on the node-agent machine: nyxid node credentials add --service {service_slug} --url <URL> ... \
+                             Run on the node-agent machine: nyxid node credentials set-url --service {service_slug} --url <URL> (owner login required; existing local secret is preserved) \
                              (`nyxid node credentials` is node-side only, not available on the user-side CLI)."
                         ),
                         502,
@@ -937,6 +937,66 @@ mod tests {
             assert!(!debug.contains(secret));
             assert!(!ws_debug.contains(secret));
         }
+    }
+
+    #[tokio::test]
+    async fn node_endpoint_2126_server_target_wins_over_stale_local_target() {
+        use super::super::{config::NodeConfig, secret_backend::SecretBackend};
+        use super::*;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
+        let old = MockServer::start().await;
+        let new = MockServer::start().await;
+        let secret = uuid::Uuid::new_v4().to_string();
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&old)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .and(header("Authorization", secret.as_str()))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&new)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", "node", dir.path()).unwrap();
+        let mut config: NodeConfig = serde_json::from_value(serde_json::json!({
+            "server":{"url":"ws://localhost"},"node":{"id":"node","auth_token_encrypted":""}
+        }))
+        .unwrap();
+        config
+            .add_header_credential_via(
+                "monitor",
+                "Authorization",
+                &secret,
+                Some(&old.uri()),
+                &backend,
+            )
+            .unwrap();
+        let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        let request = serde_json::json!({"request_id":uuid::Uuid::new_v4().to_string(), "service_slug":"monitor", "base_url":new.uri(), "method":"GET", "path":"/health", "headers":{}});
+        let (tx, mut rx) = mpsc::channel(8);
+        execute_proxy_request(
+            &request,
+            &credentials,
+            None,
+            &tokio::sync::Mutex::new(ReplayGuard::new()),
+            &NodeMetrics::new(),
+            &tx,
+            false,
+            &build_http_client().unwrap(),
+        )
+        .await;
+        let NodeWsMessage::Text(frame) = rx.recv().await.unwrap() else {
+            panic!("expected proxy response")
+        };
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["status"], 200);
     }
 
     #[tokio::test]

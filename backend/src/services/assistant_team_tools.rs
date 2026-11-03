@@ -37,6 +37,10 @@ pub const TOOL_NAMES: &[&str] = &[
     "decide_permission",
     "destroy_subagent",
     "update_subagent",
+    "create_collaboration_group",
+    "list_collaboration_groups",
+    "manage_collaboration_group",
+    "post_to_collaboration_group",
     "create_group",
     "list_groups",
     "post_to_group",
@@ -109,19 +113,13 @@ pub const SETTINGS_AREAS: &[&str] = &[
 ];
 
 /// The frontend path (with query) for a settings area.
-pub fn settings_path(area: &str, service: Option<&str>, org_id: Option<&str>) -> Option<String> {
+pub fn settings_path(area: &str, _service: Option<&str>, org_id: Option<&str>) -> Option<String> {
     let encode =
         |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
     Some(match area {
         "create_agent_key" => "/keys?tab=nyxid&action=create-key".into(),
         "agent_keys" => "/keys?tab=nyxid".into(),
-        "add_service" => match service {
-            Some(slug) => format!(
-                "/keys?tab=services&action=add-service&slug={}",
-                encode(slug)
-            ),
-            None => "/keys?tab=services&action=add-service".into(),
-        },
+        "add_service" => "/assistant/plugins".into(),
         "services" => "/keys?tab=services".into(),
         "service_pools" => "/keys?tab=pools".into(),
         "channel_bots" => "/channel-bots".into(),
@@ -181,6 +179,7 @@ pub fn read_only(name: &str) -> bool {
             | "preview_agent_skill"
             | "learning_status"
             | "learning_list_proposals"
+            | "list_collaboration_groups"
             | "list_groups"
             | "channel_setup_guide"
             | "list_channel_agents"
@@ -440,6 +439,7 @@ pub fn schema(name: &str) -> Value {
                 "include_images": {"type": "boolean", "default": false,
                     "description": "Also send the tool images of this turn only (verified \
                     images your tools returned during the current turn, at most eight), \
+                    plus server-adopted delegated images authorized for this original chat, \
                     before the text. Each image reaches a chat once: images already \
                     delivered there are reported, not resent. Default false."}}),
             vec!["chat_id", "text"],
@@ -464,7 +464,7 @@ pub fn schema(name: &str) -> Value {
                 "members": {"type": "string", "enum": ["everyone", "owner", "default"],
                     "description": "Groups and channels: whether members other than the \
                     user may talk to the agent, as guests; default lets them once the user \
-                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone does not complete model setup"},
+                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
                 "allow_posts": {"type": "boolean",
                     "description": "Let the chat's agent post there without being asked"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
@@ -478,8 +478,25 @@ pub fn schema(name: &str) -> Value {
                 "private_chats": {"type": "string", "enum": ["owner", "everyone"],
                     "description": "Who may talk to the agent in private chats with the bot: \
                     only the user (owner), or anyone (everyone, each as a guest in their own \
-                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone does not complete model setup"}}),
-            vec!["channel_agent_id", "private_chats"],
+                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
+                "private_chat_posts": {"type":"boolean","description":"Allow new private customer chats to start with posting enabled. Default false. Groups, channels and topics still need per-chat opt-in. Turning off changes only future chats unless apply_to_existing is true."},
+                "apply_to_existing": {"type":"boolean","default":false,"description":"Also set existing private chats of this channel to private_chat_posts (required with this option). At most 1000 changed chats; over the cap nothing changes. Per-chat off remains effective until explicitly applied again."}}),
+            vec!["channel_agent_id"],
+        ),
+        "create_collaboration_group" => (
+            json!({"name":string(60),"member_agent_ids":{"type":"array","minItems":1,"maxItems":8,"items":string(64)}}),
+            vec!["name", "member_agent_ids"],
+        ),
+        "list_collaboration_groups" => (json!({}), vec![]),
+        "post_to_collaboration_group" => (
+            json!({"group":string(64),"text":string(32768),"recipient_agent_ids":{"type":"array","minItems":1,"maxItems":8,"items":string(64)}}),
+            vec!["group", "text"],
+        ),
+        "manage_collaboration_group" => (
+            json!({"group":string(64),"expected_revision":{"type":"integer","minimum":1},"change":{"type":"object","additionalProperties":false,"properties":{
+            "action":{"type":"string","enum":["invite","cancel_invite","quick_add","remove","leave","delete","add_agent","propose_agent","accept_agent","remove_agent","guest_access","rename","lead"]},
+            "agent_id":string(64),"person_id":string(36),"intended_user_id":string(36),"proposal_id":string(200),"invite_id":string(64),"history_disclosed":{"type":"boolean"},"enabled":{"type":"boolean"},"guest_revision":{"type":"integer","minimum":1},"name":string(60)},"required":["action"]}}),
+            vec!["group", "expected_revision", "change"],
         ),
         "create_group" => (
             json!({"org":string(128),"participant_user_ids":{"type":"array","maxItems":16,"items":string(36)},"name": string(60), "members": json!({"type": "array", "minItems": 1, "maxItems": 8,
@@ -517,7 +534,7 @@ pub fn schema(name: &str) -> Value {
             json!({"area": {"type": "string", "enum": SETTINGS_AREAS},
                 "agent": string(64), "label":string(128), "instruction":string(8192),
                 "service": {"type": "string", "minLength": 1, "maxLength": 100,
-                    "description": "add_service only: catalog slug to preselect"},
+                    "description": "add_service only: authorized catalog slug or UUID; returns nyx__connect_service guidance, never a Studio connection URL"},
                 "org_id": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "organizations only: open this organization"}}),
             vec!["area"],
@@ -650,9 +667,11 @@ pub(crate) fn description(name: &str) -> &'static str {
             (it is already working) or pool_full (too many specialists working; wait first)."
         }
         "wait_for_subagents" => {
-            "Wait up to timeout_secs (max 120) for specialists to finish; returns their latest \
-            replies, who is still running, and pending permission requests. You can also end \
-            your turn instead; NyxID wakes you with an event."
+            "Wait up to timeout_secs (max 120) for specialists to finish; returns exact queued \
+            assignment results (otherwise their latest replies), who is still running, and pending permission requests. You can also end \
+            your turn instead; NyxID wakes you with an event. Assigned results can include \
+            server-authorized delegated_images for this reply at the original chat. Only \
+            those references qualify; never invent foreign image IDs or claim confirmed delivery."
         }
         "get_agent_sharing" => {
             "Read your personal specialist's sharing policy, write version and authority revision. No private recipient chats or notes are included."
@@ -741,6 +760,18 @@ pub(crate) fn description(name: &str) -> &'static str {
             changes your persona. Setting model changes which NyxAgent model the agent's new threads use; \
             the user's access mode may require their confirmation card first."
         }
+        "create_collaboration_group" => {
+            "Create a multi-person group with 1–8 specialists you can use. NyxBot cannot join. Invite people separately; everyone can read the retained history."
+        }
+        "list_collaboration_groups" => {
+            "List the acting person's collaboration groups and safe member/status metadata; no hidden threads or other participants' cards."
+        }
+        "post_to_collaboration_group" => {
+            "Post a request for the acting person in a collaboration group, retaining their identity and billing for every handoff. No private NyxBot context or automatic follower is attached."
+        }
+        "manage_collaboration_group" => {
+            "Manage a collaboration group at its exact membership revision. The creator manages people and accepts agent proposals; anyone may leave. Invites may bind intended_user_id to an existing person; omit it for a bearer link. They are single-use, expire after seven days and are returned once; never send an invitation automatically. Quick-add must first disclose full retained history. Guest enablement always asks the agent owner, even in Full access: future unauthorized participants use the owner's guest policy and bill the owner. Transfer and invite acceptance require the human UI."
+        }
         "create_group" => {
             "Create a group chat of the user and several agents (you and/or specialists). In a \
             group, a user message goes to the agents it @mentions, else to the lead; agents \
@@ -760,7 +791,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Change NyxBot settings only when the owner asks. Automatic continuations preserve context and the same logical task; higher limits may use more credits."
         }
         "settings_link" => {
-            "Link the user to the exact NyxID page for a configuration you cannot or should not \
+            "For add_service with a named catalog, return nyx__connect_service guidance; without a name open Plugins. Never send /keys for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
             MFA), profile, sessions, MCP, display, privacy, billing, usage, NyxBot settings (nyxbot_settings), organizations, automations, machines, saved_logins, developer apps, devices \
             and more. Account settings, NyxBot settings, billing and usage open as panels over the current assistant view; automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \
@@ -820,7 +851,8 @@ pub(crate) fn description(name: &str) -> &'static str {
             (e.g. a scheduled update). Works only in chats you answer (NyxBot: any of the \
             user's chats) whose posting is allowed; only when the user asked for it. Set \
             include_images to true to send this turn's tool images (current turn only, at \
-            most eight) before the text; the result reports per image whether it was sent \
+            most eight) and server-adopted delegated images authorized for this original chat \
+            before the text; the result reports per image whether it was sent \
             now, already delivered to that chat, skipped or failed."
         }
         "list_channel_chats" => {
@@ -829,7 +861,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             posting). NyxID records chats and their kind by itself as messages arrive (a \
             group appears once the bot gets a message there): never ask the user for chat \
             IDs or whether a chat is a group. Use the chat id with nyxid__update_channel_chat \
-            and nyxid__post_to_chat."
+            and nyxid__post_to_chat. Use nyxid__update_channel_access private_chat_posts for new customer posting defaults, optionally apply_to_existing for existing private chats."
         }
         "list_channel_threads" => {
             "List followed platform threads and retained thread history. Returns metadata only, with conversation links, state and idle expiry. Optional channel/chat filters and bounded cursor pagination."
@@ -841,7 +873,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Change one chat's settings when the user asks: answer every message or only \
             mentions and replies (groups default to mentions); let members other than the user \
             talk to the agent (default once the user has talked to the bot there); allow \
-            posting there; or give the chat its own personal specialist. Organization specialists \
+            posting there (per-chat off always overrides the new-chat default); use nyxid__update_channel_access private_chat_posts to allow new customer chats automatically, with apply_to_existing to include existing private chats; or give the chat its own personal specialist. Organization specialists \
             cannot be linked to channel bots or chats. Guests never act for the user: you \
             answer them without tools, and a specialist given the chat uses only its own \
             services, as far as nyxid__set_guest_access lets guests (by default looking up, \
@@ -851,7 +883,7 @@ pub(crate) fn description(name: &str) -> &'static str {
         "update_channel_access" => {
             "Set who may talk to the agent in private chats with a channel bot: only the user \
             (default) or anyone, each in their own thread as a guest (no account actions and \
-            nothing private to the user; NyxBot uses no tools for them)."
+            nothing private to the user; NyxBot uses no tools for them). Also set private_chat_posts to allow new private customer chats to receive agent-initiated posts, optionally apply_to_existing. This does not open the audience or change group/channel/topic permissions."
         }
         _ => "Unknown NyxBot tool.",
     }
@@ -1112,7 +1144,7 @@ mod tests {
             ("triggers", "/triggers"),
             ("create_agent_key", "/keys?tab=nyxid&action=create-key"),
             ("agent_keys", "/keys?tab=nyxid"),
-            ("add_service", "/keys?tab=services&action=add-service"),
+            ("add_service", "/assistant/plugins"),
             ("services", "/keys?tab=services"),
             ("service_pools", "/keys?tab=pools"),
             ("channel_bots", "/channel-bots"),
@@ -1136,7 +1168,7 @@ mod tests {
 
         assert_eq!(
             settings_path("add_service", Some("api-github"), None).as_deref(),
-            Some("/keys?tab=services&action=add-service&slug=api-github")
+            Some("/assistant/plugins")
         );
         assert_eq!(
             settings_path("organizations", None, Some("acme corp")).as_deref(),

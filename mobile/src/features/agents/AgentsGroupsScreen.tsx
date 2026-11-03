@@ -1,9 +1,9 @@
 import { Pressable, StyleSheet, View } from "react-native";
 import { Plus } from "lucide-react-native";
+import { SegmentControl } from "../../components/SegmentControl";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
-import { Label, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
-import { fonts } from "../../theme/designTokens";
 import { AgentsScreen } from "./AgentsScreen";
 import { GroupsList } from "../groups/GroupsList";
 
@@ -28,7 +28,12 @@ export function AgentsGroupsScreen({
   const tabs = (
     <View style={styles.tabRow}>
       <View style={styles.fill}>
-        <AgentsGroupsTabs value={tab} onChange={onTabChange} />
+        <SegmentControl
+          segments={[{ label: "Agents" }, { label: "Crews" }]}
+          activeIndex={tab === "agents" ? 0 : 1}
+          onPress={(index) => onTabChange(index === 0 ? "agents" : "groups")}
+          style={styles.tabs}
+        />
       </View>
       <Pressable
         accessibilityRole="button"
@@ -64,52 +69,8 @@ export function AgentsGroupsScreen({
   );
 }
 
-function AgentsGroupsTabs({
-  value,
-  onChange,
-}: {
-  value: "agents" | "groups";
-  onChange: (tab: "agents" | "groups") => void;
-}) {
-  const { colors } = useTheme();
-  return (
-    <View
-      accessibilityRole="tablist"
-      style={[
-        styles.tabs,
-        { backgroundColor: colors.cardSoft, borderColor: colors.border },
-      ]}
-    >
-      {(["agents", "groups"] as const).map((tab) => (
-        <Pressable
-          key={tab}
-          accessibilityRole="tab"
-          accessibilityLabel={tab === "agents" ? "Agents" : "Crews"}
-          accessibilityState={{ selected: value === tab }}
-          onPress={() => onChange(tab)}
-          style={[
-            styles.tab,
-            {
-              backgroundColor: value === tab ? colors.navActive : "transparent",
-            },
-          ]}
-        >
-          <Label
-            style={{
-              fontFamily: fonts.bodySemi,
-              color:
-                value === tab ? colors.primaryOnTint : colors.textSecondary,
-            }}
-          >
-            {tab === "agents" ? "Agents" : "Crews"}
-          </Label>
-        </Pressable>
-      ))}
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
+  tabs: { marginBottom: 0 },
   fill: { flex: 1 },
   tabRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   createButton: {
@@ -118,19 +79,5 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-  },
-  tabs: {
-    flexDirection: "row",
-    padding: 4,
-    gap: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-  },
-  tab: {
-    flex: 1,
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 8,
   },
 });

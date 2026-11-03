@@ -50,7 +50,7 @@ export const sharedConsentsSchema = z.object({
   consents: z.array(z.object({
     id: z.string(), connection_id: z.string(), catalog_service_id: z.string(),
     connection_name: z.string().nullable().optional(),
-    operation: z.string(), conversation_id: z.string(), decision: z.enum(["pending", "always", "once"]),
+    operation: z.string(), conversation_id: z.string().nullable(), group_id: z.string().nullish(), audience: z.string().nullish(), decision: z.enum(["pending", "always", "once"]),
     expires_at: z.string().nullable(), scope: z.string(),
   })),
 });

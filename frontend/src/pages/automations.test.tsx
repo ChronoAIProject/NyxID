@@ -327,7 +327,9 @@ it("shows history thread links, pages older runs and confirms deletion", async (
               id: "run",
               outcome: "completed",
               scheduled_at: trigger.created_at,
-              started_at: new Date(Date.parse(trigger.created_at) + 23_000).toISOString(),
+              started_at: new Date(
+                Date.parse(trigger.created_at) + 23_000,
+              ).toISOString(),
               capacity_wait_ms: 80_000,
               reason: null,
               duration_ms: 2000,
@@ -361,7 +363,9 @@ it("shows history thread links, pages older runs and confirms deletion", async (
     "href",
     "/assistant?c=thread-1",
   );
-  expect(screen.getByText("waited 1 minute 20 seconds for capacity")).toBeInTheDocument();
+  expect(
+    screen.getByText("waited 1 minute 20 seconds for capacity"),
+  ).toBeInTheDocument();
   expect(screen.getByText(/^Started /)).toBeInTheDocument();
   expect(
     screen.getByText(/Missed 864 occurrences between/),
@@ -378,6 +382,55 @@ it("shows history thread links, pages older runs and confirms deletion", async (
     within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }),
   );
   expect(mocks.remove).toHaveBeenCalledWith(trigger.id);
+});
+
+it("shows the closed model failure in run history and preserves legacy reasons", async () => {
+  const user = userEvent.setup();
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({
+    data: {
+      pages: [
+        {
+          runs: [
+            {
+              id: "failed",
+              outcome: "failed",
+              scheduled_at: trigger.created_at,
+              reason: "assistant_unavailable",
+              duration_ms: 9000,
+              thread_id: "failed-thread",
+              failure_reason: {
+                source: "nyxid",
+                stage: "model_proxy",
+                code: "api_key_scope_forbidden",
+                http_status: 403,
+                nyxid_error_code: 9000,
+              },
+            },
+            {
+              id: "legacy",
+              outcome: "failed",
+              scheduled_at: trigger.created_at,
+              reason: "turn_lost",
+              duration_ms: null,
+              thread_id: null,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  render(<AutomationsPage />);
+  await user.click(
+    screen.getAllByRole("button", { name: "Morning summary" })[0]!,
+  );
+  expect(
+    screen.getByText(
+      "Model request failed: api_key_scope_forbidden (HTTP 403)",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("assistant unavailable")).not.toBeInTheDocument();
+  expect(screen.getByText("turn lost")).toBeInTheDocument();
 });
 it("shows preference validation errors and keeps invalid timezones unsaved", async () => {
   mocks.settings.mockReturnValue({ data: { timezone: "Mars/Olympus" } });

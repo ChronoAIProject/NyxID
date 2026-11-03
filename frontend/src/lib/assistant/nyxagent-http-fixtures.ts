@@ -842,6 +842,16 @@ export class NyxAgentHttpFixtures {
       this.save();
       return json({ disconnected: row.id, platform: row.platform, gateway_released: true });
     }
+    if (method === "PATCH" && typeof body().private_chat_posts === "boolean") {
+      row.private_chat_posts = body().private_chat_posts as boolean;
+      if (body().apply_to_existing === true) {
+        for (const chat of this.chats) {
+          if (chat.channel_agent_id === row.id && chat.kind === "private" && !chat.parent_chat_id) chat.allow_posts = row.private_chat_posts;
+        }
+      }
+      this.save();
+      return json({ channel_agent_id: row.id, private_chat_posts: row.private_chat_posts });
+    }
     if (method === "PATCH" && body().private_chats !== undefined) {
       const access = body().private_chats;
       if (access !== "owner" && access !== "everyone") {
@@ -936,6 +946,7 @@ export class NyxAgentHttpFixtures {
         agent_id: null,
         org_id: null,
         private_chats: "owner",
+        private_chat_posts: false,
         delivery_status: null,
         delivery_error: null,
         delivery_reason: null,

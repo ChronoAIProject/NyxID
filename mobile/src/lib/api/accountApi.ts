@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { requestJson } from "./http";
 import type { AccountProfile } from "./types";
+import { createAccountSecurityApi } from "./accountSecurityTransport";
 import {
   mfaConfirmSchema,
   mfaSetupSchema,
@@ -19,6 +20,7 @@ function parseResponse<T>(schema: z.ZodType<T>, payload: unknown): T {
 }
 
 export const accountApi = {
+  ...createAccountSecurityApi(requestJson),
   getProfile: (signal?: AbortSignal) =>
     requestJson<AccountProfile>("/users/me", { signal }),
   updateProfile: (input: UpdateProfileInput) =>
@@ -59,11 +61,4 @@ export const accountApi = {
       }),
     );
   },
-  disableMfa: (password: string) =>
-    requestJson<{ message: string }>("/auth/mfa/disable", {
-      method: "POST",
-      body: { password },
-      retryOnAuthFailure: false,
-      invalidateSessionOnAuthFailure: false,
-    }),
 };

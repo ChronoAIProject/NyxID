@@ -246,7 +246,7 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
     <span
       title={decisionTitle(row)}
       className={cn(
-        "shrink-0 rounded border px-1 font-sans text-9 leading-4",
+        "shrink-0 rounded border px-1 font-sans text-9 leading-normal",
         denied
           ? "border-warning/30 bg-warning/10 text-warning"
           : "border-hairline bg-overlay text-text-tertiary",
@@ -477,8 +477,10 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
   return (
     <details className="mt-2 max-w-[900px] text-11 text-text-tertiary">
       <summary className="cursor-pointer">Details</summary>
-      {failure?.source === "nyxid" && failure.code === "guest_model_route_required" ? (
-        <p className="mt-1">Send one message to this agent as its owner using its configured model to record the route for guest replies.</p>
+      {failure?.source === "nyxid" && (failure.code === "guest_model_route_required" || failure.stage === "guest_setup") ? (
+        <p className="mt-1">{failure.model_route?.reason === "credits_unavailable"
+          ? "Add credits to the linking owner's account. Visitor setup retries automatically."
+          : "Check this assistant's configured model and model connection. Visitor setup retries automatically."}</p>
       ) : null}
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
         <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
@@ -627,8 +629,8 @@ export function ChatMessageBubble({
   }
   if (message.role === "user") {
     return (
-      <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
-        <UserMessageBubble>
+      <div className="group/message ml-auto flex min-w-0 max-w-[90%] flex-col items-end gap-1 sm:max-w-[78%]">
+        <UserMessageBubble className="max-w-full text-16 [overflow-wrap:anywhere]">
           {message.steering && (
             <p className="mb-1 text-11" role="note">
               Steering ·{" "}

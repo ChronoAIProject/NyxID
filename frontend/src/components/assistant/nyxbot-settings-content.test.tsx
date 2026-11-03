@@ -93,6 +93,8 @@ function agent(
     channels: [],
   };
 }
+let privateChatPosts: boolean | undefined;
+let postsError = false;
 let writes: { method: string; endpoint: string; body: unknown }[];
 let client: QueryClient;
 
@@ -136,9 +138,12 @@ beforeEach(() => {
     owner_linked: true,
     agent_id: channelAgentId,
     private_chats: privateChats,
+    private_chat_posts: privateChatPosts,
     created_at: "2026-09-28T00:00:00Z",
   });
   privateChats = "owner";
+  privateChatPosts = undefined;
+  postsError = false;
   const chat = (id: string, kind: string, title: string) => ({
     id,
     channel_agent_id: "channel-1",
@@ -194,7 +199,26 @@ beforeEach(() => {
       endpoint === "/assistant/nyxagent/channels/channel-1" &&
       method === "PATCH"
     ) {
-      const update = body as { agent_id?: string; private_chats?: string };
+      const update = body as {
+        agent_id?: string;
+        private_chats?: string;
+        private_chat_posts?: boolean;
+        apply_to_existing?: boolean;
+      };
+      if (update.private_chat_posts !== undefined) {
+        if (postsError) return json({ message: "Could not save posting" }, 503);
+        privateChatPosts = update.private_chat_posts;
+        if (update.apply_to_existing)
+          chats = chats.map((chat) =>
+            chat.kind === "private"
+              ? { ...chat, allow_posts: privateChatPosts! }
+              : chat,
+          );
+        return json({
+          channel_agent_id: "channel-1",
+          private_chat_posts: privateChatPosts,
+        });
+      }
       if (update.private_chats) {
         privateChats = update.private_chats;
         return json({
@@ -697,4 +721,69 @@ it("saves Automation preferences independently from dirty General settings", asy
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({ max_live_subagents: 12 }),
   );
+});
+
+it("defaults new private chat posting off on legacy responses and saves without changing existing chats", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  const connected = await screen.findByRole("list", {
+    name: "Connected channel bots",
+  });
+  await user.click(
+    within(connected).getByRole("button", { name: "Chats and who can talk" }),
+  );
+  const toggle = screen.getByRole("switch", {
+    name: "Allow posts in new private chats with Home bot",
+  });
+  expect(toggle).not.toBeChecked();
+  await user.click(toggle);
+  await waitFor(() => expect(toggle).toBeChecked());
+  expect(writes).toContainEqual({
+    method: "PATCH",
+    endpoint: "/assistant/nyxagent/channels/channel-1",
+    body: { private_chat_posts: true, apply_to_existing: false },
+  });
+  await user.click(
+    screen.getByRole("checkbox", {
+      name: "Also apply to existing private chats",
+    }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Apply current setting" }),
+  );
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/channels/channel-1",
+      body: { private_chat_posts: true, apply_to_existing: true },
+    }),
+  );
+  await user.click(toggle);
+  await waitFor(() => expect(toggle).not.toBeChecked());
+  expect(writes).toContainEqual({
+    method: "PATCH",
+    endpoint: "/assistant/nyxagent/channels/channel-1",
+    body: { private_chat_posts: false, apply_to_existing: false },
+  });
+});
+it("keeps the posting switch unchanged and exposes a save failure", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  postsError = true;
+  const connected = await screen.findByRole("list", {
+    name: "Connected channel bots",
+  });
+  await user.click(
+    within(connected).getByRole("button", { name: "Chats and who can talk" }),
+  );
+  const toggle = screen.getByRole("switch", {
+    name: "Allow posts in new private chats with Home bot",
+  });
+  await user.click(toggle);
+  await waitFor(() =>
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "NyxBot is temporarily unavailable",
+    ),
+  );
+  expect(toggle).not.toBeChecked();
 });

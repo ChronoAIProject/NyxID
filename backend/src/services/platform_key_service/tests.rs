@@ -483,6 +483,7 @@ async fn platform_auto_connections_reconcile_and_hosted_links_complete_once() {
     let link = connect_link_service::create(
         &db,
         connect_link_service::CreateInput {
+            assistant_intent_locked: false,
             user_id: user.clone(),
             service_slug: catalog.slug.clone(),
             use_platform_key: Some(true),
@@ -2017,6 +2018,7 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     let mut service = platform_service();
     service.requires_user_credential = false;
     let mut target = proxy_service::ProxyTarget {
+        credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,
         base_url: service.base_url.clone(),

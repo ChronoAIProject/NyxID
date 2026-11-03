@@ -230,6 +230,7 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         outcome: RunOutcome::Pending,
         confirmation_policy: None,
         reason: None,
+        failure_reason: None,
         started_at: None,
         finished_at: None,
         thread_id: None,
@@ -239,6 +240,7 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         waiting_for: Vec::new(),
         result_claimed: false,
         image_refs: Vec::new(),
+        delegated_image_refs: Vec::new(),
         image_refs_truncated: 0,
         agent_id: None,
         deliver_to: Default::default(),
@@ -1541,6 +1543,7 @@ async fn record_terminal_in_session(
             .await?
         {
             let message = AssistantMessage {
+                delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,

@@ -108,7 +108,7 @@ async fn guest_1995_fresh_platform_connection_bootstraps_without_owner() {
 }
 
 #[tokio::test]
-async fn guest_1995_fresh_byok_route_needs_owner_and_has_safe_reply() {
+async fn guest_setup_2092_fresh_byok_route_initializes_without_owner_message() {
     Box::pin(guest_pipeline(false, &["bootstrap_byok"])).await;
 }
 
@@ -261,6 +261,8 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
     let input_source = model_input.clone();
     let scenario_source = Arc::new(Mutex::new(String::new()));
     let current_scenario = scenario_source.clone();
+    let setup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let setup_sink = setup_calls.clone();
     let callback_db = f.state.db.clone();
     let callback_conversation = f.row.id.clone();
     let agent = Router::new().route("/v1/responses", post(move |headers: HeaderMap, Json(body): Json<Value>| {
@@ -269,6 +271,7 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
         let input_source = input_source.clone();
         let scenario_source = scenario_source.clone();
         let db = callback_db.clone();
+        let setup_calls = setup_sink.clone();
         let conversation = callback_conversation.clone();
         async move {
             let scenario = scenario_source.lock().await.clone();
@@ -276,6 +279,9 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             // NyxAgent's nyxid::Auth uses X-API-Key for MCP and Bearer for
             // model proxy calls. Both carry this conversation's exact key.
             let thread_key = bearer.to_str().unwrap().strip_prefix("Bearer ").unwrap();
+            let (_, validated_key, _) = crate::services::key_service::validate_api_key(&db,thread_key).await.unwrap();
+            let setup = db.collection::<bson::Document>("assistant_conversations").find_one(doc!{"credential_api_key_id":&validated_key.id,"guest_model_setup":true}).await.unwrap().is_some();
+            if setup {assert_eq!(body["input"],crate::services::assistant_guest_model_setup::INSTRUCTION);}
             let mut observations = Vec::new();
             for method in ["initialize", "tools/list"] {
                 let response = callbacks.clone().oneshot(Request::builder().method("POST").uri("/mcp")
@@ -286,12 +292,7 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
                 let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
                 observations.push(json!({"stage":method,"status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
             }
-            if scenario == "owner_no_attempt" {
-                db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
-                    "conversation_id":&conversation,"kind":"model_attempt"
-                }).await.unwrap();
-            }
-            if scenario == "missing_input" {
+            if !setup && scenario == "missing_input" {
                 db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
                     "conversation_id":&conversation,"kind":"input_admission"
                 }).await.unwrap();
@@ -309,11 +310,11 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             }
             let response = callbacks.clone().oneshot(request
                 .header("authorization", bearer.clone()).header("content-type", "application/json").header("accept", "*/*")
-                .body(Body::from(input_source.lock().await.to_string())).unwrap()).await.unwrap();
+                .body(Body::from(if setup {json!({"model":model_name,"store":false,"input":body["input"],"stream":false}).to_string()}else{input_source.lock().await.to_string()})).unwrap()).await.unwrap();
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             observations.push(json!({"stage":"model","status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
-            if scenario.starts_with("bootstrap_") && scenario != "bootstrap_byok" {
+            if !setup && scenario.starts_with("bootstrap_") {
                 for (slug, path, model, store, override_method) in [
                     ("unrelated-owner-model", model_path, model_name, false, false),
                     (model_slug, model_path, "unrelated-model", false, false),
@@ -331,7 +332,7 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
                     assert_eq!(response.status(), StatusCode::FORBIDDEN, "bootstrap probe {slug}/{path}, model={model}");
                 }
             }
-            if scenario == "probes" {
+            if !setup && scenario == "probes" {
                 // The exact same authenticated key and live turn can use only
                 // the owner-established route, not another owner BYOK account.
                 for (slug, path, model, store, override_method) in [
@@ -360,7 +361,9 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
                 let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
                 observations.push(json!({"stage":"guest_tool_call","body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
             }
-            sink.lock().await.push(json!({"calls":observations,"request":body}));
+            if setup {
+                if status==200 {setup_calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
+            } else {sink.lock().await.push(json!({"calls":observations,"request":body}));}
             let failed = status != 200;
             let event = json!({"type":if failed {"response.failed"} else {"response.completed"},"sequence_number":0,
                 "response":{"id":RESPONSE,"conversation":{"id":SESSION},"status":if failed {"failed"} else {"completed"},
@@ -375,7 +378,11 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
     if bootstrap {
         provider_mock = provider_mock.and(wiremock::matchers::header(
             "authorization",
-            "Bearer test-only-master",
+            if scenarios.contains(&"bootstrap_byok") {
+                "Bearer test-only-byok"
+            } else {
+                "Bearer test-only-master"
+            },
         ));
     }
     provider_mock
@@ -555,6 +562,7 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
         .filter(|s| !matches!(**s, "chat" | "research" | "channel"))
     {
         let provider_calls_before = provider.received_requests().await.unwrap().len();
+        let setups_before = setup_calls.load(std::sync::atomic::Ordering::SeqCst);
         let guest = !scenario.starts_with("owner");
         let cards_before = f
             .state
@@ -753,13 +761,25 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
                 .unwrap()
                 .get("owner_model_route")
                 .cloned();
-            if scenario == "stale_route" {
-                assert!(route_before.is_some());
-                assert!(route_after.is_none());
-            } else {
+            if setups_before == setup_calls.load(std::sync::atomic::Ordering::SeqCst) {
                 assert_eq!(
                     route_before, route_after,
                     "guest may not establish or replace a model route"
+                );
+            } else {
+                let setup = crate::services::assistant_guest_model_setup::record(
+                    &f.state.db,
+                    &f.owner,
+                    &f.chat.agent_id,
+                    &row.model,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(setup.get_str("status"), Ok("ready"));
+                assert!(
+                    setup.get_document("route").is_ok(),
+                    "only the separately authenticated owner setup recorded a route"
                 );
             }
             assert_eq!(f.state.db.collection::<bson::Document>("assistant_service_execution")
@@ -828,7 +848,12 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
         } else {
             assert!(reply.activities.is_empty());
         }
-        assert_eq!(reply.turn_metadata.as_ref().unwrap().attempts, Some(1));
+        let initialized = setup_calls.load(std::sync::atomic::Ordering::SeqCst) > setups_before;
+        assert_eq!(
+            reply.turn_metadata.as_ref().unwrap().attempts,
+            Some(if guest && initialized { 2 } else { 1 }),
+            "{scenario}: only an independently admitted owner setup permits a route retry"
+        );
         assert_eq!(
             seen.last().unwrap()["request"]["model"],
             seen[0]["request"]["model"]
@@ -849,17 +874,7 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
         }
         let expected = match scenario {
             "approval" => Some((403, "api_key_scope_forbidden", 9000)),
-            "stateful"
-            | "missing_input"
-            | "unbound"
-            | "catalog_unbound"
-            | "bootstrap_byok"
-            | "metadata_stateful"
-            | "metadata_hosted"
-            | "metadata_unknown"
-            | "metadata_unknown_effect"
-            | "metadata_replacement"
-            | "semantic_header" => Some((403, "guest_model_route_required", 9000)),
+            "stateful" | "missing_input" => Some((403, "guest_model_route_required", 9000)),
             "concurrency" => Some((429, "service_concurrency_limited", 12600)),
             _ => None,
         };
@@ -876,8 +891,9 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             assert_eq!(calls[2]["status"], status, "{scenario}: {}", calls[2]);
             assert_eq!(
                 provider.received_requests().await.unwrap().len(),
-                provider_calls_before,
-                "{scenario} must be refused before reaching the provider"
+                provider_calls_before + setup_calls.load(std::sync::atomic::Ordering::SeqCst)
+                    - setups_before,
+                "{scenario} guest must be refused before reaching the provider"
             );
             assert_eq!(reply.status, "failed", "{scenario}: {calls}");
             let mapped = if code == "guest_model_route_required" {
@@ -902,11 +918,12 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
                     .model_route
                     .as_ref()
                     .expect("closed route diagnostic on failure");
-                let setup = crate::services::assistant_service_execution::model_diagnostic::Reason::setup_code(&diagnostic.reason);
+                let setup =
+                    crate::services::assistant_guest_model_setup::failure_code(&diagnostic.reason);
                 assert_eq!(
                     completed["error"]["message"],
                     if setup {
-                        "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later."
+                        "Visitor setup could not finish. The owner has been notified. Please try again later."
                     } else {
                         "This assistant can't answer right now. Please try again later."
                     }
@@ -928,7 +945,8 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             );
             assert_eq!(
                 provider.received_requests().await.unwrap().len(),
-                provider_calls_before + 1,
+                provider_calls_before + 1 + setup_calls.load(std::sync::atomic::Ordering::SeqCst)
+                    - setups_before,
                 "{scenario}: {calls}"
             );
             assert!(

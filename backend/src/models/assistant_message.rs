@@ -12,6 +12,8 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default)]
+    pub delegated_images: super::assistant_delegated_image::DelegatedImages,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_queue_notice_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -160,8 +162,8 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_delivery: Option<super::generated_artifact::SavedOutcome>,
+    #[serde(default)]
+    pub timing: Option<TurnTiming>,
     /// Closed metadata from a failed model callback, or the upstream code alone.
     #[serde(default)]
     pub failure_reason: Option<Box<TurnFailureReason>>,
@@ -187,4 +189,18 @@ pub struct ChannelDelivery {
     pub status: String,
     pub heard_prefix_chars: Option<i64>,
     pub heard_prefix_matches_sent: bool,
+}
+
+/// Metadata only. Durations sum per-call wall time (parallel calls may overlap).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TurnTiming {
+    pub queue_wait_ms: u64,
+    pub admission_wait_ms: u64,
+    pub first_output_ms: Option<u64>,
+    pub model_ms: u64,
+    pub tool_ms: u64,
+    pub model_calls: u64,
+    pub tool_calls: u64,
+    pub total_ms: u64,
 }

@@ -175,6 +175,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::proxy::proxy_request_root",
+        route: "/api/v1/proxy/{service_id}/",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::proxy::proxy_request_by_slug",
         route: "/api/v1/proxy/s/{slug}/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
@@ -182,6 +187,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
         handler: "handlers::proxy::proxy_request_by_slug_root",
         route: "/api/v1/proxy/s/{slug}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::proxy::proxy_request_by_slug_root",
+        route: "/api/v1/proxy/s/{slug}/",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
@@ -284,6 +294,13 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
         handler: "handlers::public_proxy::public_proxy_request_root",
         route: "/public/s/{slug}",
+        policy: BillingRoutePolicy::Exempt(
+            "block-not-meter; billable anonymous services are invalid",
+        ),
+    },
+    BillingRouteSpec {
+        handler: "handlers::public_proxy::public_proxy_request_root",
+        route: "/public/s/{slug}/",
         policy: BillingRoutePolicy::Exempt(
             "block-not-meter; billable anonymous services are invalid",
         ),

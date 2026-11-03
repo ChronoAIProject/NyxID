@@ -885,8 +885,10 @@ mod tests {
     /// (`NyxIdOperationAdmissionProofBuilder`) accepts only this fixed
     /// schema-keyword whitelist and drops the whole endpoint on any other
     /// keyword, an unresolved `$ref`, or a union `type` array. Every
-    /// overlay schema must stay inside the subset or the operation becomes
-    /// invisible to workflow binding (see NyxID#1296).
+    /// schema exposed through /mcp/config must stay inside the subset or the
+    /// operation becomes invisible to workflow binding (see NyxID#1296).
+    /// Hosted IM adapters have a separate server contract: the legacy bridge
+    /// keeps raw message strings and omits image materialization entirely.
     const AEVATAR_SCHEMA_KEYWORDS: &[&str] = &[
         "type",
         "enum",
@@ -901,6 +903,41 @@ mod tests {
         "examples",
         "deprecated",
     ];
+
+    fn im_contracts(
+        key: &str,
+        spec: &serde_json::Value,
+    ) -> HashMap<String, crate::services::mcp_service::McpToolEndpoint> {
+        use crate::services::{
+            catalog_spec_sync, lark_attachment_tool, lark_im_tool, mcp_service,
+            service_endpoint_service,
+        };
+        let slug = match key {
+            "lark" => "api-lark",
+            "lark-bot" => "api-lark-bot",
+            _ => return HashMap::new(),
+        };
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.slug = slug.into();
+        catalog.created_by = "system".into();
+        catalog_spec_sync::destination_endpoint_inputs(&catalog, spec)
+            .unwrap()
+            .into_iter()
+            .filter_map(|input| {
+                let row = service_endpoint_service::endpoint_from_input(
+                    &catalog.id,
+                    input,
+                    crate::models::service_endpoint::PublicationState::Published,
+                );
+                let mut endpoint = mcp_service::service_endpoints_to_mcp(&[&row])
+                    .pop()
+                    .unwrap();
+                endpoint.attachment_input =
+                    lark_attachment_tool::stored_projection(Some(&catalog), &endpoint);
+                lark_im_tool::kind(&endpoint).map(|_| (endpoint.name.clone(), endpoint))
+            })
+            .collect()
+    }
 
     fn assert_admissible_schema(spec_key: &str, context: &str, schema: &serde_json::Value) {
         let Some(object) = schema.as_object() else {
@@ -940,6 +977,7 @@ mod tests {
     fn every_schema_stays_inside_aevatar_admission_subset() {
         for (key, _) in HOSTED_SPEC_SOURCES {
             let spec = spec_for_key(key).expect("registered spec");
+            let contracts = im_contracts(key, &spec);
             assert!(
                 spec.pointer("/components/schemas").is_none(),
                 "spec '{key}' must inline schemas; aevatar rejects unresolved $refs"
@@ -962,6 +1000,19 @@ mod tests {
                             .contains("$ref"),
                         "spec '{key}' {method} {path} contains a $ref"
                     );
+                    let mut legacy = operation["operationId"]
+                        .as_str()
+                        .and_then(|id| contracts.get(id))
+                        .cloned();
+                    if let Some(endpoint) = legacy.as_mut() {
+                        if crate::services::lark_im_tool::kind(endpoint)
+                            == Some(crate::services::lark_im_tool::Kind::Image)
+                        {
+                            // This server-only adapter is absent from /mcp/config.
+                            continue;
+                        }
+                        crate::services::lark_im_tool::legacy_message_contract(endpoint);
+                    }
                     for param in operation
                         .get("parameters")
                         .and_then(|params| params.as_array())
@@ -981,8 +1032,16 @@ mod tests {
                         .pointer("/requestBody/content")
                         .and_then(|content| content.as_object())
                     {
-                        for media in content.values() {
+                        for (content_type, media) in content {
                             if let Some(schema) = media.get("schema") {
+                                let schema = if content_type == "application/json" {
+                                    legacy
+                                        .as_ref()
+                                        .and_then(|ep| ep.request_body_schema.as_ref())
+                                        .unwrap_or(schema)
+                                } else {
+                                    schema
+                                };
                                 assert_admissible_schema(
                                     key,
                                     &format!("{method} {path} body"),
@@ -997,9 +1056,10 @@ mod tests {
     }
 
     #[test]
-    fn every_operation_has_unique_operation_id_and_aevatar_marker() {
+    fn every_operation_has_unique_operation_id_and_its_owners_marker() {
         for (key, _) in HOSTED_SPEC_SOURCES {
             let spec = spec_for_key(key).expect("registered spec");
+            let contracts = im_contracts(key, &spec);
             let paths = spec
                 .get("paths")
                 .and_then(|paths| paths.as_object())
@@ -1024,6 +1084,20 @@ mod tests {
                         operation_ids.insert(operation_id.to_string()),
                         "spec '{key}' duplicate operationId '{operation_id}'"
                     );
+                    if contracts
+                        .get(operation_id)
+                        .and_then(crate::services::lark_im_tool::kind)
+                        == Some(crate::services::lark_im_tool::Kind::Image)
+                    {
+                        // No Aevatar authority is invented for a NyxID-only
+                        // adapter omitted by the legacy workflow bridge.
+                        assert!(operation.get("x-aevatar-tool").is_none());
+                        assert_eq!(
+                            operation["x-nyxid-managed-operation"],
+                            serde_json::json!({"kind":"lark_im_image","version":1})
+                        );
+                        continue;
+                    }
                     let marker = operation.get("x-aevatar-tool").unwrap_or_else(|| {
                         panic!("spec '{key}' {method} {path} missing x-aevatar-tool")
                     });

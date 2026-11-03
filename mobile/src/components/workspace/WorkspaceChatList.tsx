@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   AppState,
   Pressable,
+  RefreshControl,
   ScrollView,
   type ScrollViewProps,
   StyleSheet,
@@ -21,6 +22,7 @@ import {
   ChevronRight,
   MessageSquare,
   Plus,
+  RefreshCw,
   Users,
 } from "lucide-react-native";
 import type { WorkspaceChatTarget } from "../../app/workspaceChatNavigation";
@@ -102,6 +104,10 @@ export function WorkspaceChatList({
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
   const active = visible && foreground && isConnected;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const refreshLock = useRef(false);
+  const [pullRefreshing, setPullRefreshing] = useState(false);
   const available = () =>
     visible &&
     AppState.currentState === "active" &&
@@ -117,7 +123,10 @@ export function WorkspaceChatList({
     const subscription = AppState.addEventListener("change", (state) =>
       setForeground(state === "active"),
     );
-    return () => subscription.remove();
+    return () => {
+      activeRef.current = false;
+      subscription.remove();
+    };
   }, []);
   useEffect(() => {
     if (!visible) {
@@ -131,9 +140,30 @@ export function WorkspaceChatList({
     queryKey: ["workspace", "agents", "drawer", epoch],
     queryFn: ({ signal }) => agentsApi.list(signal),
     enabled: active,
-    refetchInterval: livePollInterval(5000, live),
+    // Reopening/resuming enables a stale read immediately; events and manual
+    // refresh can update it sooner than this foreground fallback interval.
+    staleTime: 0,
+    refetchInterval: active ? 30_000 : false,
     retry: false,
   });
+  const refreshingAgents = pullRefreshing || agents.isFetching;
+  const refreshAgents = async () => {
+    if (
+      refreshLock.current ||
+      !activeRef.current ||
+      AppState.currentState !== "active" ||
+      epoch !== getAuthEpoch()
+    )
+      return;
+    refreshLock.current = true;
+    setPullRefreshing(true);
+    try {
+      await agents.refetch({ cancelRefetch: false });
+    } finally {
+      refreshLock.current = false;
+      setPullRefreshing(false);
+    }
+  };
   const groups = useQuery({
     queryKey: [...groupKeys(epoch), "list"],
     queryFn: ({ signal }) => groupsApi.list(signal),
@@ -141,12 +171,13 @@ export function WorkspaceChatList({
     refetchInterval: livePollInterval(5000, live),
     retry: false,
   });
-  const allAgents = (
+  const indexedAgents = (
     mode === "drawer" ? sidebarOrderedAgents : orderedDrawerAgents
-  )(agents.data?.agents ?? []).filter(
+  )(agents.data?.agents ?? []);
+  const allAgents = indexedAgents.filter(
     (agent) =>
-      mode !== "picker" ||
-      (agent.status !== "destroyed" && agent.can_use === true),
+      agent.status !== "destroyed" &&
+      (mode !== "picker" || agent.can_use === true),
   );
   const allGroups = [...(groups.data ?? [])].sort((a, b) =>
     (b.last_message_at || b.created_at).localeCompare(
@@ -156,7 +187,11 @@ export function WorkspaceChatList({
   const currentAgentId =
     current?.kind === "agent" ? current.agentId : undefined;
   const openId = expandedAgent !== undefined ? expandedAgent : currentAgentId;
-  const agent = allAgents.find((row) => row.id === openId);
+  // Retain historical context for an open chat/browser without adding deleted
+  // agents back to the current roster or its count.
+  const agent = (mode === "drawer" ? indexedAgents : allAgents).find(
+    (row) => row.id === openId,
+  );
   useEffect(() => {
     sticky.current.bottom = Infinity;
     setPastThreads(false);
@@ -351,17 +386,33 @@ export function WorkspaceChatList({
       onPress={() => openChat(selectedChatId)}
     />
   ) : null;
+  const previewAgents = boundedDrawerPreview(
+    allAgents,
+    openId || currentAgentId,
+  );
+  const ownerCounts = new Map<string, { total: number; shown: number }>();
+  for (const row of allAgents) {
+    const key = sidebarAgentOwner(row).key;
+    const counts = ownerCounts.get(key) ?? { total: 0, shown: 0 };
+    counts.total += 1;
+    ownerCounts.set(key, counts);
+  }
+  for (const row of previewAgents)
+    ownerCounts.get(sidebarAgentOwner(row).key)!.shown += 1;
   const rows: ReactNode[] = [<View key="workspace">{scrollHeader}</View>];
   if (mode === "drawer")
     rows.push(
       <SectionHeading
         key="agents"
         label="Agents"
-        count={allAgents.length}
+        count={`${allAgents.length} total`}
         expanded={sections.agents}
         createLabel="New agent"
         onCreate={onCreateAgent}
         createDisabled={!active}
+        onRefresh={() => void refreshAgents()}
+        refreshing={refreshingAgents}
+        refreshDisabled={!active}
         onPress={() =>
           setSections((value) => ({ ...value, agents: !value.agents }))
         }
@@ -371,10 +422,12 @@ export function WorkspaceChatList({
   if (sections.agents || mode === "picker") {
     rows.push(
       <View key="agent-status">
-        {current?.kind === "agent" &&
+        {mode === "drawer" &&
+        current?.kind === "agent" &&
         current.conversationId &&
-        !current.agentId &&
-        !chats.some((row) => row.id === current.conversationId) ? (
+        (current.agentId
+          ? !allAgents.some((row) => row.id === current.agentId)
+          : !chats.some((row) => row.id === current.conversationId)) ? (
           <ChatRow
             label="Current chat"
             selected
@@ -389,8 +442,10 @@ export function WorkspaceChatList({
         ) : null}
         {agents.isError ? (
           <DrawerMessage
-            text="Couldn’t load agents."
-            retry={() => void agents.refetch()}
+            text={
+              agents.data ? "Couldn’t refresh agents." : "Couldn’t load agents."
+            }
+            retry={() => void refreshAgents()}
             disabled={!active}
           />
         ) : null}
@@ -400,20 +455,22 @@ export function WorkspaceChatList({
       </View>,
     );
     let previousOwner: string | undefined;
-    for (const row of boundedDrawerPreview(
-      allAgents,
-      openId || currentAgentId,
-    )) {
+    for (const row of previewAgents) {
       if (mode === "drawer") {
         const owner = sidebarAgentOwner(row);
+        const counts = ownerCounts.get(owner.key)!;
         if (owner.key !== previousOwner)
           rows.push(
             <Text
               key={`owner:${owner.key}`}
               accessibilityRole="header"
+              accessibilityLabel={`${owner.label}, ${counts.shown} of ${counts.total} agents shown`}
               style={[styles.ownerHeading, { color: colors.textMuted }]}
             >
-              {owner.label}
+              {owner.label} ·{" "}
+              {counts.shown === counts.total
+                ? counts.total
+                : `${counts.shown} of ${counts.total}`}
             </Text>,
           );
         previousOwner = owner.key;
@@ -659,6 +716,18 @@ export function WorkspaceChatList({
     <View style={styles.fill}>
       <ScrollView
         {...scrollProps}
+        alwaysBounceVertical
+        refreshControl={
+          <RefreshControl
+            accessibilityLabel="Refresh agents"
+            enabled={active}
+            refreshing={pullRefreshing}
+            onRefresh={() => void refreshAgents()}
+            tintColor={colors.primary}
+            colors={[colors.primary]}
+            progressBackgroundColor={colors.card}
+          />
+        }
         stickyHeaderIndices={
           stickyIndex !== undefined && !pastThreads ? [stickyIndex] : []
         }
@@ -738,6 +807,12 @@ export function WorkspaceChatList({
             )
           }
           visible={!browserClosing}
+          onRefresh={
+            browser.kind === "agents" ? () => void refreshAgents() : undefined
+          }
+          refreshing={refreshingAgents}
+          refreshDisabled={!active}
+          refreshLabel="Refresh agents"
           onClose={() => dismissBrowser()}
           onDismiss={() => finishBrowserDismissal(browserClosing)}
           primaryAction={
@@ -778,7 +853,17 @@ export function WorkspaceChatList({
                           : "No chats yet. Start your first conversation above."
           }
           footer={
-            browser.kind === "chats" ? (
+            browser.kind === "agents" && agents.isError ? (
+              <DrawerMessage
+                text={
+                  agents.data
+                    ? "Couldn’t refresh agents."
+                    : "Couldn’t load agents."
+                }
+                retry={() => void refreshAgents()}
+                disabled={!active || refreshingAgents}
+              />
+            ) : browser.kind === "chats" ? (
               <>
                 {historyStatus}
                 {currentRow}
@@ -812,14 +897,20 @@ function SectionHeading({
   createLabel,
   onCreate,
   createDisabled,
+  onRefresh,
+  refreshing = false,
+  refreshDisabled = false,
 }: {
   label: string;
-  count: number;
+  count: number | string;
   expanded: boolean;
   onPress: () => void;
   createLabel: string;
   onCreate: () => void;
   createDisabled: boolean;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  refreshDisabled?: boolean;
 }) {
   const { colors } = useTheme();
   const Chevron = expanded ? ChevronDown : ChevronRight;
@@ -829,6 +920,7 @@ function SectionHeading({
         accessibilityRole="button"
         accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${label.toLowerCase()}`}
         accessibilityState={{ expanded }}
+        accessibilityValue={{ text: String(count) }}
         onPress={onPress}
         style={styles.sectionRow}
       >
@@ -843,6 +935,25 @@ function SectionHeading({
         </Text>
         <Chevron size={16} color={colors.textMuted} />
       </Pressable>
+      {onRefresh ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Refresh ${label.toLowerCase()}`}
+          accessibilityState={{
+            disabled: refreshDisabled || refreshing,
+            busy: refreshing,
+          }}
+          disabled={refreshDisabled || refreshing}
+          onPress={onRefresh}
+          style={[styles.createButton, { opacity: refreshDisabled ? 0.4 : 1 }]}
+        >
+          {refreshing ? (
+            <ActivityIndicator size="small" color={colors.textSecondary} />
+          ) : (
+            <RefreshCw size={18} color={colors.textSecondary} />
+          )}
+        </Pressable>
+      ) : null}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={createLabel}

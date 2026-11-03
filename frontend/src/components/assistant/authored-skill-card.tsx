@@ -35,7 +35,7 @@ function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
   if (!data.failure_code) return null;
   return (
     <>
-      <p role="alert" className="text-[12px] text-destructive">
+      <p role="alert" className="text-12 text-destructive">
         {publicationFailureText(data.failure_code, data.status, "authored")}
       </p>
       {data.failure_rules.length ? (
@@ -78,7 +78,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
             checked={accepted}
             onCheckedChange={(checked) => onAccepted(checked === true)}
           />
-          <Label htmlFor={id} className="text-11 leading-4">
+          <Label htmlFor={id} className="text-11 leading-normal">
             I accept this reduced scope ({omissions.length} declared omission
             {omissions.length === 1 ? "" : "s"}).
           </Label>
@@ -205,8 +205,8 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     finally { await refresh(); }
   }
   const messages = <>
-    {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
-    {notice ? <p role="status" className="text-[12px] text-muted-foreground">{notice}</p> : null}
+    {error ? <p role="alert" className="text-12 text-destructive">{error}</p> : null}
+    {notice ? <p role="status" className="text-12 text-muted-foreground">{notice}</p> : null}
   </>;
   const buttons = actions.length > 0 ? <div className="flex justify-end gap-2">
     {actions.includes("deny") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Deny</Button> : null}
@@ -236,7 +236,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     return <div className="space-y-2">
       {status}
       <div className="ml-[30px] space-y-2">
-        {actions.includes("show_updated_draft") ? <p className="text-[12px] text-muted-foreground">A rebuilt package for this draft is waiting for its review card.</p> : null}
+        {actions.includes("show_updated_draft") ? <p className="text-12 text-muted-foreground">A rebuilt package for this draft is waiting for its review card.</p> : null}
         {messages}
         {buttons}
       </div>
@@ -244,12 +244,12 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   }
   if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
   return <section aria-label="Review skill draft" className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
-    <p className="text-[13px] font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
-    {data ? <p className="text-[12px]">Attach to {data.agent_name}</p> : null}
-    <p className="text-[12px] text-muted-foreground">Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.</p>
-    {data?.base_scripts_not_copied ? <p className="text-[12px] text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
+    <p className="text-13 font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
+    {data ? <p className="text-12">Attach to {data.agent_name}</p> : null}
+    <p className="text-12 text-muted-foreground">Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.</p>
+    {data?.base_scripts_not_copied ? <p className="text-12 text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
     {data?.files.map((file) => <div key={file.path}>
-      <p className="text-[12px] font-medium">{file.path}</p>
+      <p className="text-12 font-medium">{file.path}</p>
       <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-11">{file.content}</pre>
     </div>)}
     {data && learningDraftEditable(data.status) ? <div className="space-y-2">
@@ -257,7 +257,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
         {editing ? "Close the editor" : "Edit before publishing"}
       </Button>
       {editing ? <>
-        <p className="text-[12px] text-muted-foreground">Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.</p>
+        <p className="text-12 text-muted-foreground">Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.</p>
         <ProposalDraftEditor agentId={reference.agent_id} proposalId={reference.proposal_id} showCardLink={false} onSaved={() => {
           setEditing(false);
           setNotice(SAVED_EDIT_NOTICE);
@@ -265,9 +265,9 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
         }} />
       </> : null}
     </div> : null}
-    {data?.status === "publishing" ? <p role="status" className="text-[12px] text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
+    {data?.status === "publishing" ? <p role="status" className="text-12 text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
     {preview.isLoading ? <p role="status">Loading complete draft…</p> : null}
-    {preview.isError ? <p role="alert" className="text-[12px] text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
+    {preview.isError ? <p role="alert" className="text-12 text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
     {data ? (
       <>
         <FailureDetails data={data} />

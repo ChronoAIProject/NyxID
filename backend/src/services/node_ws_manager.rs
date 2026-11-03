@@ -447,6 +447,7 @@ pub struct NodeCapabilitiesFlags {
     pub http_signature_v2: bool,
     pub proxy_upload_v1: bool,
     pub credential_ack_correlation: bool,
+    pub credential_target_update_v1: bool,
     pub remote_credential_crypto_v1: bool,
     pub proxy_max_body_size: Option<usize>,
 }
@@ -1067,6 +1068,8 @@ struct WsCredentialUpdate {
     param_value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_revision: Option<i64>,
 }
 
 /// JSON message instructing a node to drop its local credential for a
@@ -1134,6 +1137,8 @@ pub struct NodeCapabilitiesMsg {
     #[serde(default)]
     pub credential_ack_correlation: bool,
     #[serde(default)]
+    pub credential_target_update_v1: bool,
+    #[serde(default)]
     pub remote_credential_crypto_v1: bool,
     /// Maximum raw HTTP request body that fits through this node's control WS.
     #[serde(default)]
@@ -1170,6 +1175,8 @@ pub struct CredentialUpdateParams {
     pub param_name: Option<String>,
     pub param_value: Option<String>,
     pub target_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<i64>,
 }
 
 /// Map a retryable proxy failure from a node into the appropriate
@@ -2455,6 +2462,16 @@ impl NodeWsManager {
     ) -> AppResult<()> {
         let conn = self.connection_for(node_id, expected_connection_id)?;
 
+        if params.injection_method == "target_url"
+            && !conn
+                .capabilities
+                .lock()
+                .is_ok_and(|c| c.credential_target_update_v1 && c.credential_ack_correlation)
+        {
+            return Err(AppError::BadRequest(
+                "Node does not support metadata-only target updates; upgrade the node agent".into(),
+            ));
+        }
         let msg = WsCredentialUpdate {
             msg_type: "credential_update",
             request_id: None,
@@ -2465,6 +2482,7 @@ impl NodeWsManager {
             param_name: params.param_name.clone(),
             param_value: params.param_value.clone(),
             target_url: params.target_url.clone(),
+            target_revision: params.target_revision,
         };
 
         let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
@@ -2737,8 +2755,17 @@ impl NodeWsManager {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
         let conn = self.connection_for(node_id, expected_connection_id)?;
+        if params.injection_method == "target_url"
+            && !conn
+                .capabilities
+                .lock()
+                .is_ok_and(|c| c.credential_target_update_v1 && c.credential_ack_correlation)
+        {
+            return Err(AppError::BadRequest(
+                "Node does not support metadata-only target updates; upgrade the node agent".into(),
+            ));
+        }
         conn.credential_acks.insert(request_id.clone(), tx_ack);
-
         let msg = WsCredentialUpdate {
             msg_type: "credential_update",
             request_id: Some(request_id.clone()),
@@ -2749,6 +2776,7 @@ impl NodeWsManager {
             param_name: params.param_name.clone(),
             param_value: params.param_value.clone(),
             target_url: params.target_url.clone(),
+            target_revision: params.target_revision,
         };
         let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             conn.credential_acks.remove(&request_id);
@@ -2950,6 +2978,7 @@ impl NodeWsManager {
             flags.proxy_upload_v1 = caps.proxy_upload_v1;
             flags.http_cancellation = caps.http_cancellation;
             flags.credential_ack_correlation = caps.credential_ack_correlation;
+            flags.credential_target_update_v1 = caps.credential_target_update_v1;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
             flags.proxy_max_body_size = caps.proxy_max_body_size;
         }
@@ -6027,6 +6056,7 @@ mod tests {
     fn credential_update_fails_for_disconnected_node() {
         let mgr = NodeWsManager::new(30, 100);
         let params = CredentialUpdateParams {
+            target_revision: None,
             service_slug: "openai".to_string(),
             injection_method: "bearer".to_string(),
             header_name: Some("Authorization".to_string()),
@@ -6039,6 +6069,62 @@ mod tests {
             .send_credential_update("unknown-node", &params)
             .expect_err("should fail for disconnected node");
         assert!(matches!(err, AppError::NodeOffline(_)));
+    }
+
+    #[tokio::test]
+    async fn node_endpoint_2126_transport_gates_metadata_on_the_live_connection() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(4);
+        mgr.register_connection("node", tx);
+        let params = CredentialUpdateParams {
+            service_slug: "monitor".into(),
+            injection_method: "target_url".into(),
+            header_name: None,
+            header_value: None,
+            param_name: None,
+            param_value: None,
+            target_url: Some("http://new-monitor".into()),
+            target_revision: Some(1),
+        };
+        for (target, ack) in [(false, false), (false, true), (true, false)] {
+            mgr.record_capabilities(
+                "node",
+                &NodeCapabilitiesMsg {
+                    credential_target_update_v1: target,
+                    credential_ack_correlation: ack,
+                    ..Default::default()
+                },
+            );
+            assert!(mgr.send_credential_update("node", &params).is_err());
+            assert!(
+                mgr.send_credential_update_and_wait("node", &params, Duration::from_millis(5))
+                    .await
+                    .is_err()
+            );
+            assert!(rx.try_recv().is_err());
+            assert!(
+                mgr.connections
+                    .get("node")
+                    .unwrap()
+                    .credential_acks
+                    .is_empty()
+            );
+        }
+        mgr.record_capabilities(
+            "node",
+            &NodeCapabilitiesMsg {
+                credential_target_update_v1: true,
+                credential_ack_correlation: true,
+                ..Default::default()
+            },
+        );
+        mgr.send_credential_update("node", &params).unwrap();
+        let NodeOutboundMessage::Text(frame) = rx.recv().await.unwrap() else {
+            panic!("expected metadata frame")
+        };
+        let frame: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["target_revision"], 1);
+        assert!(frame.get("header_value").is_none());
     }
 
     #[test]
@@ -6066,6 +6152,7 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,
+                credential_target_update_v1: false,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: None,
             },

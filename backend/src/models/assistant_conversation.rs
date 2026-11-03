@@ -48,11 +48,8 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
-    /// Server-derived automation identity; never accepted from client/tool JSON.
-    #[serde(default)]
-    pub trigger_run_id: Option<String>,
-    #[serde(default)]
-    pub continuation_protocol_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,6 +331,12 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub delegated_images: super::assistant_delegated_image::DelegatedImages,
+    #[serde(default)]
+    pub timing: super::assistant_message::TurnTiming,
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     /// Bounded resource handles issued in this turn.
@@ -505,10 +508,11 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
-    /// Exact live automation runs, maintained transactionally. Avoids any trigger
-    /// reads on ordinary Stop paths and serializes Stop against wake admission.
     #[serde(default)]
-    pub coordinator_run_ids: Vec<String>,
+    pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
+    /// Server-created, tool-free visitor model initialization. Never client input.
+    #[serde(default)]
+    pub guest_model_setup: bool,
     /// Invocation conversations always enforce live execution independently of the legacy rollout.
     #[serde(default)]
     pub invocation_controlled: bool,

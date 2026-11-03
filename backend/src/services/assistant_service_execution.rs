@@ -37,9 +37,9 @@ pub use pools::pinned_pool_member;
 mod bootstrap;
 pub use bootstrap::{begin_model_attempt, finish_model_attempt};
 mod authority;
-pub use authority::connection_binding;
+pub use authority::{connection_binding, org_card_binding};
 mod availability;
-mod guest_model;
+pub(crate) mod guest_model;
 pub(crate) mod model_diagnostic;
 pub(crate) mod readiness;
 pub(crate) mod readiness_notice;
@@ -51,12 +51,14 @@ mod http;
 mod receipts;
 mod request_identity;
 pub(crate) use receipts::HttpApprovalReceipt;
+pub(crate) mod instruction;
 mod resolution;
 mod selection;
 use availability::verified_unavailable;
 pub use availability::{NodeFailureEvidence, observe_transport};
+pub(crate) use guest_model::is_shared_chat;
 #[cfg(test)]
-pub(crate) use guest_model::{is_shared_chat, owner_model_route_allowed};
+pub(crate) use guest_model::owner_model_route_allowed;
 #[cfg(test)]
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
@@ -71,9 +73,65 @@ use selection::scope;
 pub use selection::{bind_owner_selection, live_authority};
 pub(crate) use selection::{personal_authority, require_catalog_only_selection};
 
+/// Either projection marks a shared request; losing the other never downgrades it.
+pub(crate) fn is_shared_auth(auth: &crate::mw::auth::AuthUser) -> bool {
+    auth.org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        || auth.assistant_chat.as_deref().is_some_and(is_shared_chat)
+}
+
+pub(crate) fn require_shared_context(auth: &crate::mw::auth::AuthUser) -> AppResult<()> {
+    let denied = || AppError::Forbidden("Complete shared turn authority required".into());
+    let access = auth
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .ok_or_else(denied)?;
+    let chat = auth.assistant_chat.as_deref().ok_or_else(denied)?;
+    let snapshot = chat
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .ok_or_else(denied)?;
+    if !access.matches(&auth.user_id.to_string(), snapshot.owner(), &chat.agent_id)
+        || !snapshot.matches(&chat.user_id, access.owner(), &chat.agent_id)
+        || access.revision() != snapshot.revision()
+        || crate::services::shared_agent_consent::behavior(access)
+            != crate::services::shared_agent_consent::behavior(snapshot)
+        || auth.api_key_id.as_deref() != Some(chat.api_key_id.as_str())
+        || !chat.turn_live
+        || chat.turn_stopped
+        || chat.guest
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 pub const COLLECTION: &str = "assistant_service_execution";
 pub const ACK_HEADER: &str = "x-nyxid-acknowledgement-id";
 const MAX_EVIDENCE: usize = 32;
+
+/// Stateless model bootstrap uses NyxID's platform credential and the acting
+/// person's billing lane. It delegates no personal account. Keep BYOK,
+/// stateful inference, tools and every other transport behind exact consent.
+fn shared_platform_model(
+    chat: &acks::ChatAuthority,
+    service: &UserService,
+    operation: &Value,
+    target: Option<&super::proxy_service::ProxyTarget>,
+) -> bool {
+    service.user_id == chat.user_id
+        && super::platform_key_service::binding(service) == "platform"
+        && operation["kind"] == "raw_inference"
+        && operation["transport"].is_null()
+        && target.is_some_and(|target| {
+            target.service.inference.is_some()
+                && service.catalog_service_id.as_deref() == Some(target.service.id.as_str())
+                && super::proxy_service::uses_server_held_master(target)
+        })
+}
 
 fn digest(value: Value) -> String {
     mcp_service::canonical_sha256(value)
@@ -174,11 +232,16 @@ async fn check_job_http_inner(
         refusal: None,
         automatic: None,
         admission: Some(Admission {
+            owner_instruction_receipt: false,
+            shared_detached: None,
             shared_permit: None,
             connection: id.to_owned(),
             binding: connection_binding(&state.db, id, &chat.api_key_id).await?,
-            execution: Some(execution_digest(target)),
-            execution_credential: true,
+            execution: Some(execution_projection_digest(
+                target,
+                !target.credential_deferred,
+            )),
+            execution_credential: !target.credential_deferred,
             operation: digest(json!({"job_id":job})),
             operation_identity: json!({"job_id":job}),
             native_execution: None,
@@ -299,6 +362,13 @@ async fn check_inner(
         .await?;
     let service =
         super::user_service_service::get_user_service(db, effective_owner, connection_id).await?;
+    let instruction_covered = instruction::covered(db, chat, &service).await?
+        && !matches!(
+            operation["kind"].as_str(),
+            Some("raw_inference" | "legacy_inference" | "machine_job")
+        );
+    let instruction_required =
+        instruction_covered && !instruction::owner_instruction(db, chat, &service).await?;
     if let Some(access) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
         if !chat.turn_live || chat.turn_stopped {
             return Err(AppError::AssistantTurnRequired);
@@ -307,7 +377,7 @@ async fn check_inner(
             operation["kind"].as_str(),
             Some("raw_inference" | "legacy_inference")
         ) && access.allows_model_connection(&service);
-        if pool || !(access.allows_connection(&service) || model) {
+        if !(access.allows_connection(&service) || model) {
             return Err(AppError::Forbidden(
                 "Shared connection is unavailable".into(),
             ));
@@ -327,7 +397,15 @@ async fn check_inner(
             return Err(AppError::Forbidden("Use the person's exact selected connection; choose a new connection before changing accounts".into()));
         }
         let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
-        if service.user_id == chat.user_id
+        let approval =
+            approval_binding(db, chat, connection_id, &binding, instruction_covered).await?;
+        let needs_connection_consent = service.user_id == chat.user_id
+            && !shared_platform_model(chat, &service, operation, target);
+        if pool {
+            super::shared_agent_transport::require_ready(db).await?;
+            pools::pin_shared_pool(db, chat, connection_id, &binding, operation).await?;
+        }
+        if needs_connection_consent
             && let Some(refusal) =
                 super::shared_agent_consent::prompt(db, chat, access, &service, &binding, operation)
                     .await?
@@ -340,14 +418,30 @@ async fn check_inner(
         }
         // Connection consent is independent of the actor's action policy.
         // Always may remember a connection; it never bypasses an action card.
-        let gate = acks::confirmation_needed(db, chat, facts, false).await?;
+        let gate = acks::confirmation_needed_with_org(
+            db,
+            chat,
+            facts,
+            false,
+            if instruction_required {
+                acks::OrgInstructionRequirement::Required
+            } else {
+                acks::OrgInstructionRequirement::None
+            },
+        )
+        .await?;
         if let Some(need) = gate.ask() {
-            let args = json!({"connection_id": connection_id, "execution_binding": binding,
+            let args = json!({"connection_id": connection_id, "execution_binding": approval,
                 "operation": operation, "acknowledgement_id": acknowledgement});
             if let Some(refusal) =
                 acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, summary)
                     .await?
             {
+                let refusal = if instruction_required {
+                    attach_org_offer(db, chat, &service, &approval, operation, refusal).await?
+                } else {
+                    refusal
+                };
                 return Ok(Decision {
                     refusal: Some(refusal),
                     admission: None,
@@ -355,7 +449,7 @@ async fn check_inner(
                 });
             }
         }
-        let permit = if service.user_id == chat.user_id {
+        let permit = if needs_connection_consent {
             match super::shared_agent_consent::authorize(
                 db, chat, access, &service, &binding, operation,
             )
@@ -377,12 +471,14 @@ async fn check_inner(
             refusal: None,
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
-                model_control: None,
+                owner_instruction_receipt: instruction_covered,
+                shared_detached: None,
                 shared_permit: permit,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(execution_digest),
-                execution_credential: true,
+                execution: target
+                    .map(|target| execution_projection_digest(target, !target.credential_deferred)),
+                execution_credential: target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -418,6 +514,7 @@ async fn check_inner(
         return Err(AppError::Forbidden("Service access revoked".into()));
     }
     let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
+    let approval = approval_binding(db, chat, connection_id, &binding, instruction_covered).await?;
     if pool
         && let Some(failure) =
             availability::pool_predispatch_failure(db, chat, connection_id, &binding, operation)
@@ -444,7 +541,7 @@ async fn check_inner(
         Vec::new()
     };
     let mut args = json!({"connection_id": connection_id, "effective_owner_id": effective_owner,
-        "execution_binding": binding, "operation": operation});
+        "execution_binding": approval, "operation": operation});
     let mut continuation = None;
     if acknowledgement.is_none() && !model_consent && !resource_replay {
         // Only a server-validated owner continuation may present a card implicitly
@@ -466,7 +563,7 @@ async fn check_inner(
         let bound = db.collection::<Document>(COLLECTION).find_one(doc! {
             "_id": id, "kind": "card_binding", "user_id": &chat.user_id,
             "conversation_id": &chat.conversation_id, "api_key_id": &chat.api_key_id,
-            "connection_id": connection_id, "binding": &binding,
+            "connection_id": connection_id, "binding": &approval,
             "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
             "expires_at": {"$gt": bson::DateTime::now()},
         }).await?;
@@ -520,7 +617,7 @@ async fn check_inner(
         if (same_group || selected_id == connection_id)
             && !pool_fallback
             && applies
-            && (selected_id != connection_id || !selection_matches(selected, &service, &binding))
+            && (selected_id != connection_id || !selection_matches(selected, &service, &approval))
         {
             let (reason, instructions) = match selected_service.as_ref() {
                 None => (
@@ -546,7 +643,7 @@ async fn check_inner(
     }
     let explicit = selected.as_ref().is_some_and(|row| {
         row.get_str("connection_id") == Ok(connection_id)
-            && selection_matches(row, &service, &binding)
+            && selection_matches(row, &service, &approval)
             && row
                 .get("operation")
                 .is_none_or(|bound| bson::to_bson(operation).is_ok_and(|current| current == *bound))
@@ -715,15 +812,20 @@ async fn check_inner(
             });
         }
     }
-    if chat.guest {
+    if chat.guest && !instruction_required {
         return Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                owner_instruction_receipt: false,
+                shared_detached: None,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(|target| execution_projection_digest(target, !pool)),
-                execution_credential: !pool,
+                execution: target.map(|target| {
+                    execution_projection_digest(target, !pool && !target.credential_deferred)
+                }),
+                execution_credential: !pool
+                    && target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -760,18 +862,11 @@ async fn check_inner(
         } else {
             summary.to_owned()
         };
-        let gate = if let Some(control) = &model_control {
-            // All selection, grant, owner, credential and semantic-input checks
-            // above still apply. This private gate replaces only its OWN new
-            // explicit Write card. Generic approval policy remains separate.
-            if control.callback.prepared().is_none() {
-                return Ok(Decision {refusal:Some(super::assistant_model_control::observe(control.state,chat,control.callback).await?),
-                    admission:None,automatic:None});
-            }
-            acks::Gate::Proceed
-        } else if resource_replay && acknowledgement.is_some() {
-            acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
-        } else { acks::confirmation_needed(db, chat, facts, org && !model_consent).await? };
+        let gate = if resource_replay && acknowledgement.is_some() {
+            acks::Gate::Ask(acks::ConfirmationNeed { org_instruction: if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }, class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
+        } else { acks::confirmation_needed_with_org(db, chat, facts,
+            org && !model_consent && !instruction_covered,
+            if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }).await? };
         if gate.ask().is_some() {
             // Legacy idle calls can retain their existing automatic behavior, but
             // cannot mint or redeem turn-bound consent without an admitted turn.
@@ -789,24 +884,26 @@ async fn check_inner(
                             "kind": "card_binding", "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                             "api_key_id": &chat.api_key_id, "turn_id": &chat.turn_id, "connection_id": connection_id,
                             "owner_id": effective_owner, "catalog_service_id": &service.catalog_service_id,
-                            "binding": &binding, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
+                            "binding": &approval, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
                             "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
                         }}).upsert(true).await?;
             }
-            return Ok(Decision {
-                refusal: Some(refusal),
-                admission: None,
-                automatic: None,
-            });
+            let mut refusal = refusal;
+            if instruction_required {
+                refusal = attach_org_offer(db, chat, &service, &approval, operation, refusal).await?;
+            }
+            return Ok(Decision { refusal: Some(refusal), admission: None, automatic: None });
         }
         Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                owner_instruction_receipt: instruction_covered,
+                shared_detached: None,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(|target| execution_projection_digest(target, !pool)),
-                execution_credential: !pool,
+                execution: target.map(|target| execution_projection_digest(target, !pool && !target.credential_deferred)),
+                execution_credential: !pool && target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -824,11 +921,45 @@ async fn check_inner(
     .await
 }
 
-struct ModelControlConfirmation<'a> {
-    state: &'a crate::AppState,
-    callback: &'a super::assistant_model_control::Callback,
+/// Card arguments, card records and card-derived selections for an org
+/// connection use the mode-free card identity; execution keeps `binding`.
+async fn approval_binding(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    connection_id: &str,
+    binding: &str,
+    instruction_covered: bool,
+) -> AppResult<String> {
+    if instruction_covered {
+        org_card_binding(db, connection_id, &chat.api_key_id).await
+    } else {
+        Ok(binding.to_owned())
+    }
 }
 
+async fn attach_org_offer(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    service: &UserService,
+    binding: &str,
+    operation: &Value,
+    refusal: Value,
+) -> AppResult<Value> {
+    let refusal =
+        super::assistant_connection_service::org_refusal(db, chat, service, refusal).await?;
+    if let Some(id) = refusal["acknowledgement_id"].as_str() {
+        db.collection::<Document>(COLLECTION).update_one(doc! {"_id":id},doc! {"$setOnInsert":{
+            "kind":"card_binding","user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+            "api_key_id":&chat.api_key_id,"turn_id":&chat.turn_id,"connection_id":&service.id,
+            "owner_id":&service.user_id,"catalog_service_id":&service.catalog_service_id,
+            "binding":binding,"operation":bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(25))
+        }}).upsert(true).await?;
+    }
+    Ok(refusal)
+}
+
+#[cfg(test)]
 fn execution_digest(target: &super::proxy_service::ProxyTarget) -> String {
     execution_projection_digest(target, true)
 }

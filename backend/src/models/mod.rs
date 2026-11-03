@@ -147,6 +147,7 @@ pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
 pub mod assistant_conversation;
 pub mod assistant_group;
+pub mod assistant_group_collaboration;
 pub mod assistant_message;
 pub mod assistant_message_feedback;
 pub mod assistant_profile_route;
@@ -156,6 +157,7 @@ pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
 pub mod nyxbot_channel;
+pub mod nyxbot_event_binding;
 pub mod nyxbot_gateway_response;
 pub mod nyxbot_image_delivery;
 pub mod service_change_event;
@@ -239,4 +241,5 @@ pub mod platform_help;
 pub mod nyxbot_gateway_release;
 
 pub mod discord_gateway;
-pub mod generated_artifact;
+
+pub mod assistant_delegated_image;

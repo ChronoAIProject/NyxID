@@ -101,7 +101,10 @@ pub(crate) enum Started {
     PoolFull,
 }
 
-async fn acquire(state: &AppState, pool: Pool<'_>) -> AppResult<Option<DirectChatPermit>> {
+pub(crate) async fn acquire(
+    state: &AppState,
+    pool: Pool<'_>,
+) -> AppResult<Option<DirectChatPermit>> {
     match pool {
         Pool::Team { owner, limit } => {
             state
@@ -165,6 +168,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
         invocation_id: None,
@@ -522,9 +526,16 @@ pub(crate) async fn after_turn(
     text: &str,
     error: Option<&TurnError>,
 ) {
+    if row.guest_model_setup {
+        return;
+    }
     let Some(turn) = row.active_turn.as_ref() else {
         return;
     };
+    if row.collaboration.is_some() {
+        super::collaboration_group::settled(state, row, text, error).await;
+        return;
+    }
     if let Some(event_id) = turn.channel_event_id.as_deref() {
         super::nyxbot::late_delivery::settled(state, event_id).await;
     }
@@ -572,10 +583,11 @@ pub(crate) async fn after_turn(
     if row.is_subagent()
         && !direct_handoff
         && !row.guest_turn
-        && let Some(target) = match settled_report_target(state, row, turn).await {
-            Ok(target) => target,
-            Err(_) => return,
-        }
+        && let Some((target, published_assignment)) =
+            match settled_report_target(state, row, turn).await {
+                Ok(target) => target,
+                Err(_) => return,
+            }
     {
         let agent = match team::agent_for_conversation(&state.db, row).await {
             Ok(agent) => agent,
@@ -592,17 +604,29 @@ pub(crate) async fn after_turn(
             excerpt(text, 1200).replace('"', "'"),
             agent.id
         );
-        let queued = engine::push_events(
-            &state.db,
-            owner,
-            &target,
-            vec![
-                team::event("subagent_settled", note, Some(&agent.id))
-                    .for_invocation(turn.invocation_id.as_deref()),
-            ],
-        )
-        .await;
+        let queued = if published_assignment {
+            // The exact assignment result was queued in the settlement transaction.
+            Ok(None)
+        } else {
+            engine::push_events(
+                &state.db,
+                owner,
+                &target,
+                vec![
+                    team::event("subagent_settled", note, Some(&agent.id))
+                        .for_invocation(turn.invocation_id.as_deref()),
+                ],
+            )
+            .await
+        };
         if queued.is_err() {
+            if turn.delegated_images.assignment.is_some() {
+                tracing::warn!(target: "nyxid::assistant_delegated_images",
+                    actor_id = owner, source_agent_id = %agent.id,
+                    source_conversation_id = %row.id, source_turn_id = %turn.turn_id,
+                    recipient_conversation_id = %target, code = "text_fallback_unavailable",
+                    "Delegated text-only settlement notice could not be queued");
+            }
             return;
         }
         Box::pin(wake(state, owner, &target)).await;
@@ -634,11 +658,13 @@ pub(crate) async fn after_turn(
         let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
         return;
     }
-    let plan = super::nyxbot::images::ImageSendPlan {
-        attachments: engine::turn_tool_attachments(&state.db, owner, &row.id, &turn.turn_id)
+    let plan =
+        super::nyxbot::images::ImageSendPlan::settled(&state.db, owner, &row.id, &turn.turn_id)
             .await
-            .unwrap_or_default(),
-    };
+            .unwrap_or_else(|_| super::nyxbot::images::ImageSendPlan {
+                attachments: Vec::new(),
+                delegated: Vec::new(),
+            });
     // Keep the answer destination in lockstep with the model note and image
     // delivery. Channel turns answer their admitted event; event turns wake
     // their bound chats (or the configured home chat).
@@ -669,7 +695,7 @@ async fn settled_report_target(
     state: &AppState,
     row: &AssistantConversation,
     turn: &crate::models::assistant_conversation::ActiveTurn,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<(String, bool)>> {
     let settled = state
         .db
         .collection::<crate::models::assistant_message::AssistantMessage>(
@@ -681,8 +707,14 @@ async fn settled_report_target(
         })
         .await?;
     Ok(match settled {
-        Some(message) => message.report_to,
-        None => turn.report_to.clone(),
+        Some(message) => message.report_to.map(|target| {
+            (
+                target,
+                message.delegated_images.assignment.is_some()
+                    && message.delegated_images.publication_refusal.is_none(),
+            )
+        }),
+        None => turn.report_to.clone().map(|target| (target, false)),
     })
 }
 
@@ -1037,6 +1069,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
             invocation_id: invocation_id.map(str::to_owned),
@@ -1097,7 +1130,18 @@ pub(crate) async fn channel_target_agent(
             team::ensure_nyxbot(&state.db, owner).await
         }
         Some(name) => match team::live_specialist(&state.db, owner, name).await {
-            Ok(agent) => Ok(agent),
+            Ok(agent) => {
+                if agent.user_id != owner
+                    && !crate::services::org_agent_service::access(&state.db, owner, &agent.user_id)
+                        .await?
+                        .can_read()
+                {
+                    return Err(AppError::ValidationError(
+                        "Shared agents cannot be linked to platform or channel threads".into(),
+                    ));
+                }
+                Ok(agent)
+            }
             Err(error @ AppError::NotFound(_)) => {
                 if team::names_readable_organization_specialist(&state.db, owner, name).await? {
                     Err(AppError::organization_agent_channel_unsupported())
@@ -1159,6 +1203,13 @@ fn action_summary(name: &str, args: &Value) -> String {
         "update_schedule" => "Change a scheduled automation",
         "delete_schedule" => "Delete a scheduled automation",
         "run_schedule_now" => "Run a scheduled automation now",
+        "create_collaboration_group" => {
+            "Create a group; invited participants can read its full retained history"
+        }
+        "manage_collaboration_group" => {
+            "Change group membership or settings; new participants can read the full retained history"
+        }
+        "post_to_collaboration_group" => "Post a request for you in a collaboration group",
         "create_group" => "Create a group chat",
         "update_group" => "Change a group chat",
         "delete_group" => "Delete a group chat",
@@ -1169,7 +1220,7 @@ fn action_summary(name: &str, args: &Value) -> String {
         "link_channel_bot" => "Change which agent a channel bot reaches",
         "disconnect_channel_bot" => "Disconnect a channel bot",
         "update_channel_chat" => "Change who may talk in a channel chat",
-        "update_channel_access" => "Change who may chat privately with a channel bot",
+        "update_channel_access" => "Change private chat access and posting defaults",
         "stop_following_thread" => "Stop following a channel thread",
         "machine_pair" => "Pair a machine",
         "remember" => "Save a memory note",
@@ -1199,6 +1250,17 @@ fn action_summary(name: &str, args: &Value) -> String {
                 "{field} {}",
                 crate::services::assistant_nyxagent::identifier(value)
             ));
+        }
+    }
+    if name == "update_channel_access" {
+        if let Some(posts) = args["private_chat_posts"].as_bool() {
+            details.push(format!(
+                "new private chat posts {}",
+                if posts { "on" } else { "off" }
+            ));
+        }
+        if args["apply_to_existing"].as_bool() == Some(true) {
+            details.push("apply to existing private chats".into());
         }
     }
     for field in ["services", "machines", "logins"] {
@@ -1243,13 +1305,24 @@ pub(crate) async fn execute_tool(
     if chat.guest {
         return (acks::guest_refusal(), true);
     }
+    if chat.collaboration_thread && !matches!(name, "get_agent_skills" | "skill_read") {
+        return refusal(
+            "collaboration_scope",
+            "Group agents may read their pinned skills, but cannot use private memory or account management tools. Manage memory and permissions outside the group.",
+        );
+    }
     if chat
         .org_agent_access
         .as_ref()
         .is_some_and(|a| a.shared().is_some())
         && !matches!(
             name,
-            "remember" | "forget" | "get_agent_skills" | "skill_read"
+            "remember"
+                | "forget"
+                | "get_agent_skills"
+                | "skill_read"
+                | "list_channel_chats"
+                | "post_to_chat"
         )
     {
         return refusal(
@@ -1257,7 +1330,14 @@ pub(crate) async fn execute_tool(
             "Shared agents cannot use account, team, machine or permission management tools. Ask the owner to change the agent's sharing settings.",
         );
     }
-    if !chat.is_orchestrator() && !assistant_team_tools::is_agent_tool(name) {
+    if !chat.is_orchestrator()
+        && !assistant_team_tools::is_agent_tool(name)
+        && !(name == "list_channel_chats"
+            && chat
+                .org_agent_access
+                .as_ref()
+                .is_some_and(|a| a.shared().is_some()))
+    {
         return refusal(
             "orchestrator_only",
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
@@ -1364,6 +1444,9 @@ async fn execute_authorized_tool_impl(
         } else {
             None
         };
+        let group_delegation = if name=="manage_collaboration_group" {
+            super::collaboration_group::guest_widening(state,&chat.user_id,args).await?
+        } else {false};
         if !matches!(
             name,
             "set_agent_operations"
@@ -1377,7 +1460,7 @@ async fn execute_authorized_tool_impl(
                 | "request_agent_skills"
         ) {
             let class = acks::classify_owner_action(tool_name, args);
-            let facts = if sharing_preview
+            let facts = if group_delegation || sharing_preview
                 .as_ref()
                 .is_some_and(|preview| preview.widening)
             {
@@ -1391,11 +1474,11 @@ async fn execute_authorized_tool_impl(
                 .as_ref()
                 .filter(|preview| preview.widening)
                 .map(|preview| preview.summary.clone())
-                .unwrap_or_else(|| action_summary(name, args));
+                .unwrap_or_else(|| if group_delegation { format!("Enable guest access for agent {} in group {}. Current and future participants without use rights may use the owner’s guest service policy; the owner pays. Membership revision {}, guest revision {}.",text_arg(&args["change"],"agent_id"),text_arg(args,"group"),args["expected_revision"],args["change"]["guest_revision"]) } else {action_summary(name,args)});
             if let Some(need) = gate.ask() {
-                if sharing_preview
+                if (group_delegation || sharing_preview
                     .as_ref()
-                    .is_some_and(|preview| preview.widening)
+                    .is_some_and(|preview| preview.widening))
                     && let Some(acknowledgement_id) = args["acknowledgement_id"].as_str()
                 {
                     delegation_approved = acks::consume_delegation_action(
@@ -1526,6 +1609,22 @@ fn dispatch<'a>(
         "decide_permission" | "destroy_subagent" => {
             Box::pin(dispatch_permission_decisions(state, chat, name, args))
         }
+        "create_collaboration_group"
+        | "list_collaboration_groups"
+        | "manage_collaboration_group"
+        | "post_to_collaboration_group" => Box::pin(async move {
+            Ok((
+                super::collaboration_group::tool(
+                    state,
+                    &chat.user_id,
+                    name,
+                    args,
+                    delegation_approved,
+                )
+                .await?,
+                false,
+            ))
+        }),
         "create_group" | "list_groups" | "post_to_group" | "update_group" | "delete_group" => {
             Box::pin(dispatch_groups(state, chat, name, args))
         }
@@ -2797,6 +2896,24 @@ async fn dispatch_settings(
                     false,
                 ));
             }
+            if area == "add_service"
+                && let Some(reference) = args["service"].as_str()
+            {
+                let (id, slug) = if uuid::Uuid::parse_str(reference).is_ok() {
+                    (Some(reference), None)
+                } else {
+                    (None, Some(reference))
+                };
+                let catalog = crate::services::assistant_connection_service::resolve_catalog(
+                    &state.db, owner, id, slug,
+                )
+                .await?;
+                return Ok((
+                    json!({"area":area,"action":"connect_service","catalog_service_id":catalog.id,"service_slug":catalog.slug,
+                    "instructions":"Call nyx__connect_service with this catalog_service_id as service_id or service_slug; give the owner its hosted link. Never use /keys for connecting an account."}),
+                    false,
+                ));
+            }
             let path = crate::services::assistant_team_tools::settings_path(
                 area,
                 args["service"].as_str(),
@@ -2862,6 +2979,12 @@ async fn dispatch_channels(
         }
         "list_channel_agents" => (super::nyxbot::list_tool(state, owner).await?, false),
         "list_channel_chats" => {
+            if crate::services::assistant_service_execution::is_shared_chat(chat) {
+                crate::services::shared_agent_transport::require_ready(&state.db).await?;
+                if !super::nyxbot::chats::post_turn_is_live(state, chat).await? {
+                    return Err(AppError::AssistantTurnRequired);
+                }
+            }
             let chats = Box::pin(super::nyxbot::chats::list_chats(
                 state,
                 owner,
@@ -2923,11 +3046,15 @@ async fn dispatch_channels(
             )
         }
         "update_channel_access" => (
-            Box::pin(super::nyxbot::chats::set_private_chats(
+            Box::pin(super::nyxbot::chats::update_access(
                 state,
                 owner,
                 text_arg(args, "channel_agent_id"),
-                text_arg(args, "private_chats"),
+                &crate::services::nyxbot_chat_settings_service::AccessSettings {
+                    private_chats: args["private_chats"].as_str().map(str::to_owned),
+                    private_chat_posts: args["private_chat_posts"].as_bool(),
+                    apply_to_existing: args["apply_to_existing"].as_bool().unwrap_or(false),
+                },
             ))
             .await?,
             false,
@@ -3011,6 +3138,13 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
         .await?
         .active_turn
         .map(|turn| turn.turn_id);
+    if chat
+        .turn_id
+        .as_ref()
+        .is_some_and(|id| own_turn.as_ref().is_some_and(|live| live != id))
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
     loop {
         let running = team::running_agents(db, owner).await?;
@@ -3021,7 +3155,7 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
             None => false,
         };
         if !busy || !requests.is_empty() || stopped || tokio::time::Instant::now() >= deadline {
-            let summaries =
+            let mut summaries =
                 team::tool_delegation_summaries(db, owner, true, team::REPLY_EXCERPT_CHARS)
                     .await?
                     .into_iter()
@@ -3032,15 +3166,24 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
                 .filter(|summary| summary.status != "running")
                 .map(|summary| summary.id.clone())
                 .collect();
-            team::consume_settled_events(
-                db,
-                owner,
-                caller,
-                &settled,
-                chat.trigger_run_id.as_deref(),
-            )
-            .await?;
+            let adopted = match own_turn.as_deref() {
+                Some(turn) if !stopped => {
+                    crate::services::assistant_delegated_images::consume_wait(
+                        db, owner, caller, turn, &settled,
+                    )
+                    .await?
+                }
+                _ => Default::default(),
+            };
+            for (agent, reply) in adopted.results {
+                if let Some(summary) = summaries.iter_mut().find(|s| s.id == agent) {
+                    summary.last_reply = reply;
+                }
+            }
+            let references = adopted.references;
             return Ok(json!({
+                "delegated_images": references.iter().map(|r| json!({"id":r.attachment.id,"source_agent":r.assignment.source_agent})).collect::<Vec<_>>(),
+                "image_delivery": "Only the listed server-authorized image references may accompany this reply; NyxID sends them to the assignment's original chat when still authorized. Do not invent image IDs or claim delivery.",
                 "settled": summaries.iter().filter(|s| s.status != "running").map(|s| json!({
                     "id": s.id, "name": s.delegation_name(), "status": s.status, "reply": s.last_reply,
                 })).collect::<Vec<_>>(),
@@ -3742,6 +3885,18 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if super::nyxbot::guest_setup_queue::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Guest model queue deferred");
+            }
+            if crate::services::assistant_guest_model_setup::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Guest model recovery deferred");
+            }
             if super::nyxbot::guest_model_notices::sweep(&state)
                 .await
                 .is_err()
@@ -3825,6 +3980,7 @@ pub fn spawn_sweeps(state: AppState) {
                     wake(&state, &row.user_id, &row.id).await;
                 }
             }
+            super::collaboration_group::sweep(&state).await;
             // Group members addressed while busy (or while the pool was full).
             if let Ok(rows) =
                 crate::services::assistant_group_service::with_pending(&state.db).await

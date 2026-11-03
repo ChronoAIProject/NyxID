@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, View, Text, TextInput } from "react-native";
 import { requestJson } from "../../lib/api/http";
 import { mobileApi } from "../../lib/api/mobileApi";
@@ -25,6 +25,10 @@ export function useMfaStepUp(scope: string) {
   const [busy, setBusy] = useState(false);
   const active = useRef<string | null>(scope);
   const lifecycle = useRef(0);
+  const reset = useCallback(() => {
+    lifecycle.current++;
+    setPending(null);
+  }, []);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -92,6 +96,19 @@ export function useMfaStepUp(scope: string) {
                   body: { code: value },
                   retryOnAuthFailure: false,
                   invalidateSessionOnAuthFailure: false,
+                  authorityGuard: () => {
+                    if (
+                      promptLifecycle !== lifecycle.current ||
+                      !stepUpScopeIsCurrent(
+                        pending,
+                        active.current,
+                        authSessionGeneration(),
+                      )
+                    )
+                      throw Object.assign(new Error("Verification cancelled"), {
+                        name: "AbortError",
+                      });
+                  },
                 });
               },
               async () => {
@@ -112,7 +129,7 @@ export function useMfaStepUp(scope: string) {
         }}
       />
     ) : null;
-  return { handle, prompt, busy };
+  return { handle, prompt, busy, reset };
 }
 
 function MfaStepUpPrompt({

@@ -1,3 +1,4 @@
+import { useCollaborationAvailable } from "@/hooks/use-collaboration-groups";
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
@@ -75,7 +76,8 @@ function pickerRows(
   group?: AssistantGroup,
 ): PickerRow[] {
   const live = agents
-    .filter((agent) => agent.status !== "destroyed")
+    .filter((agent) => agent.status !== "destroyed" && agent.can_use !== false
+      && !group?.members.some((member) => member.id === agent.id && member.unavailable))
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"))
     .map((agent) => ({
       id: agent.id,
@@ -84,7 +86,7 @@ function pickerRows(
       kind: agent.kind,
       description: [
         agentHandle(agent),
-        agent.kind === "nyxbot" ? "Your personal agent" : agent.description || "Specialist",
+        agent.share_role ? `Shared agent${agent.owner_name ? ` · ${agent.owner_name}` : ""}` : agent.kind === "nyxbot" ? "Your personal agent" : agent.description || "Specialist",
       ]
         .filter(Boolean)
         .join(" · "),
@@ -94,7 +96,7 @@ function pickerRows(
   const known = agents.length > 0;
   const gone = (group?.members ?? [])
     .filter(
-      (member) => member.destroyed || (known && !live.some((row) => row.id === member.id)),
+      (member) => member.destroyed || member.unavailable || (known && !live.some((row) => row.id === member.id)),
     )
     .map((member) => ({
       id: member.id,
@@ -264,6 +266,7 @@ export function NewGroupDialog({
   readonly onCreated: (group: AssistantGroup) => void;
 }) {
   const create = useCreateNyxBotGroup();
+  const collaborationAvailable = useCollaborationAvailable();
   const userId = useAuthStore((state) => state.user?.id);
   const nyxbotId = nyxBotOf(agents)?.id;
   const form = useAppForm<AssistantGroupForm>({
@@ -272,14 +275,15 @@ export function NewGroupDialog({
   });
   const [error, setError] = useState<string>();
   const org = form.watch("org");
+  const collaboration = form.watch("collaboration");
   const people = form.watch("participant_user_ids") ?? [];
   const name = form.watch("name");
   const members = form.watch("member_agent_ids");
   // Agents may still be loading when the dialog opens; preselect NyxBot once known.
   useEffect(() => {
-    if (org || !nyxbotId || form.getValues("member_agent_ids").length) return;
+    if (org || collaboration || !nyxbotId || form.getValues("member_agent_ids").length) return;
     form.setValue("member_agent_ids", [nyxbotId], { shouldDirty: false, shouldTouch: false });
-  }, [form, nyxbotId, org]);
+  }, [form, nyxbotId, org, collaboration]);
 
   async function submit(values: AssistantGroupForm) {
     setError(undefined);
@@ -310,12 +314,20 @@ export function NewGroupDialog({
             <DialogBody className="space-y-4 pb-1">
               <GroupOwnerPicker value={org} onChange={(id) => {
                 form.setValue("org", id);
+                form.setValue("collaboration", undefined);
                 form.setValue("member_agent_ids", id ? [] : nyxbotId ? [nyxbotId] : []);
                 form.setValue("participant_user_ids", id && userId ? [userId] : undefined);
               }} />
+              {!org && collaborationAvailable.data ? <label className="flex items-center gap-2 text-12">
+                <Checkbox checked={Boolean(collaboration)} onCheckedChange={(checked) => {
+                  form.setValue("collaboration", checked === true);
+                  form.setValue("member_agent_ids", []);
+                }} />Invite other people
+              </label> : null}
+              {collaboration ? <p className="text-12 text-muted-foreground">Up to 16 people can join by invitation after creation. Everyone can read the full retained group history. Personal NyxBot cannot join.</p> : null}
               <GroupFields form={form} rows={pickerRows(agents.filter((agent) => org
                 ? agent.owner_kind === "org" && agent.owner_id === org
-                : true))} />
+                : !collaboration || agent.kind === "specialist"))} />
               {org ? <GroupParticipantPicker org={org} value={people} onChange={(ids) => form.setValue("participant_user_ids", ids)} /> : null}
               {error ? (
                 <p role="alert" className="text-12 text-destructive">
@@ -364,10 +376,10 @@ export function GroupSettingsDialog({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string>();
   const liveAgentIds = new Set(
-    agents.filter((agent) => agent.status !== "destroyed").map((agent) => agent.id),
+    agents.filter((agent) => agent.status !== "destroyed" && agent.can_use !== false).map((agent) => agent.id),
   );
   const alive = (member: AssistantGroup["members"][number]) =>
-    !member.destroyed && (!agents.length || liveAgentIds.has(member.id));
+    !member.destroyed && !member.unavailable && (!agents.length || liveAgentIds.has(member.id));
   // Members that are gone leave on the next save (the server refuses them).
   const goneMembers = group.members.some((member) => !alive(member));
   const form = useAppForm<AssistantGroupForm>({

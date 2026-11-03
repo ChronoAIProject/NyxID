@@ -105,12 +105,12 @@ pub fn verify_resolved_projected<'a>(
     projection: &'a HttpProjection,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
     Box::pin(verify_resolved_projected_inner(
-        db, keys, chat, id, actual, method, path, projection,
+        db, keys, chat, id, actual, method, path, projection, false,
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn verify_resolved_projected_inner(
+pub(super) async fn verify_resolved_projected_inner(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
     chat: &acks::ChatAuthority,
@@ -119,22 +119,63 @@ async fn verify_resolved_projected_inner(
     method: &str,
     path: &str,
     projection: &HttpProjection,
+    model: bool,
 ) -> AppResult<()> {
-    let before = connection_binding(db, id, &chat.api_key_id).await?;
-    let mut fresh = crate::services::proxy_service::resolve_proxy_target_by_user_service_id(
+    resolve_projected(
         db,
         keys,
-        &chat.user_id,
+        chat,
         id,
-        None,
-        None,
-        crate::services::proxy_service::ProxyExecutionContext::new(
-            None,
-            crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
-        )
-        .with_assistant_access(chat.org_agent_access.as_deref()),
+        actual,
+        method,
+        path,
+        projection,
+        !actual.credential_deferred,
+        model,
     )
-    .await?
+    .await
+    .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_projected(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    chat: &acks::ChatAuthority,
+    id: &str,
+    actual: &crate::services::proxy_service::ProxyTarget,
+    method: &str,
+    path: &str,
+    projection: &HttpProjection,
+    materialize: bool,
+    model: bool,
+) -> AppResult<crate::services::proxy_service::ProxyTarget> {
+    let before = connection_binding(db, id, &chat.api_key_id).await?;
+    let mut fresh = if materialize {
+        crate::services::proxy_service::resolve_proxy_target_by_user_service_id(
+            db,
+            keys,
+            &chat.user_id,
+            id,
+            None,
+            None,
+            crate::services::proxy_service::ProxyExecutionContext::new(
+                None,
+                crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+            )
+            .with_assistant_access(chat.org_agent_access.as_deref()),
+        )
+        .await?
+    } else {
+        crate::services::proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            db,
+            keys,
+            &chat.user_id,
+            id,
+            None,
+        )
+        .await?
+    }
     .ok_or_else(|| AppError::NotFound("Service connection unavailable".into()))?;
     let canonical = crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?;
     crate::services::destination_routing::resolve_target(
@@ -148,7 +189,8 @@ async fn verify_resolved_projected_inner(
         .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
         .await?
         .ok_or_else(|| AppError::Forbidden("Assistant credential revoked".into()))?;
-    if projection.apply_agent_override
+    if materialize
+        && projection.apply_agent_override
         && key
             .assistant_agent_owner_id
             .as_deref()
@@ -177,14 +219,23 @@ async fn verify_resolved_projected_inner(
         )
         .await?;
     }
-    if before != connection_binding(db, id, &chat.api_key_id).await?
-        || execution_digest(actual) != execution_digest(&fresh.target)
+    let binding_matches = if model {
+        super::authority::model_bindings_match(db, id, &chat.api_key_id, &[&before]).await?
+    } else {
+        before == connection_binding(db, id, &chat.api_key_id).await?
+    };
+    if !binding_matches
+        || execution_projection_digest(actual, !actual.credential_deferred)
+            != execution_projection_digest(&fresh.target, !actual.credential_deferred)
     {
+        if model {
+            return Err(AppError::AssistantModelAuthorityChanged);
+        }
         return Err(AppError::Conflict(
             "Resolved service connection changed before execution".into(),
         ));
     }
-    Ok(())
+    Ok(fresh.target)
 }
 
 #[cfg(test)]
@@ -294,6 +345,9 @@ async fn check_http_projected_inner(
     {
         return Err(AppError::AssistantTurnRequired);
     }
+    if is_shared_auth(auth) {
+        require_shared_context(auth)?;
+    }
     let Some(chat) = auth.assistant_chat.as_deref() else {
         return Ok(Decision {
             refusal: None,
@@ -313,7 +367,76 @@ async fn check_http_projected_inner(
             route
         });
     let mut operation = http_operation(target, method, path, query, body);
+    if crate::services::assistant_guest_model_setup::is_setup(&state.db, &chat.conversation_id)
+        .await?
+    {
+        let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        if model_route.is_none()
+            || request
+                .get("tools")
+                .is_some_and(|tools| !tools.as_array().is_some_and(|items| items.is_empty()))
+        {
+            return Err(AppError::Forbidden(
+                "Visitor setup only admits model generation without tools".into(),
+            ));
+        }
+    }
     bind_headers(&mut operation, &projection.headers(target, headers));
+    if is_shared_chat(chat)
+        && crate::services::telnyx_platform_service::contract(&target.service).is_some()
+    {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        operation["transport"] = json!("managed");
+    }
+    let stream = method == "CONNECT"
+        || headers
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    if stream && is_shared_chat(chat) {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        operation["transport"] = json!(if method == "CONNECT" {
+            "connect"
+        } else {
+            "websocket"
+        });
+        let access = chat
+            .org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .expect("shared");
+        let connection = id
+            .and_then(|id| access.connections().get(id))
+            .ok_or_else(crate::services::shared_agent_service::missing)?;
+        // A CONNECT rule, like a WebSocket handshake rule, cannot constrain
+        // subsequent opaque traffic to the reviewed HTTP operation.
+        if crate::services::agent_operation_scope_service::is_scoped(
+            &auth.assistant_operation_scopes,
+            &connection.id,
+            connection.catalog_service_id.as_deref(),
+        ) {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Shared streams require unrestricted agent operation authority".into(),
+            ));
+        }
+        crate::services::shared_agent_transport::require_stream_policy(
+            &state.db,
+            &chat.user_id,
+            connection,
+            &target.service,
+        )
+        .await?;
+        if id
+            .and_then(|id| access.connections().get(id))
+            .is_some_and(|s| s.user_id == access.owner())
+            && id.and_then(|id| access.level(id))
+                != Some(crate::models::assistant_agent::GuestAccess::All)
+        {
+            return Err(AppError::Forbidden(
+                "Shared streams require explicit full service access".into(),
+            ));
+        }
+    }
     let stateless = operation["kind"] == "inference";
     let guest_inference = chat.guest && target.service.inference.is_some();
     let shape_failure = if method_override {
@@ -438,7 +561,7 @@ async fn check_http_projected_inner(
         operation = control.operation();
     }
     if pool.is_none() {
-        verify_resolved_projected(
+        verify_resolved_projected_inner(
             &state.db,
             &state.encryption_keys,
             chat,
@@ -447,6 +570,7 @@ async fn check_http_projected_inner(
             method,
             path,
             projection,
+            !chat.guest && !is_shared_chat(chat) && generation && stateless && !method_override,
         )
         .await?;
     }
@@ -541,21 +665,24 @@ async fn check_http_projected_inner(
             .find_one(grant_filter)
             .await?
         {
-            if grant.get_str("binding")
-                == Ok(connection_binding(&state.db, id, &chat.api_key_id)
+            let binding = grant.get_str("binding").unwrap_or_default();
+            let matches = if !is_shared_chat(chat) {
+                super::authority::model_bindings_match(&state.db, id, &chat.api_key_id, &[binding])
                     .await?
-                    .as_str())
-            {
+            } else {
+                binding == connection_binding(&state.db, id, &chat.api_key_id).await?
+            };
+            if matches {
                 model_consent = true;
                 consent_binding = grant.get_str("binding").ok().map(str::to_owned);
             } else {
-                return Err(AppError::Conflict(
-                    "Model-use consent expired because the connection changed".into(),
-                ));
+                return Err(AppError::AssistantModelAuthorityChanged);
             }
         }
     }
-    let read = matches!(method, "GET" | "HEAD" | "OPTIONS") && !method_override;
+    let read = matches!(method, "GET" | "HEAD" | "OPTIONS")
+        && !method_override
+        && !(stream && is_shared_chat(chat));
     let destructive = method == "DELETE" || method_override;
     let mut summary = if raw_inference {
         format!(
@@ -625,7 +752,7 @@ async fn check_http_projected_inner(
     )
     .await?;
     if let Some(binding) = consent_binding.as_deref() {
-        validate_model_consent_snapshot(decision.admission.as_ref(), binding)?;
+        validate_model_consent_snapshot(&state.db, decision.admission.as_ref(), binding).await?;
     }
     if chat.turn_live && model_transport {
         super::bootstrap::observe_model_callback(&state.db, chat, decision.refusal.as_ref())
@@ -683,14 +810,73 @@ pub(super) async fn persist_model_consent(
     Ok(())
 }
 
-pub(super) fn validate_model_consent_snapshot(
+pub(super) async fn validate_model_consent_snapshot(
+    db: &Database,
     admission: Option<&Admission>,
     binding: &str,
 ) -> AppResult<()> {
-    if admission.is_some_and(|admission| admission.binding != binding) {
-        return Err(AppError::Conflict(
-            "Model-use authority changed during admission".into(),
-        ));
+    if let Some(admission) = admission
+        && admission.binding != binding
+    {
+        if !is_shared_chat(&admission.chat)
+            && super::authority::model_bindings_match(
+                db,
+                &admission.connection,
+                &admission.api_key_id,
+                &[&admission.binding, binding],
+            )
+            .await?
+        {
+            return Ok(());
+        }
+        return Err(AppError::AssistantModelAuthorityChanged);
     }
     Ok(())
+}
+
+impl Admission {
+    pub(crate) async fn materialize_http(
+        &mut self,
+        db: &Database,
+        keys: &crate::crypto::aes::EncryptionKeys,
+        target: &mut crate::services::proxy_service::ProxyTarget,
+        method: &str,
+        path: &str,
+        projection: &HttpProjection,
+    ) -> AppResult<()> {
+        if !target.credential_deferred {
+            return Ok(());
+        }
+        self.revalidate(db, &self.connection, Some(target)).await?;
+        let fresh = resolve_projected(
+            db,
+            keys,
+            &self.chat,
+            &self.connection,
+            target,
+            method,
+            path,
+            projection,
+            true,
+            self.operation_identity["kind"] == "raw_inference" && !is_shared_chat(&self.chat),
+        )
+        .await?;
+        self.revalidate(db, &self.connection, Some(target)).await?;
+        target.credential = fresh.credential;
+        target.credential_deferred = false;
+        self.bind_materialized_http(db, target).await
+    }
+
+    pub(crate) async fn bind_materialized_http(
+        &mut self,
+        db: &Database,
+        target: &crate::services::proxy_service::ProxyTarget,
+    ) -> AppResult<()> {
+        target.require_credential_materialized()?;
+        self.revalidate(db, &self.connection, Some(target)).await?;
+        self.execution = Some(execution_projection_digest(target, true));
+        self.execution_credential = true;
+        self.revalidate(db, &self.connection, Some(target)).await?;
+        Ok(())
+    }
 }

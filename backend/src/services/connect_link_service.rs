@@ -41,6 +41,7 @@ pub struct CreateInput {
     pub user_id: String,
     pub service_slug: String,
     pub use_platform_key: Option<bool>,
+    pub assistant_intent_locked: bool,
     pub scopes: Vec<String>,
     pub label: Option<String>,
     pub endpoint_url: Option<String>,
@@ -212,6 +213,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         user_id: input.user_id,
         service_slug: service.service_slug.clone(),
         use_platform_key: input.use_platform_key,
+        assistant_intent_locked: input.assistant_intent_locked,
         service_id: service.service_id.clone(),
         scopes,
         label,
@@ -393,6 +395,15 @@ pub async fn complete(
         context.actor.app_id = current.requesting_app_id.clone().or(context.actor.app_id);
         crate::services::service_history::context::replace(context);
     }
+    if current.assistant_intent_locked
+        && input
+            .use_platform_key
+            .is_some_and(|intent| Some(intent) != current.use_platform_key)
+    {
+        return Err(AppError::ValidationError(
+            "This assistant connection link has a fixed credential intent".into(),
+        ));
+    }
     let catalog = load_catalog_info_by_id(db, &current.service_id).await?;
 
     if let Some(service_id) = current.completed_user_service_id.clone() {
@@ -427,10 +438,24 @@ pub async fn complete(
         return Err(completion_conflict_error(db, &current.id).await?);
     };
 
-    let use_platform_key = input
-        .use_platform_key
-        .or(claimed.use_platform_key)
-        .unwrap_or(false);
+    if claimed.assistant_intent_locked
+        && input
+            .use_platform_key
+            .is_some_and(|intent| Some(intent) != claimed.use_platform_key)
+    {
+        release_claim(db, &claimed.id, &claim_id).await;
+        return Err(AppError::ValidationError(
+            "This assistant connection link has a fixed credential intent".into(),
+        ));
+    }
+    let use_platform_key = if claimed.assistant_intent_locked {
+        claimed.use_platform_key.unwrap_or(false)
+    } else {
+        input
+            .use_platform_key
+            .or(claimed.use_platform_key)
+            .unwrap_or(false)
+    };
     if use_platform_key
         && (input.credential.is_some()
             || input.endpoint_url.is_some()
@@ -1529,6 +1554,77 @@ mod tests {
         service
     }
 
+    #[tokio::test]
+    async fn assistant_intent_lock_rejects_override_before_completion_and_resume_but_legacy_keeps_override()
+     {
+        let db = connect_test_database("assistant_intent_lock")
+            .await
+            .expect("MongoDB 8 replica set required");
+        for intent in [false, true] {
+            let (owner, created) = create_test_link(&db, "locked").await;
+            db.collection::<bson::Document>(CONNECT_LINKS)
+                .update_one(
+                    doc! {"_id":&created.link.id},
+                    doc! {"$set":{"assistant_intent_locked":true,"use_platform_key":intent}},
+                )
+                .await
+                .unwrap();
+            for resume in [false, true] {
+                if resume {
+                    db.collection::<bson::Document>(CONNECT_LINKS)
+                        .update_one(
+                            doc! {"_id":&created.link.id},
+                            doc! {"$set":{"completed_user_service_id":"pinned-service"}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                assert!(matches!(
+                    complete(
+                        &db,
+                        &crate::test_utils::test_encryption_keys(),
+                        &owner,
+                        &created.raw_token,
+                        CompleteInput {
+                            use_platform_key: Some(!intent),
+                            ..Default::default()
+                        },
+                        false
+                    )
+                    .await,
+                    Err(AppError::ValidationError(_))
+                ));
+            }
+            let preview = preview(&db, &created.raw_token).await.unwrap();
+            assert!(preview.link.assistant_intent_locked);
+            assert_eq!(preview.link.use_platform_key, Some(intent));
+        }
+        let (owner, created) = create_test_link(&db, "legacy").await;
+        db.collection::<bson::Document>(CONNECT_LINKS)
+            .update_one(
+                doc! {"_id":&created.link.id},
+                doc! {"$set":{"use_platform_key":true},"$unset":{"assistant_intent_locked":""}},
+            )
+            .await
+            .unwrap();
+        let result = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                use_platform_key: Some(false),
+                credential: Some("test-secret"),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CompleteResult::Completed(_)));
+        db.drop().await.unwrap();
+    }
+
     async fn insert_oauth_client(
         db: &mongodb::Database,
         name: &str,
@@ -1571,6 +1667,7 @@ mod tests {
         let created = create(
             db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
@@ -1661,6 +1758,7 @@ mod tests {
 
     fn scope_create_input(service: &DownstreamService, scopes: &[&str]) -> CreateInput {
         CreateInput {
+            assistant_intent_locked: false,
             user_id: Uuid::new_v4().to_string(),
             service_slug: service.slug.clone(),
             use_platform_key: None,
@@ -1872,6 +1970,7 @@ mod tests {
                 State(state.clone()),
                 test_auth_user(&actor),
                 Json(handlers::CreateConnectLinkRequest {
+                    assistant_personal: false,
                     service_slug: service.slug.clone(),
                     use_platform_key: None,
                     scopes: vec!["read:org, public_repo".to_string()],
@@ -2036,6 +2135,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
@@ -2074,6 +2174,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
@@ -2106,6 +2207,7 @@ mod tests {
         let result = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
@@ -2774,6 +2876,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner,
                 service_slug: service.slug.clone(),
@@ -2817,6 +2920,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
@@ -2862,6 +2966,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
@@ -2904,6 +3009,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,

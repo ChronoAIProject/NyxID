@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
 import { deriveConnectorItems, matchesPluginQuery } from "./pluginConnectors";
 import type {
   CatalogEntry,
@@ -216,6 +217,9 @@ function setup({
       },
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
+    "../../components/SegmentControl": {
+      SegmentControl: renderSegmentControl,
+    },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["ActionButton", "Card", "Label", "Notice", "WorkspacePage"].map(
         (name) => [name, name],

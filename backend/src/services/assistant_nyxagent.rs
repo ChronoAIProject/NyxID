@@ -69,7 +69,10 @@ pub struct AnswerRouting {
 
 pub fn answer_routing(row: &AssistantConversation, turn: &ActiveTurn) -> AnswerRouting {
     answer_routing_parts(
-        row.group_id.as_deref(),
+        row.collaboration
+            .as_ref()
+            .map(|b| b.group_id.as_str())
+            .or(row.group_id.as_deref()),
         row.channel.as_ref(),
         row.reply_channel.as_ref(),
         turn,
@@ -82,18 +85,12 @@ fn answer_routing_parts(
     reply_channel: Option<&ChannelOrigin>,
     turn: &ActiveTurn,
 ) -> AnswerRouting {
-    if turn
-        .events
-        .iter()
-        .any(super::assistant_model_denial_notice::is_notice)
-    {
-        // App replies stay in the app. Captured platform notices use the
-        // separate saved-personal-reply path, never today's legacy home/chat.
-        return AnswerRouting {
-            primary: PrimaryDestination::App,
-            also: Vec::new(),
-        };
-    }
+    // Active-turn attribution also covers partial projections used by image delivery.
+    let group_id = turn
+        .collaboration
+        .as_ref()
+        .map(|b| b.group_id.as_str())
+        .or(group_id);
     let primary = if let Some(group_id) = group_id {
         PrimaryDestination::Group {
             group_id: group_id.to_owned(),
@@ -416,6 +413,7 @@ pub fn base_prompt(
             ),
         ),
     };
+    prompt.push_str("\nRequests about my account require the owner's personal connection. Never present an organization's account or data as the owner's. If only an organization connection exists, offer nyx__connect_service for their own account first. Never send /keys for connecting; use a hosted connect link or Plugins. Specialists cannot create connect links: direct the owner to NyxBot or Plugins, then request a separate specialist grant.");
     prompt.push_str(TASK_COMPLETION_PROMPT);
     if row.role == AgentRole::Orchestrator && !row.guest_turn {
         prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot.");
@@ -445,7 +443,9 @@ pub fn base_prompt(
         prompt.push_str(guest_note(row.is_subagent()));
     } else {
         if let Some(agent) = agent {
-            if agent.user_id != row.user_id {
+            if row.collaboration.is_some() {
+                prompt.push_str("\n\nThis is a multi-person collaboration group. Use only the group transcript and explicitly published team memory. Private notes, private chats and owner memory are unavailable. Every handoff retains the original requester and their authority. Do not write group content into private or team memory.");
+            } else if agent.user_id != row.user_id {
                 if row.shared_agent_thread {
                     prompt.push_str("\n\nThis is a private chat with a shared personal specialist. You act for the person chatting, who pays for NyxID usage. Your context includes explicitly published team memory and this person's private notes only. Remember/forget edits only their private notes; never publish private content to team memory. The agent owner's memory, other chats, roster, machines, saved logins and approvals are unavailable. Use only explicitly shared services or the person's own same-service connection after their consent; never silently switch accounts.");
                 } else if row.group_request_id.is_some() {
@@ -671,8 +671,15 @@ pub struct TurnRequest {
 
 /// One turn to claim: a user message, an orchestrator instruction to a
 /// subagent, a batch of NyxID events, or a channel message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerInstructionSource {
+    FirstPartyOwner,
+    VerifiedPrivateChannel,
+}
+
 #[derive(Clone)]
 pub struct TurnStart {
+    pub owner_instruction_source: Option<OwnerInstructionSource>,
     pub media_event_ids: Vec<String>,
     pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
     pub invocation_id: Option<String>,
@@ -861,6 +868,7 @@ impl From<&TurnRequest> for TurnStart {
             conversation_id: request.conversation_id.clone(),
             text: request.text.clone(),
             model: request.model.clone(),
+            owner_instruction_source: None,
             origin: TurnOrigin::User,
             channel: None,
             title: None,
@@ -1140,6 +1148,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::collaboration_group_service::ensure_indexes(db).await?;
     super::channel_media_events::ensure_indexes(db).await?;
     super::assistant_channel_media::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
@@ -1560,7 +1569,25 @@ pub(crate) async fn authorize_thread_read(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<Option<std::sync::Arc<super::org_agent_service::RequestAccess>>> {
-    if row.shared_agent_thread && row.group_id.is_none() {
+    if row.collaboration.is_some() {
+        return Err(not_found());
+    }
+    if row.shared_agent_thread {
+        if let Some(id) = &row.group_id {
+            let group = super::assistant_group_service::get(db, &row.user_id, id).await?;
+            if super::org_group_service::is_org(&group)
+                || group
+                    .participant_user_ids
+                    .iter()
+                    .any(|id| id != &row.user_id)
+            {
+                return Err(AppError::Forbidden(
+                    "Shared agent history requires your personal crew".into(),
+                ));
+            }
+        }
+        // Retained history is the recipient's. Execution still resolves and
+        // fences the live shared ACL, independent of this metadata marker.
         return Ok(None);
     }
     let user_id = row.user_id.as_str();
@@ -1600,6 +1627,8 @@ pub async fn list(
         None => doc! {"user_id": user_id, "group_id": bson::Bson::Null,
         "voice_parent_conversation_id": bson::Bson::Null},
     };
+    filter.insert("collaboration", bson::Bson::Null);
+    filter.insert("guest_model_setup", doc! {"$ne":true});
     if let Some(cursor) = cursor {
         let (ms, id) = cursor
             .split_once(':')
@@ -1658,7 +1687,7 @@ pub async fn list_shared_history(
         return Err(AppError::NotFound("Agent not found".into()));
     }
     let mut filter = doc! {"user_id": user_id, "agent_id": agent, "shared_agent_thread": true,
-    "group_id": null, "voice_parent_conversation_id": null};
+    "collaboration": null, "group_id": null, "voice_parent_conversation_id": null};
     if let Some(cursor) = cursor {
         let (ms, id) = cursor
             .split_once(':')
@@ -1688,7 +1717,7 @@ pub async fn list_shared_history(
             .collection::<bson::Document>(CONVERSATIONS)
             .find_one(
                 doc! {"user_id": user_id, "agent_id": agent, "shared_agent_thread": true,
-                "group_id": null, "voice_parent_conversation_id": null},
+                "collaboration": null, "group_id": null, "voice_parent_conversation_id": null},
             )
             .projection(doc! {"_id": 1})
             .await?
@@ -1869,7 +1898,7 @@ pub(crate) async fn write_checkpoint_in_session(
     reply: &AssistantMessage,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
-    if row.guest_turn {
+    if row.guest_turn || row.collaboration.is_some() {
         return Ok(());
     }
     let collection = db.collection::<AssistantCheckpoint>(CHECKPOINTS);
@@ -2144,7 +2173,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
-            coordinator_run_ids: Vec::new(),
+            collaboration: None,
             owner_model_route: None,
             invocation_controlled: false,
             credential_invocation_id: None,
@@ -2154,6 +2183,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             platform_cleanup_id: None,
             automation_thread: false,
             voice_parent_conversation_id: None,
+            guest_model_setup: false,
             shared_agent_thread: false,
             agent_owner_id: (agent.user_id != user_id).then(|| agent.user_id.clone()),
             id: id.clone(),
@@ -2198,6 +2228,21 @@ pub(crate) async fn begin_owner_turn_in_session(
             guest_turn: false,
         }
     };
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::check_start(&row, start)?;
+    }
+    if row.guest_model_setup
+        && (start.origin != TurnOrigin::Event
+            || start.guest
+            || row
+                .pending_events
+                .iter()
+                .any(|event| event.kind != super::assistant_guest_model_setup::KIND))
+    {
+        return Err(AppError::Forbidden(
+            "Visitor setup only accepts its system event".into(),
+        ));
+    }
     if row.message_count == 0
         && super::assistant_title_service::eligible(&row)
         && start.origin == TurnOrigin::User
@@ -2383,7 +2428,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if start.invocation_id.is_some()
+    let events = if row.collaboration.is_some()
+        || start.invocation_id.is_some()
         || start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
@@ -2436,7 +2482,13 @@ pub(crate) async fn begin_owner_turn_in_session(
     let admitted =
         super::assistant_access_policy::admit_skill_events_in_session(db, user_id, events, session)
             .await?;
-    let events = admitted.eligible;
+    let events = Box::pin(super::assistant_delegated_images::filter_events_in_session(
+        db,
+        session,
+        &row,
+        admitted.eligible,
+    ))
+    .await?;
     if start.origin == TurnOrigin::Event && events.is_empty() {
         collection
             .update_one(
@@ -2449,6 +2501,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         return Ok(OwnerTurnAdmission::Drained);
     }
     let with_nyxbot = start.origin == TurnOrigin::Group
+        && !row.shared_agent_thread
         && row.role == AgentRole::Subagent
         && match row.group_id.as_deref() {
             Some(group_id) => {
@@ -2595,6 +2648,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             "Voice continuation credential changed".into(),
         ));
     }
+    if row.collaboration.is_some() {
+        row.credential_api_key_id = credential_id.into();
+        super::collaboration_group_service::runtime::bind_key(db, &row, session).await?;
+    }
     if row.group_request_id.is_some() {
         super::api_key_mutation_service::update_one(
             db,
@@ -2671,6 +2728,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -2804,6 +2862,59 @@ pub(crate) async fn begin_owner_turn_in_session(
                 "This reply has already been retried".into(),
             ));
         }
+        // The visible summary and hidden execution reply share one Retry claim.
+        // This transaction also carries every completed-action digest forward.
+        let requests = db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS);
+        if let Some(link) = requests
+            .find_one(doc! {"user_id":user_id,"turn_id":start.retry_of.as_deref(),
+            "$or":[{"conversation_id":&id},{"task_conversation_id":&id}]})
+            .session(&mut *session)
+            .await?
+        {
+            let claimed = requests
+                .update_one(
+                    doc! {"_id":link.get("_id").cloned(),"retry_claimed_by":bson::Bson::Null},
+                    doc! {"$set":{"retry_claimed_by":turn_id}},
+                )
+                .session(&mut *session)
+                .await?;
+            if claimed.modified_count != 1 {
+                return Err(AppError::Conflict(
+                    "This voice task has already been retried".into(),
+                ));
+            }
+            // Old replicas know the message claim, not the additive request
+            // claim. Fence both replies in this same transaction so their hidden
+            // thread Retry cannot race the new visible-thread Retry.
+            let threads: Vec<_> = ["conversation_id", "task_conversation_id"]
+                .into_iter()
+                .filter_map(|field| link.get_str(field).ok())
+                .collect();
+            let messages = db.collection::<bson::Document>(MESSAGES);
+            let mut family = doc! {
+                "user_id":user_id,"conversation_id":{"$in":threads},
+                "turn_id":start.retry_of.as_deref(),"role":"assistant","status":"failed",
+            };
+            family.insert(
+                "retry_claimed_by",
+                doc! {"$exists":true,"$nin":[bson::Bson::Null,bson::Bson::String(turn_id.to_owned())]},
+            );
+            if messages
+                .find_one(family.clone())
+                .session(&mut *session)
+                .await?
+                .is_some()
+            {
+                return Err(AppError::Conflict(
+                    "This voice task has already been retried".into(),
+                ));
+            }
+            family.insert("retry_claimed_by", bson::Bson::Null);
+            messages
+                .update_many(family, doc! {"$set":{"retry_claimed_by":turn_id}})
+                .session(&mut *session)
+                .await?;
+        }
     }
     let note = match (start.note.as_deref(), retry.as_ref()) {
         (Some(note), Some(retry)) => Some(format!("{}\n\n{}", excerpt(note, 1200), retry.note)),
@@ -2815,6 +2926,9 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        delegated_images: Default::default(),
+        timing: Default::default(),
+        collaboration: row.collaboration.clone(),
         channel_adapter_origin: None,
         invocation_id: start
             .invocation_id
@@ -2904,7 +3018,31 @@ pub(crate) async fn begin_owner_turn_in_session(
             .flatten(),
         also_deliver: Vec::new(),
     });
+    Box::pin(super::assistant_delegated_images::assign_in_session(
+        db, session, &mut row,
+    ))
+    .await?;
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|t| t.events.iter().any(|e| e.delegated_result.is_some()))
+    {
+        let delegated_events = row.active_turn.as_ref().unwrap().events.clone();
+        Box::pin(super::assistant_delegated_images::adopt_in_session(
+            db,
+            session,
+            &mut row,
+            &delegated_events,
+        ))
+        .await?;
+    }
     if let Some(event_id) = start.channel_event_id.as_deref() {
+        Box::pin(
+            super::channel_turn_delivery::validate_guest_setup_in_session(
+                db, session, event_id, &row,
+            ),
+        )
+        .await?;
         super::channel_turn_delivery::bind_in_session(
             db,
             session,
@@ -3057,7 +3195,8 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     // An agent's first own thread becomes its home; a hidden group
     // member, channel or isolated automation thread never does.
-    if row.group_id.is_none()
+    if row.collaboration.is_none()
+        && row.group_id.is_none()
         && row.channel.is_none()
         && row.platform_thread.is_none()
         && !row.automation_thread
@@ -3172,6 +3311,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        delegated_images: Default::default(),
         media_event_ids,
         media_queue_notice_id: None,
         media_pending: (media_declared > 0).then_some(media_declared),
@@ -3397,8 +3537,10 @@ pub async fn push_events(
 }
 
 /// Ordinary notices can be evicted only when no invocation continuation is
-/// queued. Accepted source questions are never evicted. Capacity refusal aborts
-/// transactional producers so their work remains available for retry.
+/// queued. Delegated results follow the same FIFO eviction as ordinary notices;
+/// images must not monopolize the queue. Accepted source questions are never
+/// evicted. Capacity refusal aborts transactional producers unless they
+/// explicitly degrade optional publication without discarding their source work.
 pub async fn append_events_in_session(
     db: &Database,
     user_id: &str,
@@ -3666,7 +3808,10 @@ pub async fn mark_dequeued(
     db.collection::<bson::Document>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": turn_id},
-            doc! {"$unset": {"active_turn.queued_at": "", "active_turn.queue_deadline": ""}},
+            vec![doc! {"$set": {"active_turn.timing.queue_wait_ms":{"$add":[
+                {"$ifNull":["$active_turn.timing.queue_wait_ms",0]},
+                {"$max":[0,{"$subtract":["$$NOW",{"$ifNull":["$active_turn.queued_at","$$NOW"]}]}]}]}}},
+                doc! {"$unset":["active_turn.queued_at","active_turn.queue_deadline"]}],
         )
         .await?;
     Ok(())
@@ -3800,6 +3945,7 @@ async fn finish_turn_inner(
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
                                 artifact_delivery: None,
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
+                                timing: saved.turn_metadata.as_ref().and_then(|data| data.timing.clone()),
                                 channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
                             }));
@@ -3934,7 +4080,8 @@ async fn finish_turn_inner(
                     let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;
                     let update = if error.is_some() {
                         vec![doc! {"$set": {
-                            "state": "cancelled",
+                            "state": "cancelled", // Legacy terminal bucket; outcome distinguishes failure.
+                            "terminal_error_code": error.as_ref().map(|error| error.code),
                             "pending_acknowledgement_ids": [],
                         }}]
                     } else {
@@ -3986,7 +4133,12 @@ async fn finish_turn_inner(
                     current.nyxagent_last_response_id = result.response_id.clone();
                     current.credential_api_key_id = credential_id.clone();
                 }
-                let message = AssistantMessage {
+                let mut message = AssistantMessage {
+                    delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
+                        assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
+                        publication_refusal: None,
+                        references: if error.is_none() { settled_turn.as_ref().map(|t| t.delegated_images.references.clone()).unwrap_or_default() } else { Vec::new() },
+                    },
                     media_event_ids: Vec::new(),
                     media_queue_notice_id: None,
                     media_pending: None,
@@ -4050,7 +4202,14 @@ async fn finish_turn_inner(
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message)).await?;
                 }
+                if current.collaboration.is_some() && let Some(turn) = settled_turn.as_ref() {
+                    Box::pin(super::collaboration_group_service::runtime::publish_reply(&db,&current,turn,&message,session)).await?;
+                }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
+                if let Some(turn) = settled_turn.as_ref() {
+                    message.delegated_images.publication_refusal =
+                        Box::pin(super::assistant_delegated_images::publish_in_session(&db, session, &message, turn)).await?.map(str::to_owned);
+                }
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
                     .session(&mut *session)
@@ -4641,6 +4800,12 @@ pub async fn read_group_tool_attachment(
         assistant_group::MESSAGES_COLLECTION_NAME as GROUP_MESSAGES,
     };
     let missing = || AppError::NotFound("Attachment not found".into());
+    if super::collaboration_group_service::marked(db, group_id).await? {
+        return super::collaboration_group_service::uploads::published_image(
+            db, keys, user, group_id, id,
+        )
+        .await;
+    }
     let access = super::assistant_upload_service::owner_scope(db, user, group_id)
         .await?
         .ok_or_else(missing)?;
@@ -4782,6 +4947,7 @@ fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
             ]},
             -MAX_TURN_ACTIVITIES,
         ]},
+        "active_turn.timing.tool_calls": {"$add":[{"$ifNull":["$active_turn.timing.tool_calls",0]},1]},
         "active_turn.activity_total": {"$add": [{"$ifNull": ["$active_turn.activity_total", 0]}, 1]},
         "active_turn.activity_count": {"$cond": [
             {"$in": [{"$type": "$active_turn.activity_count"}, ["int", "long"]]},
@@ -4877,6 +5043,8 @@ struct RetryActivityEvidence {
 
 #[derive(Clone, Deserialize)]
 struct RetryEvidence {
+    #[serde(rename = "_id")]
+    id: String,
     turn_id: String,
     seq: i64,
     role: String,
@@ -4893,6 +5061,7 @@ struct RetryEvidence {
 impl From<&AssistantMessage> for RetryEvidence {
     fn from(row: &AssistantMessage) -> Self {
         Self {
+            id: row.id.clone(),
             turn_id: row.turn_id.clone(),
             seq: row.seq,
             role: row.role.clone(),
@@ -5080,15 +5249,40 @@ pub async fn recovery_previews(
         .find(doc! {
             "conversation_id": conversation_id, "user_id": user_id,
             "turn_id": {"$in": &ids}, "role": "user",
-            "origin": "user", "steering": bson::Bson::Null,
-            "via": bson::Bson::Null,
+            "origin": {"$in":[bson::Bson::Null,bson::Bson::String("user".into())]}, "steering": bson::Bson::Null,
+            "via": {"$in": [bson::Bson::Null, bson::Bson::String("voice".into())]},
             "execution_pending": {"$ne": true},
         })
         .await?
         .try_collect()
         .await?;
-    let inputs: std::collections::HashMap<_, _> =
+    let mut inputs: std::collections::HashMap<_, _> =
         inputs.into_iter().map(|m| (m.turn_id.clone(), m)).collect();
+    // Voice summaries keep the visible input and hidden execution correlated.
+    // Only a server-owned request/result link authorizes the voice input here.
+    if failed
+        .iter()
+        .any(|reply| reply.via.as_deref() == Some("voice"))
+    {
+        let links: Vec<crate::models::assistant_voice::VoiceRequest> = db
+            .collection(crate::models::assistant_voice::REQUESTS)
+            .find(doc! {"user_id":user_id,"conversation_id":conversation_id,"turn_id":{"$in":&ids}})
+            .await?
+            .try_collect()
+            .await?;
+        for reply in &failed {
+            if let Some(input) = inputs.get_mut(&reply.turn_id)
+                && links.iter().any(|link| {
+                    link.turn_id == reply.turn_id
+                        && link.message_id == input.id
+                        && link.result_message_id.as_deref() == Some(&reply.id)
+                })
+            {
+                input.via = None; // In-memory provenance normalization only; never rewrite history.
+                input.origin = Some(TurnOrigin::User);
+            }
+        }
+    }
     let attachment_ids: Vec<String> = inputs
         .values()
         .flat_map(|m| m.attachments.iter().map(|a| a.id.clone()))
@@ -5187,16 +5381,35 @@ pub async fn retry_context_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::BadRequest(RETRY_INVALID.into()))?;
-    let input = messages
+    let mut input = messages
         .find_one(doc! {
             "conversation_id": conversation_id, "user_id": user_id,
             "turn_id": retry_of, "role": "user",
-            "origin": "user", "steering": bson::Bson::Null,
-            "via": bson::Bson::Null,
+            "origin": {"$in":[bson::Bson::Null,bson::Bson::String("user".into())]}, "steering": bson::Bson::Null,
+            "via": {"$in": [bson::Bson::Null, bson::Bson::String("voice".into())]},
             "execution_pending": {"$ne": true},
         })
         .session(&mut *session)
         .await?;
+    if let Some(input) = input
+        .as_mut()
+        .filter(|input| input.via.as_deref() == Some("voice"))
+    {
+        let link = db
+            .collection::<crate::models::assistant_voice::VoiceRequest>(
+                crate::models::assistant_voice::REQUESTS,
+            )
+            .find_one(
+                doc! {"user_id":user_id,"conversation_id":conversation_id,"turn_id":retry_of,
+                "message_id":&input.id,"result_message_id":&failed.id},
+            )
+            .session(&mut *session)
+            .await?;
+        if link.is_some() {
+            input.via = None;
+            input.origin = Some(TurnOrigin::User);
+        }
+    }
     let mut ancestors: std::collections::HashMap<String, RetryEvidence> =
         std::collections::HashMap::new();
     let mut prior = failed.retry_of.clone();
@@ -5320,11 +5533,15 @@ pub async fn activity_finished_for_turn(
                 "active_turn.turn_id": turn_id,
                 "active_turn.activities.id": activity_id,
             },
-            doc! {"$set": {
-                "active_turn.activities.$.status": if ok { "completed" } else { "error" },
-                "active_turn.activities.$.ended_at": bson::DateTime::now(),
-                "active_turn.activities.$.failure": failure.map(|value| bson::to_bson(&value).expect("tool failure serialization")).unwrap_or(bson::Bson::Null),
-            }},
+            vec![doc! {"$set": {
+                "active_turn.timing.tool_ms": {"$add":[{"$ifNull":["$active_turn.timing.tool_ms",0]},
+                    {"$sum":{"$map":{"input":{"$filter":{"input":{"$ifNull":["$active_turn.activities",[]]},"as":"a","cond":{"$and":[{"$eq":["$$a.id",activity_id]},{"$eq":["$$a.status","running"]}]}}},"as":"a",
+                        "in":{"$max":[0,{"$subtract":["$$NOW","$$a.started_at"]}]}}}}]},
+                "active_turn.activities":{"$map":{"input":{"$ifNull":["$active_turn.activities",[]]},"as":"a","in":{
+                    "$cond":[{"$eq":["$$a.id",activity_id]},
+                        {"$mergeObjects":["$$a",{"status":if ok {"completed"} else {"error"},"ended_at":"$$NOW",
+                            "failure":{"$literal":failure.map(|v| bson::to_bson(&v).expect("tool failure")).unwrap_or(bson::Bson::Null)}}]},"$$a"]}}},
+            }}],
         )
         .await?;
     if !ok {
@@ -5569,6 +5786,12 @@ pub async fn delete(
                             .session(&mut *session)
                             .await?;
                     }
+                    // Pending guest input has not yet been bound to a turn.
+                    // Revoke its resumability with the conversation, preserving dedup metadata.
+                    db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+                        .update_many(doc!{"user_id":user_id,"guest_setup_conversation_id":id,"turn_id":bson::Bson::Null},
+                            doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset":{"guest_setup_payload":""}})
+                        .session(&mut *session).await?;
                     db.collection::<bson::Document>(CHECKPOINTS)
                         .delete_one(doc! {"_id": id, "user_id": user_id})
                         .session(&mut *session)
@@ -5883,7 +6106,11 @@ pub async fn conversation_history_page(
     if chat.guest || chat.turn_stopped || chat.turn_id.is_none() {
         return Err(AppError::AssistantTurnRequired);
     }
-    let thread = get(db, &chat.user_id, &chat.conversation_id).await?;
+    let thread = if chat.collaboration_thread {
+        super::collaboration_group_service::uploads::thread(db, chat).await?
+    } else {
+        get(db, &chat.user_id, &chat.conversation_id).await?
+    };
     if thread.guest_turn
         || thread.credential_api_key_id != chat.api_key_id
         || live_turn(&thread, Utc::now())
@@ -6270,11 +6497,9 @@ impl TurnError {
     /// Unknown or absent reasons never claim that an owner notice was queued.
     pub fn with_model_route_reason(mut self, reason: Option<&str>) -> Self {
         if self.code == "guest_model_route_required"
-            && reason.is_some_and(
-                super::assistant_service_execution::model_diagnostic::Reason::setup_code,
-            )
+            && reason.is_some_and(super::assistant_guest_model_setup::failure_code)
         {
-            self.message = "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.".into();
+            self.message = "Visitor setup could not finish. The owner has been notified. Please try again later.".into();
         }
         self
     }
@@ -6322,6 +6547,10 @@ impl TurnError {
             && !code.starts_with("sk_"))
         .then(|| code.into());
         let (code, message) = match code {
+            "assistant_start_unavailable" => (
+                "assistant_start_unavailable",
+                "The assistant could not start because a dependency is temporarily unavailable. Nothing was done. Please try again shortly.",
+            ),
             "session_busy" => (
                 "session_busy",
                 "The assistant session is busy. Try again shortly.",
@@ -6352,6 +6581,10 @@ impl TurnError {
             "agent_key_required" | "credential_invalid" => (
                 "credential_invalid",
                 "The assistant credential could not be accepted.",
+            ),
+            "model_authority_changed" => (
+                "model_authority_changed",
+                "Your access settings or model connection changed during this task. Review the completed actions and try again.",
             ),
             "model_not_configured" => (
                 "model_not_configured",
@@ -6460,7 +6693,9 @@ pub enum RecoveryAction {
 impl Recovery {
     pub fn decide(&mut self, status: u16, code: &str, bound: bool) -> RecoveryAction {
         // Billing failures need their own remedy, never a credential replacement or rebind.
-        if super::assistant_model_observer::billing_failure_code(code).is_some() {
+        if code == "model_authority_changed"
+            || super::assistant_model_observer::billing_failure_code(code).is_some()
+        {
             return RecoveryAction::Fail;
         }
         if (status == 401 || status == 403 || code == "agent_key_required") && !self.replaced {

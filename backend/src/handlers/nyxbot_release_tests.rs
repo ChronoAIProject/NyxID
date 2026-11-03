@@ -806,6 +806,7 @@ async fn continuity_restores_stable_chats_policy_verified_owners_and_both_reply_
         previous.status = "disconnected".into();
         previous.owner_sender_ids = vec!["verified-owner".into()];
         previous.private_chats = Some("everyone".into());
+        previous.private_chat_posts = Some(true);
         previous.agent_id = Some("agent-old".into());
         previous.link_code_hash = Some("never-copy".into());
         state
@@ -861,6 +862,7 @@ async fn continuity_restores_stable_chats_policy_verified_owners_and_both_reply_
             ["newly-verified-owner", "verified-owner"]
         );
         assert_eq!(active.private_chats, previous.private_chats);
+        assert_eq!(active.private_chat_posts, previous.private_chat_posts);
         assert_eq!(active.link_code_hash.as_deref(), Some("fresh-link-hash"));
         assert_eq!(
             active.link_code_expires_at.unwrap() - ChronoDuration::hours(LINK_CODE_TTL_HOURS),

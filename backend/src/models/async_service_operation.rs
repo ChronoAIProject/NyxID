@@ -79,16 +79,10 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
-    /// Producer identity verified at generated-artifact admission. Missing legacy
-    /// snapshots cannot gain fresh acquisition authority from endpoint shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_catalog_service_id: Option<String>,
+    pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(default)]
-    pub artifact_mode: Option<String>,
-    #[serde(default)]
-    pub artifact_result: Option<super::generated_artifact::ResultManifest>,
-    #[serde(default)]
-    pub artifact_event_turn_id: Option<String>,
+    pub instruction_receipt_version: u32,
     #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]

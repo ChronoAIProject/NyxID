@@ -3,6 +3,7 @@ import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
 import { ChevronRight, Megaphone, User, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -16,6 +17,7 @@ import {
   useGuestReadiness,
   useNyxBotChannelChats,
   useSetNyxBotPrivateChats,
+  useSetNyxBotPrivateChatPosts,
   useUpdateNyxBotChannelChat,
 } from "@/hooks/use-nyxbot-agents";
 import { agentTitle, channelChatTitle } from "@/lib/assistant/nyxbot-labels";
@@ -232,6 +234,8 @@ export function ChannelChats({
   const agentId = channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
   const readiness = useGuestReadiness(agentId, open);
   const access = useSetNyxBotPrivateChats();
+  const posts = useSetNyxBotPrivateChatPosts();
+  const [applyToExisting, setApplyToExisting] = useState(false);
   const rows = chats.data ?? [];
   const roots = rows.filter((chat) => !chat.parent_chat_id || !rows.some((parent) => parent.id === chat.parent_chat_id));
 
@@ -241,6 +245,16 @@ export function ChannelChats({
       await access.mutateAsync({ channelAgentId: channel.id, privateChats });
     } catch (cause) {
       setError(errorMessage(cause, "Could not change who can talk in private chats."));
+    }
+  }
+
+  async function setPosts(enabled: boolean) {
+    setError(undefined);
+    try {
+      await posts.mutateAsync({ channelAgentId: channel.id, enabled, applyToExisting });
+      setApplyToExisting(false);
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not change private chat posting."));
     }
   }
 
@@ -280,6 +294,50 @@ export function ChannelChats({
             to the bot there. In groups it answers when mentioned or replied to unless set to
             every message.
           </p>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-11 text-muted-foreground">Allow posts in new private chats</span>
+            <Switch
+              aria-label={`Allow posts in new private chats with ${channel.bot_label}`}
+              checked={channel.private_chat_posts}
+              disabled={posts.isPending}
+              onCheckedChange={(value) => void setPosts(value)}
+            />
+          </div>
+          <p className="text-11 text-text-tertiary">
+            The agent can send updates after a customer first messages this bot. Existing chats
+            keep their settings; you can still turn posting off for individual chats. Groups and
+            topics need their own permission. This does not change who can talk to the bot.
+          </p>
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id={`apply-existing-posts-${channel.id}`}
+              checked={applyToExisting}
+              disabled={posts.isPending}
+              onCheckedChange={(checked) => setApplyToExisting(checked === true)}
+            />
+            <label
+              htmlFor={`apply-existing-posts-${channel.id}`}
+              className="text-11 text-muted-foreground"
+            >
+              Also apply to existing private chats
+            </label>
+          </div>
+          {applyToExisting ? (
+            <div className="flex items-center gap-2">
+              <p className="text-11 text-text-tertiary">
+                Applies the current setting to up to 1,000 changed private chats, including
+                individual overrides.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={posts.isPending}
+                onClick={() => void setPosts(channel.private_chat_posts)}
+              >
+                Apply current setting
+              </Button>
+            </div>
+          ) : null}
           <GuestReadiness readiness={readiness.data} />
           {error ? (
             <p role="alert" className="text-11 text-destructive">

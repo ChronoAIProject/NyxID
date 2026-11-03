@@ -61,6 +61,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -136,6 +137,11 @@ fn render(
             RequestState::Completed => "Done",
             RequestState::Claimed => "Running",
             RequestState::Queued => "Queued",
+            RequestState::Cancelled
+                if crate::services::assistant_voice::request_outcome(request) == Some("failed") =>
+            {
+                "Failed"
+            }
             RequestState::Cancelled => "Cancelled",
             RequestState::AwaitingConfirmation => "Needs your OK",
         };
@@ -192,6 +198,16 @@ mod tests {
     }
 
     #[test]
+    fn voice_2142_receipt_distinguishes_failure_from_stop() {
+        let mut failed = request(RequestState::Cancelled, "failed", "m1");
+        failed.terminal_error_code = Some("model_authority_changed".into());
+        let stopped = request(RequestState::Cancelled, "stopped", "m2");
+        let text = render(20, &[failed, stopped], &HashMap::new(), &[]);
+        assert!(text.contains("— Failed"));
+        assert!(text.contains("— Cancelled"));
+    }
+
+    #[test]
     fn receipt_hides_empty_work_and_lists_human_statuses_and_results() {
         let empty = render(12, &[], &HashMap::new(), &[]);
         assert!(empty.contains("Just a conversation, nothing handed off"));
@@ -201,6 +217,7 @@ mod tests {
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,

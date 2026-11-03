@@ -84,13 +84,14 @@ channel; the popup validates and self-navigates (§4 invariant 3).
 | `kc` | KeyConnect | reserved, unimplemented |
 | `pc` | ProviderConnect | reserved, unimplemented |
 | `sa` | ServiceAccountConnect | reserved, unimplemented |
-| `wz` | WizardConnect | reserved, unimplemented |
+| `wz` | WizardConnect | **implemented**: CLI-started connections (local wizard, `/cli/pair`, `service add --oauth`) land on `/oauth-complete` without a nonce |
 | `sl` | SocialLogin | reserved, unimplemented |
 
 The initiate endpoint (`handlers/user_tokens.rs:384-390`) accepts any of the
 six via `?flow=`; unknown tokens are a 400 `ValidationError`. Only `cc`
-engages the attempt-nonce lifecycle; other tokens keep byte-identical legacy
-behavior. `OAuthState.flow_kind` and `attempt_nonce`, and
+engages the attempt-nonce lifecycle; `wz` only changes the callback's browser
+destination; other tokens keep byte-identical legacy behavior.
+`OAuthState.flow_kind` and `attempt_nonce`, and
 `UserApiKey.oauth_attempt_nonce`, are `Option` with
 `serde(default, skip_serializing_if = "Option::is_none")` — absent on every
 legacy document, before and after round-trip (tested).
@@ -298,7 +299,8 @@ generation guard caused a reproduced
   `cc` attempt-generation guard already neutralizes D-2's retry-poisoning
   consequence *for chat*; the general fixes remain separate.
 - All non-`cc` popup surfaces: providers grid (`pc`), keys dashboard (`kc`),
-  SA providers (`sa`), CLI wizard (`wz`), social login (`sl`).
+  SA providers (`sa`), social login (`sl`). The CLI wizard (`wz`) uses the
+  completion page as a landing page only, with no popup channel.
 - Phase-2 embedded/iframe variant from the universal design.
 - Durable server-side cancel: the popup's dismiss is labelled "Close", not
   "Cancel" — OAuth-state cancellation transactions are out of the pilot.

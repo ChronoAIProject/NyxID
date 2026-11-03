@@ -164,6 +164,22 @@ describe("NyxBot message and card schemas", () => {
     expect(nyxAgentMessageSchema.parse({ ...message, role: "user", continuation_of: row.id }).continuation_of).toBe(row.id);
   });
 
+  it("preserves protected org reasons and supported or unsupported personal setup offers", () => {
+    const card = { id: "12345678-1234-4123-8123-123456789012", kind: "action", status: "pending",
+      summary: "Read the organization connection", service_slug: "github", service_name: "GitHub",
+      tool_name: "nyxid.service_execution", created_at: at, decided_at: null, expires_at: at,
+      confirmation: { risk: "read", access_mode: "autopilot", reason: "org_connection" } };
+    for (const connect_own of [
+      { supported: true, catalog_service_id: "catalog", service_slug: "github" },
+      { supported: false, reason: "ssh_requires_advanced_setup" },
+    ]) {
+      expect(nyxAgentAcknowledgementSchema.parse({ ...card, connect_own })).toMatchObject({
+        confirmation: { reason: "org_connection" }, connect_own,
+      });
+    }
+    expect(nyxAgentAcknowledgementSchema.parse(card).connect_own).toBeUndefined();
+  });
+
   it("parses a history with team members", () => {
     const page = nyxAgentHistorySchema.parse({
       conversation: { ...legacyConversation, members: [] },
@@ -364,6 +380,20 @@ describe("NyxBot team, settings and channel schemas", () => {
       .follow_readiness).toBe("ready");
   });
 
+  it("defaults private chat posting off for older channel responses", () => {
+    const channel = {
+      id: "c", channel_bot_id: "bot", platform: "telegram", bot_label: "Bot",
+      transport: "gateway", status: "active", owner_linked: true, created_at: at,
+    };
+    expect(nyxAgentChannelAgentSchema.parse(channel).private_chat_posts).toBe(false);
+    for (const enabled of [false, true]) {
+      expect(nyxAgentChannelAgentSchema.parse({ ...channel, private_chat_posts: enabled })
+        .private_chat_posts).toBe(enabled);
+    }
+    expect(nyxAgentChannelAgentSchema.safeParse({ ...channel, private_chat_posts: "true" })
+      .success).toBe(false);
+  });
+
   it("keeps only https owner links", () => {
     const channel_agent = {
       id: "c",
@@ -438,6 +468,14 @@ describe("group schemas", () => {
         before_seq: null,
       }),
     ).toThrow();
+  });
+
+  it("retains server member names and unavailable reasons without a viewer agent inventory", () => {
+    const agent = { ...group.members[1], display_name: "Office Agent", unavailable: true, unavailable_reason: "not_shared_with_you", owner_name: "Share Ops" };
+    const page = assistantGroupMessagesSchema.parse({ group: { ...group, members: [agent] }, messages: [{ id: "m", seq: 1, role: "notice", agent, text: "Ask the owner", created_at: at }] });
+    expect(page.group.members[0]).toMatchObject(agent);
+    expect(page.messages[0]?.agent?.display_name).toBe("Office Agent");
+    expect(assistantGroupPostedSchema.parse({ message: { id: "p", seq: 2, role: "user", text: "People only", created_at: at, recipient_agent_ids: [] }, addressed_agent_ids: [], request_id: null }).addressed_agent_ids).toEqual([]);
   });
 
   it("parses the accepted post response", () => {

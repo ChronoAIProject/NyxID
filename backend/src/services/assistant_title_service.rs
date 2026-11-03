@@ -60,6 +60,7 @@ pub fn eligible(row: &AssistantConversation) -> bool {
     row.title_source == TitleSource::Provisional
         && !row.guest_turn
         && row.channel.is_none()
+        && row.collaboration.is_none()
         && row.group_id.is_none()
         && !row.automation_thread
 }

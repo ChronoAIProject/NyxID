@@ -4,7 +4,9 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
+import { AssistantLinkModal } from "./assistant-link-modals";
+import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
+import { Link } from "@tanstack/react-router";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
@@ -215,11 +217,12 @@ function ConnectorCard({
 }: {
   readonly item: ConnectorCardItem;
   readonly onManage: (cardId: string) => void;
-  readonly onConnect: (slug: string) => void;
+  readonly onConnect: (slug: string, personal: boolean) => void;
 }) {
   const connectSlug = item.connectSlug;
   return (
-    <PluginCard
+    <div className="space-y-2">
+      <PluginCard
       item={item}
       addedBadge="Connected"
       addedMeta={(item.manageKeyIds?.length ?? 0) > 1 ? item.meta : undefined}
@@ -228,10 +231,25 @@ function ConnectorCard({
         item.added
           ? () => onManage(item.id)
           : connectSlug
-            ? () => onConnect(connectSlug)
+            ? () => onConnect(connectSlug, false)
             : undefined
       }
     />
+      {item.advancedSetupSlug ? (
+        <Link
+          to="/keys"
+          search={{ tab: "services", action: "add-service", slug: item.advancedSetupSlug }}
+          className="inline-block text-12 underline underline-offset-4"
+        >
+          Advanced setup for {item.name}
+        </Link>
+      ) : null}
+      {item.connectOwnSlug ? (
+        <Button variant="outline" onClick={() => onConnect(item.connectOwnSlug!, true)}>
+          Connect your own
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -239,18 +257,14 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   const keysQuery = useKeys();
   const catalogQuery = useCatalog();
   const [manageCardId, setManageCardId] = useState<string | null>(null);
-  const [connectSlug, setConnectSlug] = useState<string | null>(null);
-  // Settled result of a managed-popup OAuth connect. The popup's "view result"
-  // action hands back the key it authorized, and the grid opens the same
-  // manage modal the Added cards use. The label rides along because
-  // `connectSlug` is cleared as the dialog closes and the freshly minted key
-  // has not landed in `items` yet.
-  const [popupResult, setPopupResult] = useState<{
-    readonly keyId: string;
-    readonly name: string;
-    readonly iconSlug: string | null;
-    readonly iconUrl: string | null;
-  } | null>(null);
+  const [connectHref, setConnectHref] = useState<string | null>(null);
+  const createConnect = useCreateAssistantConnectLink();
+  function openConnect(slug: string, personal: boolean) {
+    if (createConnect.isPending) return;
+    void createConnect.mutateAsync({ serviceSlug: slug, personal }).then(setConnectHref).catch((cause: unknown) => {
+      toast.error(cause instanceof Error ? cause.message : "Could not create connection link");
+    });
+  }
 
   const items = useMemo(
     () => deriveConnectorItems(keysQuery.data ?? [], catalogQuery.data ?? []),
@@ -322,7 +336,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                     key={item.id}
                     item={item}
                     onManage={setManageCardId}
-                    onConnect={setConnectSlug}
+                    onConnect={openConnect}
                   />
                 ))}
               </CardGrid>
@@ -346,7 +360,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                 key={item.id}
                 item={item}
                 onManage={setManageCardId}
-                onConnect={setConnectSlug}
+                onConnect={openConnect}
               />
             ))}
           </CardGrid>
@@ -363,50 +377,15 @@ function ConnectorsTab({ query }: { readonly query: string }) {
         />
       )}
 
-      {/* The same add-service dialog the Studio /keys page uses — handles every
-          connect flavor (API-key paste, device-code) and invalidates the keys
-          query on success, so the card moves to Added. OAuth opts into the
-          managed popup on the same `cc` contract as the assistant's connect
-          card, so the grid stays on screen while the user authorizes instead
-          of the tab navigating away to the provider. */}
-      {connectSlug !== null && (
-        <AddKeyDialog
-          open
-          prefillSlug={connectSlug}
-          launch="popup"
-          flow="cc"
-          onPopupViewResult={(keyId) => {
-            const connecting = items.available.find(
-              (candidate) => candidate.connectSlug === connectSlug,
-            );
-            setConnectSlug(null);
-            // Deferred a tick so the add dialog unmounts before the manage
-            // modal mounts; two overlapping Radix dialogs fight over focus.
-            window.setTimeout(() => {
-              setPopupResult({
-                keyId,
-                name: connecting?.name ?? connectSlug,
-                iconSlug: connecting?.iconSlug ?? connectSlug,
-                iconUrl: connecting?.iconUrl ?? null,
-              });
-            }, 0);
-            return true;
-          }}
-          onOpenChange={(next) => {
-            if (!next) setConnectSlug(null);
-          }}
-        />
-      )}
+      <Link
+        to="/keys"
+        search={{ tab: "services", action: "add-service" }}
+        className="inline-block text-12 underline underline-offset-4"
+      >
+        Advanced setup
+      </Link>
+      <AssistantLinkModal href={connectHref} onClose={() => setConnectHref(null)} />
 
-      {popupResult && (
-        <ManageConnectionModal
-          keyIds={[popupResult.keyId]}
-          serviceName={popupResult.name}
-          iconSlug={popupResult.iconSlug}
-          iconUrl={popupResult.iconUrl}
-          onClose={() => setPopupResult(null)}
-        />
-      )}
     </>
   );
 }

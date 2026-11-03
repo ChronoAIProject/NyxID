@@ -748,7 +748,10 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
             &row,
             &origin,
             "event result",
-            Some(&images::ImageSendPlan { attachments }),
+            Some(&images::ImageSendPlan {
+                delegated: Vec::new(),
+                attachments,
+            }),
         )
         .await;
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);

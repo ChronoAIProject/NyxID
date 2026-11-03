@@ -37,7 +37,12 @@ impl ToolImages {
         self.parts.clear();
         self.note.clear();
         self.pending.clear();
-        let current = match engine::get(&state.db, &row.user_id, &row.id).await {
+        let refreshed = if row.collaboration.is_some() {
+            crate::services::collaboration_group_service::runtime::refresh(&state.db, row).await
+        } else {
+            engine::get(&state.db, &row.user_id, &row.id).await
+        };
+        let current = match refreshed {
             Ok(current) => current,
             Err(_) => {
                 tracing::warn!("Optional tool image preparation could not read the conversation");

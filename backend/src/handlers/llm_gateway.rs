@@ -230,13 +230,18 @@ pub async fn pool_aliases(
     auth.ensure_llm_proxy_access()?;
     let actor = auth.proxy_resolution_user_id();
     let mut owners = vec![actor.clone()];
-    owners.extend(
-        crate::services::org_service::find_active_memberships_with_timeout(&state.db, &actor)
-            .await?
-            .into_iter()
-            .filter(|m| m.role.can_proxy())
-            .map(|m| m.org_user_id),
-    );
+    if let Some(shared) = auth.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        owners.push(shared.owner().to_owned());
+    } else {
+        owners.extend(
+            crate::services::org_service::find_active_memberships_with_timeout(&state.db, &actor)
+                .await?
+                .into_iter()
+                .filter(|m| m.role.can_proxy())
+                .map(|m| m.org_user_id),
+        );
+    }
     let offset = query.offset.unwrap_or(0);
     if offset > 1_000_000 {
         return Err(AppError::BadRequest("Invalid alias offset".into()));
@@ -265,7 +270,7 @@ pub async fn pool_aliases(
         {
             continue;
         }
-        let plan = crate::services::service_pool_service::plan_candidates_with_allowlist(
+        let plan = crate::services::service_pool_service::plan_candidates_with_access(
             &state.db,
             &state.encryption_keys,
             &actor,
@@ -278,6 +283,7 @@ pub async fn pool_aliases(
             Some(br#"{"messages":[{"role":"user","content":""}]}"#),
             allowed.as_ref(),
             nodes.as_ref(),
+            auth.org_agent_access.as_deref(),
         )
         .await;
         let available = match plan {
@@ -346,6 +352,14 @@ pub async fn llm_proxy_request(
     Path((provider_slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(&auth_user)
+        && (request.method() == Method::CONNECT
+            || request.headers().contains_key(axum::http::header::UPGRADE))
+    {
+        return Err(AppError::Forbidden(
+            "Shared streams must use the service proxy".into(),
+        ));
+    }
     llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
     auth_user
@@ -607,28 +621,6 @@ pub async fn llm_proxy_request(
 
     let mut target = target;
     projection.apply(&mut target);
-    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
-        &state,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        owner_for_approval.as_deref(),
-        &target,
-        &request_method_str,
-        &dispatch_path,
-        query.as_deref(),
-        &dispatch_body,
-        headers
-            .get(crate::services::assistant_service_execution::ACK_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        None,
-        &headers,
-        &projection,
-    )
-    .await?;
-    if let Some(refusal) = assistant_decision.refusal.as_ref() {
-        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
-    }
-
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = owner_for_approval
         .as_deref()
@@ -649,6 +641,47 @@ pub async fn llm_proxy_request(
         &billing_request_id,
         credential_class,
     );
+    let mut assistant_decision =
+        crate::services::assistant_service_execution::check_http_projected(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            owner_for_approval.as_deref(),
+            &target,
+            &request_method_str,
+            &dispatch_path,
+            query.as_deref(),
+            &dispatch_body,
+            headers
+                .get(crate::services::assistant_service_execution::ACK_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            None,
+            &headers,
+            &projection,
+        )
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
+    if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        request_audit.denied(409);
+        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+    }
+    if let Some(admission) = assistant_decision.admission.as_mut() {
+        admission
+            .materialize_http(
+                &state.db,
+                &state.encryption_keys,
+                &mut target,
+                &request_method_str,
+                &dispatch_path,
+                &projection,
+            )
+            .await
+            .inspect_err(|error| request_audit.admission_error(error))?;
+    }
+    target
+        .require_credential_materialized()
+        .inspect_err(|error| request_audit.admission_error(error))?;
+
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -1119,6 +1152,13 @@ async fn gateway_provider_request(
     is_streaming: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(&auth_user)
+        && (method == Method::CONNECT || headers.contains_key(axum::http::header::UPGRADE))
+    {
+        return Err(AppError::Forbidden(
+            "Shared streams must use the service proxy".into(),
+        ));
+    }
     let user_id_str = auth_user.user_id.to_string();
     // Resolve provider slug from model name
     let primary_slug =
@@ -1376,28 +1416,6 @@ async fn gateway_provider_request(
 
     let mut target = target;
     projection.apply(&mut target);
-    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
-        &state,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        effective_owner_for_approval.as_deref(),
-        &target,
-        "POST",
-        &final_path,
-        query.as_deref(),
-        final_body_bytes.as_deref().unwrap_or_default(),
-        headers
-            .get(crate::services::assistant_service_execution::ACK_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        None,
-        &headers,
-        &projection,
-    )
-    .await?;
-    if let Some(refusal) = assistant_decision.refusal.as_ref() {
-        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
-    }
-
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
@@ -1418,6 +1436,47 @@ async fn gateway_provider_request(
         &billing_request_id,
         credential_class,
     );
+    let mut assistant_decision =
+        crate::services::assistant_service_execution::check_http_projected(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            effective_owner_for_approval.as_deref(),
+            &target,
+            "POST",
+            &final_path,
+            query.as_deref(),
+            final_body_bytes.as_deref().unwrap_or_default(),
+            headers
+                .get(crate::services::assistant_service_execution::ACK_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            None,
+            &headers,
+            &projection,
+        )
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
+    if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        request_audit.denied(409);
+        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+    }
+    if let Some(admission) = assistant_decision.admission.as_mut() {
+        admission
+            .materialize_http(
+                &state.db,
+                &state.encryption_keys,
+                &mut target,
+                "POST",
+                &final_path,
+                &projection,
+            )
+            .await
+            .inspect_err(|error| request_audit.admission_error(error))?;
+    }
+    target
+        .require_credential_materialized()
+        .inspect_err(|error| request_audit.admission_error(error))?;
+
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -2685,6 +2744,7 @@ async fn enforce_agent_llm_operations(
             operations::GuestHttpContext {
                 query,
                 websocket: headers.contains_key(axum::http::header::UPGRADE),
+                ..Default::default()
             },
         ))
         .await?;
@@ -2715,6 +2775,7 @@ async fn enforce_agent_llm_operations(
         operations::GuestHttpContext {
             query,
             websocket: headers.contains_key(axum::http::header::UPGRADE),
+            ..Default::default()
         },
     ))
     .await?;
@@ -3077,6 +3138,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: service.base_url.clone(),

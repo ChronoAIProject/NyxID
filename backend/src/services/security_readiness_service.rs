@@ -40,6 +40,8 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:generated-artifacts",
     "assistant:org-agents",
     "assistant:shared-agents",
+    super::collaboration_group_service::READINESS,
+    super::shared_agent_transport::READINESS,
     "assistant:operation-scopes",
     "assistant:guest-operation-scopes",
     "assistant:machine-capabilities",
@@ -47,10 +49,13 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:live-turn-gate",
     super::assistant_model_control::READINESS_CAPABILITY,
     PLATFORM_POLICY,
+    super::feature_flag_service::ORG_INSTRUCTION_FLAG_KEY,
+    super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,
+    super::nyxbot_response_recovery::RELAY_READINESS,
 ];
 const MAX_AGE_SECS: i64 = 45;
 

@@ -1067,7 +1067,7 @@ async fn authorize_decision_inner(
 
     validate_consent_write_access(form.write_access.as_deref())?;
 
-    let (client, validated_scope) = validate_authorize_request(&state, &params).await?;
+    let (client, mut validated_scope) = validate_authorize_request(&state, &params).await?;
 
     // Re-resolve the reviewed binding after the consent round-trip. The
     // signed consent request carries only its hash; current ownership and
@@ -1082,17 +1082,28 @@ async fn authorize_decision_inner(
 
     let machine = if validated_scope.split_whitespace().any(|s| s == "machine") {
         super::login_client_context::require_first_party_human(&auth_user)?;
-        Some(
-            crate::services::machine_oauth_consent_service::MachineConsentApproval {
-                request_id: params.machine_approval_request_id.clone().ok_or_else(|| {
-                    AppError::BadRequest("Review and save Machine selection before approval".into())
-                })?,
-                signed_request: consent_request.to_owned(),
-            },
-        )
+        params
+            .machine_approval_request_id
+            .clone()
+            .map(|request_id| {
+                crate::services::machine_oauth_consent_service::MachineConsentApproval {
+                    request_id,
+                    signed_request: consent_request.to_owned(),
+                }
+            })
     } else {
         None
     };
+    if machine.is_none() {
+        // RFC 6749 §3.3: approving the other permissions must not require a
+        // Machine grant. Only the saved, signed selection can retain this scope.
+        // Narrow code authority as well as the submitted consent; the ordinary
+        // union still preserves grants held by other sessions of this client.
+        validated_scope = without_machine_scope(&validated_scope);
+        if let Some(snapshot) = params.incremental_consent.as_mut() {
+            snapshot.scopes = without_machine_scope(&snapshot.scopes);
+        }
+    }
     let mut code_service_access: Option<(bool, Vec<String>)> = None;
     let consent = if params.service_access_mode.is_some() {
         let snapshot = params.incremental_consent.as_ref().ok_or_else(|| {
@@ -1223,6 +1234,14 @@ async fn authorize_decision_inner(
     } else {
         Ok(redirect_302(&redirect_url))
     }
+}
+
+fn without_machine_scope(scope: &str) -> String {
+    scope
+        .split_whitespace()
+        .filter(|scope| *scope != "machine")
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Parse the `prompt` parameter into a set of prompt values (OIDC Core §3.1.2.1).

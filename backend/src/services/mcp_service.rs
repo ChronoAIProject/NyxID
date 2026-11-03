@@ -546,7 +546,10 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
             let mut operations = service
                 .endpoints
                 .iter()
-                .filter(|endpoint| !super::lark_attachment_tool::is_attachment_operation(endpoint))
+                .filter(|endpoint| {
+                    !super::lark_attachment_tool::is_attachment_operation(endpoint)
+                        && !super::lark_im_tool::image_candidate(endpoint)
+                })
                 .filter_map(|endpoint| {
                     let metadata = service
                         .durable_endpoint_metadata
@@ -2683,13 +2686,14 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
         description: "Connect to an available service. If a credential is required and omitted, \
-            returns a hosted connection URL that the user can open. Optional scopes request \
+            returns a hosted connection URL that the user can open. Provide service_id or service_slug. For assistant chats, connecting the owner's own credential always returns a hosted link with personal intent, including when an organization connection exists. Specialists must use NyxBot or Plugins then receive a separate grant. Optional scopes request \
             additional OAuth permissions on top of provider defaults through that hosted link; \
             omit credential when requesting scopes."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
+                "service_slug": {"type":"string","description":"Catalog slug, as an alternative to service_id. Provide service_id or service_slug; if both are supplied they must identify the same visible catalog."},
                 "use_platform_key": { "type": "boolean", "default": false, "description": "Use an available NyxID platform key" },
                 "service_id": {
                     "type": "string",
@@ -2709,7 +2713,7 @@ pub fn generate_tool_definitions(
                     "description": "Additional OAuth scopes to request on top of the provider defaults, e.g. [\"public_repo\"]. Rejected for services whose provider does not accept scopes."
                 }
             },
-            "required": ["service_id"]
+            "required": []
         }),
     });
 
@@ -2996,7 +3000,10 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
                 response_description: None,
                 response: OperationResponseContract::default(),
             })
-            .filter(|endpoint| !super::lark_attachment_tool::is_attachment_operation(endpoint))
+            .filter(|endpoint| {
+                !super::lark_attachment_tool::is_attachment_operation(endpoint)
+                    && !super::lark_im_tool::image_candidate(endpoint)
+            })
             .collect();
 
         if endpoints.is_empty() {
@@ -3217,6 +3224,12 @@ pub(crate) fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Valu
             .insert("required".into(), serde_json::Value::Array(required));
     }
 
+    if super::lark_im_tool::kind(endpoint).is_some()
+        && let Some(body) = &endpoint.request_body_schema
+    {
+        schema["oneOf"] = body["oneOf"].clone();
+        schema["additionalProperties"] = serde_json::json!(false);
+    }
     schema
 }
 
@@ -3750,6 +3763,7 @@ impl AutomaticReceipt {
 }
 
 pub struct PreparedProxyCall {
+    lark_message: Option<super::lark_im_tool::MessageMode>,
     managed_base: Option<super::lark_base_writes::Prepared>,
     attachment_binding: Option<super::lark_attachment_tool::Binding>,
     resource_source: Option<crate::models::assistant_resource::ResourceSource>,
@@ -4076,6 +4090,7 @@ pub(crate) fn http_carries_method_override(
         return true;
     };
     PreparedProxyCall {
+        lark_message: None,
         managed_base: None,
         attachment_binding: None,
         resource_source: None,
@@ -4116,7 +4131,12 @@ pub fn prepare_proxy_tool_call(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
 ) -> AppResult<PreparedProxyCall> {
-    if super::lark_attachment_tool::is_attachment_operation(endpoint) {
+    if super::lark_attachment_tool::is_attachment_operation(endpoint)
+        || matches!(
+            endpoint.attachment_input,
+            Some(super::lark_attachment_tool::Projection::ImRefused)
+        )
+    {
         return Err(super::lark_attachment_tool::refused());
     }
     prepare_proxy_tool_call_inner(service, endpoint, args)
@@ -4181,7 +4201,22 @@ fn prepare_proxy_tool_call_inner(
         path
     };
 
+    let mut body = body;
+    let mut lark_message = None;
+    if let Some(kind) = super::lark_im_tool::kind(endpoint) {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(body.as_deref().unwrap_or_default())
+                .map_err(|_| super::lark_im_tool::invalid())?;
+        match kind {
+            super::lark_im_tool::Kind::Message => {
+                lark_message = Some(super::lark_im_tool::normalize_message(&mut value)?);
+                body = Some(value.to_string().into());
+            }
+            super::lark_im_tool::Kind::Image => super::lark_im_tool::image::validate(&value)?,
+        }
+    }
     Ok(PreparedProxyCall {
+        lark_message,
         managed_base: None,
         attachment_binding: None,
         resource_source: None,
@@ -4296,6 +4331,9 @@ pub fn prepare_exact_proxy_tool_call(
     args: &serde_json::Value,
     effect_idempotency_key: Option<&str>,
 ) -> AppResult<PreparedProxyCall> {
+    if super::lark_im_tool::image_candidate(endpoint) {
+        return Err(AppError::BadRequest("Message image uploads require hosted MCP execution; exact/background dispatch is not supported".into()));
+    }
     let Some(effect_idempotency_key) = effect_idempotency_key else {
         return prepare_proxy_tool_call(service, endpoint, args);
     };
@@ -4355,6 +4393,11 @@ pub fn build_mcp_operation_descriptor(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
 ) -> AppResult<operation_descriptor::OperationDescriptor> {
+    if super::lark_im_tool::image_candidate(endpoint) {
+        return Err(AppError::BadRequest(
+            "Message image uploads require hosted MCP execution; exact/background dispatch is not supported".into(),
+        ));
+    }
     Ok(prepare_proxy_tool_call(service, endpoint, args)?.operation_descriptor())
 }
 
@@ -4714,6 +4757,33 @@ fn scoped_execution(exec_ctx: &McpExecContext<'_>, service: &McpToolService) -> 
         })
 }
 
+// MCP has no opaque-stream admission/relay. Check before credential resolution
+// and again for callers that supply an already-resolved exact target.
+fn require_tool_transport(
+    exec_ctx: &McpExecContext<'_>,
+    prepared: &PreparedProxyCall,
+) -> AppResult<bool> {
+    let shared = exec_ctx
+        .org_agent_access
+        .is_some_and(|a| a.shared().is_some())
+        || exec_ctx
+            .assistant_chat
+            .is_some_and(super::assistant_service_execution::is_shared_chat);
+    if shared
+        && (prepared.method == reqwest::Method::CONNECT
+            || prepared
+                .parameter_headers
+                .iter()
+                .chain(&prepared.server_owned_headers)
+                .any(|(name, _)| name.eq_ignore_ascii_case("upgrade")))
+    {
+        return Err(AppError::Forbidden(
+            "Shared streams require admitted server HTTP proxy execution".into(),
+        ));
+    }
+    Ok(shared)
+}
+
 // Resolve before polling dispatch so credential/node resolution's debug poll frame
 // is no longer on the stack while the final admission performs database reads.
 struct ToolResolutionContext<'a> {
@@ -4754,6 +4824,7 @@ fn resolve_tool_target(
             connection_expiry_notifier,
             exec_ctx,
         } = context;
+        require_tool_transport(exec_ctx, prepared)?;
         let resolved = match &service.source {
             McpToolSource::Internal => {
                 return Err(AppError::Forbidden(
@@ -4790,7 +4861,8 @@ fn resolve_tool_target(
                             config.platform_service_rate_limit_burst,
                         ),
                     )
-                    .with_assistant_access(exec_ctx.org_agent_access),
+                    .with_assistant_access(exec_ctx.org_agent_access)
+                    .with_assistant_chat(exec_ctx.assistant_chat),
                 )
                 .await?
                 .ok_or_else(|| {
@@ -4820,11 +4892,27 @@ fn resolve_tool_target(
                 }
                 let has_cred = resolution.has_server_credential;
 
-                let mut agent_override = false;
+                let mut agent_override = if resolution.target.credential_deferred
+                    && exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
+                    && let Some(key) = exec_ctx.api_key_id
+                {
+                    proxy_service::read_agent_credential_override_identity(
+                        db,
+                        user_id,
+                        key,
+                        user_service_id,
+                        &resolution.target,
+                    )
+                    .await?
+                    .is_some()
+                } else {
+                    false
+                };
                 // Per-agent credential override: when acting as an API key with
                 // an agent binding, swap in the override credential before execute.
                 // Matches `execute_proxy_inner` in handlers/proxy.rs.
-                if exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
+                if !resolution.target.credential_deferred
+                    && exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
                     && let Some(ak_id) = exec_ctx.api_key_id
                     && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
                         db,
@@ -5420,6 +5508,19 @@ pub fn execute_tool_resolved<'a>(
     attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(async move {
+        let shared = require_tool_transport(exec_ctx, &prepared)?;
+        if shared
+            && (node_route.is_some()
+                || target
+                    .catalog_default_headers
+                    .iter()
+                    .chain(&target.user_service_default_headers)
+                    .any(|header| header.name.eq_ignore_ascii_case("upgrade")))
+        {
+            return Err(AppError::Forbidden(
+                "Shared streams require admitted server HTTP proxy execution".into(),
+            ));
+        }
         let resource_source = super::resource_adapter::source(
             service,
             endpoint,
@@ -5456,6 +5557,8 @@ pub fn execute_tool_resolved<'a>(
             exec_ctx.actor_user_id.unwrap_or(user_id),
         )
         .await?;
+        let im_kind = super::lark_im_tool::kind(endpoint);
+        let message_mode = prepared.lark_message.clone();
         let execution = execute_tool_resolved_boxed(
             http_client,
             db,
@@ -5497,6 +5600,16 @@ pub fn execute_tool_resolved<'a>(
             }
             None => execution.await?,
         };
+        if let (Some(kind), McpToolExecutionOutcome::Response(response)) = (im_kind, &mut outcome)
+            && matches!(response.origin, ToolResponseOrigin::Downstream)
+        {
+            response.text = super::lark_im_tool::response(
+                kind,
+                message_mode.as_ref(),
+                response.status,
+                &response.text,
+            )?;
+        }
         if let (Some(source), Some(arguments), McpToolExecutionOutcome::Response(response)) =
             (resource_source, resource_arguments, &mut outcome)
             && (200..300).contains(&response.status)
@@ -5595,7 +5708,7 @@ async fn execute_tool_resolved_inner(
     cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-    target: proxy_service::ProxyTarget,
+    mut target: proxy_service::ProxyTarget,
     node_route: Option<node_routing_service::NodeRoute>,
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
@@ -5603,6 +5716,13 @@ async fn execute_tool_resolved_inner(
     attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
+    if super::lark_im_tool::kind(endpoint) == Some(super::lark_im_tool::Kind::Image)
+        && (prepared.async_submission.is_some() || prepared.async_continuation.is_some())
+    {
+        return Err(AppError::BadRequest(
+            "Message image uploads require hosted MCP execution".into(),
+        ));
+    }
     if super::lark_attachment_tool::is_attachment_operation(endpoint)
         && prepared.managed_base.is_none()
     {
@@ -5810,10 +5930,20 @@ async fn execute_tool_resolved_inner(
                 ToolResponse::policy_refusal(refusal),
             ));
         }
-        if let Some(admission) = decision.admission {
+        if let Some(mut admission) = decision.admission {
             if let Some(watch) = prepared.async_submission.as_deref() {
                 admission.bind_async_submission(db, watch).await?;
             }
+            admission
+                .materialize_http(
+                    db,
+                    encryption_keys,
+                    &mut target,
+                    prepared.method.as_str(),
+                    &prepared.path,
+                    &super::assistant_service_execution::HttpProjection::default(),
+                )
+                .await?;
             admission
                 .revalidate(db, user_service_id, Some(&target))
                 .await?;
@@ -5821,8 +5951,10 @@ async fn execute_tool_resolved_inner(
         }
     }
 
+    target.require_credential_materialized()?;
     box_mcp_forwarding(move || async move {
         let PreparedProxyCall {
+            lark_message: _,
             managed_base,
             attachment_binding,
             resource_source: _,
@@ -5836,11 +5968,23 @@ async fn execute_tool_resolved_inner(
             query,
             parameter_headers,
             server_owned_headers,
-            body,
-            body_content_type,
+            mut body,
+            mut body_content_type,
             is_generic_proxy_endpoint,
             approval_metadata: _,
         } = prepared;
+
+        if let Some(kind) = super::lark_im_tool::kind(endpoint) {
+            super::lark_attachment_tool::validate_contract(db, service, endpoint).await?;
+            if kind == super::lark_im_tool::Kind::Image {
+                let materialized = super::lark_im_tool::image::materialize(body.as_deref().unwrap_or_default()).await?;
+                body = Some(materialized.0);
+                body_content_type = Some(materialized.1);
+                // Fetch/decode may await: keep the stored contract live, then
+                // normal admission.http_egress rechecks authority at send time.
+                super::lark_attachment_tool::validate_contract(db, service, endpoint).await?;
+            }
+        }
 
         proxy_service::validate_ifttt_request(
             &target,
@@ -6039,7 +6183,9 @@ async fn execute_tool_resolved_inner(
         } else {
             build_downstream_request_headers(endpoint, body.is_some())?
         };
-        if attachment_binding.is_some() {
+        if attachment_binding.is_some()
+            || super::lark_im_tool::kind(endpoint) == Some(super::lark_im_tool::Kind::Image)
+        {
             req_headers.insert(reqwest::header::CONTENT_TYPE,
                 body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
                 .map_err(|_|super::lark_attachment_tool::refused())?);
@@ -6109,7 +6255,7 @@ async fn execute_tool_resolved_inner(
                 &target,
                 (method.as_str(), &path),
                 (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
-            );
+            )?;
             destination_audit.dispatch();
             let managed = match box_mcp_forwarding(|| super::telnyx_platform_service::execute(
                 db,
@@ -6300,6 +6446,8 @@ async fn execute_tool_resolved_inner(
                 }
                 if let Some(binding)=attachment_binding.as_ref() {
                     super::lark_attachment_tool::validate_binding(db,service,endpoint,binding).await?;
+                } else if super::lark_im_tool::kind(endpoint).is_some() {
+                    super::lark_attachment_tool::validate_contract(db,service,endpoint).await?;
                 }
                 match node_ws_manager
                     .send_proxy_request_classified(
@@ -7409,6 +7557,7 @@ pub async fn connect_service(
         let created = connect_link_service::create(
             db,
             connect_link_service::CreateInput {
+                assistant_intent_locked: false,
                 scopes: scopes.to_vec(),
                 user_id: user_id.to_string(),
                 service_slug: service.slug,
@@ -9695,7 +9844,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
-            trigger_run_id: None,
+            collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,
@@ -10429,6 +10578,28 @@ mod tests {
             "List repositories"
         );
         assert_eq!(humanize_operation_name("  "), "Call operation");
+    }
+
+    #[test]
+    fn meta_tool_schemas_have_no_top_level_combinators() {
+        // Anthropic and OpenAI (strict) tool APIs reject a top-level
+        // anyOf/oneOf/allOf; one such schema can fail a client's whole tool list.
+        for tool in generate_tool_definitions(&[], None) {
+            assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
+            for keyword in ["anyOf", "oneOf", "allOf", "not"] {
+                assert!(
+                    tool.input_schema.get(keyword).is_none(),
+                    "{} uses top-level {keyword}",
+                    tool.name
+                );
+            }
+        }
+        let connect = generate_tool_definitions(&[], None)
+            .into_iter()
+            .find(|tool| tool.name == "nyx__connect_service")
+            .unwrap();
+        assert!(connect.input_schema["properties"]["service_id"].is_object());
+        assert!(connect.input_schema["properties"]["service_slug"].is_object());
     }
 
     #[test]
@@ -14523,6 +14694,7 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
+                credential_deferred: false,
                 workspace_destinations_pending: false,
                 target_id: None,
                 base_url: service.base_url.clone(),
