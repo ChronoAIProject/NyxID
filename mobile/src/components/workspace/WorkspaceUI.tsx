@@ -1,4 +1,4 @@
-import type { PropsWithChildren } from "react";
+import type { PropsWithChildren, ReactNode } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -208,6 +208,7 @@ export function ActionButton({
   loading,
   compact = false,
   variant = "primary",
+  trailingIcon,
 }: {
   label: string;
   accessibilityLabel?: string;
@@ -218,6 +219,8 @@ export function ActionButton({
   loading?: boolean;
   compact?: boolean;
   variant?: "primary" | "secondary" | "danger";
+  /** Decorative icon after the label, such as the web's arrowed primary action. */
+  trailingIcon?: (color: string) => ReactNode;
 }) {
   const { colors } = useTheme();
   const blocked = disabled || loading;
@@ -241,6 +244,14 @@ export function ActionButton({
       >
         {label}
       </Text>
+      {trailingIcon && !loading ? (
+        <View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {trailingIcon(color)}
+        </View>
+      ) : null}
     </View>
   );
   return (

@@ -680,7 +680,25 @@ test("real native connection card exposes web credential/device/terminal control
       Fragment: "Fragment",
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
-    "react-native": { View: "View" },
+    "react-native": {
+      View: "View",
+      Text: "Text",
+      Pressable: "Pressable",
+      StyleSheet: { create: (value: unknown) => value },
+    },
+    "@tanstack/react-query": {
+      useQuery: () => ({ data: { email: "owner@example.test" } }),
+    },
+    "lucide-react-native": {
+      ArrowRight: "ArrowRight",
+      ExternalLink: "ExternalLink",
+    },
+    "../../components/ConnectionIdentityHeading": {
+      ConnectionIdentityHeading: "IdentityHeading",
+    },
+    "../../lib/api/http": { getCurrentUserProfileRequest: async () => ({}) },
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "../../theme/designTokens": { fonts: {} },
     "../../components/SegmentControl": { SegmentControl: "Segment" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["ActionButton", "Card", "Field", "Label", "Notice"].map((name) => [
@@ -700,6 +718,44 @@ test("real native connection card exposes web credential/device/terminal control
     )!;
   const button = (label: string) =>
     nodes(h.value()).find((n) => n.props.label === label)!;
+  // Same layout as the web connector page: identity heading, request strip,
+  // arrowed primary action, centred Decline and the signed-in account.
+  const expand = (n: any): any =>
+    !n?.props
+      ? n
+      : typeof n.type === "function"
+        ? expand(n.type(n.props))
+        : {
+            ...n,
+            props: {
+              ...n.props,
+              children: [n.props.children].flat(Infinity).map(expand),
+            },
+          };
+  const tree = () => nodes(expand(h.value()));
+  const heading = nodes(h.value()).find((n) => n.type === "IdentityHeading")!;
+  assert.equal(
+    heading.props.title,
+    `NyxID wants to connect to your ${p.service_name}`,
+  );
+  assert.equal(heading.props.serviceSlug, p.service_slug);
+  assert.ok(
+    tree().some(
+      (n) => n.props.accessibilityLabel === "Requested by: Researcher",
+    ),
+  );
+  assert.equal(
+    typeof button("Approve & connect").props.trailingIcon,
+    "function",
+  );
+  assert.equal(button("Decline").type.name, "QuietAction");
+  assert.ok(
+    tree().some(
+      (n) =>
+        n.type === "Text" &&
+        [n.props.children].flat(Infinity).includes("owner@example.test"),
+    ),
+  );
   assert.equal(field("API key").props.secureTextEntry, true);
   field("API key").props.onChangeText("review-key");
   field("Service URL").props.onChangeText("https://gateway.test");
@@ -737,13 +793,8 @@ test("real native connection card exposes web credential/device/terminal control
   flow.preview = { ...p, status: "completed" };
   h.render();
   assert.equal(button("Decline"), undefined);
-  assert.ok(
-    nodes(h.value()).some(
-      (n) =>
-        n.props.children === "GitHub connected" ||
-        (Array.isArray(n.props.children) &&
-          n.props.children.join("") === "GitHub connected"),
-    ),
-  );
+  const done = nodes(h.value()).find((n) => n.type === "IdentityHeading")!;
+  assert.equal(done.props.title, `${p.service_name} connected`);
+  assert.equal(done.props.complete, true);
   h.unmount();
 });

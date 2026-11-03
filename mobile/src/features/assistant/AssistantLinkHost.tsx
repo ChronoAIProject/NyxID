@@ -208,18 +208,21 @@ export function ScopedAssistantLinkHost({
                 gap: 8,
               }}
             >
-              <Label
-                accessibilityRole="header"
-                numberOfLines={1}
-                maxFontSizeMultiplier={1.25}
-                style={{ flex: 1, fontSize: 18 }}
-              >
-                {target?.kind === "connect"
-                  ? "Connect a service"
-                  : target?.kind === "channel"
+              {target?.kind === "connect" ? (
+                // The connector page's own identity heading names the request.
+                <View style={{ flex: 1 }} />
+              ) : (
+                <Label
+                  accessibilityRole="header"
+                  numberOfLines={1}
+                  maxFontSizeMultiplier={1.25}
+                  style={{ flex: 1, fontSize: 18 }}
+                >
+                  {target?.kind === "channel"
                     ? "Connect a channel"
                     : "NyxBot settings"}
-              </Label>
+                </Label>
+              )}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Close"
