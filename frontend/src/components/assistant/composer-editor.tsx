@@ -231,7 +231,7 @@ export function ComposerEditor({
     previousTokenKey.current = tokenKey;
     const removed = previousTokens.current.filter(
       (token) =>
-        token.kind !== "agent" &&
+        token.kind !== "agent" && token.kind !== "person" &&
         !latest.current.tokens.some((next) => next.id === token.id),
     );
     previousTokens.current = latest.current.tokens;

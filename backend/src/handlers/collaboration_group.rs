@@ -123,7 +123,13 @@ pub(crate) async fn settled(
                 groups::roster(&state.db, &binding.original_requester_id, &binding.group_id)
                     .await?;
             // UUIDs are authoritative; ambiguous textual names are never guessed.
-            for target in crate::services::assistant_group_service::mentions(text, &roster) {
+            let group =
+                groups::get(&state.db, &binding.original_requester_id, &binding.group_id).await?;
+            let participants = groups::participants(&state.db, &group).await?;
+            let mentions = groups::people::resolve(text, &participants, &roster, false)?;
+            for target in
+                crate::services::assistant_group_service::mentions(&mentions.agent_text, &roster)
+            {
                 groups::requests::handoff(&state.db, &admission, &target).await?;
             }
             Ok(())
@@ -310,6 +316,7 @@ pub(crate) async fn response(
             .map(|id| {
                 let agent = agents.iter().find(|a| &a.id == id);
                 GroupMemberResponse {
+                    mention_handle: Some(groups::people::agent_handle(id)),
                     id: id.clone(),
                     name: agent
                         .map(|a| a.name.clone())
@@ -392,11 +399,14 @@ pub(crate) async fn messages(
     let mut messages: Vec<_> = rows
         .into_iter()
         .map(|mut r| {
+            r.text = groups::people::public_text(&r.text, &participants, &agents);
             if let Some(author) = r.author_user_id.as_deref() {
-                r.author_display_name = participants
-                    .iter()
-                    .find(|p| p.id == author)
-                    .map(|p| p.display_name.clone());
+                r.author_display_name = r.author_display_name.or_else(|| {
+                    participants
+                        .iter()
+                        .find(|p| p.id == author)
+                        .map(|p| p.display_name.clone())
+                });
             }
             super::assistant_group::message_response(r, &agents)
         })
@@ -423,7 +433,7 @@ pub(crate) async fn post(
     {
         let agents = groups::roster(&state.db, actor, id).await?;
         return Ok(
-            json!({"message":super::assistant_group::message_response(message,&agents),
+            json!({"message":public_message_response(state,actor,id,message,&agents).await?,
             "addressed_agent_ids":[],"request_id":null}),
         );
     }
@@ -439,8 +449,21 @@ pub(crate) async fn post(
     let selected = message.recipient_agent_ids.clone();
     Box::pin(advance(state, Some(id))).await?;
     Ok(
-        json!({"message":super::assistant_group::message_response(message,&agents),"addressed_agent_ids":selected,"request_id":request.id}),
+        json!({"message":public_message_response(state,actor,id,message,&agents).await?,"addressed_agent_ids":selected,"request_id":request.id}),
     )
+}
+
+async fn public_message_response(
+    state: &AppState,
+    actor: &str,
+    group_id: &str,
+    mut message: crate::models::assistant_group::GroupMessage,
+    agents: &[crate::models::assistant_agent::AssistantAgent],
+) -> AppResult<super::assistant_group::GroupMessageResponse> {
+    let group = groups::get(&state.db, actor, group_id).await?;
+    let participants = groups::participants(&state.db, &group).await?;
+    message.text = groups::people::public_text(&message.text, &participants, agents);
+    Ok(super::assistant_group::message_response(message, agents))
 }
 
 #[derive(Clone, Deserialize)]

@@ -897,6 +897,19 @@ describe("ChatComposer @mentions (group chats)", () => {
     expect(input).toHaveValue(`@${id} `);
   });
 
+  it("offers people alongside agents and inserts the exact person handle", async () => {
+    render(<ChatComposer {...baseProps} draftKey="people-mentions" mentions={[
+      { id: "person", name: "person-0123456789abcdef", display_name: "Shining", kind: "person" },
+      { id: "agent", name: "office", display_name: "Office Agent", kind: "specialist" },
+    ]} />);
+    const input = screen.getByRole("combobox") as HTMLTextAreaElement;
+    type(input, "@");
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.getByRole("option", { name: /Shining/ })).toHaveTextContent("Person");
+    await act(async () => { fireEvent.keyDown(input, { key: "Enter" }); });
+    expect(input).toHaveValue("@person-0123456789abcdef ");
+  });
+
   it("lists matching members after @ and inserts the chosen one with Enter", async () => {
     const input = renderMentions();
     expect(input).toHaveAttribute("aria-expanded", "false");
