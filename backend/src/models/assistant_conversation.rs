@@ -48,6 +48,8 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -322,6 +324,8 @@ pub struct StreamReply {
 pub struct ActiveTurn {
     #[serde(default)]
     pub business_system_success: bool,
+    #[serde(default)]
+    pub delegated_images: super::assistant_delegated_image::DelegatedImages,
     #[serde(default)]
     pub timing: super::assistant_message::TurnTiming,
     #[serde(default)]

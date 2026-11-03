@@ -33,6 +33,7 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,

@@ -45,4 +45,15 @@ describe("WizardFooter", () => {
     ).not.toBeInTheDocument()
     expect(screen.queryByText(/Served locally from/i)).not.toBeInTheDocument()
   })
+
+  it.each(["local", "pair"] as const)(
+    "hides itself on very short windows (context=%s)",
+    (context) => {
+      // Below 680px the shell's chrome would exceed 20% of the window, so
+      // the footer gives its space back to the step.
+      render(<WizardFooter context={context} />)
+
+      expect(screen.getByRole("contentinfo")).toHaveClass("very-short:hidden")
+    },
+  )
 })

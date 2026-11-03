@@ -599,10 +599,6 @@ fn content_result_with_notifications(
 /// MCP-formatted 401 with `WWW-Authenticate` pointing to the protected-resource
 /// metadata endpoint (RFC 9728).
 fn mcp_401(base_url: &str) -> Response {
-    let resource_url = format!(
-        "{}/.well-known/oauth-protected-resource",
-        base_url.trim_end_matches('/')
-    );
     let body = serde_json::json!({
         "jsonrpc": JSONRPC_VERSION,
         "error": { "code": -32001, "message": "Authentication required" },
@@ -611,9 +607,11 @@ fn mcp_401(base_url: &str) -> Response {
 
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
+        // The domain-alias middleware swaps this exact value for the alias the
+        // client connected through, so both share one constructor.
         .header(
             "www-authenticate",
-            format!("Bearer resource_metadata=\"{resource_url}\""),
+            crate::mw::cookie_domain::mcp_resource_metadata_challenge(base_url),
         )
         .header("content-type", "application/json")
         .body(axum::body::Body::from(body.to_string()))
@@ -10990,3 +10988,7 @@ mod attachment_upload_tests;
 #[cfg(test)]
 #[path = "mcp_lark_base_tests.rs"]
 mod lark_base_tests;
+
+#[cfg(test)]
+#[path = "mcp_lark_im_tests.rs"]
+mod lark_im_tests;

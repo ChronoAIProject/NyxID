@@ -1118,6 +1118,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        delegated_images: Default::default(),
                         media_event_ids: Vec::new(),
                         media_queue_notice_id: None,
         media_pending: None,

@@ -32,11 +32,11 @@ export function AssistantErrorNotice({
           className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/5 py-2.5 pl-4 pr-2 text-12 text-destructive"
         >
           <p className="min-w-0 flex-1 whitespace-pre-line break-words py-0.5">{message}</p>
-          <button
+          <button data-icon-button=""
             type="button"
             aria-label="Dismiss"
             onClick={() => setDismissed(message)}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-destructive/70 transition-colors hover:bg-destructive/10 hover:text-destructive"
+            className="flex shrink-0 items-center justify-center rounded-md text-destructive/70 transition-colors hover:bg-destructive/10 hover:text-destructive"
           >
             <X aria-hidden="true" className="h-3.5 w-3.5" />
           </button>

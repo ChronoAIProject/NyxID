@@ -10,6 +10,7 @@ import {
   monitoringFormDefaults,
   monitoringFormSchema,
   monitoringPayload,
+  type MonitoringCheck,
   type MonitoringCheckResult,
   type MonitoringConfig,
   type MonitoringFormValues,
@@ -55,10 +56,12 @@ function CheckSummary({
   title,
   check,
   now,
+  configuration,
 }: {
   title: string;
   check: MonitoringCheckResult | null;
   now: number;
+  configuration?: MonitoringCheck | null;
 }) {
   const status = check ? displayedCheckStatus(check, now) : "unknown";
   const variant =
@@ -76,9 +79,33 @@ function CheckSummary({
       </div>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-12">
         <dt className="text-muted-foreground">Source</dt>
-        <dd>{sourceLabels[check?.source ?? "none"]}</dd>
+        <dd>
+          {
+            sourceLabels[
+              !check?.checked_at && configuration
+                ? "owner"
+                : (check?.source ?? "none")
+            ]
+          }
+        </dd>
         <dt className="text-muted-foreground">Path</dt>
-        <dd className="break-all font-mono">{check?.path || "—"}</dd>
+        <dd className="break-all font-mono">
+          {check?.path || configuration?.path || "—"}
+        </dd>
+        {configuration && (
+          <>
+            <dt className="text-muted-foreground">Expected HTTP</dt>
+            <dd>{configuration.expect_status.join(", ")}</dd>
+            {configuration.body_contains && (
+              <>
+                <dt className="text-muted-foreground">Body contains</dt>
+                <dd className="break-all font-mono">
+                  {configuration.body_contains}
+                </dd>
+              </>
+            )}
+          </>
+        )}
         <dt className="text-muted-foreground">Last checked</dt>
         <dd>
           {Number.isFinite(checkedAt)
@@ -95,10 +122,10 @@ function CheckSummary({
         </dd>
         <dt className="text-muted-foreground">Duration / HTTP</dt>
         <dd>
-          {check?.duration_ms != null
+          {Number.isFinite(checkedAt) && check?.duration_ms != null
             ? `${Math.round(check.duration_ms)} ms`
             : "—"}{" "}
-          / {check?.status_code ?? "—"}
+          / {Number.isFinite(checkedAt) ? (check?.status_code ?? "—") : "—"}
         </dd>
         <dt className="text-muted-foreground">Reason</dt>
         <dd className="break-words">
@@ -273,10 +300,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
   const { query, operation } = useMonitoring(serviceId);
   const [editing, setEditing] = useState(false);
   const [clearing, setClearing] = useState(false);
-  const [manual, setManual] = useState<{
-    kind: "probe" | "validate";
-    result: MonitoringResult;
-  } | null>(null);
+  const [draftResult, setDraftResult] = useState<MonitoringResult | null>(null);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 10_000);
@@ -286,10 +310,17 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
   const data = query.isError ? undefined : query.data;
   const config = data?.configuration;
   const result = data?.status;
+  const displayNow = Math.max(now, query.dataUpdatedAt);
   const error = operation.error;
   const conflict = error instanceof ApiError && error.status === 409;
-  if ([query.error, error].some((failure) => failure instanceof ApiError
-    && failure.errorResponse.error === "monitoring_not_configured")) return null;
+  if (
+    [query.error, error].some(
+      (failure) =>
+        failure instanceof ApiError &&
+        failure.errorResponse.error === "monitoring_not_configured",
+    )
+  )
+    return null;
   return (
     <Card>
       <CardHeader>
@@ -305,7 +336,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
               isLoading={query.isFetching}
               disabled={busy || query.isFetching}
               onClick={() => {
-                setManual(null);
+                setDraftResult(null);
                 void query.refetch();
               }}
             >
@@ -317,18 +348,8 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
               disabled={!data?.can_probe || busy}
               isLoading={busy && operation.variables?.kind === "probe"}
               onClick={() => {
-                operation.mutate(
-                  { kind: "probe" },
-                  {
-                    onSuccess: (value) => {
-                      setNow(Date.now());
-                      setManual({
-                        kind: "probe",
-                        result: value as MonitoringResult,
-                      });
-                    },
-                  },
-                );
+                setDraftResult(null);
+                operation.mutate({ kind: "probe" });
               }}
             >
               Check now
@@ -340,7 +361,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                   disabled={busy}
                   onClick={() => {
                     operation.reset();
-                    setManual(null);
+                    setDraftResult(null);
                     setEditing(true);
                   }}
                 >
@@ -365,7 +386,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
           </div>
         </div>
         <CardDescription>
-          Health and readiness observed through chrono-probe. Viewing this
+          Latest health and readiness checks from chrono-probe. Viewing this
           section does not run a live check.
         </CardDescription>
       </CardHeader>
@@ -382,11 +403,17 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
         ) : (
           result && (
             <div className="grid gap-5 sm:grid-cols-2">
-              <CheckSummary title="Health" check={result.health} now={now} />
+              <CheckSummary
+                title="Health"
+                check={result.health}
+                now={displayNow}
+                configuration={config?.owner_config.health}
+              />
               <CheckSummary
                 title="Readiness"
                 check={result.readiness}
-                now={now}
+                now={displayNow}
+                configuration={config?.owner_config.readiness}
               />
             </div>
           )
@@ -395,27 +422,6 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
           <p role="alert" className="text-12 text-destructive">
             {error.message}
           </p>
-        )}
-        {manual && (
-          <div className="space-y-3 border-t border-border pt-4">
-            <h4 className="text-13 font-medium">
-              {manual.kind === "validate"
-                ? "Draft test result (not saved)"
-                : "Manual check result"}
-            </h4>
-            <div className="grid gap-5 sm:grid-cols-2">
-              <CheckSummary
-                title="Checked health"
-                check={manual.result.health}
-                now={now}
-              />
-              <CheckSummary
-                title="Checked readiness"
-                check={manual.result.readiness}
-                now={now}
-              />
-            </div>
-          </div>
         )}
         <Dialog
           open={editing}
@@ -440,11 +446,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                 config={config}
                 busy={busy}
                 canProbe={Boolean(data?.can_probe)}
-                onEdit={() =>
-                  setManual((current) =>
-                    current?.kind === "validate" ? null : current,
-                  )
-                }
+                onEdit={() => setDraftResult(null)}
                 onCancel={() => setEditing(false)}
                 onSave={(values) =>
                   operation.mutate(
@@ -456,7 +458,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                     {
                       onSuccess: () => {
                         setEditing(false);
-                        setManual(null);
+                        setDraftResult(null);
                       },
                     },
                   )
@@ -467,10 +469,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                     {
                       onSuccess: (value) => {
                         setNow(Date.now());
-                        setManual({
-                          kind: "validate",
-                          result: value as MonitoringResult,
-                        });
+                        setDraftResult(value as MonitoringResult);
                       },
                     },
                   )
@@ -494,7 +493,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                 Reload configuration
               </Button>
             )}
-            {manual?.kind === "validate" && (
+            {draftResult && (
               <div className="space-y-2 border-t border-border pt-3">
                 <p className="text-12 font-medium">
                   Draft test result (not saved)
@@ -502,12 +501,12 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <CheckSummary
                     title="Draft health"
-                    check={manual.result.health}
+                    check={draftResult.health}
                     now={now}
                   />
                   <CheckSummary
                     title="Draft readiness"
-                    check={manual.result.readiness}
+                    check={draftResult.readiness}
                     now={now}
                   />
                 </div>
@@ -552,7 +551,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                       {
                         onSuccess: () => {
                           setClearing(false);
-                          setManual(null);
+                          setDraftResult(null);
                         },
                       },
                     );

@@ -1228,7 +1228,7 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
         .await
         .unwrap()
         .unwrap();
-    let plan=images::ImageSendPlan {attachments:vec![serde_json::from_value(json!({"id":"tool-image","content_type":"image/png","size":10,"label":"image","origin":"tool","chat_delivery":true})).unwrap()]};
+    let plan=images::ImageSendPlan { delegated: Vec::new(),attachments:vec![serde_json::from_value(json!({"id":"tool-image","content_type":"image/png","size":10,"label":"image","origin":"tool","chat_delivery":true})).unwrap()]};
     for anchor in [
         images::ImageAnchor::Inbound {
             message_id: "stale-relay".into(),

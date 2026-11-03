@@ -207,7 +207,7 @@ function ConversationRow({
         {showDraft && (
           <span
             id={draftPreviewId}
-            className="mt-0.5 flex min-w-0 items-center gap-1 text-11 leading-4 text-text-tertiary"
+            className="mt-0.5 flex min-w-0 items-center gap-1 text-11 leading-normal text-text-tertiary"
           >
             <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
             <span className="sr-only">Draft: </span>
@@ -220,9 +220,10 @@ function ConversationRow({
           <button
             type="button"
             aria-label={`Options for ${shownTitle}`}
+            data-icon-button=""
             data-keep-drawer-open=""
             className={cn(
-              "absolute right-1 top-1 flex size-[1.5em] items-center justify-center rounded-md bg-card text-13 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
+              "absolute right-1 top-1 flex items-center justify-center rounded-md bg-card text-13 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
               "pointer-events-none opacity-0",
               "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
               "group-hover:pointer-events-auto group-hover:opacity-100",
@@ -350,7 +351,7 @@ function ChannelThreadsGroup({
           className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
         />
         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary @min-[15rem]:inline">
+        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-normal text-text-tertiary @min-[15rem]:inline">
           {platform}
         </span>
         {running ? (
@@ -517,7 +518,7 @@ function AgentRow({
               {platforms.slice(0, 1).map((platform) => (
                 <span
                   key={platform}
-                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary @min-[15rem]:inline"
+                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-normal text-text-tertiary @min-[15rem]:inline"
                 >
                   {channelPlatformName(platform)}
                   {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
@@ -534,7 +535,7 @@ function AgentRow({
         {hasMenu ? (
           <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
             <DropdownMenuTrigger asChild>
-              <button
+              <button data-icon-button=""
                 ref={menuTrigger}
                 type="button"
                 aria-label={`Options for ${name}`}
@@ -679,7 +680,7 @@ function CreateAgentMenu({
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           {compact ? (
-            <button
+            <button data-icon-button=""
               type="button"
               aria-label="Create new agent"
               title="Create new agent"
@@ -1085,7 +1086,7 @@ export function AssistantSidebar({
               Boolean(accountPanel.panel) && "bg-overlay-strong font-medium text-foreground",
             )}
           >
-            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
+            <div className="flex shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong p-[0.375em]">
               <User className="h-3.5 w-3.5 text-text-tertiary" />
             </div>
             <div className="min-w-0 flex-1">
@@ -1193,7 +1194,7 @@ function RenameChatInline({
 }
 
 const RAIL_BUTTON =
-  "relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-overlay data-[state=open]:text-foreground";
+  "assistant-icon-button relative inline-flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-overlay data-[state=open]:text-foreground";
 
 /** One rail icon with its name in a tooltip. */
 function RailItem({ label, children }: { readonly label: string; readonly children: ReactNode }) {
@@ -1286,7 +1287,7 @@ function SidebarRail({
           {!agents ? (
             <>
               <RailItem label="New chat">
-                <button type="button" aria-label="New chat" onClick={onNewChat} className={RAIL_BUTTON}><Plus className="h-4 w-4" /></button>
+                <button data-icon-button="" type="button" aria-label="New chat" onClick={onNewChat} className={RAIL_BUTTON}><Plus className="h-4 w-4" /></button>
               </RailItem>
               <LegacyRailChats conversations={conversations} activeConversationId={activeConversationId} onSelect={onSelect} />
             </>
@@ -1323,12 +1324,12 @@ function SidebarRail({
         </nav>
         <div className="shrink-0 py-2">
           <AssistantAccountMenu align="start" side="top">
-            <button
+            <button data-icon-button=""
               type="button"
               aria-label="Account menu"
               data-assistant-account-fallback="menu"
               className={cn(
-                "flex h-8 w-8 items-center justify-center rounded-lg border border-hairline bg-overlay-strong text-text-tertiary transition-colors hover:text-foreground",
+                "flex items-center justify-center rounded-lg border border-hairline bg-overlay-strong text-text-tertiary transition-colors hover:text-foreground",
                 accountOpen && "text-foreground",
               )}
             >
@@ -1350,7 +1351,7 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button type="button" aria-label="Previous chats" title="Previous chats" className={RAIL_BUTTON}><MessageSquare className="h-4 w-4" /></button>
+        <button data-icon-button="" type="button" aria-label="Previous chats" title="Previous chats" className={RAIL_BUTTON}><MessageSquare className="h-4 w-4" /></button>
       </PopoverTrigger>
       <PopoverContent side="right" align="start" className="w-72 p-2">
         <p className="px-2 py-1 text-12 font-medium">Previous chats</p>
