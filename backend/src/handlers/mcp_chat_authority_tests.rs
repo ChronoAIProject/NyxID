@@ -3344,6 +3344,122 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
     )
     .await;
     assert_eq!(read["content"], "Pinned guidance only");
+    let unbound = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__skill_read",
+            json!({"skill": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(unbound["error"], "forbidden");
+    // A concrete personal Ornn connection is deliberately absent from the
+    // specialist grant. Bound skill reads may use this exact owner connection
+    // after the server has verified the pin; ordinary Ornn calls still require
+    // a grant.
+    let endpoint_id = uuid::Uuid::new_v4().to_string();
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user_endpoint::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user_endpoint(
+            &endpoint_id,
+            &f.owner,
+            "Ornn",
+            &upstream.uri(),
+            None,
+            Some(&catalog.id),
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection(crate::models::user_service::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user_service(
+            &connection_id,
+            &f.owner,
+            "ornn-owner",
+            &endpoint_id,
+            Some(&catalog.id),
+            None,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &connection_id},
+            doc! {"$set": {"identity_propagation_mode": "jwt"}},
+        )
+        .await
+        .unwrap();
+    let before_concrete = upstream.received_requests().await.unwrap().len();
+    let concrete_auth = authenticate(&f).await;
+    assert!(!concrete_auth.allow_all_services);
+    assert!(!concrete_auth.allowed_service_ids.contains(&connection_id));
+    let concrete_read = result(
+        call(&f, &concrete_auth, "nyxid__skill_read", json!({"skill":id})).await,
+        false,
+    )
+    .await;
+    assert_eq!(concrete_read["content"], "Pinned guidance only");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), before_concrete + 1);
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .headers
+            .contains_key("x-nyxid-identity-token")
+    );
+    // The actual ordinary HTTP proxy ingress cannot borrow the server marker.
+    {
+        use tower::ServiceExt;
+        let credential = credentials::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let response = Box::pin(
+            private.with_state(f.state.clone()).oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/api/v1/proxy/{connection_id}/api/v1/skills/{id}/versions/1.0/download"
+                    ))
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            upstream.received_requests().await.unwrap().len(),
+            requests.len()
+        );
+    }
+    let ordinary_ornn = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__search_agent_skills",
+            json!({"query": "private", "page": 1}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(ordinary_ornn.get("error").is_some());
     f.state
         .db
         .collection::<crate::models::assistant_agent::AssistantAgent>(
@@ -3449,6 +3565,148 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         upstream.received_requests().await.unwrap().len(),
         before_scope
     );
+    // Revoking the real thread key still fences this internal capability.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"operation_scopes": doc! {}}},
+        )
+        .await
+        .unwrap();
+    for (collection, target) in [
+        (
+            crate::models::downstream_service::COLLECTION_NAME,
+            &catalog.id,
+        ),
+        (crate::models::user_service::COLLECTION_NAME, &connection_id),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>(collection)
+            .update_one(
+                doc! {"_id": target},
+                doc! {"$set": {"identity_propagation_mode": "none"}},
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        Box::pin(crate::handlers::agent_skills::dispatch(
+            &f.state,
+            &f.chat,
+            "skill_read",
+            &json!({"skill": id}),
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before_scope
+    );
+    for (collection, target) in [
+        (
+            crate::models::downstream_service::COLLECTION_NAME,
+            &catalog.id,
+        ),
+        (crate::models::user_service::COLLECTION_NAME, &connection_id),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>(collection)
+            .update_one(
+                doc! {"_id": target},
+                doc! {"$set": {"identity_propagation_mode": "jwt"}},
+            )
+            .await
+            .unwrap();
+    }
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.api_key_id},
+            doc! {"$set": {"is_active": false}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(crate::handlers::agent_skills::dispatch(
+            &f.state,
+            &f.chat,
+            "skill_read",
+            &json!({"skill": id}),
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before_scope
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.api_key_id},
+            doc! {"$set": {"is_active": true}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &catalog.id},
+            doc! {"$set": {"is_active": false}},
+        )
+        .await
+        .unwrap();
+    let unavailable = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill": id})).await,
+        true,
+    )
+    .await;
+    assert!(unavailable.get("error").is_some());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let records: Vec<crate::models::audit_log::AuditLog> = f
+                .state
+                .db
+                .collection(crate::models::audit_log::COLLECTION_NAME)
+                .find(doc! {"event_type": "assistant_skill_read_refused"})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if ["skill_not_bound", "grant_refused", "operation_restriction"]
+                .iter()
+                .all(|reason| {
+                    records
+                        .iter()
+                        .any(|row| row.event_data == Some(json!({"reason": reason})))
+                })
+            {
+                assert!(
+                    records.iter().all(|row| row
+                        .event_data
+                        .as_ref()
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .len()
+                        == 1)
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     // Removing needs neither an owner card nor an available Ornn.
     upstream.reset().await;
     let removed = result(

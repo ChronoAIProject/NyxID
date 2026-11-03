@@ -5690,6 +5690,92 @@ async fn platform_thread_requires_live_turn_with_ordinary_rollout_disabled() {
     db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn in_progress_excludes_other_people_channel_and_guest_threads() {
+    let db = connect_transaction_test_database("nyxa_in_progress_request_scope").await;
+    let now = Utc::now();
+    let fresh_row = || {
+        let mut row = stale_test_row(now);
+        row.active_turn.as_mut().unwrap().started_at = now;
+        row
+    };
+    let mut current = fresh_row();
+    current.role = AgentRole::Subagent;
+    let mut own = fresh_row();
+    own.id = format!("own-{}", Uuid::new_v4().simple());
+    own.agent_id = Some("agent".into());
+    own.active_turn.as_mut().unwrap().question = Some("owner question".into());
+    own.active_turn.as_mut().unwrap().question_key = Some("owner-key".into());
+
+    let mut channel = fresh_row();
+    channel.id = format!("channel-{}", Uuid::new_v4().simple());
+    channel.agent_id = Some("agent".into());
+    channel.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        native_event_id: None,
+        thread: None,
+        nyxbot_channel_id: "channel".into(),
+        partition: "customer".into(),
+        platform: "telegram".into(),
+    });
+    channel.guest_turn = true;
+    channel.active_turn.as_mut().unwrap().question = Some("customer question".into());
+    channel.active_turn.as_mut().unwrap().question_key = Some("customer-key".into());
+    let mut channel_owner_turn = channel.clone();
+    channel_owner_turn.id = format!("channel-owner-{}", Uuid::new_v4().simple());
+    channel_owner_turn.guest_turn = false;
+    let mut guest = channel.clone();
+    guest.id = format!("guest-{}", Uuid::new_v4().simple());
+    guest.channel = None;
+
+    let mut group = fresh_row();
+    group.id = format!("group-{}", Uuid::new_v4().simple());
+    group.agent_id = Some("agent".into());
+    group.group_id = Some("group".into());
+    group.active_turn.as_mut().unwrap().question = Some("group question".into());
+
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_many([
+            current.clone(),
+            own.clone(),
+            channel,
+            channel_owner_turn,
+            guest,
+            group,
+        ])
+        .await
+        .unwrap();
+    // Pre-field rows retain private-owner discovery compatibility.
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &own.id}, doc! {"$unset": {"guest_turn": ""}})
+        .await
+        .unwrap();
+    let rows =
+        crate::services::assistant_team_service::in_progress(&db, "owner", "agent", &current.id)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].question.as_deref(), Some("owner question"));
+    let agent: crate::models::assistant_agent::AssistantAgent = bson::from_document(doc! {
+        "_id":"agent", "user_id":"owner", "kind":"specialist", "name":"helper", "created_by":"user",
+        "model":"nyxagent/chat",
+        "created_at":bson::DateTime::from_chrono(now), "updated_at":bson::DateTime::from_chrono(now)
+    })
+    .unwrap();
+    let state = test_app_state(db.clone());
+    let note = crate::services::assistant_nyxagent_runtime::turn_notes(
+        &state,
+        &current,
+        Some(&agent),
+        None,
+    )
+    .await;
+    assert!(note.contains("owner question"));
+    assert!(!note.contains("customer question"));
+    assert!(!note.contains("group question"));
+    assert!(note.contains("Answer the user in this thread"));
+    db.drop().await.unwrap();
+}
+
 #[test]
 fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separate() {
     use crate::models::async_service_operation::{AsyncServiceOperation, DeliveryBinding};

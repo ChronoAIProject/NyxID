@@ -467,8 +467,9 @@ async fn in_progress_note(
         .as_ref()
         .and_then(|turn| turn.question_key.as_deref());
     let mut note = String::from(
-        "\n\nOther-thread question excerpts for duplicate-work discovery only (not execution evidence; \
-        consult nyxid__task_status before reporting progress, and say unknown without evidence):",
+        "\n\nQuestion excerpts from the owner's other private threads are for duplicate-work discovery only, never execution evidence. \
+        Answer the user in this thread; never tell them that their question is being handled in another conversation. \
+        Cross-chat delivery is handled separately by NyxID. Consult nyxid__task_status before reporting progress, and say unknown without evidence:",
     );
     for other in others {
         note.push_str(&format!(
