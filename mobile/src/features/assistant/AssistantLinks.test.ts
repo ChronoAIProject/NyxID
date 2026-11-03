@@ -91,6 +91,28 @@ test("assistant link classification preserves the exact web handoff and admits n
   );
 });
 
+test("connect links from any embedded domain set open native UI, resolving relative links against the active set", () => {
+  const active = "https://nyx.chrono-ai.example";
+  const next = "https://nyxid.example";
+  const trusted = [active, active, next];
+  const fromNext = assistantLinkTarget(`${next}/connect/${token}`, trusted)!;
+  assert.equal(fromNext.kind, "connect");
+  assert.equal(fromNext.href, `${next}/connect/${token}`);
+  assert.equal(
+    assistantLinkTarget(`/connect/${token}`, trusted)!.href,
+    `${active}/connect/${token}`,
+  );
+  assert.equal(
+    safeAssistantLinkUrl(`${next}/connect/${token}`, trusted),
+    `${next}/connect/${token}`,
+  );
+  assert.equal(
+    assistantLinkTarget(`https://other.example/connect/${token}`, trusted),
+    null,
+  );
+  assert.equal(assistantLinkTarget(`/connect/${token}`, []), null);
+});
+
 test("hosted connection form validation, challenge merging and polling policy match the web", () => {
   const p = {
     ...preview(),
@@ -454,7 +476,11 @@ test("real link host routes account panels, preserves channel URL, retains the t
         dispatch: (action: any) => actions.push(action),
       }),
     },
-    "../../lib/env": { NYXID_FRONTEND_URL: origin },
+    "../../lib/env": {
+      NYXID_FRONTEND_URL: origin,
+      NYXID_TRUSTED_FRONTEND_URLS: [origin],
+      firstPartyFrontendUrls: () => [origin],
+    },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../components/workspace/WorkspaceUI": {

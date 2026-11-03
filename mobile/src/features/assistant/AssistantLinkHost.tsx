@@ -16,7 +16,7 @@ import { useNavigation } from "@react-navigation/native";
 import * as WebBrowser from "expo-web-browser";
 import { X } from "lucide-react-native";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { firstPartyFrontendUrls } from "../../lib/env";
 import { useTheme } from "../../theme/ThemeContext";
 import {
   openWorkspaceSheetAction,
@@ -83,7 +83,7 @@ export function ScopedAssistantLinkHost({
   }, []);
   const open = useCallback(
     (href: string, source?: number) => {
-      const value = assistantLinkTarget(href, NYXID_FRONTEND_URL);
+      const value = assistantLinkTarget(href, firstPartyFrontendUrls());
       if (!value) return false;
       if (!available.current()) return true;
       trigger.current = source;

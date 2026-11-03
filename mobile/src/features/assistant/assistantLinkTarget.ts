@@ -17,17 +17,24 @@ export type AssistantLinkTarget =
       period?: "24h" | "7d" | "30d";
     };
 
-/** Only the configured first-party origin can select authenticated native UI. */
+/**
+ * Only embedded first-party origins can select authenticated native UI. Every
+ * configured domain set is trusted so links keep working whichever set the
+ * launch-time domain switch selected; relative links resolve against the first.
+ */
 export function assistantLinkTarget(
   href: string,
-  frontendUrl: string,
+  frontendUrls: string | readonly string[],
 ): AssistantLinkTarget | null {
   try {
-    const origin = new URL(frontendUrl).origin;
-    const url = new URL(href, origin);
+    const origins = (
+      typeof frontendUrls === "string" ? [frontendUrls] : frontendUrls
+    ).map((frontendUrl) => new URL(frontendUrl).origin);
+    if (!origins.length) return null;
+    const url = new URL(href, origins[0]);
     if (
       !/^https?:$/.test(url.protocol) ||
-      url.origin !== origin ||
+      !origins.includes(url.origin) ||
       url.username ||
       url.password ||
       url.hash

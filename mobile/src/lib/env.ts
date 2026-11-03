@@ -1,4 +1,7 @@
-import { CONFIGURED_DOMAIN_SETS } from "./domains";
+import {
+  CONFIGURED_DOMAIN_SETS,
+  NYXID_FRONTEND_URL as activeFrontendUrl,
+} from "./domains";
 
 /**
  * True when running a local development build (pnpm run ios / pnpm run android).
@@ -23,6 +26,13 @@ export const NYXID_TRUSTED_API_BASE_URLS: readonly string[] =
   CONFIGURED_DOMAIN_SETS.map((set) => set.apiBaseUrl);
 export const NYXID_TRUSTED_FRONTEND_URLS: readonly string[] =
   CONFIGURED_DOMAIN_SETS.map((set) => set.frontendUrl);
+/**
+ * First-party frontends whose links may open native UI: the launch-selected
+ * one first (it resolves relative links), then every other embedded set.
+ */
+export function firstPartyFrontendUrls(): readonly string[] {
+  return [activeFrontendUrl, ...NYXID_TRUSTED_FRONTEND_URLS];
+}
 export const NYXID_UNIVERSAL_LINK_HOST =
   process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST ?? "";
 export const NYXID_APP_SCHEME = process.env.EXPO_PUBLIC_APP_SCHEME ?? "nyxid";
@@ -33,7 +43,9 @@ export const NYXID_APP_SCHEME = process.env.EXPO_PUBLIC_APP_SCHEME ?? "nyxid";
  */
 const ALLOWED_EMAILS_RAW = process.env.EXPO_PUBLIC_ALLOWED_EMAILS ?? "";
 export const ALLOWED_EMAILS: string[] = ALLOWED_EMAILS_RAW
-  ? ALLOWED_EMAILS_RAW.split(",").map((e: string) => e.trim().toLowerCase()).filter(Boolean)
+  ? ALLOWED_EMAILS_RAW.split(",")
+      .map((e: string) => e.trim().toLowerCase())
+      .filter(Boolean)
   : [];
 
 export function isEmailAllowed(email: string): boolean {

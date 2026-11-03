@@ -27,6 +27,9 @@ test("private and crew message bodies are memoized and keep parser props stable 
     "./assistantSelectableMarkdown": {
       assistantSelectableMarkdown: { textgroup: () => "selectable" },
     },
+    "./AssistantConnectButton": {
+      AssistantConnectButton: "AssistantConnectButton",
+    },
   });
   const Body = h.load(
     fileURLToPath(new URL("./AssistantMarkdownBody.tsx", import.meta.url)),
@@ -97,6 +100,9 @@ test("private and crew GFM render accessible tasks, scrollable aligned tables, s
     "../../theme/ThemeContext": { useTheme: () => ({ colors: darkColors }) },
     "./assistantSelectableMarkdown": {
       assistantSelectableMarkdown: { textgroup: () => "selectable" },
+    },
+    "./AssistantConnectButton": {
+      AssistantConnectButton: "AssistantConnectButton",
     },
   });
   const Body = h.load(
@@ -217,4 +223,111 @@ test("private and crew GFM render accessible tasks, scrollable aligned tables, s
     reference.props.ref(null);
     h.unmount();
   }
+});
+
+test("hosted connect links render one button under their block and keep plain words inline", () => {
+  const origin = "https://app.example.test";
+  const href = `${origin}/connect/nyx_clk_synthetic_review`;
+  const opened: { url: string; trigger?: number }[] = [];
+  const h = hookHarness<any>({
+    "react/jsx-runtime": {
+      jsx: (type: any, props: any) => ({ type, props }),
+      jsxs: (type: any, props: any) => ({ type, props }),
+    },
+    "react-native": { Text: "Text", View: "View", ScrollView: "ScrollView" },
+    "react-native-markdown-display": {
+      __esModule: true,
+      default: "Markdown",
+      MarkdownIt,
+      renderRules: {},
+    },
+    "expo-web-browser": {},
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: darkColors }) },
+    "./assistantSelectableMarkdown": { assistantSelectableMarkdown: {} },
+    "./AssistantConnectButton": {
+      AssistantConnectButton: "AssistantConnectButton",
+    },
+    "./AssistantLinkContext": {
+      AssistantLinkContext: {
+        value: (url: string, trigger?: number) => {
+          opened.push({ url, trigger });
+          return true;
+        },
+      },
+    },
+    "./assistantMarkdown": {
+      assistantMarkdownOptions: {},
+      configureAssistantMarkdown: (parser: unknown) => parser,
+      safeAssistantLinkUrl: (url: string) => url,
+    },
+    "../../lib/env": { firstPartyFrontendUrls: () => [origin] },
+  });
+  const Body = h.load(
+    fileURLToPath(new URL("./AssistantMarkdownBody.tsx", import.meta.url)),
+  ).AssistantMarkdownBody as any;
+  h.mount(() => Body.type({ text: "connect", variant: "private" }));
+  const { rules } = h.value().props;
+  const link = (target: string, text: string) => ({
+    type: "link",
+    attributes: { href: target },
+    children: [{ type: "text", content: text }],
+  });
+  const paragraph = (key: string, children: any[]) => ({
+    type: "paragraph",
+    key,
+    children: [{ type: "textgroup", children }],
+  });
+  const ast = {
+    key: "body",
+    attributes: {},
+    children: [
+      paragraph("a", [
+        { type: "text", content: "Your mailbox needs connecting. " },
+        link(href, "Connect your email securely"),
+      ]),
+      paragraph("b", [link("https://example.test/docs", "docs")]),
+      paragraph("c", [link(href, href)]),
+    ],
+  };
+  const body = rules.body(ast, ["A", "B", "C"], [], { _VIEW_SAFE_body: {} });
+  const blocks = body.props.children;
+  const buttons = (block: any) =>
+    block.props.children[1].filter(
+      (child: any) => child.type === "AssistantConnectButton",
+    );
+  assert.equal(blocks[0].props.children[0], "A");
+  assert.equal(
+    buttons(blocks[0])
+      .map((button: any) => button.props.label)
+      .join("|"),
+    "Connect your email securely",
+  );
+  assert.equal(buttons(blocks[1]).length, 0, "ordinary links stay links");
+  assert.equal(buttons(blocks[2]).length, 0, "one button per connect link");
+  buttons(blocks[0])[0].props.onPress(42);
+  assert.equal(
+    JSON.stringify(opened),
+    JSON.stringify([{ url: href, trigger: 42 }]),
+  );
+
+  const inline = rules.link(
+    { key: "l", attributes: { href }, children: [{ content: href }] },
+    [href],
+  );
+  assert.equal(inline.type, "Text");
+  assert.equal(inline.props.children, "Connect service");
+  assert.equal(inline.props.onPress, undefined);
+  assert.equal(inline.props.accessibilityRole, undefined);
+  const ordinary = rules.link(
+    {
+      key: "o",
+      attributes: { href: "https://example.test/docs" },
+      children: [{ content: "docs" }],
+    },
+    ["docs"],
+  );
+  assert.equal(ordinary.props.accessibilityRole, "link");
+  ordinary.props.onPress({ nativeEvent: { target: 7 } });
+  assert.equal(opened.at(-1)!.url, "https://example.test/docs");
+  h.unmount();
 });
