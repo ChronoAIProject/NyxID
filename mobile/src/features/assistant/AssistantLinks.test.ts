@@ -481,6 +481,7 @@ test("real link host routes account panels, preserves channel URL, retains the t
   };
   let scope = "chat-a";
   let epoch = 1;
+  const minted: string[] = [];
   const transcript = {
     type: "Transcript",
     props: { draft: "Keep this draft" },
@@ -526,6 +527,19 @@ test("real link host routes account panels, preserves channel URL, retains the t
     "expo-web-browser": {
       openBrowserAsync: async (href: string) => browsers.push(href),
     },
+    "../../lib/api/connectLinksApi": {
+      connectLinksApi: {
+        create: async (slug: string) => {
+          minted.push(slug);
+          if (slug === "broken") throw new Error("not connectable");
+          return {
+            id: "link",
+            connect_url: `${origin}/connect/${token}`,
+            expires_at: "2099-01-01T00:00:00Z",
+          };
+        },
+      },
+    },
   });
   const Host = h.load(
     fileURLToPath(new URL("./AssistantLinkHost.tsx", import.meta.url)),
@@ -544,20 +558,33 @@ test("real link host routes account panels, preserves channel URL, retains the t
   assert.equal(actions.at(-1).payload.params.screen, "AccountSecurity");
   open(`${origin}/assistant?panel=settings&panelTab=display`);
   assert.equal(actions.at(-1).payload.params.params.section, "display");
-  assert.equal(
-    open(`${origin}/keys?tab=services&action=add-service&slug=api-github`),
-    true,
-  );
-  assert.equal(actions.at(-1).payload.params.screen, "ServiceSetup");
-  assert.equal(actions.at(-1).payload.params.params.catalogSlug, "api-github");
   open(`${origin}/keys?tab=services&action=add-service`);
   assert.equal(actions.at(-1).payload.params.screen, "Plugins");
   assert.equal(actions.at(-1).payload.params.params.tab, "connectors");
+  // A failed mint falls back to the native setup page for that service.
+  open(`${origin}/keys?tab=services&action=add-service&slug=broken`);
+  await h.settle();
+  assert.equal(actions.at(-1).payload.params.screen, "ServiceSetup");
+  assert.equal(actions.at(-1).payload.params.params.catalogSlug, "broken");
   assert.equal(
-    nodes(h.value()).find((n) => n.type === "Modal")?.props.visible ?? false,
-    false,
-    "service setup opens a native page, not the link modal",
+    nodes(h.value()).find((n) => n.type === "Connect"),
+    undefined,
   );
+  // The button starts a real hosted connection; a double tap mints once.
+  const github = `${origin}/keys?tab=services&action=add-service&slug=api-github`;
+  open(github);
+  open(github);
+  await h.settle();
+  h.flush();
+  assert.equal(minted.filter((slug) => slug === "api-github").length, 1);
+  assert.equal(
+    nodes(h.value()).find((n) => n.type === "Connect")!.props.token,
+    token,
+  );
+  nodes(h.value())
+    .find((n) => n.type === "Modal")!
+    .props.onRequestClose();
+  h.flush();
   const channel = `${origin}/channel-bots/connect/telegram?label=Release%20crew&target_org_id=org&x=kept`;
   open(channel);
   nodes(h.value())
