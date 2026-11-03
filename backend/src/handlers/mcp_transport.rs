@@ -5361,7 +5361,7 @@ async fn handle_meta_connect(
                 );
             } else {
                 refusal["instructions"] = serde_json::json!(
-                    "Ask the owner to connect their account through NyxBot or Plugins, then grant this specialist access. Completing a link never grants the specialist automatically."
+                    "Ask the owner to have NyxBot send a connect link for this service, then grant this specialist access. Completing a link never grants the specialist automatically."
                 );
             }
         }
@@ -5444,7 +5444,9 @@ async fn handle_meta_connect(
     // personal intent. Platform-key and credential-free connections are
     // outside the organization rule and keep their one-step behavior.
     let personal_hosted = catalog.as_ref().filter(|catalog| {
-        auth.chat.is_some() && !use_platform_key && catalog.requires_user_credential
+        auth.chat.is_some()
+            && !use_platform_key
+            && crate::services::assistant_connection_service::personal_hosted_connect(catalog)
     });
     let connected = if let Some(catalog) = personal_hosted {
         crate::services::assistant_connection_service::hosted(

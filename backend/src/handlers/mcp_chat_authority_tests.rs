@@ -6241,6 +6241,78 @@ async fn public_connect_catalog(
 }
 
 #[tokio::test]
+async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already_connected() {
+    // GitHub-style catalogs get their credential from an OAuth provider, so
+    // requires_user_credential is false. A chat must still receive a hosted
+    // link (adding another account), never the legacy "Already connected".
+    let f = orchestrator_fixture("assistant_provider_connect").await;
+    crate::services::provider_service::seed_default_providers(
+        &f.state.db,
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let provider = f
+        .state
+        .db
+        .collection::<bson::Document>("provider_configs")
+        .find_one(doc! {"slug":"github"})
+        .await
+        .unwrap()
+        .expect("seeded GitHub provider");
+    let mut catalog = public_connect_catalog(&f, "github-oauth").await;
+    catalog.requires_user_credential = false;
+    catalog.auth_method = "bearer".into();
+    catalog.auth_key_name = "Authorization".into();
+    catalog.provider_config_id = Some(provider.get_str("_id").unwrap().to_owned());
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .insert_one(
+            doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,
+            "service_id":&catalog.id,"is_active":true},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_slug":catalog.slug}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(
+        value["connect_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("/connect/"))
+    );
+    let stored = f
+        .state
+        .db
+        .collection::<crate::models::connect_link::ConnectLink>("connect_links")
+        .find_one(doc! {"_id":value["connect_link_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.use_platform_key, Some(false));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_keeps_platform_one_step()
  {
     use crate::services::feature_flag_service as flags;

@@ -55,11 +55,20 @@ pub async fn facts(db: &Database, actor: &str, connection: &UserService) -> AppR
         .ok_or_else(|| AppError::NotFound("Connection owner unavailable".into()))
 }
 
+/// A catalog the owner connects with their own account through a hosted link:
+/// an OAuth/device-code/API-key provider or a per-user credential. Provider
+/// rows report `requires_user_credential = false` because the provider
+/// supplies the credential, so the provider check is required.
+pub fn personal_hosted_connect(catalog: &DownstreamService) -> bool {
+    catalog.service_type != "ssh"
+        && (catalog.requires_user_credential || catalog.provider_config_id.is_some())
+}
+
 /// Unsupported flows never advertise a link that cannot be completed personally.
 pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -> AppResult<Value> {
     let Some(id) = connection.catalog_service_id.as_deref() else {
         return Ok(
-            json!({"supported":false,"reason":"custom_connection","instructions":"Ask the owner to approve this exact organization operation, or use Plugins → Advanced setup for a personal custom connection."}),
+            json!({"supported":false,"reason":"custom_connection","instructions":"Ask the owner whether to approve this exact organization operation. A custom connection cannot be set up through a hosted link."}),
         );
     };
     let catalog = match resolve_catalog(db, actor, Some(id), None).await {
@@ -71,14 +80,14 @@ pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -
         }
         Err(error) => return Err(error),
     };
-    if catalog.service_type == "ssh" || !catalog.requires_user_credential {
+    if !personal_hosted_connect(&catalog) {
         return Ok(
-            json!({"supported":false,"reason":if catalog.service_type == "ssh" {"ssh_requires_advanced_setup"} else {"personal_account_not_supported"},"instructions":"Ask the owner to approve this exact organization operation, or use Plugins → Advanced setup."}),
+            json!({"supported":false,"reason":if catalog.service_type == "ssh" {"ssh_requires_advanced_setup"} else {"personal_account_not_supported"},"instructions":"Ask the owner whether to approve this exact organization operation. This service cannot be connected through a hosted link."}),
         );
     }
     Ok(
         json!({"supported":true,"catalog_service_id":catalog.id,"service_slug":catalog.slug,
-        "instructions":format!("Offer nyx__connect_service for {} so the owner can connect their own account; or ask whether to use the organization connection. Specialists must ask the owner to connect via NyxBot or Plugins, then grant the specialist. Connecting never grants access automatically.",catalog.slug)}),
+        "instructions":format!("Offer nyx__connect_service for {} so the owner can connect their own account; or ask whether to use the organization connection. Specialists must ask the owner to have NyxBot send a connect link, then grant the specialist. Connecting never grants access automatically.",catalog.slug)}),
     )
 }
 

@@ -2746,7 +2746,16 @@ async fn dispatch_settings(
                 .await?;
                 return Ok((
                     json!({"area":area,"action":"connect_service","catalog_service_id":catalog.id,"service_slug":catalog.slug,
-                    "instructions":"Call nyx__connect_service with this catalog_service_id as service_id or service_slug; give the owner its hosted link. Never use /keys for connecting an account."}),
+                    "instructions":"Call nyx__connect_service with this catalog_service_id as service_id or service_slug; give the owner its hosted link. Never send a page link (/keys or Plugins) for connecting an account."}),
+                    false,
+                ));
+            }
+            if area == "add_service" {
+                // Connecting is never a page link: name the service and use
+                // the hosted connect tool instead.
+                return Ok((
+                    json!({"area":area,"action":"connect_service",
+                    "instructions":"Ask the owner which service to connect (use nyx__discover_services), then call nyx__connect_service and give its hosted link. Never send a page link (/keys or Plugins) for connecting an account."}),
                     false,
                 ));
             }
