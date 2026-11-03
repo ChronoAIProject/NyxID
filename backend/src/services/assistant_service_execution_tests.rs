@@ -26,6 +26,8 @@ mod receipts;
 #[path = "assistant_service_execution_ssh_session_tests.rs"]
 mod ssh_sessions;
 
+#[path = "assistant_service_execution_instruction_tests.rs"]
+mod instructions;
 #[path = "assistant_service_execution_invocation_tests.rs"]
 mod invocations;
 
@@ -192,7 +194,7 @@ async fn raw(
 }
 
 #[tokio::test]
-async fn org_reads_confirm_in_auto_and_ask_but_never_full_access() {
+async fn legacy_org_reads_confirm_in_auto_and_ask_but_never_full_access() {
     let f = orchestrator_fixture("execution_mode_matrix").await;
     let owner = org(&f).await;
     let id = connection(&f, &owner, "org", None).await;
@@ -632,6 +634,7 @@ fn selector_is_leading_exact_and_header_binding_excludes_only_control_metadata()
 #[test]
 fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves_pool_projection() {
     let mut target = super::super::proxy_service::ProxyTarget {
+        credential_deferred: false,
         service: test_utils::test_auto_connected_catalog_service(),
         base_url: "https://example.invalid".into(),
         auth_method: "bearer".into(),
@@ -820,6 +823,47 @@ fn guest_1995_codex_correlation_metadata_is_stateless_but_provider_handles_are_n
 }
 
 #[tokio::test]
+async fn org_reads_require_instruction_in_every_access_mode() {
+    let f = orchestrator_fixture("instruction_mode_matrix").await;
+    instructions::activate(&f).await;
+    let owner = org(&f).await;
+    let id = connection(&f, &owner, "org", None).await;
+    let personal = connection(&f, &f.owner, "personal", None).await;
+    for setting in [
+        AccessMode::Autopilot,
+        AccessMode::Nyxmode,
+        AccessMode::AskEveryTime,
+    ] {
+        mode(&f, setting).await;
+        assert!(
+            gate(
+                &f,
+                &id,
+                &owner,
+                &json!({"method":"GET","path":"/read"}),
+                None
+            )
+            .await
+            .refusal
+            .is_some()
+        );
+        assert!(
+            gate(
+                &f,
+                &personal,
+                &f.owner,
+                &json!({"method":"GET","path":"/read"}),
+                None
+            )
+            .await
+            .refusal
+            .is_none()
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn precondition_2113_http_projection_binds_exact_approval_to_write_revision() {
     async fn write_gate(f: &Fixture, id: &str, operation: &Value, ack: Option<&str>) -> Decision {
         check(
@@ -907,6 +951,7 @@ fn guest_model_2121_absent_preconditions_preserve_route_fingerprint() {
         voice: None,
     });
     let target = super::super::proxy_service::ProxyTarget {
+        credential_deferred: false,
         service,
         base_url: "https://example.invalid".into(),
         auth_method: "bearer".into(),

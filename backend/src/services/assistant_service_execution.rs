@@ -37,7 +37,7 @@ pub use pools::pinned_pool_member;
 mod bootstrap;
 pub use bootstrap::{begin_model_attempt, finish_model_attempt};
 mod authority;
-pub use authority::connection_binding;
+pub use authority::{connection_binding, org_card_binding};
 mod availability;
 pub(crate) mod guest_model;
 pub(crate) mod model_diagnostic;
@@ -51,6 +51,7 @@ mod http;
 mod receipts;
 mod request_identity;
 pub(crate) use receipts::HttpApprovalReceipt;
+pub(crate) mod instruction;
 mod resolution;
 mod selection;
 use availability::verified_unavailable;
@@ -230,12 +231,16 @@ async fn check_job_http_inner(
         refusal: None,
         automatic: None,
         admission: Some(Admission {
+            owner_instruction_receipt: false,
             shared_detached: None,
             shared_permit: None,
             connection: id.to_owned(),
             binding: connection_binding(&state.db, id, &chat.api_key_id).await?,
-            execution: Some(execution_digest(target)),
-            execution_credential: true,
+            execution: Some(execution_projection_digest(
+                target,
+                !target.credential_deferred,
+            )),
+            execution_credential: !target.credential_deferred,
             operation: digest(json!({"job_id":job})),
             operation_identity: json!({"job_id":job}),
             native_execution: None,
@@ -352,6 +357,13 @@ async fn check_inner(
         .await?;
     let service =
         super::user_service_service::get_user_service(db, effective_owner, connection_id).await?;
+    let instruction_covered = instruction::covered(db, chat, &service).await?
+        && !matches!(
+            operation["kind"].as_str(),
+            Some("raw_inference" | "legacy_inference" | "machine_job")
+        );
+    let instruction_required =
+        instruction_covered && !instruction::owner_instruction(db, chat, &service).await?;
     if let Some(access) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
         if !chat.turn_live || chat.turn_stopped {
             return Err(AppError::AssistantTurnRequired);
@@ -380,6 +392,8 @@ async fn check_inner(
             return Err(AppError::Forbidden("Use the person's exact selected connection; choose a new connection before changing accounts".into()));
         }
         let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
+        let approval =
+            approval_binding(db, chat, connection_id, &binding, instruction_covered).await?;
         let needs_connection_consent = service.user_id == chat.user_id
             && !shared_platform_model(chat, &service, operation, target);
         if pool {
@@ -399,14 +413,30 @@ async fn check_inner(
         }
         // Connection consent is independent of the actor's action policy.
         // Always may remember a connection; it never bypasses an action card.
-        let gate = acks::confirmation_needed(db, chat, facts, false).await?;
+        let gate = acks::confirmation_needed_with_org(
+            db,
+            chat,
+            facts,
+            false,
+            if instruction_required {
+                acks::OrgInstructionRequirement::Required
+            } else {
+                acks::OrgInstructionRequirement::None
+            },
+        )
+        .await?;
         if let Some(need) = gate.ask() {
-            let args = json!({"connection_id": connection_id, "execution_binding": binding,
+            let args = json!({"connection_id": connection_id, "execution_binding": approval,
                 "operation": operation, "acknowledgement_id": acknowledgement});
             if let Some(refusal) =
                 acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, summary)
                     .await?
             {
+                let refusal = if instruction_required {
+                    attach_org_offer(db, chat, &service, &approval, operation, refusal).await?
+                } else {
+                    refusal
+                };
                 return Ok(Decision {
                     refusal: Some(refusal),
                     admission: None,
@@ -436,12 +466,14 @@ async fn check_inner(
             refusal: None,
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
+                owner_instruction_receipt: instruction_covered,
                 shared_detached: None,
                 shared_permit: permit,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(execution_digest),
-                execution_credential: true,
+                execution: target
+                    .map(|target| execution_projection_digest(target, !target.credential_deferred)),
+                execution_credential: target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -477,6 +509,7 @@ async fn check_inner(
         return Err(AppError::Forbidden("Service access revoked".into()));
     }
     let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
+    let approval = approval_binding(db, chat, connection_id, &binding, instruction_covered).await?;
     if pool
         && let Some(failure) =
             availability::pool_predispatch_failure(db, chat, connection_id, &binding, operation)
@@ -503,7 +536,7 @@ async fn check_inner(
         Vec::new()
     };
     let mut args = json!({"connection_id": connection_id, "effective_owner_id": effective_owner,
-        "execution_binding": binding, "operation": operation});
+        "execution_binding": approval, "operation": operation});
     let mut continuation = None;
     if acknowledgement.is_none() && !model_consent && !resource_replay {
         // Only a server-validated owner continuation may present a card implicitly
@@ -525,7 +558,7 @@ async fn check_inner(
         let bound = db.collection::<Document>(COLLECTION).find_one(doc! {
             "_id": id, "kind": "card_binding", "user_id": &chat.user_id,
             "conversation_id": &chat.conversation_id, "api_key_id": &chat.api_key_id,
-            "connection_id": connection_id, "binding": &binding,
+            "connection_id": connection_id, "binding": &approval,
             "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
             "expires_at": {"$gt": bson::DateTime::now()},
         }).await?;
@@ -579,7 +612,7 @@ async fn check_inner(
         if (same_group || selected_id == connection_id)
             && !pool_fallback
             && applies
-            && (selected_id != connection_id || !selection_matches(selected, &service, &binding))
+            && (selected_id != connection_id || !selection_matches(selected, &service, &approval))
         {
             let (reason, instructions) = match selected_service.as_ref() {
                 None => (
@@ -605,7 +638,7 @@ async fn check_inner(
     }
     let explicit = selected.as_ref().is_some_and(|row| {
         row.get_str("connection_id") == Ok(connection_id)
-            && selection_matches(row, &service, &binding)
+            && selection_matches(row, &service, &approval)
             && row
                 .get("operation")
                 .is_none_or(|bound| bson::to_bson(operation).is_ok_and(|current| current == *bound))
@@ -774,16 +807,20 @@ async fn check_inner(
             });
         }
     }
-    if chat.guest {
+    if chat.guest && !instruction_required {
         return Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                owner_instruction_receipt: false,
                 shared_detached: None,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(|target| execution_projection_digest(target, !pool)),
-                execution_credential: !pool,
+                execution: target.map(|target| {
+                    execution_projection_digest(target, !pool && !target.credential_deferred)
+                }),
+                execution_credential: !pool
+                    && target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -820,8 +857,10 @@ async fn check_inner(
             summary.to_owned()
         };
         let gate = if resource_replay && acknowledgement.is_some() {
-            acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
-        } else { acks::confirmation_needed(db, chat, facts, org && !model_consent).await? };
+            acks::Gate::Ask(acks::ConfirmationNeed { org_instruction: if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }, class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
+        } else { acks::confirmation_needed_with_org(db, chat, facts,
+            org && !model_consent && !instruction_covered,
+            if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }).await? };
         if gate.ask().is_some() {
             // Legacy idle calls can retain their existing automatic behavior, but
             // cannot mint or redeem turn-bound consent without an admitted turn.
@@ -839,24 +878,26 @@ async fn check_inner(
                             "kind": "card_binding", "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                             "api_key_id": &chat.api_key_id, "turn_id": &chat.turn_id, "connection_id": connection_id,
                             "owner_id": effective_owner, "catalog_service_id": &service.catalog_service_id,
-                            "binding": &binding, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
+                            "binding": &approval, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
                             "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
                         }}).upsert(true).await?;
             }
-            return Ok(Decision {
-                refusal: Some(refusal),
-                admission: None,
-                automatic: None,
-            });
+            let mut refusal = refusal;
+            if instruction_required {
+                refusal = attach_org_offer(db, chat, &service, &approval, operation, refusal).await?;
+            }
+            return Ok(Decision { refusal: Some(refusal), admission: None, automatic: None });
         }
         Ok(Decision {
             refusal: None,
-            admission: Some(Admission { shared_detached: None,
+            admission: Some(Admission {
+                owner_instruction_receipt: instruction_covered,
+                shared_detached: None,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
-                execution: target.map(|target| execution_projection_digest(target, !pool)),
-                execution_credential: !pool,
+                execution: target.map(|target| execution_projection_digest(target, !pool && !target.credential_deferred)),
+                execution_credential: !pool && target.is_none_or(|target| !target.credential_deferred),
                 operation: digest(operation.clone()),
                 operation_identity: operation.clone(),
                 native_execution: None,
@@ -873,6 +914,45 @@ async fn check_inner(
     .await
 }
 
+/// Card arguments, card records and card-derived selections for an org
+/// connection use the mode-free card identity; execution keeps `binding`.
+async fn approval_binding(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    connection_id: &str,
+    binding: &str,
+    instruction_covered: bool,
+) -> AppResult<String> {
+    if instruction_covered {
+        org_card_binding(db, connection_id, &chat.api_key_id).await
+    } else {
+        Ok(binding.to_owned())
+    }
+}
+
+async fn attach_org_offer(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    service: &UserService,
+    binding: &str,
+    operation: &Value,
+    refusal: Value,
+) -> AppResult<Value> {
+    let refusal =
+        super::assistant_connection_service::org_refusal(db, chat, service, refusal).await?;
+    if let Some(id) = refusal["acknowledgement_id"].as_str() {
+        db.collection::<Document>(COLLECTION).update_one(doc! {"_id":id},doc! {"$setOnInsert":{
+            "kind":"card_binding","user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+            "api_key_id":&chat.api_key_id,"turn_id":&chat.turn_id,"connection_id":&service.id,
+            "owner_id":&service.user_id,"catalog_service_id":&service.catalog_service_id,
+            "binding":binding,"operation":bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(25))
+        }}).upsert(true).await?;
+    }
+    Ok(refusal)
+}
+
+#[cfg(test)]
 fn execution_digest(target: &super::proxy_service::ProxyTarget) -> String {
     execution_projection_digest(target, true)
 }

@@ -153,6 +153,25 @@ pub fn connection_binding<'a>(
     Box::pin(async move { Ok(digest(connection_projection(db, id, api_key_id).await?)) })
 }
 
+/// Identity of an organization-instruction card. It omits only the access-mode
+/// preference, so a pending org card stays redeemable across a mode switch.
+/// Execution admissions keep the mode-sensitive `connection_binding`, so a
+/// mode change after admission still fences the action before egress.
+pub fn org_card_binding<'a>(
+    db: &'a Database,
+    id: &'a str,
+    api_key_id: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<String>> {
+    Box::pin(async move {
+        let mut projection = connection_projection(db, id, api_key_id).await?;
+        if let Some(authority) = projection["authority"].as_object_mut() {
+            authority.remove("mode");
+            authority.insert("binding_version".into(), json!(2));
+        }
+        Ok(digest(projection))
+    })
+}
+
 /// Model consent is independent of the owner's action-confirmation mode. Compare
 /// legacy digests against the same live projection under the three known modes;
 /// every other authority field must still match. No approval or tool path uses this.

@@ -18,6 +18,8 @@ use crate::services::{
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateConnectLinkRequest {
+    #[serde(default)]
+    pub assistant_personal: bool,
     pub service_slug: String,
     pub use_platform_key: Option<bool>,
     /// Additional OAuth scopes requested on top of the provider defaults.
@@ -57,6 +59,7 @@ impl std::fmt::Debug for PreviewConnectLinkRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PreviewConnectLinkResponse {
+    pub assistant_intent_locked: bool,
     pub service_name: String,
     pub service_slug: String,
     pub use_platform_key: Option<bool>,
@@ -201,6 +204,16 @@ pub async fn create_connect_link(
     Json(body): Json<CreateConnectLinkRequest>,
 ) -> AppResult<Json<CreateConnectLinkResponse>> {
     let actor_id = auth_user.user_id.to_string();
+    if body.assistant_personal {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+    }
+    let locked = body.assistant_personal
+        && crate::services::feature_flag_service::personal_flag_enabled(
+            &state.db,
+            &actor_id,
+            crate::services::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
+        )
+        .await?;
     let rate_key = auth_user
         .api_key_id
         .as_deref()
@@ -216,9 +229,14 @@ pub async fn create_connect_link(
     let created = connect_link_service::create(
         &state.db,
         connect_link_service::CreateInput {
+            assistant_intent_locked: locked,
             user_id: actor_id,
             service_slug: body.service_slug,
-            use_platform_key: body.use_platform_key,
+            use_platform_key: if body.assistant_personal {
+                Some(false)
+            } else {
+                body.use_platform_key
+            },
             scopes: body.scopes,
             label: body.label,
             endpoint_url: body.endpoint_url,
@@ -357,6 +375,7 @@ pub async fn preview_connect_link(
     let callback_url = connect_link_service::terminal_callback_url(&view.link)?;
     let connect_method = view.service.connect_method().to_string();
     Ok(Json(PreviewConnectLinkResponse {
+        assistant_intent_locked: view.link.assistant_intent_locked,
         service_name: view.service.service_name,
         service_slug: view.service.service_slug,
         use_platform_key: view.link.use_platform_key,
@@ -732,6 +751,7 @@ mod tests {
     use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+    use mongodb::bson::doc;
 
     #[test]
     fn completion_request_debug_redacts_all_secret_inputs() {
@@ -781,6 +801,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugins_personal_intent_lock_is_first_party_only_and_readiness_gated() {
+        use crate::services::feature_flag_service as flags;
+        let f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "plugins_hosted_intent",
+        )
+        .await;
+        let mut catalog = dummy_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = "plugins-personal".into();
+        catalog.visibility = "public".into();
+        catalog.requires_user_credential = true;
+        // Credentialed HTTP catalog: a no-auth row takes the no-auth platform path.
+        catalog.auth_method = "bearer".into();
+        catalog.auth_key_name = "Authorization".into();
+        catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            enabled: true,
+            audience: crate::models::downstream_service::PlatformKeyAudience::Public,
+            ..Default::default()
+        });
+        catalog.credential_encrypted = f
+            .state
+            .encryption_keys
+            .encrypt(b"fixture-platform-key")
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let input = |assistant_personal| CreateConnectLinkRequest {
+            assistant_personal,
+            service_slug: catalog.slug.clone(),
+            use_platform_key: Some(true),
+            scopes: vec![],
+            label: None,
+            endpoint_url: None,
+            requested_by: None,
+            callback_url: None,
+            expires_in: None,
+        };
+        for (enabled, assistant_personal, expected_lock) in [
+            (false, true, false),
+            (true, true, true),
+            (true, false, false),
+        ] {
+            flags::set_platform_override(
+                &f.state.db,
+                flags::HOSTED_CONNECT_INTENT_FLAG_KEY,
+                &flags::FlagTarget::User(f.owner.clone()),
+                enabled,
+                &f.owner,
+            )
+            .await
+            .unwrap();
+            let Json(created) = create_connect_link(
+                State(f.state.clone()),
+                test_auth_user(&f.owner),
+                Json(input(assistant_personal)),
+            )
+            .await
+            .unwrap();
+            let stored = f
+                .state
+                .db
+                .collection::<ConnectLink>(CONNECT_LINKS)
+                .find_one(doc! {"_id":created.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.assistant_intent_locked, expected_lock);
+            assert_eq!(stored.use_platform_key, Some(!assistant_personal));
+        }
+        let mut api = test_auth_user(&f.owner);
+        api.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        api.api_key_id = Some(f.chat.api_key_id.clone());
+        assert!(
+            create_connect_link(State(f.state.clone()), api, Json(input(true)))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<ConnectLink>(CONNECT_LINKS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            3
+        );
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn create_and_public_preview_handler_round_trip() {
         let Some(db) = connect_test_database("connect_link_handler_round_trip").await else {
             return;
@@ -801,6 +916,7 @@ mod tests {
             State(state.clone()),
             test_auth_user(&actor_id),
             Json(CreateConnectLinkRequest {
+                assistant_personal: false,
                 scopes: Vec::new(),
                 service_slug: service.slug.clone(),
                 use_platform_key: None,
@@ -901,6 +1017,7 @@ mod tests {
             State(state.clone()),
             auth,
             Json(CreateConnectLinkRequest {
+                assistant_personal: false,
                 scopes: Vec::new(),
                 service_slug: service.slug,
                 use_platform_key: None,
@@ -975,6 +1092,7 @@ mod tests {
         let created = connect_link_service::create(
             &db,
             connect_link_service::CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: actor_id.clone(),
                 service_slug: service.slug,
@@ -1044,6 +1162,7 @@ mod tests {
         let created = connect_link_service::create(
             &db,
             connect_link_service::CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: actor_id.clone(),
                 service_slug: service.slug.clone(),

@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   preview: vi.fn(),
   navigate: vi.fn(),
   available: true,
+  intentLocked: false,
   choice: undefined as boolean | undefined,
   scopes: [] as string[],
   endpointUrl: null as string | null,
@@ -59,6 +60,7 @@ vi.mock("@/hooks/use-connect-links", () => ({
       endpoint_url: mocks.endpointUrl,
       requires_gateway_url: mocks.requiresGatewayUrl,
       use_platform_key: mocks.choice,
+      assistant_intent_locked: mocks.intentLocked,
     },
   }),
   useCompleteConnectLink: () => {
@@ -79,6 +81,7 @@ vi.mock("@/hooks/use-connect-links", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.available = true;
+  mocks.intentLocked = false;
   mocks.choice = undefined;
   mocks.scopes = [];
   mocks.endpointUrl = null;
@@ -369,4 +372,13 @@ it("keeps retrying after a transient device poll failure without offering a new 
   expect(
     screen.getByRole("heading", { name: "xAI connected" }),
   ).toBeInTheDocument();
+});
+
+it("hides credential switching and completes the stored assistant personal intent", async () => {
+  mocks.intentLocked = true;
+  mocks.choice = false;
+  mocks.complete.mockResolvedValue({ id: "id", status: "completed", service_slug: "llm-xai" });
+  render(<ConnectLinkPage />);
+  expect(screen.queryByText("Use platform key")).not.toBeInTheDocument();
+  expect(screen.getByText(/fixed/i)).toBeVisible();
 });

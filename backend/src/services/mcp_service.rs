@@ -2684,13 +2684,14 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
         description: "Connect to an available service. If a credential is required and omitted, \
-            returns a hosted connection URL that the user can open. Optional scopes request \
+            returns a hosted connection URL that the user can open. Provide service_id or service_slug. For assistant chats, connecting the owner's own credential always returns a hosted link with personal intent, including when an organization connection exists. Specialists must use NyxBot or Plugins then receive a separate grant. Optional scopes request \
             additional OAuth permissions on top of provider defaults through that hosted link; \
             omit credential when requesting scopes."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
+                "service_slug": {"type":"string","description":"Catalog slug, as an alternative to service_id. Provide service_id or service_slug; if both are supplied they must identify the same visible catalog."},
                 "use_platform_key": { "type": "boolean", "default": false, "description": "Use an available NyxID platform key" },
                 "service_id": {
                     "type": "string",
@@ -2710,7 +2711,7 @@ pub fn generate_tool_definitions(
                     "description": "Additional OAuth scopes to request on top of the provider defaults, e.g. [\"public_repo\"]. Rejected for services whose provider does not accept scopes."
                 }
             },
-            "required": ["service_id"]
+            "required": []
         }),
     });
 
@@ -4856,7 +4857,8 @@ fn resolve_tool_target(
                             config.platform_service_rate_limit_burst,
                         ),
                     )
-                    .with_assistant_access(exec_ctx.org_agent_access),
+                    .with_assistant_access(exec_ctx.org_agent_access)
+                    .with_assistant_chat(exec_ctx.assistant_chat),
                 )
                 .await?
                 .ok_or_else(|| {
@@ -4886,11 +4888,27 @@ fn resolve_tool_target(
                 }
                 let has_cred = resolution.has_server_credential;
 
-                let mut agent_override = false;
+                let mut agent_override = if resolution.target.credential_deferred
+                    && exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
+                    && let Some(key) = exec_ctx.api_key_id
+                {
+                    proxy_service::read_agent_credential_override_identity(
+                        db,
+                        user_id,
+                        key,
+                        user_service_id,
+                        &resolution.target,
+                    )
+                    .await?
+                    .is_some()
+                } else {
+                    false
+                };
                 // Per-agent credential override: when acting as an API key with
                 // an agent binding, swap in the override credential before execute.
                 // Matches `execute_proxy_inner` in handlers/proxy.rs.
-                if exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
+                if !resolution.target.credential_deferred
+                    && exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
                     && let Some(ak_id) = exec_ctx.api_key_id
                     && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
                         db,
@@ -5607,7 +5625,7 @@ async fn execute_tool_resolved_inner(
     cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-    target: proxy_service::ProxyTarget,
+    mut target: proxy_service::ProxyTarget,
     node_route: Option<node_routing_service::NodeRoute>,
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
@@ -5829,10 +5847,20 @@ async fn execute_tool_resolved_inner(
                 ToolResponse::policy_refusal(refusal),
             ));
         }
-        if let Some(admission) = decision.admission {
+        if let Some(mut admission) = decision.admission {
             if let Some(watch) = prepared.async_submission.as_deref() {
                 admission.bind_async_submission(db, watch).await?;
             }
+            admission
+                .materialize_http(
+                    db,
+                    encryption_keys,
+                    &mut target,
+                    prepared.method.as_str(),
+                    &prepared.path,
+                    &super::assistant_service_execution::HttpProjection::default(),
+                )
+                .await?;
             admission
                 .revalidate(db, user_service_id, Some(&target))
                 .await?;
@@ -5840,6 +5868,7 @@ async fn execute_tool_resolved_inner(
         }
     }
 
+    target.require_credential_materialized()?;
     box_mcp_forwarding(move || async move {
         let PreparedProxyCall {
             lark_message: _,
@@ -7423,6 +7452,7 @@ pub async fn connect_service(
         let created = connect_link_service::create(
             db,
             connect_link_service::CreateInput {
+                assistant_intent_locked: false,
                 scopes: scopes.to_vec(),
                 user_id: user_id.to_string(),
                 service_slug: service.slug,
@@ -10260,6 +10290,28 @@ mod tests {
             "List repositories"
         );
         assert_eq!(humanize_operation_name("  "), "Call operation");
+    }
+
+    #[test]
+    fn meta_tool_schemas_have_no_top_level_combinators() {
+        // Anthropic and OpenAI (strict) tool APIs reject a top-level
+        // anyOf/oneOf/allOf; one such schema can fail a client's whole tool list.
+        for tool in generate_tool_definitions(&[], None) {
+            assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
+            for keyword in ["anyOf", "oneOf", "allOf", "not"] {
+                assert!(
+                    tool.input_schema.get(keyword).is_none(),
+                    "{} uses top-level {keyword}",
+                    tool.name
+                );
+            }
+        }
+        let connect = generate_tool_definitions(&[], None)
+            .into_iter()
+            .find(|tool| tool.name == "nyx__connect_service")
+            .unwrap();
+        assert!(connect.input_schema["properties"]["service_id"].is_object());
+        assert!(connect.input_schema["properties"]["service_slug"].is_object());
     }
 
     #[test]
@@ -14354,6 +14406,7 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
+                credential_deferred: false,
                 workspace_destinations_pending: false,
                 target_id: None,
                 base_url: service.base_url.clone(),
