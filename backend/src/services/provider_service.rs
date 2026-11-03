@@ -3416,6 +3416,7 @@ pub async fn seed_default_providers(
     }
 
     backfill_provider_revocation(&collection).await?;
+    backfill_bot_credential_instructions(&collection).await?;
 
     for adapter in super::channel_adapters::registered_adapters(&std::sync::Arc::new(
         super::provider_token_exchange_service::TokenExchangeCache::new(),
@@ -3460,6 +3461,29 @@ pub async fn seed_default_providers(
         );
     }
 
+    Ok(())
+}
+
+// Like STALE_SEED_DESCRIPTIONS, recognize only the exact old system seed.
+// Custom/admin text, explicit clears and non-system providers are preserved.
+async fn backfill_bot_credential_instructions(
+    collection: &mongodb::Collection<ProviderConfig>,
+) -> AppResult<()> {
+    for (slug, domain) in [
+        ("lark-bot", "open.larksuite.com"),
+        ("feishu-bot", "open.feishu.cn"),
+    ] {
+        let old = format!(
+            "Create a custom app at https://{domain}/app, then copy the App Secret. The App ID is sent in your request body when calling /auth/v3/tenant_access_token/internal."
+        );
+        let new = format!(
+            "Create a custom app at https://{domain}/app, then enter its App ID and App Secret. NyxID exchanges them for a tenant access token."
+        );
+        collection.update_many(
+            doc! {"slug":slug, "created_by":"system", "provider_type":"api_key", "api_key_instructions":old},
+            doc! {"$set":{"api_key_instructions":new,"updated_at":bson::DateTime::from_chrono(Utc::now())}},
+        ).await?;
+    }
     Ok(())
 }
 
@@ -8815,6 +8839,73 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(updated.revocation, Some(config));
+    }
+
+    #[tokio::test]
+    async fn bot_credential_instruction_backfill_only_replaces_exact_system_seed_text() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("bot_instruction_backfill").await;
+        let raw = db.collection::<bson::Document>(COLLECTION_NAME);
+        for (slug, domain) in [
+            ("lark-bot", "open.larksuite.com"),
+            ("feishu-bot", "open.feishu.cn"),
+        ] {
+            let old = format!(
+                "Create a custom app at https://{domain}/app, then copy the App Secret. The App ID is sent in your request body when calling /auth/v3/tenant_access_token/internal."
+            );
+            for (id, author, text) in [
+                ("seed", "system", Some(old.as_str())),
+                ("edited", "system", Some("Admin-authored setup")),
+                ("cleared", "system", None),
+                ("empty", "system", Some("")),
+                ("custom", "admin-user", Some(old.as_str())),
+            ] {
+                raw.insert_one(doc! {"_id":format!("{slug}-{id}"),"slug":slug,"created_by":author,"provider_type":"api_key","api_key_instructions":text}).await.unwrap();
+            }
+            super::backfill_bot_credential_instructions(
+                &db.collection::<ProviderConfig>(COLLECTION_NAME),
+            )
+            .await
+            .unwrap();
+            let updated = raw
+                .find_one(doc! {"_id":format!("{slug}-seed")})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                updated
+                    .get_str("api_key_instructions")
+                    .unwrap()
+                    .contains("App ID and App Secret")
+            );
+            for (id, text) in [
+                ("edited", Some("Admin-authored setup")),
+                ("cleared", None),
+                ("empty", Some("")),
+                ("custom", Some(old.as_str())),
+            ] {
+                let unchanged = raw
+                    .find_one(doc! {"_id":format!("{slug}-{id}")})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(unchanged.get_str("api_key_instructions").ok(), text);
+                assert!(!unchanged.contains_key("updated_at"));
+            }
+            super::backfill_bot_credential_instructions(
+                &db.collection::<ProviderConfig>(COLLECTION_NAME),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                raw.find_one(doc! {"_id":format!("{slug}-seed")})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                updated
+            );
+        }
+        db.drop().await.unwrap();
     }
 
     #[test]

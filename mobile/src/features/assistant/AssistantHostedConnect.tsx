@@ -49,7 +49,11 @@ export function AssistantHostedConnect({
     if (!p || flow.disabled) return;
     try {
       let composed = credential;
-      if (flow.credentialFields.length) {
+      if (
+        !flow.usePlatformKey &&
+        p.connect_method === "api_key" &&
+        flow.credentialFields.length
+      ) {
         const fields: Record<string, string> = {};
         for (const field of flow.credentialFields) {
           const value = fieldValues[field.name]?.trim();
@@ -184,7 +188,10 @@ export function AssistantHostedConnect({
                 label={field.label}
                 value={fieldValues[field.name] ?? ""}
                 onChangeText={(value) =>
-                  setFieldValues((current) => ({ ...current, [field.name]: value }))
+                  setFieldValues((current) => ({
+                    ...current,
+                    [field.name]: value,
+                  }))
                 }
                 secureTextEntry={field.secret}
                 autoCorrect={false}

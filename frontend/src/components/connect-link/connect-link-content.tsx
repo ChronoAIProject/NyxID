@@ -498,7 +498,11 @@ export function ConnectLinkContent({
             ) : (
               <>
                 {preview.data.assistant_intent_locked ? (
-                  <p className="text-12 text-muted-foreground">{preview.data.use_platform_key ? "Use the NyxID platform connection. This link's intent is fixed." : "Connect your own personal account. This link's intent is fixed."}</p>
+                  <p className="text-12 text-muted-foreground">
+                    {preview.data.use_platform_key
+                      ? "Use the NyxID platform connection. This link's intent is fixed."
+                      : "Connect your own personal account. This link's intent is fixed."}
+                  </p>
                 ) : null}
                 <ConnectionIdentityHeading
                   className="connection-card-heading"
@@ -510,7 +514,8 @@ export function ConnectLinkContent({
                 />
                 {submitError ? <ErrorBanner message={submitError} /> : null}
                 <RequestDetails preview={preview.data} />
-                {!preview.data.assistant_intent_locked && platformAvailable &&
+                {!preview.data.assistant_intent_locked &&
+                  platformAvailable &&
                   catalog?.platform_key &&
                   preview.data.status === "pending" && (
                     <CredentialBindingChoice
@@ -544,7 +549,11 @@ export function ConnectLinkContent({
                   preview.data.connect_method === "api_key" ? (
                     <CredentialForm
                       preview={preview.data}
-                      fields={catalog?.token_exchange_credential_fields ?? []}
+                      fields={
+                        preview.data.token_exchange_credential_fields ??
+                        catalog?.token_exchange_credential_fields ??
+                        []
+                      }
                       pending={actionPending}
                       onSubmit={handleCredentialSubmit}
                     />
@@ -813,10 +822,13 @@ function CredentialForm({
     },
   });
   const submit = form.handleSubmit((values) => {
-    const error = validateConnectCredentialForm(
-      values,
-      preview.requires_gateway_url,
+    const missing = fields.find(
+      (field) =>
+        !parseTokenExchangeCredential(values.credential)[field.name]?.trim(),
     );
+    const error = missing
+      ? `Enter ${missing.label}.`
+      : validateConnectCredentialForm(values, preview.requires_gateway_url);
     setFormError(error);
     if (!error) onSubmit(values);
   });
@@ -864,7 +876,9 @@ function CredentialForm({
                   spec.placeholder ?? `Enter ${spec.label.toLowerCase()}`
                 }
                 value={fieldValues[spec.name] ?? ""}
-                onChange={(event) => setFieldValue(spec.name, event.target.value)}
+                onChange={(event) =>
+                  setFieldValue(spec.name, event.target.value)
+                }
               />
             </div>
           ))
@@ -1078,7 +1092,6 @@ export function RequestDetails({
   );
 }
 
-
 function DeviceCodePanel({
   code,
   url,
@@ -1096,9 +1109,7 @@ function DeviceCodePanel({
         Enter this code at the provider. NyxID will finish the connection after
         authorization.
       </p>
-      <p className="font-mono text-15 font-semibold text-foreground">
-        {code}
-      </p>
+      <p className="font-mono text-15 font-semibold text-foreground">{code}</p>
       <p className="text-11 text-muted-foreground" role="status">
         {status === "slow_down"
           ? `Provider requested a slower check. Checking again in ${interval} seconds.`

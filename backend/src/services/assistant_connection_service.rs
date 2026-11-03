@@ -65,13 +65,28 @@ pub fn personal_hosted_connect(catalog: &DownstreamService) -> bool {
 }
 
 /// Whether a hosted personal link for `catalog` can actually be completed:
-/// its provider must be active, and an admin-only OAuth provider needs the
-/// platform client configured. `Err` carries a stable reason code.
+/// its provider must be active, and an admin-only OAuth/device-code provider
+/// needs its platform client configured. `Err` carries a stable reason code.
 pub async fn hosted_connect_ready(
     db: &Database,
     catalog: &DownstreamService,
 ) -> AppResult<Result<(), &'static str>> {
+    if catalog.service_type == "ssh" {
+        return Ok(Err("ssh_requires_advanced_setup"));
+    }
     let Some(provider_id) = catalog.provider_config_id.as_deref() else {
+        // Hosted preview and unified provisioning resolve the provider only
+        // through provider_config_id. A requirement alone cannot start or
+        // complete its sign-in; do not mint a misleading API-key form.
+        if db
+            .collection::<bson::Document>("service_provider_requirements")
+            .find_one(doc! {"service_id": &catalog.id})
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some()
+        {
+            return Ok(Err("provider_requirement_only"));
+        }
         return Ok(Ok(()));
     };
     let Some(provider) = db
@@ -81,7 +96,13 @@ pub async fn hosted_connect_ready(
     else {
         return Ok(Err("provider_unavailable"));
     };
-    if provider.provider_type == "oauth2"
+    if !matches!(
+        provider.provider_type.as_str(),
+        "oauth2" | "device_code" | "api_key"
+    ) {
+        return Ok(Err("provider_flow_unsupported"));
+    }
+    if matches!(provider.provider_type.as_str(), "oauth2" | "device_code")
         && provider.credential_mode == "admin"
         && !super::user_credentials_service::provider_has_admin_oauth_credentials(&provider)
     {
@@ -107,19 +128,155 @@ pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -
         Err(error) => return Err(error),
     };
     if let Err(reason) = hosted_connect_ready(db, &catalog).await? {
-        return Ok(
-            json!({"supported":false,"reason":reason,"instructions":"This service's sign-in is not available in NyxID right now (a platform admin must enable or configure its provider). Ask the owner whether to approve this exact organization operation instead."}),
-        );
+        return Ok(json!({"supported":false,"reason":reason,
+            "instructions":format!("{} The current organization operation still requires its exact owner approval.", unavailable_instructions(reason))}));
     }
     if !personal_hosted_connect(&catalog) {
         return Ok(
-            json!({"supported":false,"reason":if catalog.service_type == "ssh" {"ssh_requires_advanced_setup"} else {"personal_account_not_supported"},"instructions":"Ask the owner whether to approve this exact organization operation. This service cannot be connected through a hosted link."}),
+            json!({"supported":false,"reason":"personal_account_not_supported",
+            "instructions":unavailable_instructions("personal_account_not_supported")}),
         );
     }
     Ok(
         json!({"supported":true,"catalog_service_id":catalog.id,"service_slug":catalog.slug,
-        "instructions":format!("Offer nyx__connect_service for {} so the owner can connect their own account; or ask whether to use the organization connection. Specialists must ask the owner to have NyxBot send a connect link, then grant the specialist. Connecting never grants access automatically.",catalog.slug)}),
+        "instructions":format!("If the owner asks to connect their own account, call nyx__connect_service for {} immediately. Give its hosted link immediately and mention existing connections in one short line; never ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link. Specialists cannot mint links: ask the owner to have NyxBot send one, followed by a separate specialist grant. This offer does not approve the current organization operation.",catalog.slug)}),
     )
+}
+
+/// Stable reasons shared by chat connect results and organization-card offers.
+pub fn unavailable_instructions(reason: &str) -> &'static str {
+    match reason {
+        "provider_requirement_only" => {
+            "NyxID cannot connect another account for this catalog yet: its sign-in provider is declared only in a requirement. A platform admin must link the provider to the catalog before hosted setup can work. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
+        }
+        "ssh_requires_advanced_setup" => {
+            "Hosted SSH setup is unsupported; SSH requires a node and advanced configuration. Mention existing connections in one short line; do not substitute a page link."
+        }
+        "provider_flow_unsupported" => {
+            "This provider's sign-in flow is not supported by hosted setup. Mention existing connections in one short line; do not substitute a page link."
+        }
+        "personal_account_not_supported" => {
+            "This catalog does not support connecting another personal account. A platform-key connection requires an explicit use_platform_key request and an available platform key. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
+        }
+        _ => {
+            "This service's sign-in is unavailable in NyxID: a platform admin must enable or configure its provider. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
+        }
+    }
+}
+
+pub const CONNECT_PRESENTATION_INSTRUCTIONS: &str = "Give the hosted link immediately and mention existing connections in one short line (ownership, label, enabled/disabled; provider account identity is unknown). Never ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link. A pending link grants no access; NyxID watches for completion.";
+
+pub struct ExistingConnections {
+    pub connections: Vec<Value>,
+    pub truncated: bool,
+}
+impl ExistingConnections {
+    pub fn attach(&self, result: &mut Value) {
+        result["existing_connections"] = json!(self.connections);
+        result["existing_connections_truncated"] = json!(self.truncated);
+    }
+}
+
+/// Metadata only, bounded before owner/catalog/label hydration. The actor's
+/// live membership scopes govern visibility; a specialist is additionally
+/// restricted to its existing grants. No credential material is loaded.
+pub async fn existing_connections(
+    db: &Database,
+    actor: &str,
+    catalog: &DownstreamService,
+    selected: Option<&[String]>,
+) -> AppResult<ExistingConnections> {
+    use futures::TryStreamExt;
+    use std::collections::HashMap;
+    const LIMIT: i64 = 10;
+    let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
+    let mut owners = vec![doc! {"user_id": actor}];
+    for membership in memberships {
+        let scope =
+            super::org_role_scope_service::effective_scope_for_membership(db, &membership).await?;
+        let mut filter = doc! {"user_id": &membership.org_user_id};
+        if let Some(ids) = scope {
+            filter.insert("_id", doc! {"$in": ids});
+        }
+        owners.push(filter);
+    }
+    let mut filter = doc! {"catalog_service_id": &catalog.id, "deleted_at": null, "$or": owners};
+    if let Some(ids) = selected {
+        filter.insert("_id", doc! {"$in": ids});
+    }
+    let mut rows: Vec<UserService> = db
+        .collection::<UserService>("user_services")
+        .find(filter)
+        .projection(doc! {"default_request_headers": 0, "ws_frame_injections": 0})
+        .sort(doc! {"created_at": -1, "_id": 1})
+        .limit(LIMIT + 1)
+        .await?
+        .try_collect()
+        .await?;
+    let truncated = rows.len() > LIMIT as usize;
+    rows.truncate(LIMIT as usize);
+    let facts = facts_for(db, actor, &rows).await?;
+    let mut labels = HashMap::new();
+    for (collection, ids) in [
+        (
+            "user_endpoints",
+            rows.iter()
+                .map(|r| r.endpoint_id.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "user_api_keys",
+            rows.iter()
+                .filter_map(|r| r.api_key_id.as_deref())
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        if ids.is_empty() {
+            continue;
+        }
+        let entries: Vec<bson::Document> = db
+            .collection::<bson::Document>(collection)
+            .find(doc! {"_id": {"$in": ids}})
+            .projection(doc! {"_id": 1, "user_id": 1, "label": 1})
+            .await?
+            .try_collect()
+            .await?;
+        for entry in entries {
+            if let (Ok(id), Ok(owner), Ok(label)) = (
+                entry.get_str("_id"),
+                entry.get_str("user_id"),
+                entry.get_str("label"),
+            ) {
+                labels.insert(
+                    (id.to_owned(), owner.to_owned()),
+                    label.chars().take(120).collect::<String>(),
+                );
+            }
+        }
+    }
+    let connections = rows
+        .iter()
+        .filter_map(|row| {
+            let mut fact = facts.get(&row.id)?.clone();
+            fact["connection_id"] = json!(row.id);
+            fact["connection_slug"] = json!(row.slug);
+            let label = row
+                .api_key_id
+                .as_ref()
+                .and_then(|id| labels.get(&(id.clone(), row.user_id.clone())))
+                .or_else(|| labels.get(&(row.endpoint_id.clone(), row.user_id.clone())));
+            fact["label"] = json!(label);
+            fact["is_active"] = json!(row.is_active);
+            if let Some(name) = fact["organization_name"].as_str() {
+                fact["organization_name"] = json!(name.chars().take(120).collect::<String>());
+            }
+            Some(fact)
+        })
+        .collect();
+    Ok(ExistingConnections {
+        connections,
+        truncated,
+    })
 }
 
 pub async fn org_refusal(
@@ -183,8 +340,50 @@ pub async fn hosted(
     Ok(
         json!({"status":"pending_connection","connect_url":super::connect_link_service::build_connect_url(frontend,&created.raw_token)?,
         "connect_link_id":created.link.id,"expires_at":created.link.expires_at.to_rfc3339(),"service_id":catalog.id,"catalog_service_id":catalog.id,"service_slug":catalog.slug,"scopes":created.link.scopes,
-        "instructions":"Open the hosted link to connect your account, then call nyx__wait_for_connection. A pending link grants no access."}),
+        "instructions":CONNECT_PRESENTATION_INSTRUCTIONS}),
     )
+}
+
+/// Credential-free chat adds use unified storage, where each add has its own
+/// connection identity. The legacy connector permits only one row per catalog.
+pub async fn credential_free(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    actor: &str,
+    catalog: &DownstreamService,
+    label: Option<&str>,
+    scopes: &[String],
+) -> AppResult<Value> {
+    if !scopes.is_empty() {
+        return Err(AppError::ValidationError(
+            "This service does not use OAuth; remove the additional scopes".into(),
+        ));
+    }
+    let created = super::unified_key_service::create_key(
+        db,
+        keys,
+        actor,
+        actor,
+        Some(&catalog.slug),
+        None,
+        "",
+        label.unwrap_or(&catalog.name),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        super::unified_key_service::OpenApiSpecUrlInput::Inherit,
+        None,
+        false,
+        super::unified_key_service::OauthClientCredentialsInput::None,
+        false,
+    )
+    .await?;
+    Ok(json!({"status":"connected", "service_name":catalog.name,
+        "service_id":created.service.id, "service_slug":created.service.slug,
+        "connected_at":created.service.created_at.to_rfc3339()}))
 }
 
 /// Batched, fail-soft connection facts keyed by `UserService.id`. A connection

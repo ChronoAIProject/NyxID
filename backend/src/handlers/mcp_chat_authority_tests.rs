@@ -4520,7 +4520,7 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     .unwrap();
     assert!(routed_body.contains("access_request_denied"));
     assert!(routed_body.contains("connect-service"));
-    assert!(routed_body.contains("NyxBot or Plugins"));
+    assert!(routed_body.contains("NyxBot send one"));
     assert!(!routed_body.contains("/keys"));
     f.state
         .db
@@ -4546,7 +4546,7 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
         ssh["instructions"]
             .as_str()
             .unwrap()
-            .contains("Advanced setup")
+            .contains("advanced configuration")
     );
     assert_eq!(
         f.state
@@ -5134,7 +5134,7 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
         connect["instructions"]
             .as_str()
             .unwrap()
-            .contains("NyxBot or Plugins")
+            .contains("NyxBot send one")
     );
     assert!(!connect.to_string().contains("/keys"));
     f.state.db.drop().await.unwrap();
@@ -6259,6 +6259,515 @@ async fn seeded_github(f: &Fixture) -> crate::models::downstream_service::Downst
         .expect("seeded GitHub catalog")
 }
 
+async fn catalog_connection(
+    f: &Fixture,
+    owner: &str,
+    catalog: &str,
+    slug: &str,
+    active: bool,
+) -> String {
+    let id = connected(&f.state.db, owner, slug, "https://example.test").await;
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::user_service::UserService>("user_services")
+        .find_one(doc! {"_id": &id})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set":{"catalog_service_id":catalog,"is_active":active}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_endpoints")
+        .update_one(doc! {"_id": &row.endpoint_id}, doc! {"$set":{"label":slug}})
+        .await
+        .unwrap();
+    id
+}
+
+async fn connect_test_org(f: &Fixture, active: bool) -> String {
+    use crate::models::org_membership::{MemberScopeSource, OrgRole};
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut org = crate::test_utils::test_user(&id, crate::models::user::UserType::Org);
+    org.display_name = Some("Example Organization".into());
+    f.state
+        .db
+        .collection("users")
+        .insert_one(org)
+        .await
+        .unwrap();
+    crate::services::org_service::create_membership(
+        &f.state.db,
+        &id,
+        &f.owner,
+        OrgRole::Member,
+        MemberScopeSource::Inherit,
+        None,
+    )
+    .await
+    .unwrap();
+    if !active {
+        f.state
+            .db
+            .collection::<bson::Document>("users")
+            .update_one(doc! {"_id":&id}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+    }
+    id
+}
+
+#[tokio::test]
+async fn chat_hosted_connect_returns_both_personal_and_org_facts_and_skips_inactive_owners() {
+    let f = orchestrator_fixture("connect_existing_facts").await;
+    let catalog = seeded_github(&f).await;
+    let org = connect_test_org(&f, true).await;
+    let inactive = connect_test_org(&f, false).await;
+    let personal = catalog_connection(&f, &f.owner, &catalog.id, "personal-github", false).await;
+    let shared = catalog_connection(&f, &org, &catalog.id, "work-github", true).await;
+    catalog_connection(&f, &inactive, &catalog.id, "inactive-owner", true).await;
+    let other = public_connect_catalog(&f, "unrelated-service").await;
+    catalog_connection(&f, &f.owner, &other.id, "unrelated", true).await;
+    // User-owned label metadata takes precedence; secret fields never enter the response.
+    let key = crate::services::user_api_key_service::create_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        crate::services::user_api_key_service::CreateApiKeyParams {
+            label: "Personal PAT",
+            credential_type: "api_key",
+            credential: "must-never-appear",
+            access_token: None,
+            refresh_token: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "active",
+            source: None,
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_api_keys")
+        .update_one(
+            doc! {"_id":&key.id},
+            doc! {"$set":{"metadata":{"provider_account":"do-not-infer"}}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(doc! {"_id":&personal}, doc! {"$set":{"api_key_id":&key.id}})
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_slug":catalog.slug}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(
+        value["connect_url"]
+            .as_str()
+            .unwrap()
+            .contains("/connect/nyx_clk_")
+    );
+    let existing = value["existing_connections"].as_array().unwrap();
+    assert_eq!(existing.len(), 2, "{value}");
+    let own = existing
+        .iter()
+        .find(|v| v["connection_id"] == personal)
+        .unwrap();
+    assert_eq!(own["relation"], "self");
+    assert_eq!(own["label"], "Personal PAT");
+    assert_eq!(own["is_active"], false);
+    let org = existing
+        .iter()
+        .find(|v| v["connection_id"] == shared)
+        .unwrap();
+    assert_eq!(org["relation"], "organization");
+    assert_eq!(org["organization_name"], "Example Organization");
+    assert_eq!(org["label"], "work-github");
+    assert_eq!(org["is_active"], true);
+    for fact in existing {
+        assert_eq!(fact["account"]["status"], "unknown");
+    }
+    assert_eq!(value["existing_connections_truncated"], false);
+    assert!(!value.to_string().contains("must-never-appear"));
+    assert!(!value.to_string().contains("do-not-infer"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_connect_facts_are_bounded_and_respect_org_scopes_and_deleted_rows() {
+    use crate::models::org_membership::{MemberScopeSource, OrgMembership};
+    let f = orchestrator_fixture("connect_bounded_facts").await;
+    let catalog = public_connect_catalog(&f, "bounded-connect").await;
+    let org = connect_test_org(&f, true).await;
+    catalog_connection(&f, &org, &catalog.id, "hidden-by-scope", true).await;
+    f.state.db.collection::<OrgMembership>("org_memberships").update_many(doc! {"org_user_id":&org}, doc! {"$set":{"scope_source":bson::to_bson(&MemberScopeSource::Override).unwrap(),"allowed_service_ids":[]}}).await.unwrap();
+    let deleted = catalog_connection(&f, &f.owner, &catalog.id, "deleted", false).await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&deleted},
+            doc! {"$set":{"deleted_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let empty = crate::services::assistant_connection_service::existing_connections(
+        &f.state.db,
+        &f.owner,
+        &catalog,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(empty.connections.is_empty());
+    for n in 0..12 {
+        catalog_connection(
+            &f,
+            &f.owner,
+            &catalog.id,
+            &format!("account-{n}"),
+            n % 2 == 0,
+        )
+        .await;
+    }
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["existing_connections"].as_array().unwrap().len(), 10);
+    assert_eq!(value["existing_connections_truncated"], true);
+    assert!(!value.to_string().contains("hidden-by-scope"));
+    assert!(!value.to_string().contains("\"deleted\""));
+    assert!(serde_json::to_string_pretty(&value).unwrap().len() < 10_000);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn specialist_connect_refusal_reports_only_granted_connections_and_never_mints_a_link() {
+    let f = fixture("specialist_connect_inventory").await;
+    let catalog = public_connect_catalog(&f, "specialist-connect").await;
+    let granted = catalog_connection(&f, &f.owner, &catalog.id, "granted-account", true).await;
+    catalog_connection(&f, &f.owner, &catalog.id, "ungranted-account", true).await;
+    let mut auth = authenticate(&f).await;
+    auth.allow_all_services = false;
+    auth.allowed_service_ids = vec![granted.clone()];
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_slug":catalog.slug}),
+            None,
+            false,
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(value["existing_connections"].as_array().unwrap().len(), 1);
+    assert_eq!(value["existing_connections"][0]["connection_id"], granted);
+    assert!(!value.to_string().contains("ungranted-account"));
+    assert!(value.get("connect_url").is_none());
+    assert!(
+        value["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Specialists cannot mint connect links")
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn non_account_catalog_and_failed_platform_request_report_existing_facts_without_a_link() {
+    let f = orchestrator_fixture("chat_connect_unsupported").await;
+    let mut catalog = public_connect_catalog(&f, "no-personal-account").await;
+    catalog.requires_user_credential = false;
+    catalog.auth_method = "bearer".into();
+    catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        enabled: false,
+        ..Default::default()
+    });
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    catalog_connection(&f, &f.owner, &catalog.id, "existing-connection", true).await;
+    let auth = authenticate(&f).await;
+    for platform in [false, true] {
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_id":catalog.id,"use_platform_key":platform}),
+                None,
+                false,
+            )
+            .await,
+            true,
+        )
+        .await;
+        assert_eq!(
+            value["error"],
+            if platform {
+                "connect_failed"
+            } else {
+                "connect_unavailable"
+            }
+        );
+        if !platform {
+            assert_eq!(value["reason"], "personal_account_not_supported");
+        }
+        assert_eq!(value["existing_connections"].as_array().unwrap().len(), 1);
+        assert!(value.get("connect_url").is_none());
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn requirement_only_connect_reports_unsupported_with_facts_and_no_link_even_when_credentialed()
+ {
+    let f = orchestrator_fixture("requirement_only_connect").await;
+    let mut catalog = seeded_github(&f).await;
+    let provider = catalog.provider_config_id.take().unwrap();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    assert!(
+        f.state
+            .db
+            .collection::<bson::Document>("service_provider_requirements")
+            .find_one(doc! {"service_id":&catalog.id,"provider_config_id":&provider})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let id = catalog_connection(&f, &f.owner, &catalog.id, "existing", true).await;
+    let auth = authenticate(&f).await;
+    for required in [false, true] {
+        f.state
+            .db
+            .collection::<bson::Document>("downstream_services")
+            .update_one(
+                doc! {"_id":&catalog.id},
+                doc! {"$set":{"requires_user_credential":required}},
+            )
+            .await
+            .unwrap();
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_id":catalog.id}),
+                None,
+                false,
+            )
+            .await,
+            true,
+        )
+        .await;
+        assert_eq!(value["error"], "connect_unavailable");
+        assert_eq!(value["reason"], "provider_requirement_only");
+        assert_eq!(value["existing_connections"][0]["connection_id"], id);
+        assert!(value.get("connect_url").is_none());
+    }
+    let connection =
+        crate::services::user_service_service::find_user_service_by_id(&f.state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+    let offer = crate::services::assistant_connection_service::connect_own(
+        &f.state.db,
+        &f.owner,
+        &connection,
+    )
+    .await
+    .unwrap();
+    assert_eq!(offer["reason"], "provider_requirement_only");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn external_connect_retains_legacy_duplicate_refusal_and_pending_contract() {
+    let f = orchestrator_fixture("external_connect_unchanged").await;
+    let catalog = seeded_github(&f).await;
+    let mut auth = authenticate(&f).await;
+    auth.chat = None;
+    auth.api_key_id = Some(ordinary_key(&f).await);
+    auth.allow_all_services = true;
+    // External callers still use the legacy one-step path for this shape.
+    f.state
+        .db
+        .collection::<bson::Document>("downstream_services")
+        .update_one(
+            doc! {"_id":&catalog.id},
+            doc! {"$set":{"service_category":"internal"}},
+        )
+        .await
+        .unwrap();
+    let args = json!({"service_id":catalog.id});
+    let first = result(
+        handle_meta_connect(&f.state, &auth, None, &args, None, false).await,
+        false,
+    )
+    .await;
+    assert_eq!(first.as_object().unwrap().len(), 4, "{first}");
+    assert!(first.get("existing_connections").is_none());
+    let response = handle_meta_connect(&f.state, &auth, None, &args, None, false).await;
+    let bytes = axum::body::to_bytes(response.into_body(), 10000)
+        .await
+        .unwrap();
+    let duplicate: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(duplicate["result"]["isError"], true);
+    assert_eq!(
+        duplicate["result"]["content"][0]["text"],
+        "Conflict: Already connected to this service"
+    );
+    let mut credentialed = public_connect_catalog(&f, "external-pending").await;
+    credentialed.auth_method = "bearer".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&credentialed.id}, &credentialed)
+        .await
+        .unwrap();
+    let pending = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":credentialed.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(pending["status"], "pending_connection");
+    assert_eq!(pending.as_object().unwrap().len(), 8, "{pending}");
+    assert!(pending.get("existing_connections").is_none());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_free_chat_connect_can_add_another_connection() {
+    let f = orchestrator_fixture("chat_no_auth_multi").await;
+    let mut catalog = public_connect_catalog(&f, "credential-free").await;
+    catalog.requires_user_credential = false;
+    catalog.auth_method = "none".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let mut previous = None;
+    for n in 0..2 {
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_id":catalog.id}),
+                None,
+                false,
+            )
+            .await,
+            false,
+        )
+        .await;
+        assert_eq!(value["status"], "connected");
+        assert_eq!(value["existing_connections"].as_array().unwrap().len(), n);
+        assert_ne!(previous, value["service_id"].as_str().map(str::to_owned));
+        previous = value["service_id"].as_str().map(str::to_owned);
+        assert!(value.get("connect_url").is_none());
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .count_documents(doc! {"user_id":&f.owner,"catalog_service_id":&catalog.id})
+            .await
+            .unwrap(),
+        2
+    );
+    f.state.db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already_connected() {
     // Production case: the seeded GitHub catalog gets its credential from an
@@ -6312,6 +6821,8 @@ async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already
             .as_str()
             .is_some_and(|url| url.contains("/connect/"))
     );
+    assert_eq!(value["existing_connections"], json!([]));
+    assert_eq!(value["existing_connections_truncated"], false);
     let stored = f
         .state
         .db
@@ -6325,34 +6836,44 @@ async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already
 }
 
 #[tokio::test]
-async fn assistant_connect_reports_an_inactive_provider_instead_of_a_dead_link() {
+async fn assistant_connect_reports_unavailable_providers_and_accepts_configured_device_clients() {
     let f = orchestrator_fixture("assistant_provider_inactive").await;
     let catalog = seeded_github(&f).await;
-    f.state
-        .db
-        .collection::<bson::Document>("provider_configs")
-        .update_one(
-            doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
-            doc! {"$set":{"is_active":false}},
-        )
-        .await
-        .unwrap();
+    catalog_connection(&f, &f.owner, &catalog.id, "existing-offline", true).await;
     let auth = authenticate(&f).await;
-    let value = result(
-        handle_meta_connect(
-            &f.state,
-            &auth,
-            None,
-            &json!({"service_slug":"api-github"}),
-            None,
-            false,
+    for (active, kind, reason) in [
+        (false, "oauth2", "provider_unavailable"),
+        (true, "oauth2", "provider_not_configured"),
+        (true, "device_code", "provider_not_configured"),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>("provider_configs")
+            .update_one(
+                doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
+                doc! {"$set":{"is_active":active,"provider_type":kind,"credential_mode":"admin",
+                "client_id_encrypted":bson::Bson::Null,"client_secret_encrypted":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_slug":"api-github"}),
+                None,
+                false,
+            )
+            .await,
+            true,
         )
-        .await,
-        true,
-    )
-    .await;
-    assert_eq!(value["error"], "connect_unavailable", "{value}");
-    assert_eq!(value["reason"], "provider_unavailable");
+        .await;
+        assert_eq!(value["error"], "connect_unavailable", "{value}");
+        assert_eq!(value["reason"], reason, "{kind}: {value}");
+        assert_eq!(value["existing_connections"].as_array().unwrap().len(), 1);
+        assert!(value.get("connect_url").is_none());
+    }
     assert_eq!(
         f.state
             .db
@@ -6362,6 +6883,39 @@ async fn assistant_connect_reports_an_inactive_provider_instead_of_a_dead_link()
             .unwrap(),
         0
     );
+    // Public device-code clients need an ID, but no client secret.
+    let client_id = f
+        .state
+        .encryption_keys
+        .encrypt(b"public-device-client")
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("provider_configs")
+        .update_one(
+            doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
+            doc! {"$set":{"client_id_encrypted":bson::Binary {
+            subtype:bson::spec::BinarySubtype::Generic, bytes:client_id}}},
+        )
+        .await
+        .unwrap();
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(value["connect_url"].as_str().is_some());
+    assert_eq!(value["existing_connections"].as_array().unwrap().len(), 1);
     f.state.db.drop().await.unwrap();
 }
 
@@ -6480,6 +7034,22 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
             .unwrap(),
         1
     );
+    let second = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id,"use_platform_key":true}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(second["status"], "connected");
+    assert_ne!(second["service_id"], platform["service_id"]);
+    assert_eq!(second["existing_connections"].as_array().unwrap().len(), 1);
     let response = handle_meta_connect(
         &f.state,
         &auth,

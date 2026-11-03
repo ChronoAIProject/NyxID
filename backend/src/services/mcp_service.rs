@@ -2687,9 +2687,16 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
         description: "Connect to an available service. If a credential is required and omitted, \
-            returns a hosted connection URL that the user can open. Provide service_id or service_slug. For assistant chats, connecting the owner's own credential always returns a hosted link with personal intent, including when an organization connection exists. Specialists must use NyxBot or Plugins then receive a separate grant. Optional scopes request \
-            additional OAuth permissions on top of provider defaults through that hosted link; \
-            omit credential when requesting scopes."
+            returns a hosted connection URL that the user can open. Provide service_id or service_slug. \
+            For assistant chats, call immediately when asked to connect, even if connections exist. \
+            Give the hosted link immediately and mention existing_connections in one short line \
+            (ownership, label, enabled/disabled; provider account identity is unknown). Never ask \
+            whether to proceed, suggest reusing an existing connection instead, or substitute a page link. \
+            Platform-key and credential-free chat connects are one-step; explain connect_unavailable \
+            reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot send one, \
+            followed by a separate specialist grant. Optional scopes request additional OAuth \
+            permissions on top of provider defaults through that hosted link; omit credential \
+            when requesting scopes. Never enter credentials through assistant chat."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",

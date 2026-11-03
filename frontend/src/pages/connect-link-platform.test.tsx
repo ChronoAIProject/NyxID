@@ -24,9 +24,8 @@ const mocks = vi.hoisted(() => ({
   requiresGatewayUrl: false,
   authKeyName: "Authorization",
   connectMethod: "api_key",
-  fields: null as
-    | { name: string; label: string; secret: boolean }[]
-    | null,
+  catalogUnavailable: false,
+  fields: null as { name: string; label: string; secret: boolean }[] | null,
 }));
 vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ token: "hosted-token" }),
@@ -41,11 +40,13 @@ vi.mock("@/stores/auth-store", () => ({
 }));
 vi.mock("@/hooks/use-keys", () => ({
   useCatalogEntry: () => ({
-    data: {
-      platform_key: { available: mocks.available, pricing: null },
-      byok_pricing: null,
-      token_exchange_credential_fields: mocks.fields,
-    },
+    data: mocks.catalogUnavailable
+      ? undefined
+      : {
+          platform_key: { available: mocks.available, pricing: null },
+          byok_pricing: null,
+          token_exchange_credential_fields: mocks.fields,
+        },
   }),
 }));
 vi.mock("@/hooks/use-connect-links", () => ({
@@ -61,6 +62,9 @@ vi.mock("@/hooks/use-connect-links", () => ({
       expires_at: "2099-01-01T00:00:00Z",
       connect_method: mocks.connectMethod,
       auth_key_name: mocks.authKeyName,
+      token_exchange_credential_fields: mocks.catalogUnavailable
+        ? mocks.fields
+        : undefined,
       endpoint_url: mocks.endpointUrl,
       requires_gateway_url: mocks.requiresGatewayUrl,
       use_platform_key: mocks.choice,
@@ -93,6 +97,7 @@ beforeEach(() => {
   mocks.authKeyName = "Authorization";
   mocks.connectMethod = "api_key";
   mocks.fields = null;
+  mocks.catalogUnavailable = false;
   sessionStorage.clear();
   mocks.preview.mockResolvedValue({});
   mocks.complete.mockResolvedValue({ status: "completed" });
@@ -300,6 +305,7 @@ it("prefills an editable gateway URL and submits it with the credential", async 
 
 it("collects declared token-exchange fields and submits them as one JSON credential", async () => {
   mocks.available = false;
+  mocks.catalogUnavailable = true;
   mocks.fields = [
     { name: "app_id", label: "App ID", secret: false },
     { name: "app_secret", label: "App Secret", secret: true },
@@ -308,13 +314,22 @@ it("collects declared token-exchange fields and submits them as one JSON credent
   const approve = screen.getByRole("button", { name: "Approve & connect" });
   await userEvent.type(screen.getByLabelText("App ID"), "cli_app");
   expect(approve).toBeDisabled();
-  expect(screen.getByLabelText("App Secret")).toHaveAttribute("type", "password");
+  fireEvent.submit(approve.closest("form")!);
+  await screen.findByText("Enter App Secret.");
+  expect(mocks.complete).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("App Secret")).toHaveAttribute(
+    "type",
+    "password",
+  );
   await userEvent.type(screen.getByLabelText("App Secret"), "app-secret");
   await userEvent.click(approve);
   expect(mocks.complete).toHaveBeenCalledWith({
     token: "hosted-token",
     values: expect.objectContaining({
-      credential: JSON.stringify({ app_id: "cli_app", app_secret: "app-secret" }),
+      credential: JSON.stringify({
+        app_id: "cli_app",
+        app_secret: "app-secret",
+      }),
     }),
   });
 });
@@ -403,7 +418,11 @@ it("keeps retrying after a transient device poll failure without offering a new 
 it("hides credential switching and completes the stored assistant personal intent", async () => {
   mocks.intentLocked = true;
   mocks.choice = false;
-  mocks.complete.mockResolvedValue({ id: "id", status: "completed", service_slug: "llm-xai" });
+  mocks.complete.mockResolvedValue({
+    id: "id",
+    status: "completed",
+    service_slug: "llm-xai",
+  });
   render(<ConnectLinkPage />);
   expect(screen.queryByText("Use platform key")).not.toBeInTheDocument();
   expect(screen.getByText(/fixed/i)).toBeVisible();

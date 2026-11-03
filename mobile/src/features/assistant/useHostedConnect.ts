@@ -114,6 +114,7 @@ export function useHostedConnect(
         previous && previous.status !== "pending" ? previous : value,
       );
       setError(undefined);
+      setCredentialFields(value.token_exchange_credential_fields ?? []);
       if (value.status !== "pending") {
         terminal(value.status);
         return;
@@ -124,7 +125,11 @@ export function useHostedConnect(
         );
         if (current()) {
           setIconUrl(entry.icon_url);
-          setCredentialFields(entry.token_exchange_credential_fields ?? []);
+          setCredentialFields(
+            value.token_exchange_credential_fields ??
+              entry.token_exchange_credential_fields ??
+              [],
+          );
           setPlatformAvailable(
             !!entry.platform_key?.available && value.scopes.length === 0,
           );

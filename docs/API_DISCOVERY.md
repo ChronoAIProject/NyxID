@@ -791,3 +791,28 @@ excludes encrypted results. CMA watch metadata has a 30-day TTL; result encrypti
 and the four-hour payload deadline remain the same as other watches. The
 [frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
 placement and refresh behavior.
+
+
+## Assistant connection setup
+
+For NyxBot, `nyx__connect_service` returns a hosted personal-credential link
+immediately, even when personal or organization connections already exist.
+The chat result also includes bounded `existing_connections` metadata and
+`existing_connections_truncated`; each fact names ownership, connection label,
+and enabled state while leaving the provider account identity unknown. The
+assistant gives the link immediately and mentions those facts in one short
+line, without asking whether to proceed, offering reuse instead, or replacing
+the link with a settings page.
+
+Platform-key and credential-free chat requests create independent connections
+in one step. A catalog whose sign-in provider exists only in
+`service_provider_requirements` is unavailable for hosted setup until an admin
+links `provider_config_id`; it returns `connect_unavailable` and existing facts,
+with no link. Admin-only OAuth and device-code providers must have their
+platform client credentials configured before a chat can mint a link; a
+device-code public client requires only a client ID. Specialists cannot create
+links and see only facts within their existing grants; completing setup never
+grants them access automatically.
+External MCP clients keep the legacy connection response contract. See
+[the engine contract](chat/08-nyxagent-engine.md#protected-org-connections-and-hosted-personal-setup)
+for bounds, owner checks, failures, and readiness-gated personal intent locks.
