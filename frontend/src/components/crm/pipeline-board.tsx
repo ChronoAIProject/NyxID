@@ -1,9 +1,36 @@
+import { useState } from "react";
+import {
+  DndContext,
+  PointerSensor,
+  KeyboardSensor,
+  closestCorners,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { CSS } from "@dnd-kit/utilities";
+import { GripVertical, MoreHorizontal } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   useCrmAggregate,
   useCrmObject,
   useCrmTableQuery,
+  useMoveCrmRecord,
 } from "@/hooks/use-crm";
-import type { CrmField, CrmTableQuery } from "@/schemas/crm";
+import {
+  applyOptimisticPipelineRows,
+  type CrmOptimisticPipelineMove,
+} from "@/lib/crm/pipeline-optimistic";
+import type { CrmField, CrmRecordRow, CrmTableQuery } from "@/schemas/crm";
 
 export interface CrmPipelineBoardProps {
   readonly query: CrmTableQuery;
@@ -11,21 +38,117 @@ export interface CrmPipelineBoardProps {
   readonly onSelectRecord?: (recordId: string) => void;
 }
 
+function PipelineCard({
+  record,
+  stage,
+  title,
+  stages,
+  pending,
+  readOnly,
+  onMove,
+  onSelect,
+}: {
+  readonly record: CrmRecordRow;
+  readonly stage: string;
+  readonly title: string;
+  readonly stages: readonly {
+    readonly value: string;
+    readonly label: string;
+  }[];
+  readonly pending: boolean;
+  readonly readOnly: boolean;
+  readonly onMove: (to: string) => void;
+  readonly onSelect?: () => void;
+}) {
+  const { setNodeRef, transform, attributes, listeners } = useDraggable({
+    id: record.id,
+    disabled: pending || readOnly,
+    data: { record, from: stage },
+  });
+  return (
+    <article
+      ref={setNodeRef}
+      style={{ transform: CSS.Translate.toString(transform) }}
+      className="flex items-start gap-1 rounded-lg border border-hairline bg-overlay p-2 text-12 shadow-sm transition-colors hover:border-hairline-strong hover:bg-overlay-strong"
+      data-pending={pending || undefined}
+    >
+      <button
+        type="button"
+        aria-label={`Move ${title}`}
+        className="mt-0.5 flex min-h-control cursor-grab items-center rounded-md px-1 text-text-tertiary outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed"
+        disabled={pending || readOnly}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical />
+      </button>
+      <button
+        type="button"
+        className="min-h-control min-w-0 flex-1 px-1 text-left font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={onSelect}
+      >
+        <span className="block break-words">{title}</span>
+        {pending ? (
+          <span className="mt-1 block text-10 font-normal text-text-tertiary">
+            Moving...
+          </span>
+        ) : null}
+      </button>
+      {!readOnly ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label={`Move ${title} to another stage`}
+              disabled={pending}
+            >
+              <MoreHorizontal />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {stages
+              .filter((candidate) => candidate.value !== stage)
+              .map((candidate) => (
+                <DropdownMenuItem
+                  key={candidate.value}
+                  onSelect={() => onMove(candidate.value)}
+                >
+                  Move to {candidate.label}
+                </DropdownMenuItem>
+              ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
+    </article>
+  );
+}
+
 function PipelineLane({
   query,
   stageField,
   stage,
+  stageValues,
   count,
   ownerId,
+  moves,
+  onMove,
   onSelectRecord,
+  readOnly,
 }: {
   readonly query: CrmTableQuery;
   readonly stageField: CrmField & { type: "select" };
   readonly stage: { readonly value: string; readonly label: string };
+  readonly stageValues?: readonly string[];
   readonly count: number;
   readonly ownerId?: string;
+  readonly moves: Readonly<Record<string, CrmOptimisticPipelineMove>>;
+  readonly onMove: (record: CrmRecordRow, from: string, to: string) => void;
   readonly onSelectRecord?: (recordId: string) => void;
+  readonly readOnly: boolean;
 }) {
+  const { setNodeRef, isOver } = useDroppable({ id: stage.value });
   const lane = useCrmTableQuery(
     {
       ...query,
@@ -33,7 +156,13 @@ function PipelineLane({
       page_size: Math.min(query.page_size ?? 50, 50),
       filters: [
         ...query.filters.filter((filter) => filter.field !== stageField.key),
-        { field: stageField.key, op: "eq", value: stage.value },
+        stageValues && stageValues.length > 1
+          ? { field: stageField.key, op: "in", value: stageValues }
+          : {
+              field: stageField.key,
+              op: "eq",
+              value: stageValues?.[0] ?? stage.value,
+            },
       ],
     },
     ownerId,
@@ -41,10 +170,16 @@ function PipelineLane({
   const titleField = lane.data?.object.fields.find(
     (field) => field.type === "text" && field.required,
   );
-
+  const rows = applyOptimisticPipelineRows(
+    lane.data?.rows ?? [],
+    stage.value,
+    moves,
+  );
   return (
     <section
-      className="min-w-64 flex-1 rounded-lg border border-border/50 bg-card"
+      ref={setNodeRef}
+      className="min-w-64 flex-1 rounded-lg border border-border/50 bg-card data-[over=true]:border-input-focus"
+      data-over={isOver || undefined}
       aria-label={stage.label}
     >
       <header className="flex items-center justify-between border-b border-border/50 px-3 py-2.5">
@@ -64,21 +199,31 @@ function PipelineLane({
             Could not load this lane.
           </p>
         ) : null}
-        {lane.data?.rows.map((record) => (
-          <button
-            key={record.id}
-            type="button"
-            onClick={
-              onSelectRecord ? () => onSelectRecord(record.id) : undefined
-            }
-            className="block w-full rounded-lg border border-hairline bg-overlay p-3 text-left text-12 transition-colors hover:border-hairline-strong hover:bg-overlay-strong"
-          >
-            {titleField
-              ? String(record.values[titleField.key] ?? "Untitled")
-              : "Untitled"}
-          </button>
-        ))}
-        {lane.data?.rows.length === 0 ? (
+        {rows.map((record) => {
+          const title = titleField
+            ? String(record.values[titleField.key] ?? "Untitled")
+            : "Untitled";
+          const storedStage = record.values[stageField.key];
+          const currentStage =
+            moves[record.id]?.to ??
+            (typeof storedStage === "string" ? storedStage : stage.value);
+          return (
+            <PipelineCard
+              key={record.id}
+              record={record}
+              stage={currentStage}
+              title={title}
+              stages={stageField.options.filter((option) => !option.archived)}
+              pending={Boolean(moves[record.id])}
+              readOnly={readOnly}
+              onMove={(to) => onMove(record, currentStage, to)}
+              onSelect={
+                onSelectRecord ? () => onSelectRecord(record.id) : undefined
+              }
+            />
+          );
+        })}
+        {!lane.isPending && rows.length === 0 ? (
           <p className="p-2 text-center text-11 text-text-tertiary">
             No records
           </p>
@@ -116,6 +261,49 @@ export function CrmPipelineBoard({
     ownerId,
     Boolean(stageField),
   );
+  const move = useMoveCrmRecord(ownerId);
+  const [moves, setMoves] = useState<Record<string, CrmOptimisticPipelineMove>>(
+    {},
+  );
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor),
+  );
+
+  async function moveRecord(record: CrmRecordRow, from: string, to: string) {
+    if (from === to || moves[record.id]) return;
+    setMoves((current) => ({ ...current, [record.id]: { record, from, to } }));
+    try {
+      await move.mutateAsync({
+        id: record.id,
+        expectedRevision: record.revision,
+        to,
+        idempotencyKey: crypto.randomUUID(),
+      });
+    } catch (error) {
+      toast.error("Could not move the record", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "The pipeline was restored. Try again.",
+      });
+    } finally {
+      setMoves((current) => {
+        const next = { ...current };
+        delete next[record.id];
+        return next;
+      });
+    }
+  }
+
+  function dragEnd(event: DragEndEvent) {
+    const to = typeof event.over?.id === "string" ? event.over.id : null;
+    const data = event.active.data.current as
+      | { record?: CrmRecordRow; from?: string }
+      | undefined;
+    if (to && data?.record && data.from)
+      void moveRecord(data.record, data.from, to);
+  }
 
   if (object.isPending) {
     return (
@@ -138,15 +326,35 @@ export function CrmPipelineBoard({
       </p>
     );
   }
-
   const countByStage = new Map(
     counts.data?.points.map((point) => [point.key, point.value]) ?? [],
   );
+  for (const pending of Object.values(moves)) {
+    countByStage.set(
+      pending.from,
+      Math.max(0, (countByStage.get(pending.from) ?? 0) - 1),
+    );
+    countByStage.set(pending.to, (countByStage.get(pending.to) ?? 0) + 1);
+  }
+  const liveStages = stageField.options.filter((option) => !option.archived);
+  const archivedStages = stageField.options.filter((option) => option.archived);
+  const liveCount = liveStages.reduce(
+    (total, stage) => total + (countByStage.get(stage.value) ?? 0),
+    0,
+  );
+  const archivedCount = Math.max(
+    0,
+    (counts.data?.total ?? liveCount) - liveCount,
+  );
+  const readOnly = object.data?.access === "read";
   return (
-    <div className="flex gap-3 overflow-x-auto pb-2">
-      {stageField.options
-        .filter((option) => !option.archived)
-        .map((stage) => (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCorners}
+      onDragEnd={dragEnd}
+    >
+      <div className="flex gap-3 overflow-x-auto pb-2">
+        {liveStages.map((stage) => (
           <PipelineLane
             key={stage.value}
             query={query}
@@ -154,9 +362,27 @@ export function CrmPipelineBoard({
             stage={stage}
             count={countByStage.get(stage.value) ?? 0}
             ownerId={ownerId}
+            moves={moves}
+            onMove={(record, from, to) => void moveRecord(record, from, to)}
             onSelectRecord={onSelectRecord}
+            readOnly={readOnly}
           />
         ))}
-    </div>
+        {archivedStages.length > 0 || archivedCount > 0 ? (
+          <PipelineLane
+            query={query}
+            stageField={stageField}
+            stage={{ value: "__archived_stages__", label: "Archived stages" }}
+            stageValues={archivedStages.map((stage) => stage.value)}
+            count={archivedCount}
+            ownerId={ownerId}
+            moves={moves}
+            onMove={(record, from, to) => void moveRecord(record, from, to)}
+            onSelectRecord={onSelectRecord}
+            readOnly
+          />
+        ) : null}
+      </div>
+    </DndContext>
   );
 }
