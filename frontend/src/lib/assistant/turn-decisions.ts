@@ -87,6 +87,8 @@ export function decisionTitle(row: Decision): string {
         {
           webhook: "automation confirmation",
           policy: "policy confirmation",
+          org_connection: "organization instruction",
+          delegation: "delegation confirmation",
           approval: "service approval",
           access_mode: "",
         } as const

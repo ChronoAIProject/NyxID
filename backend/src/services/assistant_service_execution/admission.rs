@@ -8,6 +8,7 @@ pub struct Admission {
     /// bypasses the specialist's ordinary Ornn grant while retaining the
     /// owner's exact-connection authority fence.
     pub(super) bound_skill_read: bool,
+    pub(super) owner_instruction_receipt: bool,
     pub(super) shared_detached: Option<crate::models::assistant_sharing::SharedExecution>,
     pub(super) shared_permit: Option<crate::services::shared_agent_consent::Permit>,
     pub(super) connection: String,

@@ -5,6 +5,10 @@ import {
   conversationIdSchema,
 } from "../assistant/assistantTypes";
 import { MAX_ASSISTANT_ATTACHMENTS } from "../assistant/assistantUploads";
+import {
+  collaborationGroupSchema,
+  collaborationDecisionSchema,
+} from "./collaborationContracts";
 
 export const MAX_GROUP_MEMBERS = 8;
 export const MAX_GROUP_PARTICIPANTS = 16;
@@ -32,10 +36,15 @@ const agent = z.object({
   kind: z.enum(["nyxbot", "specialist"]),
 });
 export const groupMemberSchema = agent.extend({
+  shared: z.boolean().optional(),
+  unavailable: z.boolean().optional(),
+  unavailable_reason: z.string().nullish(),
+  owner_name: z.string().nullish(),
   destroyed: z.boolean().default(false),
   working: z.boolean().default(false),
 });
 export const groupSchema = z.object({
+  collaboration: collaborationGroupSchema.nullish(),
   owner: z
     .object({
       type: z.enum(["personal", "org"]),
@@ -62,6 +71,8 @@ export const groupFeedbackSchema = z.object({
   updated_at: instant,
 });
 export const groupMessageSchema = z.object({
+  requester_user_id: z.string().nullish(),
+  execution_mode: z.enum(["owner", "org_member", "shared", "guest"]).nullish(),
   feedback: groupFeedbackSchema
     .partial({ comment: true, updated_at: true })
     .nullish(),
@@ -93,6 +104,7 @@ export const groupPendingActionSchema = z.object({
   expires_at: instant,
 });
 export const groupMessagesPageSchema = z.object({
+  collaboration_decisions: z.array(collaborationDecisionSchema).optional(),
   group: groupSchema,
   pending_actions: z.array(groupPendingActionSchema).default([]),
   messages: z.array(groupMessageSchema),
@@ -126,12 +138,21 @@ const participants = z
 export const groupCreateSchema = z
   .object({
     org: groupReferenceSchema.optional(),
+    collaboration: z.boolean().optional(),
     participant_user_ids: participants.optional(),
     name: groupName,
     member_agent_ids: members,
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      value.collaboration &&
+      (value.org || value.participant_user_ids?.length)
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Invite people after creating a personal collaboration group.",
+      });
     if (!value.org && value.participant_user_ids?.length)
       context.addIssue({
         code: "custom",
@@ -188,9 +209,9 @@ export const groupPostRequestSchema = z
       .max(MAX_ASSISTANT_ATTACHMENTS)
       .refine(distinct)
       .optional(),
+    // [] is an explicit people-only message (collaboration groups only).
     recipient_agent_ids: z
       .array(groupReferenceSchema)
-      .min(1)
       .max(MAX_GROUP_MEMBERS)
       .refine(distinct)
       .optional(),
@@ -202,6 +223,13 @@ export const groupPostRequestSchema = z
         code: "custom",
         path: ["text"],
         message: "Enter a message or attach a file.",
+      });
+    if (value.recipient_agent_ids?.length === 0 && value.attachment_ids?.length)
+      context.addIssue({
+        code: "custom",
+        path: ["attachment_ids"],
+        message:
+          "Attachments need an agent recipient. Choose an agent or remove the attachments.",
       });
   });
 

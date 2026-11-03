@@ -29,6 +29,7 @@ import {
   groupCanLeave,
 } from "./groupState";
 import { groupError, groupKeys, useGroupAvailability } from "./useGroupRuntime";
+import { CollaborationGroupControls } from "./CollaborationGroupControls";
 
 export type GroupEditorScreenProps = {
   groupId?: string;
@@ -332,6 +333,14 @@ function GroupEditor({
       ],
     );
   }
+  if (detail.data?.collaboration)
+    return (
+      <CollaborationGroupControls
+        group={detail.data}
+        onSaved={onSaved}
+        onRemoved={onRemoved ?? onBack}
+      />
+    );
   return (
     <WorkspacePage
       showHeading={false}

@@ -70,7 +70,10 @@ export function useHostedConnect(
     latest.current.enabled &&
     latest.current.availability.available();
   const usePlatformKey =
-    platformAvailable && (platformChoice ?? preview?.use_platform_key ?? true);
+    platformAvailable &&
+    (preview?.assistant_intent_locked
+      ? preview.use_platform_key === true
+      : (platformChoice ?? preview?.use_platform_key ?? true));
   const canAct = () =>
     current() &&
     latest.current.preview?.status === "pending" &&

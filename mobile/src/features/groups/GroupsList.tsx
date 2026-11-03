@@ -14,6 +14,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import { groupError, groupKeys, useGroupAvailability } from "./useGroupRuntime";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
 import { useGroupsLive } from "./useGroupsLive";
+import { CollaborationEntry } from "./CollaborationGroupControls";
 
 /** Content only: the Agents & Crews hub owns its heading and tabs. */
 export function GroupsList({
@@ -48,6 +49,7 @@ export function GroupsList({
   }, [active, epoch, client]);
   return (
     <>
+      <CollaborationEntry key={epoch} onOpenGroup={onOpenGroup} />
       {!online && (
         <Notice message="You're offline. Reconnect to refresh your crews." />
       )}

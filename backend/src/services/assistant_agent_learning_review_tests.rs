@@ -1837,6 +1837,7 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            connect_own: None,
             activity_id: None,
             invocation_id: None,
             link: None,
@@ -2219,6 +2220,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            connect_own: None,
             activity_id: None,
             invocation_id: None,
             link: None,

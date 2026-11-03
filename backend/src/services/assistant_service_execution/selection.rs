@@ -229,12 +229,21 @@ pub async fn bind_owner_selection(
             let connection_id = binding
                 .get_str("connection_id")
                 .map_err(|_| AppError::Conflict("Invalid service confirmation".into()))?;
-            if binding.get_str("binding")
-                != Ok(
-                    connection_binding(db, connection_id, &row.credential_api_key_id)
-                        .await?
-                        .as_str(),
-                )
+            // Organization cards store the mode-free card identity; every
+            // other card stores the mode-sensitive connection binding.
+            let stored = binding.get_str("binding").unwrap_or_default();
+            if stored
+                != connection_binding(db, connection_id, &row.credential_api_key_id)
+                    .await?
+                    .as_str()
+                && stored
+                    != super::authority::org_card_binding(
+                        db,
+                        connection_id,
+                        &row.credential_api_key_id,
+                    )
+                    .await?
+                    .as_str()
             {
                 return Err(AppError::Conflict(
                     "Confirmed service changed; request a new confirmation".into(),
@@ -385,6 +394,14 @@ pub async fn bind_owner_selection(
         "_id": uuid::Uuid::new_v4().to_string(), "kind": "selection", "user_id": &row.user_id,
         "conversation_id": &row.id, "api_key_id": &row.credential_api_key_id, "turn_id": &turn.turn_id,
         "connection_id": &connection.id, "selection_source": "owner",
+        "owner_instruction_version": if start.owner_instruction_source.is_some()
+            && !start.guest && start.trigger.is_none() && start.group_request_id.is_none()
+            && start.group_id.is_none() && row.group_request_id.is_none() && row.group_id.is_none()
+            && match start.owner_instruction_source {
+                Some(crate::services::assistant_nyxagent::OwnerInstructionSource::FirstPartyOwner) => start.origin == TurnOrigin::User,
+                Some(crate::services::assistant_nyxagent::OwnerInstructionSource::VerifiedPrivateChannel) => start.origin == TurnOrigin::Channel,
+                None => false,
+            } { 1 } else { 0 },
         "owner_id": &connection.user_id, "catalog_service_id": &connection.catalog_service_id,
         "expires_at": bson::DateTime::from_chrono(Utc::now() + selection_lifetime),
     }).session(session).await?;
