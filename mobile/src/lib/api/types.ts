@@ -127,6 +127,8 @@ export type AccountProfile = {
   is_admin: boolean;
   is_active: boolean;
   social_provider?: string | null;
+  has_password?: boolean;
+  profile_config?: { security?: { skip_mfa_for_approved_sign_ins: boolean } };
   created_at: string;
   last_login_at?: string | null;
 };

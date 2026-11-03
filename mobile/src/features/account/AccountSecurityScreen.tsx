@@ -26,6 +26,10 @@ import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useTheme } from "../../theme/ThemeContext";
 import { useAuthSession } from "../auth/AuthSessionContext";
 import { createMfaRecoveryLifecycle } from "./mfaRecoveryLifecycle";
+import { AccountSecurityControls } from "./AccountSecurityControls";
+import { AccountAuthorizations } from "./AccountAuthorizations";
+import { AccountOrganizations } from "./AccountOrganizations";
+import { disableMfaSchema } from "../../lib/api/accountSecurityTransport";
 
 type PrivateAction = "setup" | "confirm" | "disable" | "copy" | "share";
 type Feedback = { message: string; tone: "error" | "info" | "success" };
@@ -79,6 +83,7 @@ export function AccountSecurityScreen() {
   const [revealCodes, setRevealCodes] = useState(false);
   const [disableOpen, setDisableOpen] = useState(false);
   const [password, setPassword] = useState("");
+  const [disableCode, setDisableCode] = useState("");
   const [privateAction, setPrivateAction] = useState<PrivateAction | null>(
     null,
   );
@@ -107,6 +112,7 @@ export function AccountSecurityScreen() {
     setRevealCodes(false);
     setDisableOpen(false);
     setPassword("");
+    setDisableCode("");
     setFeedback(null);
   }, []);
 
@@ -341,7 +347,18 @@ export function AccountSecurityScreen() {
   }
 
   function disableMfa() {
-    if (!password) return;
+    const result = disableMfaSchema.safeParse({
+      code: disableCode,
+      ...(passwordAccount ? { password } : {}),
+    });
+    if (!result.success) {
+      setFeedback({
+        message:
+          "Enter your authenticator or recovery code and, if required, your current password.",
+        tone: "error",
+      });
+      return;
+    }
     Alert.alert(
       "Turn off two-factor authentication?",
       "Your account will no longer require an authenticator code when you sign in with a password.",
@@ -352,7 +369,7 @@ export function AccountSecurityScreen() {
           style: "destructive",
           onPress: () => {
             void runPrivate("disable", async (epoch) => {
-              await accountApi.disableMfa(password);
+              await accountApi.disableMfa(result.data);
               if (currentEpoch(epoch)) {
                 void refreshProfile();
                 clearPrivateState();
@@ -394,7 +411,9 @@ export function AccountSecurityScreen() {
     !!profile.data &&
     (displayName.trim() !== (profile.data.display_name ?? "") ||
       avatarUrl.trim() !== (profile.data.avatar_url ?? ""));
-  const passwordAccount = !!profile.data && !profile.data.social_provider;
+  const passwordAccount =
+    !!profile.data &&
+    (profile.data.has_password ?? !profile.data.social_provider);
   const mfaEnabled = profile.data?.mfa_enabled === true || recovery.count > 0;
   const privateDisabled = privateAction !== null || !isConnected;
 
@@ -608,19 +627,34 @@ export function AccountSecurityScreen() {
               disableOpen ? (
                 <>
                   <Field
-                    label="Current password"
-                    value={password}
-                    onChangeText={setPassword}
+                    label="Authenticator or recovery code"
+                    value={disableCode}
+                    onChangeText={setDisableCode}
+                    autoCorrect={false}
+                    maxLength={128}
                     secureTextEntry
-                    textContentType="password"
-                    autoComplete="current-password"
                     editable={!privateAction}
                   />
+                  {passwordAccount ? (
+                    <Field
+                      label="Current password"
+                      value={password}
+                      onChangeText={setPassword}
+                      secureTextEntry
+                      textContentType="password"
+                      autoComplete="current-password"
+                      editable={!privateAction}
+                    />
+                  ) : null}
                   <ActionButton
                     label="Turn off two-factor authentication"
                     variant="danger"
                     loading={privateAction === "disable"}
-                    disabled={privateDisabled || !password}
+                    disabled={
+                      privateDisabled ||
+                      !disableCode.trim() ||
+                      (passwordAccount && !password)
+                    }
                     onPress={disableMfa}
                   />
                   <ActionButton
@@ -630,18 +664,13 @@ export function AccountSecurityScreen() {
                     onPress={clearPrivateState}
                   />
                 </>
-              ) : passwordAccount ? (
+              ) : (
                 <ActionButton
                   label="Turn off two-factor authentication"
                   variant="secondary"
                   disabled={privateDisabled}
                   onPress={() => setDisableOpen(true)}
                 />
-              ) : (
-                <Label muted>
-                  Turning off two-factor authentication requires an account
-                  password.
-                </Label>
               )
             ) : (
               <>
@@ -664,6 +693,23 @@ export function AccountSecurityScreen() {
         )}
       </Card>
 
+      {profile.data && ownsPrivateState ? (
+        <>
+          <AccountSecurityControls
+            key={`security:${profile.data.id}`}
+            profile={profile.data}
+          />
+          <AccountAuthorizations
+            key={`access:${profile.data.id}`}
+            accountId={profile.data.id}
+          />
+          <AccountOrganizations
+            key={`orgs:${profile.data.id}`}
+            accountId={profile.data.id}
+            email={profile.data.email}
+          />
+        </>
+      ) : null}
       <Card>
         <Label accessibilityRole="header">Active sessions</Label>
         <Label muted>
