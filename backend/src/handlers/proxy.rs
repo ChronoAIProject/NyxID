@@ -5217,6 +5217,48 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
+    let cma_permit = if catalog_service_slug.as_deref() == Some("cma") {
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+        let prepared =
+            proxy_service::prepare_delegated_request(path, query.as_deref(), &delegated)?;
+        let effective = proxy_service::build_effective_outbound_headers(
+            &target,
+            node_forward_headers.clone(),
+            &identity_headers,
+            &prepared.delegated_headers,
+            &extra_outbound_headers,
+        );
+        crate::services::nyxbot_cma_admission::admit(
+            &state.db,
+            &state.encryption_keys,
+            &state.jwt_keys,
+            &state.config,
+            &user_id_str,
+            auth_user.auth_method != AuthMethod::ServiceAccount
+                && !operation_guest
+                && auth_user.org_agent_access.is_none()
+                && auth_user
+                    .assistant_agent_owner_id
+                    .as_deref()
+                    .is_none_or(|owner| owner == user_id_str)
+                && effective_owner_for_approval
+                    .as_deref()
+                    .is_none_or(|owner| owner == user_id_str),
+            catalog_service_slug.as_deref(),
+            &target,
+            method.as_str(),
+            &canonical.as_policy_path(),
+            query.as_deref(),
+            body.as_deref().unwrap_or_default(),
+            &effective,
+            node_route.is_some() || is_ws || streaming_body.is_some() || shared_connect,
+        )
+        .await?
+    } else {
+        None
+    };
+
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
     if crate::services::telnyx_platform_service::contract(&target.service).is_some() {
@@ -6937,6 +6979,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         billing_egress_permit,
                         egress_guard.as_ref(),
                         resource_proof.as_ref(),
+                        cma_permit.as_ref(),
                     )
                 }),
             )

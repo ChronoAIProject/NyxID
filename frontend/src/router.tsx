@@ -743,6 +743,29 @@ const assistantMachinesRoute = createRoute({
   component: () => <AssistantPage view="machines" />,
 });
 
+const assistantSandboxesRoute = createRoute({
+  path: "/assistant/sandboxes",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="sandboxes" />,
+});
+const assistantSandboxDetailRoute = createRoute({
+  path: "/assistant/sandboxes/$sandboxId",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="sandbox-detail" />,
+});
+const assistantCmaAgentRoute = createRoute({
+  path: "/assistant/cma-agents/$agentId",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: (search: Record<string, unknown>): { response?: string; tab?: "desktop" } => ({
+    ...(typeof search.response === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(search.response) ? { response: search.response } : {}),
+    ...(search.tab === "desktop" ? { tab: "desktop" as const } : {}),
+  }),
+  component: () => <AssistantPage view="cma-agent" />,
+});
+
 const triggersRoute = createRoute({
   path: "/triggers",
   getParentRoute: () => dashboardLayout,
@@ -1270,6 +1293,9 @@ const routeTree = rootRoute.addChildren([
   assistantApprovalsRoute,
   assistantAutomationsRoute,
   assistantMachinesRoute,
+  assistantSandboxesRoute,
+  assistantSandboxDetailRoute,
+  assistantCmaAgentRoute,
   automationsRoute,
   machineSetupRoute,
   machinePairRoute,

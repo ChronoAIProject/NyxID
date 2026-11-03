@@ -331,7 +331,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
   }, 8000,
 );
 
-it.each(["specialist", "automation", "voice"])(
+it.each(["specialist", "automation", "voice", "cma"])(
   "leaves %s confirmation continuation to the server",
   async (kind) => {
     page.conversation.active_turn = null;
@@ -339,18 +339,18 @@ it.each(["specialist", "automation", "voice"])(
     page.acknowledgements = [
       {
         id: "12345678-1234-4123-8123-123456789012",
-        kind: "service",
+        kind: kind === "cma" ? "action" : "service",
         status: "pending",
         summary: "Use GitHub",
         decider: kind === "specialist" ? "orchestrator" : "user",
         trigger_run_id: kind === "automation" ? "run-id" : null,
-        continuation_owner: kind === "voice" ? "server" : null,
-        continuation_receipt_id: kind === "voice" ? "12345678-1234-4123-8123-123456789013" : null,
+        continuation_owner: ["voice", "cma"].includes(kind) ? "server" : null,
+        continuation_receipt_id: ["voice", "cma"].includes(kind) ? "12345678-1234-4123-8123-123456789013" : null,
         decided_by: null,
         reason: null,
         service_slug: "github",
         service_name: "GitHub",
-        tool_name: null,
+        tool_name: kind === "cma" ? "nyxid__cma_request_owner" : null,
         created_at: "2026-09-17T00:00:00Z",
         decided_at: null,
         expires_at: "2026-09-17T00:15:00Z",

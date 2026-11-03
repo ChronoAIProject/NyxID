@@ -340,6 +340,7 @@ pub(crate) async fn owner_denial_decided(
 ) {
     if row.decider != "user"
         || row.status != "denied"
+        || acks::is_cma_owner_step(row)
         || row.trigger_run_id.is_some()
         || row.voice_request_id.is_some()
         || row.invocation_id.is_some()

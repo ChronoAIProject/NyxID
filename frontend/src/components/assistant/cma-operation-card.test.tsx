@@ -1,7 +1,11 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CmaOperation } from "@/schemas/cma-operation";
 import { CmaOperationCard } from "./cma-operation-card";
+
+const flags = vi.hoisted(() => ({ cma: false }));
+vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => flags.cma }));
+beforeEach(() => { flags.cma = false; });
 
 const operation: CmaOperation = {
   id: "watch-1", turn_id: "turn-1", kind: "cma_response", operation_id: "resp_agt_coffee_1",
@@ -11,6 +15,20 @@ const operation: CmaOperation = {
 };
 
 describe("CMA delegation card", () => {
+  it("links the verified internal Agent and exact response when enabled", () => {
+    flags.cma = true;
+    render(<CmaOperationCard operation={{ ...operation, agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19", response_id: "rsp-one" }} />);
+    expect(screen.getByRole("link", { name: /View execution/ })).toHaveAttribute("href", "/assistant/cma-agents/0dc85e4c-6aaf-47de-9df0-e07a69b8ee19?response=rsp-one");
+  });
+  it("does not invent an internal reference from a remote Agent ID", () => {
+    flags.cma = true;
+    render(<CmaOperationCard operation={operation} />);
+    expect(screen.queryByRole("link", { name: /View execution/ })).not.toBeInTheDocument();
+  });
+  it("hides the internal execution entry when the feature is disabled", () => {
+    render(<CmaOperationCard operation={{ ...operation, agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19", response_id: "rsp-one" }} />);
+    expect(screen.queryByRole("link", { name: /View execution/ })).not.toBeInTheDocument();
+  });
   it("shows live execution identity and updates the same card when the job completes", () => {
     const { rerender } = render(<CmaOperationCard operation={operation} />);
     expect(screen.getByRole("status")).toHaveTextContent("Working");

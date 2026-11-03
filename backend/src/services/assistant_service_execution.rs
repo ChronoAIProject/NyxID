@@ -24,6 +24,7 @@ use crate::{
 
 mod admission;
 mod async_watch;
+pub(crate) mod cma;
 pub(crate) use async_watch::{AsyncContinuation, async_contract_binding};
 mod egress;
 mod lark_managed;

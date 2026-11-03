@@ -22,6 +22,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub const TOOL_NAMES: &[&str] = &[
+    "list_cma_resources",
+    "cma_save_attachment",
+    "cma_request_owner",
     "list_agent_keys",
     "get_agent_key",
     "update_agent_key",
@@ -51,6 +54,9 @@ const MAX_RESULT_BYTES: usize = 64 * 1024;
 
 /// Read-only tools a subagent may use with an `account_read` grant.
 pub fn read_only(name: &str) -> bool {
+    if name == "list_cma_resources" {
+        return true;
+    }
     matches!(
         name,
         "list_agent_keys"
@@ -80,6 +86,9 @@ pub fn destructive(name: &str) -> bool {
 }
 
 pub fn schema(name: &str) -> Value {
+    if super::nyxbot_cma_tools::owns(name) {
+        return super::nyxbot_cma_tools::schema(name);
+    }
     let string = json!({"type": "string", "minLength": 1, "maxLength": 200});
     let boolean = json!({"type": "boolean"});
     let mut props = serde_json::Map::new();
@@ -188,6 +197,9 @@ pub fn schema(name: &str) -> Value {
 }
 
 fn description(name: &str) -> String {
+    if super::nyxbot_cma_tools::owns(name) {
+        return super::nyxbot_cma_tools::description(name);
+    }
     let purpose = match name {
         "list_agent_keys" => "List agent keys without secrets.",
         "get_agent_key" => "Inspect an agent key's permissions and settings.",
@@ -324,6 +336,27 @@ pub async fn virtual_service_for(
                 .filter(|e| e.name == super::assistant_skill_authoring::TOOL_NAME),
         );
     }
+    if super::nyxbot_cma_tools::chat_eligible(db, chat)
+        .await
+        .unwrap_or(false)
+    {
+        service
+            .endpoints
+            .extend(
+                super::nyxbot_cma_tools::NAMES
+                    .iter()
+                    .map(|name| McpToolEndpoint {
+                        endpoint_id: format!("nyxid__{name}"),
+                        name: (*name).into(),
+                        description: Some(description(name)),
+                        method: "POST".into(),
+                        request_content_type: Some("application/json".into()),
+                        request_body_required: true,
+                        request_body_schema: Some(schema(name)),
+                        ..Default::default()
+                    }),
+            );
+    }
     service
 }
 
@@ -346,6 +379,7 @@ fn account_service() -> McpToolService {
         durable_endpoint_metadata: Default::default(),
         endpoints: TOOL_NAMES
             .iter()
+            .filter(|name| !super::nyxbot_cma_tools::owns(name))
             .map(|name| McpToolEndpoint {
                 attachment_input: None,
                 async_operation: None,
@@ -437,6 +471,7 @@ pub struct AccountTools<'a> {
     pub keys: &'a EncryptionKeys,
     pub http: &'a reqwest::Client,
     pub config: &'a AppConfig,
+    pub jwt_keys: &'a crate::crypto::jwt::JwtKeys,
     pub token_exchange_cache: &'a Arc<TokenExchangeCache>,
     pub node_manager: &'a NodeWsManager,
 }
@@ -701,6 +736,9 @@ impl AccountTools<'_> {
         let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
         validate_arguments(name, args)?;
         super::assistant_nyxagent::require_enabled(self.db, &chat.user_id).await?;
+        if super::nyxbot_cma_tools::owns(name) {
+            return super::nyxbot_cma_tools::execute(self, chat, name, args).await;
+        }
         if !chat.is_orchestrator() && !read_only(name) {
             return Ok(ToolResult {
                 permission_request: None,
@@ -1640,6 +1678,7 @@ mod search_tests {
             keys: &state.encryption_keys,
             http: &state.http_client,
             config: &state.config,
+            jwt_keys: &state.jwt_keys,
             token_exchange_cache: &state.token_exchange_cache,
             node_manager: &state.node_ws_manager,
         };

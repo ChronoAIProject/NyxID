@@ -148,13 +148,25 @@ mod tests {
             callback_url: Some("https://cma.example/agents/remote-agent".into()),
             creation_operation_id: Some("create-op".into()),
             deletion_operation_id: None,
-            retired_at: None,
-            deleted_at: None,
+            retired_at: Some(now),
+            deleted_at: Some(now),
             created_at: now,
             updated_at: now,
         };
 
         let document = bson::to_document(&row).expect("serialize agent");
+        for field in [
+            "created_at",
+            "updated_at",
+            "last_observed",
+            "retired_at",
+            "deleted_at",
+        ] {
+            assert!(
+                matches!(document.get(field), Some(Bson::DateTime(_))),
+                "{field} must be a BSON datetime"
+            );
+        }
         assert!(matches!(
             document.get("created_at"),
             Some(Bson::DateTime(_))

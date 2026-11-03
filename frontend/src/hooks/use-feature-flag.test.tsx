@@ -121,6 +121,7 @@ describe("feature flag catalog", () => {
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
       ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
       ASSISTANT_WORKSPACE_PREVIEW: "assistant:workspace-preview",
+      ASSISTANT_CMA_SANDBOXES: "assistant:cma-sandboxes",
       ASSISTANT_OWNER_INVOCATIONS: "assistant:owner-invocations",
       MACHINE_CAPABILITIES: "assistant:machine-capabilities",
       MACHINE_CONTEXTS: "assistant:machine-contexts",

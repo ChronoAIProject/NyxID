@@ -23,6 +23,7 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// Embedded overlay documents, keyed by the spec key used in the hosted
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
+    ("cma", include_str!("../../specs/catalog/cma.openapi.json")),
     (
         "stripe",
         include_str!("../../specs/catalog/stripe.openapi.json"),
@@ -191,6 +192,7 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("cma", "cma"),
     ("chrono-sandbox", "chrono-sandbox"),
     ("api-ifttt", "ifttt"),
     ("api-ifttt-mcp", "ifttt-mcp"),
@@ -765,6 +767,66 @@ mod tests {
             assert!(operation_marks(slug, "POST", &forward.path, "renamed").destructive);
             assert!(spec["paths"].get("/approval/v4/tasks/transfer").is_none());
         }
+    }
+
+    #[test]
+    fn cma_overlay_exposes_v1_operations_with_exact_effects() {
+        let spec = spec_for_slug("cma").expect("CMA hosted overlay");
+        let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
+        for name in [
+            "list_agents",
+            "get_agent",
+            "create_agent",
+            "get_provisioning",
+            "stop_agent",
+            "delete_agent",
+            "list_sandboxes",
+            "get_sandbox",
+            "pause_sandbox",
+            "revive_sandbox",
+            "retire_sandbox",
+            "run_task",
+            "get_task",
+            "list_messages",
+            "get_transcript",
+            "get_task_controls",
+            "control_task",
+            "interrupt_task",
+            "list_files",
+            "read_file",
+            "download_file",
+            "write_file",
+            "list_sandbox_events",
+            "get_resources",
+            "get_usage",
+        ] {
+            assert!(endpoints.iter().any(|e| e.name == name), "{name}");
+        }
+        for name in [
+            "create_agent",
+            "delete_agent",
+            "retire_sandbox",
+            "control_task",
+        ] {
+            assert!(
+                endpoints
+                    .iter()
+                    .find(|e| e.name == name)
+                    .unwrap()
+                    .destructive,
+                "{name}"
+            );
+        }
+        for name in ["list_agents", "get_transcript", "get_task_controls"] {
+            assert_eq!(
+                endpoints.iter().find(|e| e.name == name).unwrap().risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+        }
+        assert_eq!(
+            spec_path_for_slug("cma").as_deref(),
+            Some("/api/v1/catalog-specs/cma/openapi.json")
+        );
     }
 
     #[test]

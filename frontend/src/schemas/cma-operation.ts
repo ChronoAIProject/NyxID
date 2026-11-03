@@ -15,6 +15,8 @@ export const cmaOperationSchema = z.object({
   created_at: z.string(),
   checked_at: z.string().nullable(),
   cma_url: z.string().nullish(),
+  agent_ref_id: z.string().uuid().nullish(),
+  response_id: z.string().max(256).nullish(),
 });
 
 export type CmaOperation = z.infer<typeof cmaOperationSchema>;

@@ -90,6 +90,9 @@ pub struct NyxbotCmaSandbox {
     pub observation_state: SandboxObservationState,
     pub creation_ref: String,
     pub generation: i64,
+    /// Serializes Agent-reference registration with exact receipt association.
+    #[serde(default)]
+    pub agent_reference_version: i64,
     pub source: String,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_observed: Option<DateTime<Utc>>,
@@ -162,6 +165,7 @@ mod tests {
             observation_state: SandboxObservationState::Provisioning,
             creation_ref: "creation-ref".into(),
             generation: 1,
+            agent_reference_version: 0,
             source: "nyxbot".into(),
             last_observed: Some(now),
             machine_included: Some(false),
@@ -169,8 +173,8 @@ mod tests {
             cpu_millis: Some(2_000),
             memory_mib: Some(2_048),
             last_activity_at: Some(now),
-            retire_requested_at: None,
-            retired_at: None,
+            retire_requested_at: Some(now),
+            retired_at: Some(now),
             idempotency_key: Some("idem".into()),
             request_hash: Some("hash".into()),
             operation_id: Some("operation".into()),
@@ -182,6 +186,19 @@ mod tests {
         };
 
         let document = bson::to_document(&row).expect("serialize sandbox");
+        for field in [
+            "created_at",
+            "updated_at",
+            "last_observed",
+            "last_activity_at",
+            "retire_requested_at",
+            "retired_at",
+        ] {
+            assert!(
+                matches!(document.get(field), Some(Bson::DateTime(_))),
+                "{field} must be a BSON datetime"
+            );
+        }
         assert!(matches!(
             document.get("created_at"),
             Some(Bson::DateTime(_))
@@ -214,6 +231,7 @@ mod tests {
             observation_state: SandboxObservationState::Unknown,
             creation_ref: "creation-ref".into(),
             generation: 1,
+            agent_reference_version: 0,
             source: "nyxbot".into(),
             last_observed: None,
             machine_included: None,

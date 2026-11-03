@@ -4470,6 +4470,7 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
         billing_egress_permit,
         egress_guard,
         None,
+        None,
     )
 }
 
@@ -4491,6 +4492,7 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&'a super::assistant_service_execution::HttpEgressGuard<'a>>,
     resource_proof: Option<&'a super::resource_request_proof::ReadProofIssuer<'a>>,
+    cma_permit: Option<&'a super::nyxbot_cma_admission::CmaDispatchPermit>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     Box::pin(forward_request_with_egress_guard_inner(
         client,
@@ -4509,6 +4511,7 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
         billing_egress_permit,
         egress_guard,
         resource_proof,
+        cma_permit,
     ))
 }
 
@@ -4530,8 +4533,14 @@ async fn forward_request_with_egress_guard_inner(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
+    cma_permit: Option<&super::nyxbot_cma_admission::CmaDispatchPermit>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     target.require_credential_materialized()?;
+    if target.service.slug == "cma" && cma_permit.is_none() {
+        return Err(ForwardRequestError::PreDispatchRejected(
+            AppError::Forbidden("CMA requires personal resource admission".into()),
+        ));
+    }
     super::lark_attachment_tool::refuse_reserved_path(path)?;
     if super::telnyx_platform_service::contract(&target.service).is_some() {
         let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
@@ -4939,7 +4948,22 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(proof) = resource_proof {
+    let response = if let Some(cma) = cma_permit {
+        let mut request = request.build()?;
+        if let Some(proof) = resource_proof {
+            proof
+                .attach(&mut request)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        cma.before_send(&request)
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+        let response = no_redirect_http_client().execute(request).await?;
+        cma.observe_response(response)
+            .await
+            .map_err(|_| ForwardRequestError::OutcomeUnknown)?
+    } else if let Some(proof) = resource_proof {
         let mut request = request.build()?;
         proof
             .attach(&mut request)

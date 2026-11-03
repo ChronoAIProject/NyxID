@@ -5,6 +5,38 @@ use crate::models::assistant_conversation::{
 use crate::models::async_service_operation::{AsyncServiceOperation, COLLECTION_NAME as WATCHES};
 use crate::services::{assistant_nyxagent as engine, async_service_operation as watches};
 
+const CMA_TEST_AUDIENCE: &str = "cma-async-test";
+
+fn cma_fixture_identity(
+    headers: &HeaderMap,
+    keys: &crate::crypto::jwt::JwtKeys,
+    issuer: &str,
+    owner: &str,
+    catalog_id: &str,
+) -> bool {
+    let mut assertions = headers.get_all("x-nyxid-identity-token").iter();
+    let Some(token) = assertions.next().and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    if assertions.next().is_some() {
+        return false;
+    }
+    let Ok(key) = keys.decoding_key(token) else {
+        return false;
+    };
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[CMA_TEST_AUDIENCE]);
+    jsonwebtoken::decode::<crate::services::identity_service::IdentityAssertionClaims>(
+        token,
+        key,
+        &validation,
+    )
+    .is_ok_and(|verified| {
+        verified.claims.sub == owner && verified.claims.nyx_service_id == catalog_id
+    })
+}
+
 struct AsyncFixture {
     f: Fixture,
     calls: Arc<std::sync::Mutex<Vec<String>>>,
@@ -14,6 +46,7 @@ struct AsyncFixture {
     phase: Arc<std::sync::Mutex<String>>,
     callback: Arc<std::sync::Mutex<Value>>,
     status_gate: Arc<tokio::sync::Semaphore>,
+    cma_sandbox_exists: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Drop for AsyncFixture {
     fn drop(&mut self) {
@@ -38,15 +71,33 @@ impl AsyncFixture {
         let status_phase = phase.clone();
         let callback = Arc::new(std::sync::Mutex::new(Value::Null));
         let status_callback = callback.clone();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let signed_catalog_id = catalog_id.clone();
+        let owner = f.owner.clone();
+        let identity_keys = f.state.jwt_keys.clone();
+        let identity_issuer = f.state.config.jwt_issuer.clone();
+        let cma_sandbox_exists = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let remote_sandbox_exists = cma_sandbox_exists.clone();
         let upstream = Router::new().route(
             "/{*path}",
-            any(move |uri: axum::http::Uri| {
+            any(move |method: axum::http::Method, uri: axum::http::Uri, headers: HeaderMap| {
                 captured.lock().unwrap().push(uri.path().into());
                 let gate = gate.clone();
                 let result_body = result_body.lock().unwrap().clone();
                 let status_phase = status_phase.lock().unwrap().clone();
                 let callback = status_callback.lock().unwrap().clone();
+                let authenticated = !uri.path().starts_with("/api/")
+                    || cma_fixture_identity(&headers, &identity_keys, &identity_issuer, &owner, &signed_catalog_id);
+                let owner = owner.clone();
+                let remote_sandbox_exists = remote_sandbox_exists.clone();
                 async move {
+                    use axum::response::IntoResponse;
+                    if !authenticated {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({"error":"signed_owner_identity_required"})),
+                        ).into_response();
+                    }
                     let _permit = if uri
                         .path()
                         .strip_prefix("/executions/")
@@ -56,14 +107,55 @@ impl AsyncFixture {
                     } else {
                         None
                     };
-                    Json(match uri.path() {
-                        "/api/v1/agents" => json!({"id":"lifecycle-1","status":"queued"}),
-                        "/api/v1/agent-lifecycle/lifecycle-1" => json!({"id":"lifecycle-1","status":status_phase,"agent_id":"agt_coffee","phase":"agent_startup","callback_url":callback}),
-                        "/api/v1/agents/agt_coffee/input" => json!({"queued":true}),
-                        "/api/v1/agents/agt_coffee" => json!({"id":"agt_coffee","status":status_phase,"callback_url":callback}),
-                        "/api/v2/agents/agt_coffee/responses" => json!({"id":"resp_command","status":"queued","conversation":{"id":"agt_coffee"},"callback_url":callback}),
-                        "/api/v2/responses/resp_command" => json!({"id":"resp_command","status":status_phase,"conversation":{"id":"agt_coffee"},"callback_url":callback}),
-                        "/executions" => json!({
+                    let sandbox = json!({
+                        "id":"sbx_coffee","owner":owner,"name":"Coffee environment","status":"active",
+                        "profile":{"id":"sbp_coffee","revision":1},"nyxid_services":[],
+                        "limits":{"max_workspaces":4,"max_agents_per_workspace":8},
+                        "lifecycle":{},"last_activity_at":"2026-11-04T00:00:00Z","revision":1
+                    });
+                    let agent_status = match status_phase.as_str() {
+                        "queued" | "running" => "starting",
+                        "succeeded" | "completed" => "ready",
+                        "in_progress" => "working",
+                        other => other,
+                    };
+                    let agent = json!({
+                        "id":"agt_coffee","owner":owner,"owner_title":"Coffee","status":agent_status,
+                        "sandbox":{"id":"sbx_coffee","status":"active"},
+                        "workspace":{"id":"wks_coffee"},"worktree":{"id":"wkt_coffee"},
+                        "profile":{"model":"test-model","permission_level":"guarded"},
+                        "revision":1,"callback_url":callback
+                    });
+                    let exists = remote_sandbox_exists.load(Ordering::SeqCst);
+                    Json(match (method.as_str(), uri.path()) {
+                        ("POST", "/api/v1/agents") => {
+                            remote_sandbox_exists.store(true, Ordering::SeqCst);
+                            json!({"id":"lifecycle-1","status":"queued"})
+                        }
+                        ("GET", "/api/v1/agents") => json!({"agents":if exists {vec![agent.clone()]} else {vec![]},"next_cursor":null}),
+                        ("GET", "/api/v1/agent-lifecycle/lifecycle-1") => json!({"id":"lifecycle-1","status":status_phase,"agent_id":"agt_coffee","phase":"agent_startup","callback_url":callback}),
+                        ("POST", "/api/v1/agents/agt_coffee/input") => json!({"queued":true}),
+                        ("GET", "/api/v1/agents/agt_coffee") if exists => agent,
+                        ("GET", "/api/v1/sandboxes") => json!({"sandboxes":if exists {vec![sandbox.clone()]} else {vec![]},"next_cursor":null}),
+                        ("GET", "/api/v1/sandboxes/sbx_coffee") if exists => sandbox,
+                        ("GET", "/api/v1/workspaces/wks_coffee") if exists => json!({"id":"wks_coffee","sandbox_id":"sbx_coffee"}),
+                        ("GET", "/api/v1/sandbox-profiles/sbp_coffee/revisions/1") => json!({
+                            "profile_id":"sbp_coffee","revision":1,"digest":"test-profile","published_at":"2026-11-01T00:00:00Z",
+                            "content":{"cpu_millis":2000,"memory_mib":4096}
+                        }),
+                        ("POST", "/api/v2/agents/agt_coffee/responses") => json!({"id":"resp_command","status":"queued","conversation":{"id":"agt_coffee"},"callback_url":callback}),
+                        ("GET", "/api/v2/responses/resp_command") => json!({"id":"resp_command","status":status_phase,"conversation":{"id":"agt_coffee"},"callback_url":callback}),
+                        ("GET", "/api/v2/agents/agt_coffee/responses/resp_command/controls") => json!({
+                            "response":{"receipt":{"agent_id":"agt_coffee","response_id":"resp_command"}},
+                            "target_active":status_phase == "in_progress","agent_revision":1,
+                            "target":{"response_id":"resp_command","turn_sequence":1},
+                            "runtime_support":{"resolve_approval":true}
+                        }),
+                        ("GET", "/api/v2/agents/agt_coffee/events/snapshot") => json!({
+                            "agent_id":"agt_coffee","events":[],"next_cursor":null,
+                            "through_cursor":"test-empty-snapshot","incarnation":"test-incarnation"
+                        }),
+                        (_, "/executions") => json!({
                             "operation_id": if distinct_operations {
                                 format!("op-{}", uuid::Uuid::new_v4())
                             } else {
@@ -71,15 +163,19 @@ impl AsyncFixture {
                             },
                             "status":"queued",
                         }),
-                        path if path.ends_with("/result") => result_body,
-                        path if path
+                        (_, path) if path.ends_with("/result") => result_body,
+                        (_, path) if path
                             .strip_prefix("/executions/")
                             .is_some_and(|id| !id.contains('/')) =>
                         {
                             json!({"status":status_phase})
                         }
+                        (_, path) if path.starts_with("/api/") => return (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({"error":"cma_resource_not_found"})),
+                        ).into_response(),
                         _ => json!({"status":"cancelled"}),
-                    })
+                    }).into_response()
                 }
             }),
         );
@@ -87,7 +183,7 @@ impl AsyncFixture {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
         let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
-        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.id = catalog_id;
         catalog.slug = "chrono-sandbox".into();
         catalog.base_url = url.clone();
         catalog.auth_method = "none".into();
@@ -132,6 +228,7 @@ impl AsyncFixture {
             phase,
             callback,
             status_gate,
+            cma_sandbox_exists,
         }
     }
     async fn submit(&self) -> AsyncServiceOperation {
@@ -210,10 +307,44 @@ async fn cma_fixture() -> AsyncFixture {
             doc! {"_id":&catalog_id},
             // Agent-input tests track two independent watches simultaneously.
             // Both need a polling slot to observe the same activity transition.
-            doc! {"$set":{"slug":"cma","homepage_url":"https://cma.example/agent-manager","concurrency_policy.default_limit":2}},
+            doc! {"$set":{
+                "slug":"cma","homepage_url":"https://cma.example/agent-manager",
+                "concurrency_policy.default_limit":2,"identity_propagation_mode":"jwt",
+                "identity_jwt_audience":CMA_TEST_AUDIENCE,"delegation_token_scope":""
+            }},
         )
         .await
         .unwrap();
+    // The connected alias must resolve to exactly the catalog's execution
+    // identity. A custom connection with unsigned or divergent settings is
+    // correctly refused by CMA admission before any upstream request.
+    db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&a.service},
+            doc! {"$set":{
+                "identity_propagation_mode":"jwt","identity_jwt_audience":CMA_TEST_AUDIENCE,
+                "delegation_token_scope":""
+            }},
+        )
+        .await
+        .unwrap();
+    // These tests cover asynchronous lifecycle and receipt behavior. Explicit
+    // Full access admits destructive Agent creation and records its receipt.
+    // The default Auto policy correctly requires a separate owner action card.
+    crate::services::assistant_settings_service::update(
+        db,
+        &a.f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        acks::effective_access_mode(db, &a.f.chat).await.unwrap(),
+        crate::models::assistant_settings::AccessMode::Autopilot
+    );
     let endpoints = db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
         crate::models::service_endpoint::COLLECTION_NAME,
     );
@@ -287,6 +418,12 @@ async fn cma_fixture() -> AsyncFixture {
         endpoint.request_body_schema = body;
         endpoint.request_body_required = method == "POST";
         endpoint.request_content_type = (method == "POST").then(|| "application/json".into());
+        endpoint.risk = Some(if method == "GET" {
+            crate::models::service_endpoint::EndpointRisk::Read
+        } else {
+            crate::models::service_endpoint::EndpointRisk::Write
+        });
+        endpoint.supports_idempotency_key = method == "POST";
         endpoint.async_operation = None;
         endpoints.insert_one(&endpoint).await.unwrap();
     }
@@ -294,9 +431,236 @@ async fn cma_fixture() -> AsyncFixture {
 }
 
 #[tokio::test]
+async fn cma_watch_observation_survives_flag_disable_without_widening_authority() {
+    use crate::services::{feature_flag_service as flags, nyxbot_cma_tools as cma};
+    let a = cma_fixture().await;
+    let db = &a.f.state.db;
+    let target = flags::FlagTarget::User(a.f.owner.clone());
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+        &target,
+        true,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    assert!(cma::chat_eligible(db, &a.f.chat).await.unwrap());
+    let auth = authenticate(&a.f).await;
+    let response = direct_call(
+        &a.f,
+        &auth,
+        "sandbox__post_v2_agent_response",
+        json!({"agent_id":"agt_coffee","input":"observe after flag disable","stream":true,"Idempotency-Key":"flag-disable"}),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let watch = a.watch().await;
+    assert_eq!(watch.state, "waiting");
+    let connection = db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&a.service})
+        .await
+        .unwrap()
+        .unwrap();
+    let service = connection.catalog_service_id.unwrap();
+    engine::finish_turn(
+        db,
+        &a.f.row,
+        &a.f.row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Submitted".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+        &target,
+        false,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    assert!(!cma::eligible(db, &a.f.owner, None).await.unwrap());
+    assert!(!cma::chat_eligible(db, &a.f.chat).await.unwrap());
+    cma::watch_scope(
+        db,
+        &watch,
+        &service,
+        "GET",
+        "/api/v1/agents/agt_coffee",
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    for (method, body) in [("POST", b"{}".as_slice()), ("GET", b"{}".as_slice())] {
+        assert!(
+            cma::watch_scope(
+                db,
+                &watch,
+                &service,
+                method,
+                "/api/v1/agents/agt_coffee",
+                None,
+                body,
+            )
+            .await
+            .is_err()
+        );
+    }
+    let mut shared = watch.clone();
+    shared.shared_execution = Some(crate::models::assistant_sharing::SharedExecution {
+        voice: false,
+        model: false,
+        actor: a.f.owner.clone(),
+        owner: "other-owner".into(),
+        agent: watch.agent_id.clone(),
+        conversation: watch.conversation_id.clone(),
+        key: watch.api_key_id.clone(),
+        turn: watch.turn_id.clone(),
+        connection: service.clone(),
+        revision: 1,
+        behavior: "read".into(),
+        binding: "shared-binding".into(),
+        consent_id: None,
+        consent_claim: None,
+    });
+    let mut stale = watch.clone();
+    stale.lease_id = Some("stale-lease".into());
+    for denied in [&shared, &stale] {
+        assert!(
+            cma::watch_scope(
+                db,
+                denied,
+                &service,
+                "GET",
+                "/api/v1/agents/agt_coffee",
+                None,
+                &[],
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    let scopes: crate::models::agent_operation_scope::OperationScopes =
+        serde_json::from_value(json!({(service.clone()):{
+            "revision":1,"catalog_service_id":service.clone(),"operations":[{
+                "rule":{"method":"GET","path_template":"/api/v1/agents/{agent_id}"},
+                "inputs":{"path":{"agent_id":{"type":"exact","value":"agt_coffee"}}}
+            }]
+        }}))
+        .unwrap();
+    let keys = db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME);
+    keys.update_one(
+        doc! {"_id":&watch.api_key_id},
+        doc! {"$set":{"assistant_operation_scopes":bson::to_bson(&scopes).unwrap()}},
+    )
+    .await
+    .unwrap();
+    for (path, allowed) in [
+        ("/api/v1/agents/agt_coffee", true),
+        ("/api/v1/agents/agt_other", false),
+        ("/api/v1/sandboxes", false),
+    ] {
+        assert_eq!(
+            cma::watch_scope(db, &watch, &service, "GET", path, None, &[])
+                .await
+                .is_ok(),
+            allowed,
+            "{path}"
+        );
+    }
+
+    // The flag exemption does not make a specialist's current CMA grant durable.
+    let agents = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    agents
+        .update_one(
+            doc! {"_id":&watch.agent_id},
+            doc! {"$set":{"kind":"specialist","grants.service_ids":[&a.service],"grants.platform_service_ids":[]}},
+        )
+        .await
+        .unwrap();
+    cma::watch_scope(
+        db,
+        &watch,
+        &service,
+        "GET",
+        "/api/v1/agents/agt_coffee",
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+    agents
+        .update_one(
+            doc! {"_id":&watch.agent_id},
+            doc! {"$set":{"grants.service_ids":[]}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        cma::watch_scope(
+            db,
+            &watch,
+            &service,
+            "GET",
+            "/api/v1/agents/agt_coffee",
+            None,
+            &[],
+        )
+        .await
+        .is_err()
+    );
+    agents
+        .update_one(
+            doc! {"_id":&watch.agent_id},
+            doc! {"$set":{"grants.service_ids":[&a.service]}},
+        )
+        .await
+        .unwrap();
+    keys.update_one(
+        doc! {"_id":&watch.api_key_id},
+        doc! {"$set":{"is_active":false}},
+    )
+    .await
+    .unwrap();
+    assert!(
+        cma::watch_scope(
+            db,
+            &watch,
+            &service,
+            "GET",
+            "/api/v1/agents/agt_coffee",
+            None,
+            &[],
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_metadata() {
     let a = cma_fixture().await;
     let db = &a.f.state.db;
+    // The no-parent create path must observe an empty owner inventory first;
+    // the mock publishes the new parent only after accepting the actual POST.
+    a.cma_sandbox_exists.store(false, Ordering::SeqCst);
     *a.phase.lock().unwrap() = "running".into();
     let auth = authenticate(&a.f).await;
     // Exercise the universal MCP dispatch path, including its inner arguments.
@@ -348,6 +712,18 @@ async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_me
     assert_eq!(
         finished.cma.as_ref().unwrap().agent_id.as_deref(),
         Some("agt_coffee")
+    );
+    assert!(finished.cma.as_ref().unwrap().agent_ref_id.is_some());
+    assert_eq!(
+        db.collection::<bson::Document>(crate::models::nyxbot_cma_creation::COLLECTION_NAME)
+            .count_documents(doc! {
+                "user_id":&a.f.owner,"operation_id":"lifecycle-1",
+                "submission_state":"confirmed","cma_agent_id":"agt_coffee",
+                "cma_sandbox_id":"sbx_coffee"
+            })
+            .await
+            .unwrap(),
+        1
     );
     let cards = crate::services::cma_operation::cards(db, &a.f.owner, &a.f.row.id)
         .await
@@ -824,6 +1200,314 @@ async fn async_delivery_binding_survives_thread_destination_changes() {
         row.active_turn.as_ref().unwrap().trigger_run_id.as_deref(),
         Some("automation")
     );
+}
+
+async fn queue_cma_approval(
+    a: &AsyncFixture,
+    watch: &AsyncServiceOperation,
+) -> crate::models::assistant_conversation::AgentEvent {
+    use crate::models::assistant_conversation::{REPORT_PROVENANCE_V1, carried_report_to};
+    let cma = doc! {
+        "kind":"cma_response","agent_id":"agt_approval","response_id":"resp_approval",
+        "approval_scan":{"revision":1_i64,"turn_sequence":1_i64,"incarnation":null,
+            "cursor":null,"complete":true,"pending":[]},
+    };
+    a.f.state
+        .db
+        .collection::<bson::Document>(WATCHES)
+        .update_one(doc! {"_id":&watch.id}, doc! {"$set":{"cma":cma}})
+        .await
+        .unwrap();
+    let mut event = crate::services::assistant_team_service::event(
+        crate::services::cma_operation::APPROVAL_EVENT_KIND,
+        "Inspect the exact pending CMA approval".into(),
+        Some(&watch.agent_id),
+    );
+    event.question_key = Some(format!("cma-watch:{}", watch.id));
+    event.invocation_id = watch.delivery.invocation_id.clone();
+    event.bound = watch.delivery.report_provenance == REPORT_PROVENANCE_V1;
+    event.report_to = carried_report_to(
+        watch.delivery.report_to.as_deref(),
+        watch.delivery.report_provenance,
+    );
+    engine::push_events(&a.f.state.db, &a.f.owner, &a.f.row.id, vec![event.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    event
+}
+
+#[tokio::test]
+async fn cma_approval_turn_keeps_original_delivery_and_final_result_watch() {
+    let a = AsyncFixture::new().await;
+    let db = &a.f.state.db;
+    let original = ChannelOrigin {
+        native_event_id: None,
+        thread: None,
+        nyxbot_channel_id: "original-channel".into(),
+        partition: "original-place".into(),
+        platform: "telegram".into(),
+    };
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&a.f.row.id},
+            doc! {"$set":{"reply_channel":bson::to_bson(&original).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let submitted = a.submit().await;
+    finish(&a, &a.f.row, "submitted").await;
+    queue_cma_approval(&a, &submitted).await;
+    // A waiting watch has no deliverable result. Deliberately invalid encrypted
+    // bytes prove that an approval turn never tries to read its result payload.
+    db.collection::<bson::Document>(WATCHES).update_one(
+        doc! {"_id":&submitted.id},
+        doc! {"$set":{"result_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}}},
+    ).await.unwrap();
+    let mut later = original.clone();
+    later.partition = "later-place".into();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&a.f.row.id},
+            doc! {"$set":{"reply_channel":bson::to_bson(&later).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let mut row = admit_event(&a).await;
+    assert_eq!(watches::event_id(&row), None);
+    let bound = watches::bound(db, &row).await.unwrap().unwrap();
+    assert_eq!(bound.id, submitted.id);
+    assert!(
+        watches::input_context(db, &a.f.state.encryption_keys, &row)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    watches::apply_delivery(&mut row, &bound);
+    assert_eq!(row.reply_channel, Some(original.clone()));
+
+    let auth = authenticate(&a.f).await;
+    let catalog = mcp_service::load_operation_catalog(
+        db,
+        a.f.state.node_ws_manager.as_ref(),
+        &a.f.owner,
+        mcp_node_scope(&auth),
+        mcp_service_scope(&auth),
+    )
+    .await
+    .unwrap();
+    let service = catalog
+        .services
+        .iter()
+        .find(|service| service.service_id == a.service)
+        .unwrap();
+    let endpoint = service
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.async_operation.is_some())
+        .unwrap();
+    let nested = watches::reserve(db, auth.chat.as_ref().unwrap(), service, endpoint)
+        .await
+        .unwrap();
+    assert_eq!(nested.delivery.reply_channel, Some(original));
+    finish(&a, &row, "approval reviewed").await;
+    let waiting = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&submitted.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiting.state, "waiting");
+    assert_eq!(
+        waiting.result_encrypted.as_deref(),
+        Some([1_u8, 2, 3].as_slice())
+    );
+
+    // A final result supersedes only this watch's still-queued approval wakeup.
+    queue_cma_approval(&a, &waiting).await;
+    watches::ready(
+        db,
+        &waiting,
+        Some(&a.f.state.encryption_keys),
+        "completed",
+        Some("the final result"),
+    )
+    .await
+    .unwrap();
+    let ready = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&submitted.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(watches::enqueue(db, &ready).await.unwrap());
+    let pending = engine::get(db, &a.f.owner, &a.f.row.id).await.unwrap();
+    assert!(
+        !pending
+            .pending_events
+            .iter()
+            .any(|event| event.kind == crate::services::cma_operation::APPROVAL_EVENT_KIND)
+    );
+    let result_turn = admit_event(&a).await;
+    assert_eq!(watches::event_id(&result_turn), Some(submitted.id.as_str()));
+    assert!(
+        watches::input_context(db, &a.f.state.encryption_keys, &result_turn)
+            .await
+            .unwrap()
+            .contains("the final result")
+    );
+    finish(&a, &result_turn, "completed").await;
+    let delivered = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&submitted.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivered.state, "delivered");
+}
+
+#[tokio::test]
+async fn cma_approval_delivery_requires_exact_watch_owner_conversation_and_lineage() {
+    let a = AsyncFixture::new().await;
+    let submitted = a.submit().await;
+    let event = queue_cma_approval(&a, &submitted).await;
+    let original = a.watch().await;
+    let mut row = a.f.row.clone();
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.origin = TurnOrigin::Event;
+    turn.events = vec![event];
+    assert_eq!(
+        watches::bound(&a.f.state.db, &row)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        original.id
+    );
+    for state in ["ready", "queued"] {
+        let mut finishing = original.clone();
+        finishing.state = state.into();
+        a.f.state
+            .db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .replace_one(doc! {"_id":&original.id}, finishing)
+            .await
+            .unwrap();
+        assert!(watches::bound(&a.f.state.db, &row).await.unwrap().is_some());
+        let mut session = a.f.state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            watches::bind_in_session(&a.f.state.db, &mut row.clone(), &mut session)
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+    }
+    for changed_field in 0..5 {
+        let mut changed = original.clone();
+        match changed_field {
+            0 => changed.user_id = uuid::Uuid::new_v4().to_string(),
+            1 => changed.conversation_id = uuid::Uuid::new_v4().to_string(),
+            2 => changed.agent_id = uuid::Uuid::new_v4().to_string(),
+            3 => changed.delivery.invocation_id = Some(uuid::Uuid::new_v4().to_string()),
+            _ => changed.state = "cancelled".into(),
+        }
+        a.f.state
+            .db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .replace_one(doc! {"_id":&original.id}, changed)
+            .await
+            .unwrap();
+        assert!(
+            watches::bound(&a.f.state.db, &row).await.is_err(),
+            "field {changed_field}"
+        );
+    }
+    a.f.state
+        .db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .replace_one(doc! {"_id":&original.id}, &original)
+        .await
+        .unwrap();
+    row.active_turn.as_mut().unwrap().events[0].question_key =
+        Some("cma-watch:not-a-watch-id".into());
+    assert!(watches::bound(&a.f.state.db, &row).await.is_err());
+    row.active_turn.as_mut().unwrap().events[0].kind = "ordinary_notice".into();
+    assert!(watches::bound(&a.f.state.db, &row).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cma_approval_scan_retry_uses_persisted_progress() {
+    let a = AsyncFixture::new().await;
+    let mut submitted = a.submit().await;
+    queue_cma_approval(&a, &submitted).await;
+    submitted.attempts = 4;
+    a.f.state
+        .db
+        .collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&submitted.id},
+            doc! {"$set":{"attempts":4,"cma.approval_scan.complete":false}},
+        )
+        .await
+        .unwrap();
+    let before = chrono::Utc::now();
+    watches::defer(&a.f.state.db, &submitted).await.unwrap();
+    let scanning = a.watch().await;
+    assert!(scanning.poll_at >= before);
+    assert!(scanning.poll_at < chrono::Utc::now() + chrono::Duration::seconds(5));
+    a.f.state
+        .db
+        .collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&submitted.id},
+            doc! {"$set":{"cma.approval_scan.complete":true}},
+        )
+        .await
+        .unwrap();
+    // The caller snapshot still says incomplete. Persisted completion restores
+    // normal backoff without altering lease release or attempt accounting.
+    let before = chrono::Utc::now();
+    watches::defer(&a.f.state.db, &scanning).await.unwrap();
+    let completed = a.watch().await;
+    assert!(completed.poll_at >= before + chrono::Duration::seconds(50));
+    assert_eq!(completed.attempts, scanning.attempts + 1);
+    assert!(completed.lease_id.is_none() && completed.lease_until.is_none());
+}
+
+#[tokio::test]
+async fn cma_approval_voice_cancellation_removes_only_its_watch_wakeup() {
+    let a = AsyncFixture::new().await;
+    let db = &a.f.state.db;
+    let watch = a.submit().await;
+    queue_cma_approval(&a, &watch).await;
+    let request = uuid::Uuid::new_v4().to_string();
+    db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+        .insert_one(doc! {"_id":&request,"user_id":&a.f.owner,"state":"claimed"})
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&watch.id},
+            doc! {"$set":{"delivery.voice_request_id":&request}},
+        )
+        .await
+        .unwrap();
+    let ordinary =
+        crate::services::assistant_team_service::event("ordinary_notice", "keep me".into(), None);
+    engine::push_events(db, &a.f.owner, &a.f.row.id, vec![ordinary.clone()])
+        .await
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    watches::cancel_voice_in_session(db, &a.f.owner, &request, &mut session)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+    assert_eq!(a.watch().await.state, "cancelling");
+    let row = engine::get(db, &a.f.owner, &a.f.row.id).await.unwrap();
+    assert_eq!(row.pending_events.len(), 1);
+    assert_eq!(row.pending_events[0].id, ordinary.id);
 }
 
 #[tokio::test]
@@ -1510,6 +2194,15 @@ async fn async_stop_between_status_and_result_prevents_next_provider_call() {
 
 #[tokio::test]
 async fn async_channel_event_validates_original_source_after_newer_message() {
+    channel_watch_event_validates_original_source(false).await;
+}
+
+#[tokio::test]
+async fn cma_approval_channel_event_validates_original_source_after_newer_message() {
+    channel_watch_event_validates_original_source(true).await;
+}
+
+async fn channel_watch_event_validates_original_source(approval: bool) {
     use crate::services::{channel_thread_follow_service as follow, channel_thread_service};
     use futures::TryStreamExt;
 
@@ -1607,9 +2300,13 @@ async fn async_channel_event_validates_original_source_after_newer_message() {
         )
         .await
         .unwrap();
-    a.submit().await;
-    a.due().await;
-    Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    let submitted = a.submit().await;
+    if approval {
+        queue_cma_approval(&a, &submitted).await;
+    } else {
+        a.due().await;
+        Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    }
     finish(&a, &a.f.row, "submitted").await;
     // A later source has disappeared. It cannot revoke or redirect the
     // owner's earlier async operation, whose source remains eligible.

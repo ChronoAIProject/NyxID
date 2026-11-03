@@ -291,8 +291,10 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         .pointer(&w.contract.status_field)
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let agent_not_started =
-        crate::services::cma_operation::record_observation(&state.db, w, &parsed).await?;
+    let observation = crate::services::cma_operation::record_observation(state, w, &parsed).await?;
+    if observation.approval_enqueued {
+        crate::handlers::assistant_team::wake(state, &w.user_id, &w.conversation_id).await;
+    }
     if w.contract.failure_states.iter().any(|s| s == phase) {
         // Error payloads are equally untrusted; retain only bounded encrypted data.
         let detail = w
@@ -310,7 +312,7 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         )
         .await;
     }
-    if agent_not_started || !w.contract.success_states.iter().any(|s| s == phase) {
+    if observation.awaiting_activity || !w.contract.success_states.iter().any(|s| s == phase) {
         return watches::defer(&state.db, w).await;
     }
     let result = call(state, w, &w.contract.result_operation).await?;

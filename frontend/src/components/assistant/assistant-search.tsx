@@ -5,6 +5,7 @@ import { Command } from "cmdk";
 import {
   Bell,
   Bot,
+  Box,
   CalendarClock,
   ChartNoAxesCombined,
   House,
@@ -108,6 +109,7 @@ interface Entry {
 }
 
 function SearchCommand({ onDone }: { readonly onDone: () => void }) {
+  const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const [query, setQuery] = useState("");
   const typing = query.trim().length > 0;
   const navigate = useNavigate();
@@ -184,6 +186,7 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
     { id: "page:approvals", label: "Approvals", icon: ShieldCheck, run: () => go("/assistant/approvals") },
     { id: "page:automations", label: "Automations", icon: CalendarClock, keywords: ["schedule", "webhook", "trigger"], run: () => go("/assistant/automations") },
     { id: "page:machines", label: "Machines", icon: Monitor, keywords: ["node", "computer"], run: () => go("/assistant/machines") },
+    ...(cmaEnabled ? [{ id: "page:sandboxes", label: "Sandboxes", icon: Box, keywords: ["cma", "cloud", "environment"], run: () => go("/assistant/sandboxes") }] : []),
     { id: "page:logins", label: "Saved logins", icon: KeyRound, keywords: ["password", "machine"], run: () => go("/assistant/machines", { tab: "logins" }) },
   ];
   const settings: Entry[] = [

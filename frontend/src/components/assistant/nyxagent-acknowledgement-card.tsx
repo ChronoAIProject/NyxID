@@ -5,16 +5,24 @@ import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { AuthoredSkillCard } from "./authored-skill-card";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { ACTION_RISK_LABEL, confirmationReason } from "@/lib/assistant/nyxbot-labels";
-import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
+import {
+  ACTION_RISK_LABEL,
+  confirmationReason,
+} from "@/lib/assistant/nyxbot-labels";
+import type {
+  NyxAgentAcknowledgement,
+  NyxAgentAccessMode,
+} from "@/schemas/assistant-nyxagent";
 
 function title(row: NyxAgentAcknowledgement): string {
+  if (row.tool_name === "nyxid__cma_request_owner") return row.summary;
   // A specialist's request that NyxBot decides.
   if (row.decider === "orchestrator") {
     if (row.kind === "service") {
       return `Allow this agent to use ${row.service_name ?? row.service_slug ?? "this service"}?`;
     }
-    if (row.kind === "account") return "Allow this agent to read your NyxID account?";
+    if (row.kind === "account")
+      return "Allow this agent to read your NyxID account?";
     return `Confirm: ${row.summary}`;
   }
   if (row.kind === "service")
@@ -37,19 +45,45 @@ export function NyxAgentAcknowledgementCard({
   readonly acknowledgement: NyxAgentAcknowledgement;
   readonly accessMode?: NyxAgentAccessMode;
   readonly deciding: boolean;
-  readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
+  readonly onDecision: (
+    choice: "allow" | "deny",
+    acceptReducedScope?: boolean,
+  ) => Promise<unknown>;
 }) {
   const [error, setError] = useState<string>();
+  const cmaOwnerStep = acknowledgement.tool_name === "nyxid__cma_request_owner";
+  const desktopLink =
+    cmaOwnerStep &&
+    /^\/assistant\/cma-agents\/[0-9a-f-]{36}\?tab=desktop$/.test(
+      acknowledgement.link ?? "",
+    )
+      ? acknowledgement.link
+      : undefined;
   const confirmationsBypassed =
+    !cmaOwnerStep &&
     accessMode === "autopilot" &&
     acknowledgement.decider === "user" &&
-    !["org_connection", "delegation"].includes(acknowledgement.confirmation?.reason ?? "");
-  if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} confirmationsBypassed={confirmationsBypassed} deciding={deciding} onDecision={onDecision} />;
+    !["org_connection", "delegation"].includes(
+      acknowledgement.confirmation?.reason ?? "",
+    );
+  if (acknowledgement.authored_skill)
+    return (
+      <AuthoredSkillCard
+        acknowledgement={acknowledgement}
+        confirmationsBypassed={confirmationsBypassed}
+        deciding={deciding}
+        onDecision={onDecision}
+      />
+    );
   const label = title(acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
   if (acknowledgement.status !== "pending" || confirmationsBypassed) {
-    return <DecisionReceipt acknowledgement={acknowledgement}
-      retired={confirmationsBypassed && acknowledgement.status === "pending"} />;
+    return (
+      <DecisionReceipt
+        acknowledgement={acknowledgement}
+        retired={confirmationsBypassed && acknowledgement.status === "pending"}
+      />
+    );
   }
 
   async function decide(choice: "allow" | "deny") {
@@ -57,7 +91,11 @@ export function NyxAgentAcknowledgementCard({
     try {
       await onDecision(choice);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save your decision. Try again.");
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not save your decision. Try again.",
+      );
     }
   }
 
@@ -72,6 +110,11 @@ export function NyxAgentAcknowledgementCard({
         </p>
       ) : null}
       <p className="text-13 font-medium text-foreground">{label}</p>
+      {desktopLink ? (
+        <Button asChild variant="outline">
+          <a href={desktopLink}>Open shared desktop</a>
+        </Button>
+      ) : null}
       {acknowledgement.confirmation ? (
         <p className="text-11 text-muted-foreground">
           <span
@@ -100,34 +143,47 @@ export function NyxAgentAcknowledgementCard({
         (the `routed` branch) is unchanged.
       */}
       <p className="text-12 text-muted-foreground">
-        {acknowledgement.kind === "skills"
-          ? routed
-            ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
-            : "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor."
-          : acknowledgement.kind === "operations"
-          ? "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode."
-          : routed
-          ? "NyxBot decides this specialist's request against what you asked for. " +
-            "You can decide it here instead; the agent resumes on its own."
-          : acknowledgement.kind === "action"
-            ? "This confirmation applies once, to this action only."
-            : "This permission applies to this chat only."}
-        {routed ? "" : " Allowing lets the assistant continue as soon as it finishes its reply."}
+        {cmaOwnerStep
+          ? "Complete the requested step on this Agent’s shared desktop, then choose Done to resume the conversation."
+          : acknowledgement.kind === "skills"
+            ? routed
+              ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
+              : "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor."
+            : acknowledgement.kind === "operations"
+              ? "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode."
+              : routed
+                ? "NyxBot decides this specialist's request against what you asked for. " +
+                  "You can decide it here instead; the agent resumes on its own."
+                : acknowledgement.kind === "action"
+                  ? "This confirmation applies once, to this action only."
+                  : "This permission applies to this chat only."}
+        {routed || cmaOwnerStep
+          ? ""
+          : " Allowing lets the assistant continue as soon as it finishes its reply."}
       </p>
       {error ? (
         <p role="alert" className="text-12 text-destructive">
           {error}
         </p>
       ) : null}
-      {acknowledgement.connect_own?.supported && acknowledgement.connect_own.service_slug ? (
+      {acknowledgement.connect_own?.supported &&
+      acknowledgement.connect_own.service_slug ? (
         <ConnectOwnAction slug={acknowledgement.connect_own.service_slug} />
       ) : null}
       <div className="flex justify-end gap-2">
-        <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>
-          Deny
+        <Button
+          variant="outline"
+          disabled={deciding}
+          onClick={() => void decide("deny")}
+        >
+          {cmaOwnerStep ? "Cancel" : "Deny"}
         </Button>
-        <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>
-          Allow
+        <Button
+          variant="primary"
+          disabled={deciding}
+          onClick={() => void decide("allow")}
+        >
+          {cmaOwnerStep ? "Done" : "Allow"}
         </Button>
       </div>
     </section>
@@ -138,14 +194,33 @@ function ConnectOwnAction({ slug }: { readonly slug: string }) {
   const [href, setHref] = useState<string | null>(null);
   const [error, setError] = useState<string>();
   const connect = useCreateAssistantConnectLink();
-  return <>
-    <Button variant="outline" disabled={connect.isPending} onClick={() => {
-      setError(undefined);
-      void connect.mutateAsync({ serviceSlug: slug, personal: true }).then(setHref).catch((cause: unknown) => {
-        setError(cause instanceof Error ? cause.message : "Could not create connection link.");
-      });
-    }}>Connect your own</Button>
-    {error ? <p role="alert" className="text-12 text-destructive">{error}</p> : null}
-    <AssistantLinkModal href={href} onClose={() => setHref(null)} />
-  </>;
+  return (
+    <>
+      <Button
+        variant="outline"
+        disabled={connect.isPending}
+        onClick={() => {
+          setError(undefined);
+          void connect
+            .mutateAsync({ serviceSlug: slug, personal: true })
+            .then(setHref)
+            .catch((cause: unknown) => {
+              setError(
+                cause instanceof Error
+                  ? cause.message
+                  : "Could not create connection link.",
+              );
+            });
+        }}
+      >
+        Connect your own
+      </Button>
+      {error ? (
+        <p role="alert" className="text-12 text-destructive">
+          {error}
+        </p>
+      ) : null}
+      <AssistantLinkModal href={href} onClose={() => setHref(null)} />
+    </>
+  );
 }

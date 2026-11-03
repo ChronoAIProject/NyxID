@@ -6107,6 +6107,18 @@ async fn execute_tool_resolved_inner(
                 body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
                 .map_err(|_|super::lark_attachment_tool::refused())?);
         }
+        let cma_permit = if catalog_service_slug == Some("cma") {
+            let canonical = super::proxy_authorization::CanonicalPath::from_mcp_built(&path)?;
+            let prepared_headers = proxy_service::prepare_delegated_request(&path, query.as_deref(), &delegated)?;
+            let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_default_headers.as_slice(), target.user_service_default_headers.as_slice()]);
+            let effective = proxy_service::build_effective_outbound_headers(&target, initial, &identity_headers, &prepared_headers.delegated_headers, &server_owned_headers);
+            super::nyxbot_cma_admission::admit(db,encryption_keys,jwt_keys,config,user_id,
+                exec_ctx.org_agent_access.is_none()
+                    && exec_ctx.actor_user_id.is_none_or(|actor| actor == user_id)
+                    && exec_ctx.assistant_chat.is_none_or(|chat| !chat.guest && !super::assistant_service_execution::is_shared_chat(chat))
+                    && match &service.source { McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id == user_id, _ => true },
+                catalog_service_slug,&target,method.as_str(),&canonical.as_policy_path(),query.as_deref(),body.as_deref().unwrap_or_default(),&effective,node_route.is_some()).await?
+        } else { None };
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
             .build(
@@ -6550,6 +6562,7 @@ async fn execute_tool_resolved_inner(
             billing_egress_permit,
             egress_guard.as_ref(),
             resource_proof.as_ref(),
+            cma_permit.as_ref(),
         )
         .await
         {
@@ -6675,6 +6688,7 @@ async fn execute_tool_resolved_inner(
                 admission.receipt(db, chat, assistant_auto).await;
             }
         }
+        let body_text = super::assistant_service_execution::cma::credential_setup_result(catalog_service_slug,&target.service,status,&body_text).unwrap_or(body_text);
         Ok(McpToolExecutionOutcome::Response(ToolResponse {
             resources: None,
             concurrency: None,

@@ -2478,7 +2478,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
         && !events
             .iter()
-            .any(|e| e.kind == super::async_service_operation::EVENT_KIND)
+            .any(super::async_service_operation::watch_delivery_event)
     {
         // A queued owner request retains its own authority even
         // when the preceding turn's guest is no longer eligible.
@@ -3468,8 +3468,8 @@ pub async fn push_events(
         .map_err(transactions::map_transaction_error)
 }
 
-/// Ordinary notices can be evicted only when no invocation continuation is
-/// queued. Delegated results follow the same FIFO eviction as ordinary notices;
+/// Ordinary notices can be evicted only when no invocation continuation or CMA
+/// decision wake-up is queued. Delegated results follow ordinary FIFO eviction;
 /// images must not monopolize the queue. Accepted source questions are never
 /// evicted. Capacity refusal aborts transactional producers unless they
 /// explicitly degrade optional publication without discarding their source work.
@@ -3509,7 +3509,10 @@ pub async fn append_events_in_session(
         }
         if row.pending_events.len() >= MAX_PENDING_EVENTS {
             if event.invocation_id.is_some()
-                || row.pending_events.iter().any(|e| e.invocation_id.is_some())
+                || super::async_service_operation::cma_wake_event(event)
+                || row.pending_events.iter().any(|e| {
+                    e.invocation_id.is_some() || super::async_service_operation::cma_wake_event(e)
+                })
             {
                 return Err(AppError::Conflict("Assistant event queue is full".into()));
             }

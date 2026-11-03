@@ -3382,7 +3382,7 @@ fn dispatch_service_tool<'a>(
         .await;
         if let Some(watch) = &async_watch
             && let Err(error) = crate::services::async_service_operation::submitted(
-                &state.db,
+                state,
                 watch,
                 execution.as_ref().ok(),
             )
@@ -4216,6 +4216,7 @@ async fn handle_account_tool(
         keys: &state.encryption_keys,
         http: &state.http_client,
         config: &state.config,
+        jwt_keys: &state.jwt_keys,
         token_exchange_cache: &state.token_exchange_cache,
         node_manager: &state.node_ws_manager,
     };
@@ -4797,7 +4798,7 @@ async fn handle_meta_call_tool(
     .await;
     if let Some(watch) = &async_watch
         && let Err(error) = crate::services::async_service_operation::submitted(
-            &state.db,
+            state,
             watch,
             execution.as_ref().ok(),
         )

@@ -2,6 +2,8 @@ import { Check, CircleAlert, Clock3, ExternalLink, Radio, Workflow } from "lucid
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { CmaGlyph } from "@/components/service-icons/cma";
 import { Button } from "@/components/ui/button";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { cn } from "@/lib/utils";
 import { isCmaOperationPending, type CmaOperation } from "@/schemas/cma-operation";
 
@@ -76,6 +78,7 @@ const phases: Record<string, string> = {
 };
 
 export function CmaOperationCard({ operation }: { readonly operation: CmaOperation }) {
+  const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const { label, tone } = presentation(operation);
   const pending = isCmaOperationPending(operation);
   const accepted = Boolean(operation.operation_id || (operation.kind === "cma_agent" && operation.status));
@@ -87,6 +90,9 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
   ];
   const lastChecked = operation.checked_at ? new Date(operation.checked_at) : null;
   const cmaUrl = safeCmaUrl(operation.cma_url);
+  const executionUrl = cmaEnabled && operation.agent_ref_id && /^[0-9a-f-]{36}$/i.test(operation.agent_ref_id)
+    ? `/assistant/cma-agents/${encodeURIComponent(operation.agent_ref_id)}${operation.response_id ? `?${new URLSearchParams({ response: operation.response_id })}` : ""}`
+    : undefined;
   return (
     <section
       aria-label="CMA delegation"
@@ -124,7 +130,10 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
         {tone === "warning" && !pending && <p className="mt-3 flex items-start gap-1.5 text-11 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
         {tone === "success" && operation.reason?.startsWith("result_") && <p className="mt-3 text-11 text-zinc-400">CMA finished, but its final result is unavailable here.</p>}
         {operation.state === "cancelled" && <p className="mt-3 text-11 text-zinc-400">Tracking ended. CMA may still be running.</p>}
-        {cmaUrl && <Button asChild variant="primary" className="mt-4 w-full">
+        {executionUrl && <Button asChild variant="primary" className="mt-4 w-full">
+          <a href={executionUrl}>View execution <Workflow aria-hidden className="size-3" /></a>
+        </Button>}
+        {cmaUrl && <Button asChild variant={executionUrl ? "outline" : "primary"} className="mt-4 w-full">
           <a href={cmaUrl} target="_blank" rel="noopener noreferrer">
             View in CMA <ExternalLink aria-hidden className="size-3" />
           </a>
