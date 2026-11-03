@@ -1,6 +1,7 @@
 import { useCatalogEntry } from "@/hooks/use-keys";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
+import { ConnectLinkDetailRow } from "@/components/shared/connection-detail-row";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useEffect, useRef, useState } from "react";
@@ -47,7 +48,6 @@ import {
   validateConnectOAuthForm,
 } from "@/schemas/connect-links";
 import { useAuthStore } from "@/stores/auth-store";
-import { cn } from "@/lib/utils";
 
 const CLICK_THROTTLE_MS = 750;
 
@@ -1030,29 +1030,6 @@ export function RequestDetails({
   );
 }
 
-export function ConnectLinkDetailRow({
-  label,
-  value,
-  capitalizeValue = false,
-}: {
-  readonly label: string;
-  readonly value: string;
-  readonly capitalizeValue?: boolean;
-}) {
-  return (
-    <div className="flex justify-between gap-4 px-4 py-1 text-xs">
-      <span className="text-muted-foreground">{label}</span>
-      <span
-        className={cn(
-          "min-w-0 break-words text-right font-medium text-foreground",
-          capitalizeValue && "capitalize",
-        )}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
 
 function DeviceCodePanel({
   code,
@@ -1173,3 +1150,5 @@ function StandaloneConnectShell({ children }: { children: React.ReactNode }) {
     </main>
   );
 }
+
+export { ConnectLinkDetailRow };

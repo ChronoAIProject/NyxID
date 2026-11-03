@@ -479,7 +479,8 @@ export function ConfirmDispatcher({
             onSuccess={onSuccess}
             onSlugPicked={onSlugPicked}
           />
-          <CancelLink onCancel={onCancel} />
+          {/* Centred under the action, like the connector page's Decline. */}
+          <CancelLink onCancel={onCancel} centered />
         </div>
       )
     case "service-account-create":
@@ -750,12 +751,18 @@ function WizardLostPanel() {
   )
 }
 
-function CancelLink({ onCancel }: { readonly onCancel: () => void }) {
+function CancelLink({
+  onCancel,
+  centered = false,
+}: {
+  readonly onCancel: () => void
+  readonly centered?: boolean
+}) {
   return (
     <button
       type="button"
       onClick={onCancel}
-      className="self-start text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+      className={`${centered ? "self-center" : "self-start"} text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground`}
     >
       Cancel and return to terminal
     </button>

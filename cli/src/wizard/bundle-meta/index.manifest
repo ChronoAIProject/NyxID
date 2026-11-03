@@ -118,6 +118,7 @@ frontend/src/components/service-icons/ornn-api.tsx
 frontend/src/components/service-icons/talos.tsx
 frontend/src/components/shared/async-option-select.tsx
 frontend/src/components/shared/connection-arc.tsx
+frontend/src/components/shared/connection-detail-row.tsx
 frontend/src/components/shared/connection-identity-heading.tsx
 frontend/src/components/shared/copyable-url-callout.tsx
 frontend/src/components/shared/credential-binding-choice.tsx

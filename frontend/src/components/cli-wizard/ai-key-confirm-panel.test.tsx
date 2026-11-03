@@ -1294,11 +1294,13 @@ describe("CLI wizard OAuth app choice", () => {
     });
 
     expect(
-      await screen.findByRole("heading", { name: "Connect your GitHub to NyxID" }),
+      await screen.findByRole("heading", { name: "Connect GitHub to NyxID" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("img", { name: "NyxID connects to GitHub" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("Requested by")).toBeInTheDocument();
+    expect(screen.getByText("Your NyxID CLI")).toBeInTheDocument();
     expect(screen.queryByText(/^Auth:/)).not.toBeInTheDocument();
   });
 

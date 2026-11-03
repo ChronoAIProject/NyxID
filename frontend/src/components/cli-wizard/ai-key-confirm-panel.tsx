@@ -1,5 +1,6 @@
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
+import { ConnectLinkDetailRow } from "@/components/shared/connection-detail-row";
 import {
   OAuthClientSourceChoice,
   type OAuthClientSource,
@@ -27,6 +28,7 @@ import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
+import { cn } from "@/lib/utils";
 import type { ScopeCatalogEntry } from "@/types/keys";
 import { ArrowRight, Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
@@ -293,15 +295,26 @@ export function AiKeyConfirm({
   const serviceStep = !onCatalogStep && !onCustomStep && !entryErrorMessage;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div
+      className={cn(
+        "flex flex-col gap-4",
+        // Same reading column as the hosted connector and OAuth consent pages.
+        serviceStep && "mx-auto w-full max-w-[560px] gap-6",
+      )}
+    >
       {serviceStep && entry ? (
-        <ConnectionIdentityHeading
-          serviceSlug={entry.slug}
-          serviceName={entry.name}
-          iconUrl={entry.icon_url}
-          title={`Connect your ${entry.name} to NyxID`}
-          subtitle="Your CLI asked to add this service. Review the details, then continue."
-        />
+        <>
+          <ConnectionIdentityHeading
+            serviceSlug={entry.slug}
+            serviceName={entry.name}
+            iconUrl={entry.icon_url}
+            title={`Connect ${entry.name} to NyxID`}
+            subtitle="Your CLI asked to add this service. Review the details, then continue."
+          />
+          <div className="space-y-1 border-y border-border py-4">
+            <ConnectLinkDetailRow label="Requested by" value="Your NyxID CLI" />
+          </div>
+        </>
       ) : (
         <div className="flex flex-col gap-1">
           <h2 className="font-serif text-28 font-normal">{title}</h2>
