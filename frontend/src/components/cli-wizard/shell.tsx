@@ -28,14 +28,27 @@ export interface WizardShellProps {
   readonly step?: WizardStep
   readonly context: "local" | "pair"
   readonly localOrigin?: string
+  /**
+   * Single-form steps (a picked service) use the narrow column of the hosted
+   * connector and OAuth consent pages; the catalog grid keeps the wide one.
+   */
+  readonly narrow?: boolean
   readonly children: ReactNode
 }
 
-export function WizardShell({ step, context, localOrigin, children }: WizardShellProps) {
+export function WizardShell({
+  step,
+  context,
+  localOrigin,
+  narrow = false,
+  children,
+}: WizardShellProps) {
   useApplyTheme()
   return (
     <div className="min-h-screen bg-background text-foreground">
-    <div className="mx-auto flex max-h-screen w-full max-w-[1040px] flex-col px-6 pt-10 pb-6">
+    <div
+      className={`mx-auto flex max-h-screen w-full ${narrow ? "max-w-[640px]" : "max-w-[1040px]"} flex-col px-6 pt-10 pb-6`}
+    >
       <header className="mb-6 flex items-center justify-between">
         <div className="flex items-center">
           <NyxidLogo className="h-9 w-auto" />

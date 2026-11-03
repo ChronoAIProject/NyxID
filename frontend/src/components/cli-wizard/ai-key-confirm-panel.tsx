@@ -299,7 +299,7 @@ export function AiKeyConfirm({
       className={cn(
         "flex flex-col gap-4",
         // Same reading column as the hosted connector and OAuth consent pages.
-        serviceStep && "mx-auto w-full max-w-[560px] gap-6",
+        serviceStep && "mx-auto w-full max-w-[560px] gap-5",
       )}
     >
       {serviceStep && entry ? (

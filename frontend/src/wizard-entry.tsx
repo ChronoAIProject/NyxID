@@ -293,7 +293,13 @@ function WizardApp() {
   }
 
   return (
-    <WizardShell context="local" step={step}>
+    <WizardShell
+      context="local"
+      step={step}
+      narrow={
+        bootstrap.flow === "ai-key" && slugPicked && stage.phase === "claimed"
+      }
+    >
       {shouldShowUpstreamBanner(stage.phase, upstreamError) ? (
         <UpstreamErrorBanner
           kind={upstreamError!}
