@@ -1,0 +1,31 @@
+import type { ReactNode } from "react";
+import "./workspace-pages.css";
+
+export function WorkspacePageHeader({
+  title,
+  description,
+  actions,
+}: {
+  readonly title: string;
+  readonly description: string;
+  readonly actions?: ReactNode;
+}) {
+  return (
+    <header
+      data-workspace-header=""
+      className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
+    >
+      <div className="min-w-0 space-y-2">
+        <h1 className="text-22 font-bold leading-tight tracking-tight sm:text-28">
+          {title}
+        </h1>
+        <p className="max-w-2xl text-12 text-muted-foreground">{description}</p>
+      </div>
+      {actions ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {actions}
+        </div>
+      ) : null}
+    </header>
+  );
+}

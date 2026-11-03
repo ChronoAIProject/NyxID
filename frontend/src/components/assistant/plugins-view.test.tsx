@@ -49,14 +49,17 @@ vi.mock("@tanstack/react-router", () => ({
     search,
     children,
     className,
+    ...rest
   }: {
     readonly to: string;
     readonly params?: Record<string, string>;
     readonly search?: Record<string, string>;
     readonly children?: ReactNode;
     readonly className?: string;
+    readonly "aria-label"?: string;
   }) => (
     <a
+      {...rest}
       href="#"
       className={className}
       data-to={to}
@@ -179,10 +182,10 @@ describe("PluginsView", () => {
 
   it("splits connectors into real connections and unconnected catalog entries", () => {
     render(<PluginsView />);
-    expect(screen.getByText("Added")).toBeInTheDocument();
-    expect(screen.getByText("Available to add")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText("Browse")).toBeInTheDocument();
     // Both /keys rows are Added — including the custom (non-catalog) one.
-    expect(screen.getAllByText("Connected")).toHaveLength(2);
+    expect(screen.getAllByText("Connected · 1 connection")).toHaveLength(2);
     expect(screen.getByText("Internal Admin API")).toBeInTheDocument();
     // Connected catalog slugs are removed from Available: exactly one OpenAI card.
     expect(screen.getAllByText("OpenAI")).toHaveLength(1);
@@ -213,6 +216,30 @@ describe("PluginsView", () => {
     const advanced = screen.getByRole("link", { name: "Advanced setup" });
     expect(advanced).toHaveAttribute("data-to", "/keys");
     expect(JSON.parse(advanced.getAttribute("data-search") ?? "null")).toEqual({ tab: "services", action: "add-service" });
+  });
+
+  it("creates a personal Chrono LLM model connection and keeps model setup paths explicit", async () => {
+    mockLoaded({ catalogRows: [...catalog, { ...catalog[1]!, slug: "chrono-llm", name: "Chrono LLM", platform_key: { available: true } } as CatalogEntry] });
+    mocks.createConnect.mockResolvedValue("/connect/chrono-llm");
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("button", { name: "Add a model connection" }));
+    const picker = screen.getByRole("dialog");
+    expect(within(picker).getByRole("link", { name: "Custom OpenAI-compatible endpoint" })).toHaveAttribute("data-search", JSON.stringify({ tab: "services", action: "add-service" }));
+    await user.click(within(picker).getByRole("button", { name: "Chrono LLM" }));
+    expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "chrono-llm", personal: true });
+    expect(await screen.findByRole("dialog", { name: "Hosted connection" })).toBeInTheDocument();
+  });
+
+  it("keeps secondary org actions inside the same card without activating Manage", async () => {
+    mockLoaded({ keyRows: [{ ...keys[0]!, credential_source: { type: "org", role: "viewer" } } as KeyInfo] });
+    mocks.createConnect.mockResolvedValue("/connect/openai");
+    render(<PluginsView />);
+    const own = screen.getByRole("button", { name: "Connect your own" });
+    expect(own.closest("[data-plugin-card]")).toBe(screen.getByRole("button", { name: "Manage OpenAI" }).closest("[data-plugin-card]"));
+    await userEvent.setup().click(own);
+    expect(mocks.useKey).not.toHaveBeenCalled();
+    expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "openai", personal: true });
   });
 
   it("connects from the keyboard", async () => {
@@ -263,6 +290,7 @@ describe("PluginsView", () => {
     render(<PluginsView />);
     await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
     await user.click(await screen.findByRole("button", { name: "Replace" }));
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("New credential"), "sk-new-secret");
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(mutate).toHaveBeenCalledWith(
@@ -369,7 +397,7 @@ describe("PluginsView", () => {
     expect(screen.getByRole("button", { name: "Manage Internal Admin API" })).toBeInTheDocument();
   });
 
-  it("hides mutation controls if a connection becomes platform-managed after listing", async () => {
+  it.each([{ auto_connected: true }, { auto_connected: false, credential_binding: "platform" }])("hides mutation controls if a connection becomes platform-managed after listing (%j)", async (binding) => {
     mocks.useKey.mockReturnValue({
       data: {
         ...keys[0],
@@ -378,7 +406,7 @@ describe("PluginsView", () => {
         proxy_url: "http://localhost:3011/api/v1/proxy/s/openai",
         last_used_at: null,
         granted_scopes: null,
-        auto_connected: true,
+        ...binding,
       },
       isLoading: false,
     });
@@ -486,7 +514,7 @@ describe("PluginsView", () => {
       expect.objectContaining({ id: "assistant-plugins-load-failed" }),
     );
     // The view is still standing: heading, search, and the honest empty copy.
-    expect(screen.getByText("Added")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(screen.getByRole("textbox")).toBeEnabled();
     expect(
       screen.getByText("Connected services could not be loaded right now."),
@@ -501,7 +529,7 @@ describe("PluginsView", () => {
   it("keeps the Added section with an empty state when nothing is connected", () => {
     mockLoaded({ keyRows: [] });
     render(<PluginsView />);
-    expect(screen.getByText("Added")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(screen.getByText(/No connected services yet/)).toBeInTheDocument();
     // All catalog entries are available when nothing is connected.
     expect(screen.getAllByRole("button", { name: /^Connect / })).toHaveLength(

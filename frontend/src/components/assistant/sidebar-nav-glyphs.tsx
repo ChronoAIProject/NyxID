@@ -30,8 +30,8 @@ function useRowHoverPlayback(ref: RefObject<SVGSVGElement | null>) {
   const [playing, setPlaying] = useState(false);
 
   useEffect(() => {
-    const row = ref.current?.closest("a, button");
-    if (!row) return;
+    // Resolve the live host per event: router/Slot updates may replace or move
+    // a row while retaining the glyph. Binding once to closest() loses hover.
     const enter = () => {
       hovered.current = true;
       plays.current = 0;
@@ -42,11 +42,28 @@ function useRowHoverPlayback(ref: RefObject<SVGSVGElement | null>) {
       hovered.current = false;
       setHovering(false);
     };
-    row.addEventListener("pointerenter", enter);
-    row.addEventListener("pointerleave", leave);
+    const over = (event: PointerEvent) => {
+      const row = ref.current?.closest("a, button");
+      const inside = row && event.target instanceof Node && row.contains(event.target);
+      if (!inside) {
+        if (hovered.current) leave();
+        return;
+      }
+      if (!(event.relatedTarget instanceof Node && row.contains(event.relatedTarget))) enter();
+    };
+    const out = (event: PointerEvent) => {
+      const row = ref.current?.closest("a, button");
+      if (row && event.target instanceof Node && row.contains(event.target) && !(event.relatedTarget instanceof Node && row.contains(event.relatedTarget))) leave();
+    };
+    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const motionChanged = () => { if (motion.matches) setPlaying(false); };
+    document.addEventListener("pointerover", over);
+    document.addEventListener("pointerout", out);
+    motion.addEventListener("change", motionChanged);
     return () => {
-      row.removeEventListener("pointerenter", enter);
-      row.removeEventListener("pointerleave", leave);
+      document.removeEventListener("pointerover", over);
+      document.removeEventListener("pointerout", out);
+      motion.removeEventListener("change", motionChanged);
     };
   }, [ref]);
 
@@ -97,7 +114,7 @@ function useHoverFrameLoop(
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
+    return () => { cancelAnimationFrame(frame); drawRef.current(0); };
   }, [playing, endCycle, cycleMs]);
 
   return playing;
@@ -289,7 +306,7 @@ export function PluginsGlyph({ className }: GlyphProps) {
   });
 
   return (
-    <svg ref={ref} {...SVG_ATTRS} className={className}>
+    <svg ref={ref} {...SVG_ATTRS} className={className} data-playing={playing || undefined}>
       <rect width="7" height="7" x="3" y="3" rx="1" />
       {playing ? (
         <path ref={tileRef} d={tilePath(0)} />
@@ -394,11 +411,11 @@ function markPath({ fold, split, spinDeg }: MarkState): string {
 export function ApprovalsGlyph({ className }: GlyphProps) {
   const ref = useRef<SVGSVGElement>(null);
   const markRef = useRef<SVGPathElement>(null);
-  useHoverFrameLoop(ref, MARK_CYCLE_MS, (ms) => {
+  const playing = useHoverFrameLoop(ref, MARK_CYCLE_MS, (ms) => {
     markRef.current?.setAttribute("d", markPath(markState(ms)));
   });
   return (
-    <svg ref={ref} {...SVG_ATTRS} className={className}>
+    <svg ref={ref} {...SVG_ATTRS} className={className} data-playing={playing || undefined}>
       <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
       <path ref={markRef} d={markPath(TICK_STATE)} />
     </svg>

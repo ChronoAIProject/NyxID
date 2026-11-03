@@ -21,8 +21,8 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
 }));
 // The connectors tab's Advanced setup link is a router Link.
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, className }: { readonly children?: import("react").ReactNode; readonly className?: string }) => (
-    <a href="#" className={className}>{children}</a>
+  Link: ({ children, className, to, search, ...rest }: import("react").AnchorHTMLAttributes<HTMLAnchorElement> & { readonly to?: string; readonly search?: Record<string, unknown> }) => (
+    <a href="#" className={className} data-to={to} data-search={JSON.stringify(search)} {...rest}>{children}</a>
   ),
 }));
 vi.mock("@/hooks/use-keys", () => ({
@@ -59,6 +59,7 @@ beforeEach(() => {
       pins[skills[1]!] = sent.skills;
       return json({ status: 200, body: { agent_id: skills[1], revision: 8, skills: sent.skills, metadata: {} } });
     }
+    if (url === `${root}/skills/catalog?q=&page=1`) return json({ status: 200, body: { page: 1, total_pages: 1, items: [] } });
     if (url === `${root}/skills/catalog?q=writing&page=1`) {
       return json({ status: 200, body: { page: 1, total_pages: 1, items: [
         { id: "research", name: "research", description: "Research guide" },
@@ -102,7 +103,7 @@ function puts(agent: string) {
 it("manages NyxBot by default and lists its attached skills", async () => {
   await openSkills();
   expect(screen.getByRole("combobox", { name: "Agent for skills" })).toHaveTextContent("NyxBot");
-  const list = await screen.findByRole("region", { name: "Attached skills" });
+  const list = await screen.findByRole("region", { name: "Attached to NyxBot · 1/16" });
   expect(within(list).getByText("Attached to NyxBot · 1/16")).toBeVisible();
   expect(within(list).getByText("research")).toBeVisible();
   expect(within(list).getByText("1.0.0")).toBeVisible();
@@ -124,9 +125,10 @@ it("marks attached catalog skills and attaches others at an exact version and sh
   const user = await openSkills();
   await screen.findByText("Attached to NyxBot · 1/16");
   await user.type(screen.getByPlaceholderText("Search the catalog..."), "writing");
-  // research is already pinned, so its card is inert.
+  // An attached catalog result opens the agent's existing skill settings.
   expect(await screen.findByText("Research guide")).toBeVisible();
   expect(screen.queryByRole("button", { name: "Attach research" })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "View research" })).toHaveAttribute("data-search", JSON.stringify({ agent: "nyxbot", details: "skills" }));
   await user.click(screen.getByRole("button", { name: "Attach style" }));
   await waitFor(() => expect(puts("nyxbot")).toHaveLength(1));
   // The newest non-deprecated version, pinned from its verified preview.
@@ -146,7 +148,7 @@ it("detaches a pin with the observed revision", async () => {
   const user = await openSkills();
   await user.click(await screen.findByRole("button", { name: "Detach research" }));
   await waitFor(() => expect(puts("nyxbot")).toEqual([{ expected_revision: 7, skills: [] }]));
-  expect(await screen.findByText("No skills attached. Search the catalog to attach one.")).toBeVisible();
+  expect(await screen.findByText("No skills attached")).toBeVisible();
 });
 
 it("shows a refused change", async () => {
@@ -155,4 +157,15 @@ it("shows a refused change", async () => {
   await user.click(await screen.findByRole("button", { name: "Detach research" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Agent skills changed; reload and try again");
   expect(screen.getByText("research")).toBeVisible();
+});
+
+it("browses the real empty catalog query and keeps the 16-skill cap", async () => {
+  pins.nyxbot = Array.from({ length: 16 }, (_, i) => pin(`pin-${i}`, `Skill ${i}`, "1.0.0", "a"));
+  const user = await openSkills();
+  expect(await screen.findByText("Attached to NyxBot · 16/16")).toBeVisible();
+  expect(fetchMock).toHaveBeenCalledWith(`${root}/skills/catalog?q=&page=1`, expect.anything());
+  expect(screen.getByText("This agent already has 16 skills. Detach one first.")).toBeVisible();
+  await user.type(screen.getByPlaceholderText("Search the catalog..."), "writing");
+  expect(await screen.findByRole("button", { name: "Attach style" })).toBeDisabled();
+  expect(puts("nyxbot")).toEqual([]);
 });

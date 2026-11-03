@@ -277,6 +277,23 @@ Drawer deep links focus the selected panel heading; detail Back restores focus
 to its disclosure. Keep the drawer full width on mobile and `sm:max-w-lg` on
 desktop. All spacing, text and icons follow the assistant display scale.
 
+### Assistant workspace pages
+
+Approvals, Plugins, Automations and Machines use `WorkspacePageHeader` inside the
+workspace's common scroll and padding container. Titles, description width and
+wrapping action slots share one scale. Approvals use Pending/History segments and
+local-day history groups; the workspace wrapper adapts the existing approval
+block without changing its decision handling or transcript presentation.
+
+Plugin catalog cards share `PluginCard` and a `13.5rem` height in every section,
+including skill search results. Rem sizing follows the assistant text setting.
+Names and status lines truncate with native titles, descriptions reserve two
+lines, and the footer stays at the bottom. The primary native button/link covers
+the card; secondary controls are siblings inside the footer. Neutral overlay
+hover and an outer focus ring keep the full card actionable without nested
+buttons. Attached skills remain inset grouped rows. Platform-bound and automatic
+connections stay hidden; personal model setup is explicit in Models.
+
 ### Sheet (slide-over panel)
 - Used for inline detail/edit on list pages where a full route is overkill (e.g. `admin-invite-codes` row detail). `sm:max-w-lg`, otherwise inherits Dialog tokens. Prefer Sheet over Dialog when the panel contains substantial reading content alongside actions.
 
@@ -565,6 +582,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | Workspace page family and equal-size plugin cards | Shared headers and segmented status views align workspace pages. Connectors and skill results share a text-scaled card size with native full-card actions and contained secondary controls; attached skills remain grouped rows. |
 | 2026-11-04 | NyxBot inset grouped forms and segmented navigation | One neutral card per group, inset hairlines, borderless controls and external helper text replace nested boxes. Mounted tabs preserve drafts; detail navigation keeps independent revision-fenced saves. The subtle `border-border/50` edge preserves light-theme contrast. |
 | 2026-04-01 | Initial design system created | Created by /design-consultation + /design-shotgun. User reviewed 7 directions and chose refined purple with warm neutrals. |
 | 2026-04-01 | Keep purple, shift accent | User chose to keep purple identity but shift from #8b5cf6 to #9775fa (warmer, less saturated). |

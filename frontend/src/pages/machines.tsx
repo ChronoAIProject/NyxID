@@ -25,7 +25,7 @@ import { parseMachinesSearch } from "@/lib/machine-search";
 import { SavedLoginsPage } from "@/pages/saved-logins";
 import { MachineActivity } from "@/components/shared/machine-activity";
 import { MachineSettings } from "@/components/shared/machine-settings";
-import { PageHeader } from "@/components/shared/page-header";
+import { WorkspacePageHeader } from "@/components/assistant/workspace-page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -170,6 +170,31 @@ export function MachinesPage() {
   }
   return (
     <div className="space-y-6">
+      <WorkspacePageHeader
+        title="Machines"
+        description="Remote and self-hosted computers for authorized agents and clients."
+        actions={
+          <div className="flex flex-wrap gap-2">
+            {remoteAdmission && (
+              <AddCtaButton
+                label="Create remote machine"
+                onClick={() =>
+                  void navigate({
+                    to: "/assistant/machines/new",
+                    search: { where: "hosted" },
+                  })
+                }
+              />
+            )}
+            <AddCtaButton
+              label="Add a machine"
+              onClick={() =>
+                void navigate({ to: "/assistant/machines/new" })
+              }
+            />
+          </div>
+        }
+      />
       <Tabs
         value={search.tab ?? "machines"}
         onValueChange={(tab) =>
@@ -184,31 +209,6 @@ export function MachinesPage() {
           <TabsTrigger value="logins">Saved logins</TabsTrigger>
         </TabsList>
         <TabsContent value="machines" className="mt-6 space-y-6">
-          <PageHeader
-            title="Machines"
-            description="Remote and self-hosted computers for authorized agents and clients."
-            actions={
-              <div className="flex flex-wrap gap-2">
-                {remoteAdmission && (
-                  <AddCtaButton
-                    label="Create remote machine"
-                    onClick={() =>
-                      void navigate({
-                        to: "/assistant/machines/new",
-                        search: { where: "hosted" },
-                      })
-                    }
-                  />
-                )}
-                <AddCtaButton
-                  label="Add a machine"
-                  onClick={() =>
-                    void navigate({ to: "/assistant/machines/new" })
-                  }
-                />
-              </div>
-            }
-          />
           <section aria-label="Remote machines" className="space-y-3">
             <h3 className="text-15 font-semibold">Remote machines</h3>
             <p className="text-12 text-muted-foreground">

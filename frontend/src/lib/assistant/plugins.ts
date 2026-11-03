@@ -52,6 +52,7 @@ export interface ConnectorCardItem {
 export interface ConnectorItems {
   readonly added: readonly ConnectorCardItem[];
   readonly available: readonly ConnectorCardItem[];
+  readonly models: readonly ConnectorCardItem[];
 }
 
 /** Tile initial: first letters of the first two words ("OpenClaw Gateway"
@@ -210,7 +211,7 @@ export function deriveConnectorItems(
   const bySlug = new Map<string, KeyInfo[]>();
   const custom: KeyInfo[] = [];
   for (const key of keys) {
-    if (key.auto_connected) continue;
+    if (key.auto_connected || key.credential_binding === "platform") continue;
     if (key.catalog_service_slug) {
       const group = bySlug.get(key.catalog_service_slug) ?? [];
       group.push(key);
@@ -227,8 +228,9 @@ export function deriveConnectorItems(
       ...custom.map(addedCustomItem),
     ],
     available: catalog
-      .filter((entry) => !connectedSlugs.has(entry.slug))
+      .filter((entry) => !connectedSlugs.has(entry.slug) && !entry.inference && entry.slug !== "chrono-llm" && !entry.platform_key?.available)
       .map(availableItem),
+    models: catalog.filter((entry) => entry.inference || entry.slug === "chrono-llm").map(availableItem),
   };
 }
 

@@ -81,7 +81,19 @@ export function GroupedDraftNavigation({ active }: { readonly active: boolean })
   useEffect(() => {
     if (!active || !router || !confirm) return;
     return router.history.block({
-      blockerFn: async () => !(await confirm()),
+      blockerFn: async ({ action, currentLocation, nextLocation }) => {
+        const current = new URLSearchParams(currentLocation.search);
+        const next = new URLSearchParams(nextLocation.search);
+        // A bare agent link adopts its latest thread asynchronously. That
+        // canonical replacement retains this drawer and every draft in it.
+        const sameDrawer = action === "REPLACE" &&
+          currentLocation.pathname === nextLocation.pathname &&
+          current.get("agent") && current.get("details") &&
+          current.get("agent") === next.get("agent") &&
+          current.get("details") === next.get("details") &&
+          current.get("proposal") === next.get("proposal");
+        return sameDrawer ? false : !(await confirm());
+      },
       enableBeforeUnload: () => dirty,
     });
   }, [active, router, confirm, dirty]);

@@ -49,7 +49,7 @@ import {
   type ScheduleSpec,
 } from "@/schemas/automations";
 import type { TriggerResponse } from "@/schemas/triggers";
-import { PageHeader } from "@/components/shared/page-header";
+import { WorkspacePageHeader } from "@/components/assistant/workspace-page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
@@ -176,7 +176,7 @@ export function AutomationsPage() {
   }
   return (
     <div className="space-y-6">
-      <PageHeader
+      <WorkspacePageHeader
         title="Automations"
         description="Scheduled work, reminders and webhook events for your agents."
         actions={

@@ -1,0 +1,112 @@
+/* Rem dimensions follow the assistant reading scale across every catalog. */
+.assistant-plugin-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+}
+.assistant-plugin-card {
+  height: 13.5rem;
+}
+.assistant-plugin-card > p {
+  min-height: 3.25em;
+}
+.workspace-status-success {
+  color: color-mix(in srgb, var(--color-success) 55%, var(--color-foreground));
+}
+.workspace-status-destructive {
+  color: color-mix(
+    in srgb,
+    var(--color-destructive) 70%,
+    var(--color-foreground)
+  );
+}
+/* Keep the chat block's decision state machine; only its workspace wrapper
+   adapts the presentation. These rules never affect transcript approvals. */
+.assistant-workspace-approval > section {
+  width: 100%;
+  max-width: none;
+  border-color: color-mix(in srgb, var(--color-border) 50%, transparent);
+  background: var(--color-card);
+  box-shadow: none;
+}
+.assistant-workspace-approval > section > div:first-child {
+  position: relative;
+  align-items: center;
+  border: 0;
+  padding-block: 0.75rem;
+}
+.assistant-workspace-approval > section > div:first-child > div:first-child,
+.assistant-workspace-approval
+  > section
+  > div:first-child
+  > div:last-child
+  > :first-child {
+  display: none;
+}
+.assistant-workspace-approval > section > div:first-child > div:nth-child(2) {
+  display: none;
+}
+.assistant-workspace-approval h3 {
+  font-size: var(--text-12);
+  font-weight: 500;
+}
+.assistant-workspace-approval > section > div:nth-child(2) {
+  padding-top: 0;
+}
+.assistant-workspace-approval > section > div:nth-child(2) > p:first-child {
+  font-size: var(--text-12);
+  font-weight: 400;
+}
+.assistant-workspace-approval > section > div:nth-child(2) > div > span {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  font-size: var(--text-11);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.assistant-workspace-approval
+  > section
+  > div:nth-child(2)
+  > div
+  > span:first-child {
+  display: none;
+}
+.assistant-workspace-approval > section > div:nth-child(2) > div {
+  gap: 0.75rem;
+}
+.assistant-workspace-approval > section > div:last-child {
+  position: relative;
+  border: 0;
+  background: transparent;
+}
+.assistant-workspace-approval > section > div:last-child::before {
+  position: absolute;
+  content: "";
+  top: 0;
+  left: 1rem;
+  right: 0;
+  height: 1px;
+  background: color-mix(in srgb, var(--color-border) 50%, transparent);
+}
+.assistant-workspace-approval > section > div:last-child > button {
+  border-color: transparent;
+}
+.assistant-workspace-approval > section > div:last-child > button:first-child {
+  color: color-mix(in srgb, var(--color-success) 55%, var(--color-foreground));
+}
+.assistant-workspace-approval > section > div:last-child > button:nth-child(2) {
+  color: color-mix(
+    in srgb,
+    var(--color-destructive) 70%,
+    var(--color-foreground)
+  );
+}
+@media (max-width: 639px) {
+  .assistant-workspace-approval > section > div:first-child {
+    flex-wrap: wrap;
+  }
+  .assistant-workspace-approval > section > div:last-child > span {
+    width: 100%;
+  }
+}
