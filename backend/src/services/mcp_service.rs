@@ -544,7 +544,10 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
             let mut operations = service
                 .endpoints
                 .iter()
-                .filter(|endpoint| !super::lark_attachment_tool::is_attachment_operation(endpoint))
+                .filter(|endpoint| {
+                    !super::lark_attachment_tool::is_attachment_operation(endpoint)
+                        && !super::lark_im_tool::image_candidate(endpoint)
+                })
                 .filter_map(|endpoint| {
                     let metadata = service
                         .durable_endpoint_metadata
@@ -2992,7 +2995,10 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
                 response_description: None,
                 response: OperationResponseContract::default(),
             })
-            .filter(|endpoint| !super::lark_attachment_tool::is_attachment_operation(endpoint))
+            .filter(|endpoint| {
+                !super::lark_attachment_tool::is_attachment_operation(endpoint)
+                    && !super::lark_im_tool::image_candidate(endpoint)
+            })
             .collect();
 
         if endpoints.is_empty() {
@@ -3213,6 +3219,12 @@ pub(crate) fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Valu
             .insert("required".into(), serde_json::Value::Array(required));
     }
 
+    if super::lark_im_tool::kind(endpoint).is_some()
+        && let Some(body) = &endpoint.request_body_schema
+    {
+        schema["oneOf"] = body["oneOf"].clone();
+        schema["additionalProperties"] = serde_json::json!(false);
+    }
     schema
 }
 
@@ -3746,6 +3758,7 @@ impl AutomaticReceipt {
 }
 
 pub struct PreparedProxyCall {
+    lark_message: Option<super::lark_im_tool::MessageMode>,
     managed_base: Option<super::lark_base_writes::Prepared>,
     attachment_binding: Option<super::lark_attachment_tool::Binding>,
     resource_source: Option<crate::models::assistant_resource::ResourceSource>,
@@ -4072,6 +4085,7 @@ pub(crate) fn http_carries_method_override(
         return true;
     };
     PreparedProxyCall {
+        lark_message: None,
         managed_base: None,
         attachment_binding: None,
         resource_source: None,
@@ -4112,7 +4126,12 @@ pub fn prepare_proxy_tool_call(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
 ) -> AppResult<PreparedProxyCall> {
-    if super::lark_attachment_tool::is_attachment_operation(endpoint) {
+    if super::lark_attachment_tool::is_attachment_operation(endpoint)
+        || matches!(
+            endpoint.attachment_input,
+            Some(super::lark_attachment_tool::Projection::ImRefused)
+        )
+    {
         return Err(super::lark_attachment_tool::refused());
     }
     prepare_proxy_tool_call_inner(service, endpoint, args)
@@ -4177,7 +4196,22 @@ fn prepare_proxy_tool_call_inner(
         path
     };
 
+    let mut body = body;
+    let mut lark_message = None;
+    if let Some(kind) = super::lark_im_tool::kind(endpoint) {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(body.as_deref().unwrap_or_default())
+                .map_err(|_| super::lark_im_tool::invalid())?;
+        match kind {
+            super::lark_im_tool::Kind::Message => {
+                lark_message = Some(super::lark_im_tool::normalize_message(&mut value)?);
+                body = Some(value.to_string().into());
+            }
+            super::lark_im_tool::Kind::Image => super::lark_im_tool::image::validate(&value)?,
+        }
+    }
     Ok(PreparedProxyCall {
+        lark_message,
         managed_base: None,
         attachment_binding: None,
         resource_source: None,
@@ -4292,6 +4326,9 @@ pub fn prepare_exact_proxy_tool_call(
     args: &serde_json::Value,
     effect_idempotency_key: Option<&str>,
 ) -> AppResult<PreparedProxyCall> {
+    if super::lark_im_tool::image_candidate(endpoint) {
+        return Err(AppError::BadRequest("Message image uploads require hosted MCP execution; exact/background dispatch is not supported".into()));
+    }
     let Some(effect_idempotency_key) = effect_idempotency_key else {
         return prepare_proxy_tool_call(service, endpoint, args);
     };
@@ -4351,6 +4388,11 @@ pub fn build_mcp_operation_descriptor(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
 ) -> AppResult<operation_descriptor::OperationDescriptor> {
+    if super::lark_im_tool::image_candidate(endpoint) {
+        return Err(AppError::BadRequest(
+            "Message image uploads require hosted MCP execution; exact/background dispatch is not supported".into(),
+        ));
+    }
     Ok(prepare_proxy_tool_call(service, endpoint, args)?.operation_descriptor())
 }
 
@@ -5414,6 +5456,8 @@ pub fn execute_tool_resolved<'a>(
             exec_ctx.actor_user_id.unwrap_or(user_id),
         )
         .await?;
+        let im_kind = super::lark_im_tool::kind(endpoint);
+        let message_mode = prepared.lark_message.clone();
         let execution = execute_tool_resolved_boxed(
             http_client,
             db,
@@ -5455,6 +5499,16 @@ pub fn execute_tool_resolved<'a>(
             }
             None => execution.await?,
         };
+        if let (Some(kind), McpToolExecutionOutcome::Response(response)) = (im_kind, &mut outcome)
+            && matches!(response.origin, ToolResponseOrigin::Downstream)
+        {
+            response.text = super::lark_im_tool::response(
+                kind,
+                message_mode.as_ref(),
+                response.status,
+                &response.text,
+            )?;
+        }
         if let (Some(source), Some(arguments), McpToolExecutionOutcome::Response(response)) =
             (resource_source, resource_arguments, &mut outcome)
             && (200..300).contains(&response.status)
@@ -5561,6 +5615,13 @@ async fn execute_tool_resolved_inner(
     attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
+    if super::lark_im_tool::kind(endpoint) == Some(super::lark_im_tool::Kind::Image)
+        && (prepared.async_submission.is_some() || prepared.async_continuation.is_some())
+    {
+        return Err(AppError::BadRequest(
+            "Message image uploads require hosted MCP execution".into(),
+        ));
+    }
     if super::lark_attachment_tool::is_attachment_operation(endpoint)
         && prepared.managed_base.is_none()
     {
@@ -5781,6 +5842,7 @@ async fn execute_tool_resolved_inner(
 
     box_mcp_forwarding(move || async move {
         let PreparedProxyCall {
+            lark_message: _,
             managed_base,
             attachment_binding,
             resource_source: _,
@@ -5794,11 +5856,23 @@ async fn execute_tool_resolved_inner(
             query,
             parameter_headers,
             server_owned_headers,
-            body,
-            body_content_type,
+            mut body,
+            mut body_content_type,
             is_generic_proxy_endpoint,
             approval_metadata: _,
         } = prepared;
+
+        if let Some(kind) = super::lark_im_tool::kind(endpoint) {
+            super::lark_attachment_tool::validate_contract(db, service, endpoint).await?;
+            if kind == super::lark_im_tool::Kind::Image {
+                let materialized = super::lark_im_tool::image::materialize(body.as_deref().unwrap_or_default()).await?;
+                body = Some(materialized.0);
+                body_content_type = Some(materialized.1);
+                // Fetch/decode may await: keep the stored contract live, then
+                // normal admission.http_egress rechecks authority at send time.
+                super::lark_attachment_tool::validate_contract(db, service, endpoint).await?;
+            }
+        }
 
         proxy_service::validate_ifttt_request(
             &target,
@@ -5997,7 +6071,9 @@ async fn execute_tool_resolved_inner(
         } else {
             build_downstream_request_headers(endpoint, body.is_some())?
         };
-        if attachment_binding.is_some() {
+        if attachment_binding.is_some()
+            || super::lark_im_tool::kind(endpoint) == Some(super::lark_im_tool::Kind::Image)
+        {
             req_headers.insert(reqwest::header::CONTENT_TYPE,
                 body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
                 .map_err(|_|super::lark_attachment_tool::refused())?);
@@ -6257,6 +6333,8 @@ async fn execute_tool_resolved_inner(
                 }
                 if let Some(binding)=attachment_binding.as_ref() {
                     super::lark_attachment_tool::validate_binding(db,service,endpoint,binding).await?;
+                } else if super::lark_im_tool::kind(endpoint).is_some() {
+                    super::lark_attachment_tool::validate_contract(db,service,endpoint).await?;
                 }
                 match node_ws_manager
                     .send_proxy_request_classified(

@@ -26,7 +26,7 @@ export function useResolvedTheme(): ResolvedTheme {
  * before first paint (no flash); the cleanup strips it on unmount so leaving
  * the themed surface reverts to dark.
  */
-export function useApplyTheme(): void {
+export function useApplyTheme(surface?: "assistant"): void {
   const resolved = useResolvedTheme();
   const textScale = useThemeStore((s) => s.textScale);
   useLayoutEffect(() => {
@@ -37,6 +37,12 @@ export function useApplyTheme(): void {
       root.classList.remove("theme-light", "theme-dark");
     };
   }, [resolved]);
+  useLayoutEffect(() => {
+    if (surface !== "assistant") return;
+    const root = document.documentElement;
+    root.classList.add("assistant-display");
+    return () => root.classList.remove("assistant-display");
+  }, [surface]);
   const density = useThemeStore((s) => s.density);
   const motion = useThemeStore((s) => s.motion);
   const customColors = useThemeStore((s) => s.customColors);
@@ -57,10 +63,12 @@ export function useApplyTheme(): void {
     const root = document.documentElement;
     if (density === 1) root.style.removeProperty("--spacing");
     else root.style.setProperty("--spacing", `${4 * density}px`);
+    if (surface === "assistant") root.style.setProperty("--assistant-density", String(density));
     return () => {
       root.style.removeProperty("--spacing");
+      if (surface === "assistant") root.style.removeProperty("--assistant-density");
     };
-  }, [density]);
+  }, [density, surface]);
 
   useLayoutEffect(() => {
     const root = document.documentElement;

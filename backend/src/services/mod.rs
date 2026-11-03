@@ -132,6 +132,7 @@ pub mod internal_auth;
 pub mod invite_code_service;
 pub mod key_service;
 pub mod lark_attachment_tool;
+pub mod lark_im_tool;
 pub mod lark_permission;
 pub mod llm_gateway_service;
 pub mod llm_usage_service;
@@ -540,3 +541,5 @@ pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
 
 pub mod monitoring_service;
+
+pub mod assistant_delegated_images;

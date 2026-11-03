@@ -445,6 +445,7 @@ pub fn schema(name: &str) -> Value {
                 "include_images": {"type": "boolean", "default": false,
                     "description": "Also send the tool images of this turn only (verified \
                     images your tools returned during the current turn, at most eight), \
+                    plus server-adopted delegated images authorized for this original chat, \
                     before the text. Each image reaches a chat once: images already \
                     delivered there are reported, not resent. Default false."}}),
             vec!["chat_id", "text"],
@@ -672,9 +673,11 @@ pub(crate) fn description(name: &str) -> &'static str {
             (it is already working) or pool_full (too many specialists working; wait first)."
         }
         "wait_for_subagents" => {
-            "Wait up to timeout_secs (max 120) for specialists to finish; returns their latest \
-            replies, who is still running, and pending permission requests. You can also end \
-            your turn instead; NyxID wakes you with an event."
+            "Wait up to timeout_secs (max 120) for specialists to finish; returns exact queued \
+            assignment results (otherwise their latest replies), who is still running, and pending permission requests. You can also end \
+            your turn instead; NyxID wakes you with an event. Assigned results can include \
+            server-authorized delegated_images for this reply at the original chat. Only \
+            those references qualify; never invent foreign image IDs or claim confirmed delivery."
         }
         "get_agent_sharing" => {
             "Read your personal specialist's sharing policy, write version and authority revision. No private recipient chats or notes are included."
@@ -854,7 +857,8 @@ pub(crate) fn description(name: &str) -> &'static str {
             (e.g. a scheduled update). Works only in chats you answer (NyxBot: any of the \
             user's chats) whose posting is allowed; only when the user asked for it. Set \
             include_images to true to send this turn's tool images (current turn only, at \
-            most eight) before the text; the result reports per image whether it was sent \
+            most eight) and server-adopted delegated images authorized for this original chat \
+            before the text; the result reports per image whether it was sent \
             now, already delivered to that chat, skipped or failed."
         }
         "list_channel_chats" => {
