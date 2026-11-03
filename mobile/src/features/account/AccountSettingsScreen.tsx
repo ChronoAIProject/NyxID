@@ -59,6 +59,9 @@ export function AccountSettingsTitle({
   );
 }
 
+/** Published support contact (App Review guideline 1.2), as on the legal pages. */
+const SUPPORT_EMAIL = "contact@chrono-ai.fun";
+
 // Push-register failure modes are surfaced as a tagged error so the
 // caller can branch on `reason` (e.g. iOS denial → Alert + Linking
 // to system Settings) instead of brittle string-matching the message.
@@ -828,6 +831,18 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             }}
           >
             <Text style={styles.legalLink}>Privacy Policy</Text>
+          </Pressable>
+          <Text style={styles.legalDot}>·</Text>
+          <Pressable
+            accessibilityRole="link"
+            accessibilityHint={`Email ${SUPPORT_EMAIL}`}
+            onPress={() => {
+              Linking.openURL(
+                `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("NyxID app support")}`,
+              ).catch(() => Alert.alert("Contact support", `Email us at ${SUPPORT_EMAIL}.`));
+            }}
+          >
+            <Text style={styles.legalLink}>Contact support</Text>
           </Pressable>
         </View>
       </ScrollView>

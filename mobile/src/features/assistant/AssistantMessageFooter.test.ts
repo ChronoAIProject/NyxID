@@ -59,6 +59,7 @@ function setup(props: any) {
       ["ActionButton", "Card", "Field", "Label"].map((n) => [n, n]),
     ),
     "./AssistantCopyButton": modules.copy,
+    "./AssistantReportButton": { AssistantReportButton: "ReportButton" },
   });
   Object.assign(
     modules.copy,
@@ -154,11 +155,22 @@ test("human footer keeps time-before-Copy order with the same compact spacing", 
   x.h.unmount();
 });
 test("user bubble dates and copy icons use the supplied foreground", () => {
-  const x = setup({ text: "Hello", timestamp: "2026-10-27T01:00:00Z", user: true, foreground: "#FFFFFF" });
+  const x = setup({
+    text: "Hello",
+    timestamp: "2026-10-27T01:00:00Z",
+    user: true,
+    foreground: "#FFFFFF",
+  });
   const date = x.all().find((node) => node.type === "Text");
   assert.ok(date);
-  assert.equal(Object.assign({}, ...[date.props.style].flat()).color, "#FFFFFF");
-  assert.equal(x.all().find((node) => node.type === "Copy")?.props.color, "#FFFFFF");
+  assert.equal(
+    Object.assign({}, ...[date.props.style].flat()).color,
+    "#FFFFFF",
+  );
+  assert.equal(
+    x.all().find((node) => node.type === "Copy")?.props.color,
+    "#FFFFFF",
+  );
   x.h.unmount();
 });
 
@@ -189,4 +201,35 @@ test("message-time parity: local calendar day/month/year, locale and full daylig
   );
   for (const invalid of [undefined, null, "", "invalid", NaN])
     assert.equal(messageTime(invalid), undefined);
+});
+
+test("completed agent replies add a Report control after the date; people never get one", () => {
+  const target = {
+    kind: "conversation",
+    id: "nyxa-x",
+    messageId: "m1",
+    reported: true,
+  };
+  const agent = setup({
+    text: "Reply",
+    timestamp: "2026-10-27T01:00:00Z",
+    report: target,
+  });
+  const children = [agent.h.value().props.children]
+    .flat(Infinity)
+    .filter(Boolean);
+  const report = children.at(-1);
+  assert.equal(report.type, "ReportButton");
+  assert.deepEqual(JSON.parse(JSON.stringify(report.props.target)), target);
+  assert.equal(report.props.reported, true);
+  for (const props of [
+    { text: "Mine", user: true, report: target },
+    { text: "Reply without target" },
+  ]) {
+    const x = setup({ timestamp: "2026-10-27T01:00:00Z", ...props });
+    assert.equal(
+      x.all().some((n) => n.type === "ReportButton"),
+      false,
+    );
+  }
 });

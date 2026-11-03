@@ -3,6 +3,8 @@ import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
 import { AssistantCopyButton } from "./AssistantCopyButton";
+import { AssistantReportButton } from "./AssistantReportButton";
+import type { ReplyReportTarget } from "../../lib/api/replyReportTransport";
 import { messageTime } from "./messageTime";
 
 export function AssistantMessageTime({
@@ -46,17 +48,20 @@ export function AssistantMessageTime({
   );
 }
 
-/** Native replies intentionally offer Copy and date, without reply voting. */
+/** Native replies offer Copy, date and Report (no reply voting). */
 export function AssistantMessageFooter({
   text,
   timestamp,
   user,
   foreground,
+  report,
 }: {
   text: string;
   timestamp?: string | number | null;
   user?: boolean;
   foreground?: string;
+  /** Completed agent replies only; omitted for people and pending turns. */
+  report?: ReplyReportTarget & { reported?: boolean };
 }) {
   const copy = <AssistantCopyButton text={text} afterDate={user} foreground={foreground} />;
   const time = <AssistantMessageTime value={timestamp} beforeCopy={user} foreground={foreground} />;
@@ -64,6 +69,9 @@ export function AssistantMessageFooter({
     <View style={[styles.row, user && styles.userRow]}>
       {user ? time : copy}
       {user ? copy : time}
+      {!user && report ? (
+        <AssistantReportButton target={report} reported={report.reported} />
+      ) : null}
     </View>
   );
 }

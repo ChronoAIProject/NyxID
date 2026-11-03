@@ -69,6 +69,7 @@ import {
   JumpToLatest,
 } from "../assistant/AssistantBanner";
 import { sanitizeAssistantMessageContent } from "../assistant/assistantChatContent";
+import { isReported } from "../../lib/api/replyReportTransport";
 import { GroupPendingCard } from "./GroupPendingCard";
 import {
   CollaborationCards,
@@ -1202,6 +1203,16 @@ function GroupMessage({
         timestamp={message.created_at}
         user={user}
         foreground={user ? bubble.foreground : undefined}
+        report={
+          message.role === "agent" && group
+            ? {
+                kind: "group",
+                id: group.id,
+                messageId: message.id,
+                reported: isReported(message.feedback),
+              }
+            : undefined
+        }
       />
     </View>
   );

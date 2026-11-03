@@ -98,6 +98,7 @@ import {
   JumpToLatest,
 } from "./AssistantBanner";
 import { sanitizeAssistantMessageContent } from "./assistantChatContent";
+import { isReported } from "../../lib/api/replyReportTransport";
 import { AssistantMessageFooter } from "./AssistantMessageFooter";
 import { AssistantAttachmentView } from "./AssistantAttachmentView";
 import { AssistantPendingUploads } from "./AssistantPendingUploads";
@@ -917,6 +918,18 @@ export function AssistantScreen({
           timestamp={item.created_at}
           user={isUser}
           foreground={isUser ? bubble.foreground : undefined}
+          report={
+            item.role === "assistant" &&
+            item.status === "completed" &&
+            assistant.conversationId
+              ? {
+                  kind: "conversation",
+                  id: assistant.conversationId,
+                  messageId: item.id,
+                  reported: isReported(item.feedback),
+                }
+              : undefined
+          }
         />
       </View>
     );
