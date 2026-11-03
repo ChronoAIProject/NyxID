@@ -2657,7 +2657,12 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     if let Some(lost) = row.active_turn.take() {
         let lost_turn = lost.clone();
-        let lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
+        let mut lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
+        lost_metadata.work = Some(super::assistant_real_work::evidence(
+            &row,
+            &lost_turn,
+            Some(now),
+        ));
         Box::pin(super::assistant_turn_observability::failed_in_session(
             db,
             session,
@@ -2886,6 +2891,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        business_system_success: false,
         delegated_images: Default::default(),
         timing: Default::default(),
         collaboration: row.collaboration.clone(),
@@ -3268,7 +3274,12 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_queue_notice_id: None,
         media_pending: (media_declared > 0).then_some(media_declared),
         media_bound: None,
-        turn_metadata: None,
+        turn_metadata: row.active_turn.as_ref().map(|turn| {
+            crate::models::assistant_message::TurnMetadata {
+                work: Some(super::assistant_real_work::evidence(&row, turn, None)),
+                ..Default::default()
+            }
+        }),
         platform_delivery_recovery_queued: false,
         platform_reply: row
             .active_turn
@@ -3868,6 +3879,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 timing: saved.turn_metadata.as_ref().and_then(|data| data.timing.clone()),
                                 channel_delivery:None,
@@ -3917,7 +3929,11 @@ async fn finish_turn_inner(
                     |turn| super::assistant_model_observer::attribute(&error, turn, Utc::now()),
                 ));
                 let turn = current.active_turn.as_ref().expect("matched turn");
-                let mut turn_metadata = super::assistant_turn_observability::metadata(turn, Utc::now());
+                let settled_at = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
+                    Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
+                });
+                let mut turn_metadata = super::assistant_turn_observability::metadata(turn, settled_at);
+                turn_metadata.work = Some(super::assistant_real_work::evidence(&current, turn, Some(settled_at)));
                 turn_metadata.failure_reason = error.as_ref().and_then(|error|
                     super::assistant_model_observer::failure_reason(error, turn, Utc::now()));
                 if let Some(error) = error.as_mut() {
@@ -3970,9 +3986,7 @@ async fn finish_turn_inner(
                     .active_turn
                     .as_ref()
                     .and_then(|turn| turn.report_to.clone());
-                let now = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
-                    Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
-                });
+                let now = settled_at;
                 // Conflict with concurrent revocation or rotation before rebinding.
                 let credential_alive = db
                     .collection::<bson::Document>(

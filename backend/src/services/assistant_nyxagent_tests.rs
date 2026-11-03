@@ -1259,6 +1259,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            business_system_success: false,
             delegated_images: Default::default(),
             timing: Default::default(),
             collaboration: None,
@@ -7683,4 +7684,119 @@ fn channel_model_first_output_excludes_keepalives_and_reports_once() {
         assert!(observer.take_first_output());
         assert!(!observer.take_first_output());
     }
+}
+
+#[tokio::test]
+async fn real_work_signal_is_retained_at_settlement_and_legacy_is_false() {
+    let db = connect_transaction_test_database("real_work_settlement").await;
+    ensure_indexes(&db).await.unwrap();
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let mut previous = None;
+    for success in [false, true] {
+        let row = Box::pin(begin_turn(
+            &db,
+            &owner,
+            &request(previous.as_deref(), "Work"),
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        if success {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"active_turn.business_system_success":true}},
+                )
+                .await
+                .unwrap();
+        }
+        Box::pin(settle(
+            &db,
+            &state.encryption_keys,
+            &owner,
+            &row,
+            "Done",
+            None,
+        ))
+        .await;
+        let reply = db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(
+                doc! {"turn_id":&row.active_turn.as_ref().unwrap().turn_id,"role":"assistant"},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let evidence = reply.turn_metadata.unwrap().work.unwrap();
+        assert_eq!(evidence.business_system_success, success);
+        assert_eq!(evidence.owner_id, owner);
+        assert!(evidence.settled_at.is_some());
+        previous = Some(row.id);
+    }
+    let mut legacy = bson::to_document(&stale_test_row(Utc::now())).unwrap();
+    legacy
+        .get_document_mut("active_turn")
+        .unwrap()
+        .remove("business_system_success");
+    assert!(
+        !bson::from_document::<AssistantConversation>(legacy)
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .business_system_success
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_work_run_signal_accumulates_across_continuations_under_same_owner() {
+    let db = connect_transaction_test_database("real_work_continuations").await;
+    for event in [false, true] {
+        let run = Uuid::new_v4().to_string();
+        let mut row = stale_test_row(Utc::now());
+        row.agent_owner_id = Some("organization".into());
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.trigger_run_id = Some(run.clone());
+        turn.business_system_success = true;
+        db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME).insert_one(doc!{
+            "_id":&run,"user_id":&row.user_id,"turn_id":&turn.turn_id,
+            "confirmation_policy":if event{bson::Bson::String("confirm_every_change".into())}else{bson::Bson::Null}
+        }).await.unwrap();
+        for success in [true, false] {
+            row.active_turn.as_mut().unwrap().business_system_success = success;
+            let turn = row.active_turn.as_ref().unwrap();
+            let data = crate::services::assistant_turn_observability::metadata(turn, Utc::now());
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            crate::services::assistant_turn_observability::run_metadata_in_session(
+                &db,
+                &mut session,
+                &row,
+                turn,
+                &data,
+            )
+            .await
+            .unwrap();
+            session.commit_transaction().await.unwrap();
+        }
+        let saved = db
+            .collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+            .find_one(doc! {"_id":&run})
+            .await
+            .unwrap()
+            .unwrap();
+        let work = saved.get_document("work").unwrap();
+        assert!(work.get_bool("business_system_success").unwrap());
+        assert_eq!(work.get_str("owner_id").unwrap(), "organization");
+        assert_eq!(
+            work.get_str("source").unwrap(),
+            if event { "event" } else { "scheduled" }
+        );
+    }
+    db.drop().await.unwrap();
 }

@@ -31,6 +31,7 @@ mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_model_observer;
 pub mod assistant_readiness_service;
+pub mod assistant_real_work;
 pub(crate) mod assistant_record_service;
 pub mod assistant_resource_service;
 pub mod assistant_service;

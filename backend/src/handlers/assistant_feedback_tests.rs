@@ -2152,3 +2152,151 @@ async fn assistant_analytics_counts_real_activity_deduplicates_voice_and_separat
         );
     }
 }
+
+#[tokio::test]
+async fn real_work_internal_owner_list_allows_operator_writes_but_usage_viewer_reads_only() {
+    let f = fixture("real-work-roles", false).await;
+    let path = "/api/v1/admin/assistant/analytics/internal-owners";
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/assistant/analytics?threshold=0",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, report) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/analytics?threshold=5",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["real_work"]["threshold"], 5);
+
+    let roles = crate::services::role_service::get_platform_role_ids(&f.state.db)
+        .await
+        .unwrap();
+    for role in [&roles.admin, &roles.operator] {
+        f.state
+            .db
+            .collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id":&f.owner},
+                doc! {"$set":{"is_admin":false,"role_ids":[role]}},
+            )
+            .await
+            .unwrap();
+        let (status, body) = request(
+            &f.state,
+            "PUT",
+            path,
+            &f.human_token,
+            Some(json!({"owner_ids":[&f.owner]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["owner_ids"], json!([&f.owner]));
+    }
+    let viewer = f
+        .state
+        .db
+        .collection::<Document>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! {"slug":"usage_viewer"})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id":&f.owner},
+            doc! {"$set":{"role_ids":[viewer.get_str("_id").unwrap()]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f.state, "GET", path, &f.human_token, None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            path,
+            &f.human_token,
+            Some(json!({"owner_ids":[]}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(doc! {"_id":&f.owner}, doc! {"$set":{"role_ids":[]}})
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f.state, "GET", path, &f.human_token, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_work_failure_preserves_existing_analytics_and_recovers() {
+    let f = fixture("real-work-degraded", false).await;
+    let at = bson::DateTime::from_chrono(Utc::now() - Duration::minutes(1));
+    f.state.db.collection::<Document>(ASSISTANT_MESSAGES).insert_many([
+        doc! {"_id":"input","conversation_id":"thread","seq":1,"user_id":&f.owner,"turn_id":"turn","role":"user","created_at":at},
+        doc! {"_id":"reply","conversation_id":"thread","seq":2,"user_id":&f.owner,"turn_id":"turn","role":"assistant","status":"completed","created_at":at},
+    ]).await.unwrap();
+    let path = "/api/v1/admin/assistant/analytics";
+    let (status, baseline) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(baseline["active_sessions"], 1);
+    assert_eq!(baseline["outcomes"]["completed"], 1);
+    assert!(baseline["real_work"].is_object());
+    assert_eq!(baseline["real_work_unavailable"], false);
+    // A corrupt optional-report setting fails the real aggregation only. Never
+    // expose the underlying database error or stored material in the response.
+    let settings = f
+        .state
+        .db
+        .collection::<Document>("assistant_analytics_settings");
+    settings
+        .insert_one(doc! {"_id":"internal_owners","owner_ids":"PRIVATE_SENTINEL"})
+        .await
+        .unwrap();
+    let (status, degraded) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK, "{degraded}");
+    assert_eq!(degraded["real_work"], Value::Null);
+    assert_eq!(degraded["real_work_unavailable"], true);
+    for field in [
+        "active_sessions",
+        "active_accounts",
+        "running_now",
+        "outcomes",
+        "daily_sessions",
+        "daily_turns",
+    ] {
+        assert_eq!(degraded[field], baseline[field], "{field}");
+    }
+    assert!(!degraded.to_string().contains("PRIVATE_SENTINEL"));
+    settings
+        .delete_one(doc! {"_id":"internal_owners"})
+        .await
+        .unwrap();
+    let (status, restored) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(restored["real_work"].is_object());
+    assert_eq!(restored["real_work_unavailable"], false);
+    f.state.db.drop().await.unwrap();
+}

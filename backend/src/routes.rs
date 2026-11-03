@@ -1307,6 +1307,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_assistant::model_usage),
         )
         .route(
+            "/assistant/analytics/internal-owners",
+            get(handlers::admin_assistant::internal_owners)
+                .put(handlers::admin_assistant::set_internal_owners),
+        )
+        .route(
             "/assistant/analytics",
             get(handlers::admin_assistant::analytics),
         )
