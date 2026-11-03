@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Keyboard, KeyboardAvoidingView, Platform, Pressable, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, AppState, Keyboard, KeyboardAvoidingView, Platform, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
+import { ActionButton, Notice } from '../../../components/workspace/WorkspaceUI';
+import { useTheme } from '../../../theme/ThemeContext';
 import { lockDesktopLandscape, restorePortrait } from '../../../lib/desktopOrientation';
 import { getAuthEpoch } from '../../../lib/auth/authEpoch';
 import { loadStoredAuthSession } from '../../../lib/auth/sessionStore';
@@ -27,6 +29,7 @@ const documentSource = { html: canvasDocument(), baseUrl: 'about:blank' };
  * renderer messages. Native snapshot protection is required in addition to JS. */
 export function MachineDesktopScreen({ route, navigation, privacyProtected = false }: MachineDesktopScreenProps) {
   const focused = useIsFocused();
+  const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const { nodeId, conversationId, contextId, display = 'secure' } = route.params;
   const webView = useRef<WebView>(null);
@@ -40,6 +43,7 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
   const [overlay, setOverlay] = useState(true);
   const [keyboard, setKeyboard] = useState(false);
   const [draft, setDraft] = useState('');
+  const [inputError, setInputError] = useState<string>();
   const viewerEpoch = useRef(-1);
   const viewer = useRef<ReturnType<typeof createDesktopViewer>>(undefined);
   const decodeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -51,7 +55,7 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
     pendingRead.current?.abort(); pendingRead.current = undefined;
     clearTimeout(decodeTimer.current); decoding.current = undefined;
     privacyCover.current?.setNativeProps({ style: { opacity: 1 } });
-    setHasPixels(false); setKeyboard(false); setDraft(''); Keyboard.dismiss();
+    setHasPixels(false); setKeyboard(false); setDraft(''); setInputError(undefined); Keyboard.dismiss();
     const generation = compositor.current?.reset() ?? 0;
     webView.current?.injectJavaScript(`window.nyxDesktop?.clear(${generation});true;`);
   };
@@ -99,7 +103,7 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
         if (!current()) return;
         setState(value);
         webView.current?.injectJavaScript(`window.nyxDesktop?.control(${value.controls === true});true;`);
-        if (!value.controls) { setKeyboard(false); setDraft(''); Keyboard.dismiss(); }
+        if (!value.controls) { setKeyboard(false); setDraft(''); setInputError(undefined); Keyboard.dismiss(); }
         revealOverlay();
       },
       invalidated: () => {
@@ -129,15 +133,17 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
     return () => { mounted = false; activeViewer.stop(); clear(); };
   }, [privacyProtected, focused, foreground, oriented, ready, retry, nodeId, conversationId, contextId, display]);
 
-  const button = (label: string, action: () => void, disabled = false, longPress?: () => void) => <Pressable
-    key={label} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} accessibilityHint={longPress ? "Touch and hold for task stop options" : undefined}
-    disabled={disabled} onPress={() => { revealOverlay(); action(); }} onLongPress={longPress}
-    style={({ pressed }) => [styles.button, { opacity: disabled ? 0.45 : 1, backgroundColor: pressed ? '#3f3f46' : '#18181be8' }]}>
-    <Text style={styles.buttonText}>{label}</Text>
-  </Pressable>;
+  const button = (label: string, action: () => void, disabled = false, longPress?: () => void) => <ActionButton
+    key={label} label={label} variant="secondary" disabled={disabled}
+    accessibilityHint={longPress ? "Touch and hold for task stop options" : undefined}
+    onPress={() => { revealOverlay(); action(); }} onLongPress={longPress} />;
   const sendText = () => {
     if (!draft) return;
-    viewer.current?.input({ tool: 'type_text', arguments: { text: draft } }); setDraft('');
+    if (viewer.current?.input({ tool: 'type_text', arguments: { text: draft } })) {
+      setDraft(''); setInputError(undefined);
+    } else {
+      setInputError('Check control and try again in a moment, or send a shorter message.');
+    }
   };
   const controlOptions = () => {
     if (!state.controls) return;
@@ -189,7 +195,8 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
       <Text accessibilityLiveRegion="polite" style={styles.message}>{privacyProtected ? state.label : 'Desktop snapshot protection is unavailable on this device.'}</Text>
       {unavailable && <View style={styles.retryRow}>{button('Retry', () => { stop(); setReady(false); webView.current?.reload(); setState({ phase: 'connecting', label: 'Connecting to the desktop…' }); setRetry(value => value + 1); })}{button('Close desktop', close)}</View>}
     </View>}
-    {keyboard && state.controls && <View style={[styles.keyboard, { bottom: Math.max(8, insets.bottom), left: Math.max(8, insets.left), right: Math.max(8, insets.right) }]}>
+    {keyboard && state.controls && <View style={[styles.keyboard, { backgroundColor: colors.card, bottom: Math.max(8, insets.bottom), left: Math.max(8, insets.left), right: Math.max(8, insets.right) }]}>
+      {inputError && <Notice message={inputError} tone="error" />}
       <View style={styles.keyRow}>
         {(['ENTER', 'TAB', 'BACKSPACE', 'ESC'] as const).map(key => button(key === 'BACKSPACE' ? '⌫' : key, () => viewer.current?.input({ tool: 'press_key', arguments: { key } })))}
         {button('Hide keyboard', () => { setKeyboard(false); Keyboard.dismiss(); })}
@@ -198,18 +205,16 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
         accessibilityLabel="Desktop text to send" placeholder="Type text, then Send" placeholderTextColor="#a1a1aa" style={styles.textInput}
         autoCorrect={false} autoCapitalize="none" secureTextEntry onSubmitEditing={sendText} />{button('Send', sendText, !draft)}</View>
     </View>}
-    {!visible && <Pressable accessibilityRole="button" accessibilityLabel="Show desktop controls" onPress={revealOverlay} style={styles.reveal}><Text style={styles.buttonText}>•••</Text></Pressable>}
+    {!visible && <View style={styles.reveal}><ActionButton label="•••" accessibilityLabel="Show desktop controls" variant="secondary" onPress={revealOverlay} /></View>}
   </KeyboardAvoidingView>;
 }
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#000' }, webView: { flex: 1, backgroundColor: '#000' },
   cover: { backgroundColor: '#000' }, overlay: { position: 'absolute', flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  button: { minWidth: 44, minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: '#52525b', borderRadius: 10, justifyContent: 'center' },
-  buttonText: { color: '#fafafa', fontSize: 15, fontWeight: '500' },
   messageWrap: { position: 'absolute', bottom: 24, left: 24, right: 24, alignItems: 'center' },
   message: { backgroundColor: '#18181be8', color: '#fafafa', padding: 12, borderRadius: 8, textAlign: 'center', fontSize: 15 },
-  retryRow: { flexDirection: 'row', gap: 8, paddingTop: 12 },
-  keyboard: { position: 'absolute', padding: 8, borderRadius: 12, backgroundColor: '#18181bf5', gap: 8 }, keyRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  retryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingTop: 12 },
+  keyboard: { position: 'absolute', padding: 8, borderRadius: 12, gap: 8 }, keyRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
   textInput: { flex: 1, minWidth: 120, color: '#fafafa', fontSize: 17, padding: 12, backgroundColor: '#27272a', borderRadius: 8 },
-  reveal: { position: 'absolute', top: 8, left: 8, minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: '#18181bc0', borderRadius: 10 },
+  reveal: { position: 'absolute', top: 8, left: 8, minWidth: 44 },
 });

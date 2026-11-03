@@ -71,7 +71,10 @@ function setup() {
   const calls: unknown[][] = [];
   const queries = new Map<string, Record<string, any>>();
   const harness = hookHarness<Element>({
-    "../../components/AgentAvatar": { AgentAvatar: "AgentAvatar", AgentAvatarStack: "AgentAvatarStack" },
+    "../../components/AgentAvatar": {
+      AgentAvatar: "AgentAvatar",
+      AgentAvatarStack: "AgentAvatarStack",
+    },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
@@ -300,6 +303,9 @@ test("empty, loading and failed reads remain honest without synthetic rows", () 
 
 test("revocation, removed requests and inactive views fence retained callbacks and polling", () => {
   const h = setup();
+  assert.equal(h.queries.get("agents")!.refetchInterval, 30_000);
+  assert.equal(h.queries.get("agents")!.staleTime, 0);
+  assert.equal(h.queries.get("crews")!.refetchInterval, 5000);
   const chat = h.button("Chat with organization").onPress;
   const review = h.button(
     "Review waiting's request: Approve decision-1",
@@ -324,6 +330,10 @@ test("revocation, removed requests and inactive views fence retained callbacks a
   assert.deepEqual(h.calls, []);
   h.state.active = true;
   h.state.online = true;
+  h.harness.render();
+  assert.equal(h.queries.get("agents")!.enabled, true);
+  assert.equal(h.queries.get("agents")!.refetchInterval, 30_000);
+  assert.equal(h.queries.get("crews")!.refetchInterval, 5000);
   h.state.live = true;
   h.harness.render();
   assert.equal(h.queries.get("agents")!.refetchInterval, 30_000);

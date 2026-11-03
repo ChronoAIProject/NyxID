@@ -60,9 +60,14 @@ export function createGroupsApi(request: JsonRequest) {
         groupSchema.parse(await request(path(id), { signal })),
       );
     },
-    async create(input: GroupCreate) {
+    async create(
+      input: GroupCreate,
+      options?: Pick<RequestOptions, "authorityGuard">,
+    ) {
       const body = groupCreateSchema.parse(input);
-      return groupSchema.parse(await request(ROOT, { method: "POST", body }));
+      return groupSchema.parse(
+        await request(ROOT, { ...options, method: "POST", body }),
+      );
     },
     async update(id: string, input: GroupUpdate) {
       const body = groupUpdateSchema.parse(input);
