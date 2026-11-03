@@ -1,7 +1,6 @@
 import { useCatalogEntry } from "@/hooks/use-keys";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
-import { ConnectionArc } from "@/components/shared/connection-arc";
-import { ServiceIcon } from "@/components/service-icon";
+import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useEffect, useRef, useState } from "react";
@@ -490,42 +489,14 @@ export function ConnectLinkContent({
               </div>
             ) : (
               <>
-                <div className="connection-card-heading space-y-5 text-center">
-                  <div
-                    className="flex items-start justify-center"
-                    role="img"
-                    aria-label={`NyxID connects to ${preview.data.service_name}`}
-                  >
-                    <div className="flex w-20 flex-col items-center gap-2.5">
-                      <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
-                        <NyxidIcon className="size-9" alt="" />
-                      </div>
-                      <span className="text-xs font-medium">NyxID</span>
-                    </div>
-                    <ConnectionArc />
-                    <div className="flex w-20 flex-col items-center gap-2.5">
-                      <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
-                        <ServiceIcon
-                          slug={preview.data.service_slug}
-                          iconUrl={catalog?.icon_url}
-                          size="xl"
-                          className="text-foreground"
-                        />
-                      </div>
-                      <span className="text-xs font-medium">
-                        {preview.data.service_name}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <h1 className="text-xl font-semibold leading-tight text-foreground sm:text-2xl">
-                      NyxID wants to connect to your {preview.data.service_name}
-                    </h1>
-                    <p className="text-sm text-muted-foreground">
-                      Add your connection details and approve the request.
-                    </p>
-                  </div>
-                </div>
+                <ConnectionIdentityHeading
+                  className="connection-card-heading"
+                  serviceSlug={preview.data.service_slug}
+                  serviceName={preview.data.service_name}
+                  iconUrl={catalog?.icon_url}
+                  title={`NyxID wants to connect to your ${preview.data.service_name}`}
+                  subtitle="Add your connection details and approve the request."
+                />
                 {submitError ? <ErrorBanner message={submitError} /> : null}
                 <RequestDetails preview={preview.data} />
                 {platformAvailable &&

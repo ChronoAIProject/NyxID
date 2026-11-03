@@ -1287,6 +1287,21 @@ describe("CLI wizard OAuth app choice", () => {
     expect([...props.scopeOverride].sort()).toEqual(["read:user", "user:email"]);
   });
 
+  it("opens the service step with the connector's identity heading", async () => {
+    mockGet.mockResolvedValue(githubEntry);
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-github" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect your GitHub to NyxID" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "NyxID connects to GitHub" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^Auth:/)).not.toBeInTheDocument();
+  });
+
   it("explains NyxID managed in a tooltip and shows the NyxID logo", async () => {
     mockGet.mockResolvedValue(githubEntry);
     render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-github" }} />, {

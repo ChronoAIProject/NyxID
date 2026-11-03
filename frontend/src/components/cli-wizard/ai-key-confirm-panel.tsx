@@ -1,4 +1,5 @@
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
+import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
 import {
   OAuthClientSourceChoice,
   type OAuthClientSource,
@@ -17,7 +18,7 @@ import type { LanePricingView } from "@/schemas/platform-keys";
 
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -27,7 +28,7 @@ import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import type { ScopeCatalogEntry } from "@/types/keys";
-import { Building2, ExternalLink } from "lucide-react";
+import { ArrowRight, Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
 import {
@@ -288,12 +289,25 @@ export function AiKeyConfirm({
       ? "For services not in the catalog — paste your own endpoint URL and credential."
       : `Your CLI wants to add ${trimmedSlug || "a service"} to NyxID. Confirm the details here.`;
 
+  // A resolved catalog service gets the hosted connector's identity heading.
+  const serviceStep = !onCatalogStep && !onCustomStep && !entryErrorMessage;
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{title}</h2>
-        <p className="text-12 text-muted-foreground">{subtitle}</p>
-      </div>
+      {serviceStep && entry ? (
+        <ConnectionIdentityHeading
+          serviceSlug={entry.slug}
+          serviceName={entry.name}
+          iconUrl={entry.icon_url}
+          title={`Connect your ${entry.name} to NyxID`}
+          subtitle="Your CLI asked to add this service. Review the details, then continue."
+        />
+      ) : (
+        <div className="flex flex-col gap-1">
+          <h2 className="font-serif text-28 font-normal">{title}</h2>
+          <p className="text-12 text-muted-foreground">{subtitle}</p>
+        </div>
+      )}
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
 
@@ -1272,25 +1286,6 @@ function CatalogConfirmForm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
-        {entry.icon_url ? (
-          <img
-            src={entry.icon_url}
-            alt=""
-            className="h-8 w-8 rounded"
-            loading="lazy"
-          />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          <h3 className="font-medium">{entry.name}</h3>
-          {entry.description ? (
-            <p className="text-xs text-muted-foreground">{entry.description}</p>
-          ) : null}
-          <p className="text-xs text-muted-foreground">
-            Auth: <code>{entry.auth_method}</code>
-          </p>
-        </div>
-      </div>
 
       {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
       {oauthClientChoice ? (
@@ -1427,8 +1422,16 @@ function CatalogConfirmForm({
 
       {error ? <ErrorLine message={error} /> : null}
 
-      <Button variant="primary" onClick={handleSubmit} disabled={submitDisabled}>
-        {submitLabel}
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={handleSubmit}
+        disabled={submitDisabled}
+      >
+        {submitLabel}{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
       </Button>
     </div>
   );
