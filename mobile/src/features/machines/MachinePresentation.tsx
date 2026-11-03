@@ -1,11 +1,4 @@
-import {
-  ActionSheetIOS,
-  Alert,
-  Platform,
-  StyleSheet,
-  Switch,
-} from "react-native";
-import { ChevronsUpDown } from "lucide-react-native";
+import { StyleSheet, Switch } from "react-native";
 import { SettingsRow } from "../../components/settings/SettingsList";
 import { useTheme } from "../../theme/ThemeContext";
 import { spacing } from "../../theme/designTokens";
@@ -40,64 +33,6 @@ export function formatMachineDate(value: string | null | undefined) {
   if (!value) return "Never";
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? date.toLocaleString() : value;
-}
-
-/**
- * A short choice opens a native menu, as iOS pop-up buttons do, instead of
- * spreading its options over several rows.
- */
-export function chooseFromMenu<T extends string>(
-  title: string,
-  options: readonly { value: T; label: string }[],
-  onPick: (value: T) => void,
-) {
-  const labels = options.map((option) => option.label);
-  if (Platform.OS === "ios") {
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        title,
-        options: [...labels, "Cancel"],
-        cancelButtonIndex: labels.length,
-      },
-      (index) => {
-        const option = options[index];
-        if (option) onPick(option.value);
-      },
-    );
-    return;
-  }
-  Alert.alert(title, undefined, [
-    ...options.map((option) => ({
-      text: option.label,
-      onPress: () => onPick(option.value),
-    })),
-    { text: "Cancel", style: "cancel" as const },
-  ]);
-}
-
-/** One row holding its current value; tapping opens the native menu. */
-export function MachineMenuRow({
-  label,
-  value,
-  disabled,
-  onPress,
-}: {
-  label: string;
-  value: string;
-  disabled?: boolean;
-  onPress: () => void;
-}) {
-  const { colors } = useTheme();
-  return (
-    <SettingsRow
-      label={label}
-      value={value}
-      disabled={disabled}
-      accessibilityHint={`Opens a menu to choose ${label.toLowerCase()}`}
-      accessory={<ChevronsUpDown size={16} color={colors.textMuted} />}
-      onPress={onPress}
-    />
-  );
 }
 
 /** An inline switch row; switches never open a page. */

@@ -41,6 +41,7 @@ const ui = {
     SettingsGroup: "Group",
     SettingsRow: "Row",
     SettingsCheckRow: "CheckRow",
+    SettingsMenuRow: "MenuRow",
   },
   "../../components/workspace/WorkspaceUI": {
     Label: "Label",
@@ -94,67 +95,7 @@ const node = {
   metadata: { agent_version: "0.41.1" },
 } satisfies MachineNode;
 
-test("native menus list each choice once with Cancel, on iOS and the Alert fallback", () => {
-  for (const os of ["ios", "android"] as const) {
-    let sheet: any;
-    let alert: any;
-    const picks: string[] = [];
-    const harness = hookHarness<unknown>({
-      ...ui,
-      "react-native": {
-        Platform: { OS: os },
-        StyleSheet: { create: (x: any) => x },
-        Switch: "Switch",
-        ActionSheetIOS: {
-          showActionSheetWithOptions: (options: any, callback: any) => {
-            sheet = { options, callback };
-          },
-        },
-        Alert: { alert: (...args: any[]) => (alert = args) },
-      },
-      "lucide-react-native": { ChevronsUpDown: "Updown" },
-      "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
-      "../../theme/designTokens": {
-        spacing: { sm: 8, xxl: 16, huge: 24 },
-      },
-    });
-    const { chooseFromMenu } = harness.load(
-      file("MachinePresentation.tsx"),
-    ) as {
-      chooseFromMenu: typeof import("./MachinePresentation").chooseFromMenu;
-    };
-    chooseFromMenu(
-      "Machine confirmation",
-      [
-        { value: "none", label: "No machine confirmation" },
-        { value: "all", label: "Confirm every operation" },
-      ],
-      (value) => picks.push(value),
-    );
-    if (os === "ios") {
-      assert.deepEqual(plain(sheet.options.options), [
-        "No machine confirmation",
-        "Confirm every operation",
-        "Cancel",
-      ]);
-      assert.equal(sheet.options.cancelButtonIndex, 2);
-      sheet.callback(2);
-      sheet.callback(1);
-    } else {
-      const buttons = alert[2];
-      assert.deepEqual(plain(buttons.map((button: any) => button.text)), [
-        "No machine confirmation",
-        "Confirm every operation",
-        "Cancel",
-      ]);
-      buttons[1].onPress();
-    }
-    assert.deepEqual(picks, ["all"]);
-  }
-});
-
 function policyEditor(overrides: Partial<MachineNode> = {}) {
-  let menu: any;
   const saved: any[] = [];
   const x = render(
     "MachinePolicyScreen.tsx",
@@ -193,22 +134,27 @@ function policyEditor(overrides: Partial<MachineNode> = {}) {
         }),
       },
       "./MachinePresentation": {
-        chooseFromMenu: (...args: any[]) => (menu = args),
-        MachineMenuRow: "MenuRow",
         MachineSwitch: "Switch",
         machinePageContent: {},
       },
       "./machineContracts": contracts,
     },
   );
-  return { ...x, saved, menu: () => menu };
+  return { ...x, saved };
 }
 
 test("owner confirmation is one menu row; Save is a tinted row gated on a real change", async () => {
   const x = policyEditor();
   const menuRows = x.all().filter((n) => n.type === "MenuRow");
   assert.equal(menuRows.length, 1);
-  assert.equal(menuRows[0]!.props.value, "No machine confirmation");
+  const menu = () => x.all().find((n) => n.type === "MenuRow")!;
+  assert.equal(menu().props.label, "Machine confirmation");
+  assert.equal(menu().props.value, "none");
+  assert.deepEqual(plain(menu().props.options.map((o: any) => o.label)), [
+    "No machine confirmation",
+    "Confirm changes",
+    "Confirm every operation",
+  ]);
   assert.equal(
     x.all().some((n) => /Selected:/.test(String(n.props.label))),
     false,
@@ -216,20 +162,9 @@ test("owner confirmation is one menu row; Save is a tinted row gated on a real c
   const save = () => x.row("Save owner policy");
   assert.equal(save().props.tone, "action");
   assert.equal(save().props.disabled, true);
-  menuRows[0]!.props.onPress();
-  const [title, options, pick] = x.menu();
-  assert.equal(title, "Machine confirmation");
-  assert.deepEqual(plain(options.map((o: any) => o.label)), [
-    "No machine confirmation",
-    "Confirm changes",
-    "Confirm every operation",
-  ]);
-  pick("all");
+  menu().props.onChange("all");
   x.harness.flush();
-  assert.equal(
-    x.all().find((n) => n.type === "MenuRow")!.props.value,
-    "Confirm every operation",
-  );
+  assert.equal(menu().props.value, "all");
   assert.equal(save().props.disabled, false);
   await save().props.onPress();
   await x.harness.settle();

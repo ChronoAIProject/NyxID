@@ -5,6 +5,7 @@ import type { WorkspaceContentParamList } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import {
   SettingsGroup,
+  SettingsMenuRow,
   SettingsRow,
 } from "../../components/settings/SettingsList";
 import {
@@ -20,12 +21,7 @@ import {
   useMachineRuntime,
   useMachineWrite,
 } from "./MachineUI";
-import {
-  chooseFromMenu,
-  MachineMenuRow,
-  machinePageContent,
-  MachineSwitch,
-} from "./MachinePresentation";
+import { machinePageContent, MachineSwitch } from "./MachinePresentation";
 import {
   updateInProgress,
   updateResultMessage,
@@ -41,13 +37,6 @@ const CONFIRMATION_OPTIONS = [
   value: MachineNode["machine_confirm"];
   label: string;
 }[];
-
-export function confirmationLabel(value: MachineNode["machine_confirm"]) {
-  return (
-    CONFIRMATION_OPTIONS.find((option) => option.value === value)?.label ??
-    value
-  );
-}
 
 export function MachinePolicyScreen({
   navigation,
@@ -205,17 +194,12 @@ export function PolicyEditor({
       {refreshError && <Notice tone="error" message={refreshError} />}
       {notice && <Notice message={notice} />}
       <SettingsGroup title="Owner policy" inset={false}>
-        <MachineMenuRow
+        <SettingsMenuRow
           label="Machine confirmation"
-          value={confirmationLabel(confirm)}
+          value={confirm}
+          options={CONFIRMATION_OPTIONS}
           disabled={blocked}
-          onPress={() =>
-            chooseFromMenu(
-              "Machine confirmation",
-              CONFIRMATION_OPTIONS,
-              setConfirm,
-            )
-          }
+          onChange={setConfirm}
         />
         <MachineSwitch
           label="Saved-login typing"
