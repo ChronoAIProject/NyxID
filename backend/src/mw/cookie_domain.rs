@@ -82,14 +82,75 @@ fn callback_origin<'a>(
     })
 }
 
+/// The configured API alias an MCP client connected through. RFC 9728 requires
+/// protected-resource metadata to name the exact resource the client used, and
+/// MCP clients reject a `resource` on another origin. Inserted only when the
+/// request matched a configured alias other than the canonical base.
+#[derive(Clone)]
+pub struct McpResourceOrigin(pub(crate) String);
+
+/// The `WWW-Authenticate` challenge for an unauthenticated MCP request.
+pub(crate) fn mcp_resource_metadata_challenge(api_origin: &str) -> String {
+    format!(
+        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+        api_origin.trim_end_matches('/')
+    )
+}
+
+fn is_mcp_metadata_route(path: &str) -> bool {
+    matches!(
+        path,
+        "/.well-known/oauth-protected-resource" | "/mcp" | "/public/mcp"
+    )
+}
+
+/// Keep MCP discovery on the API origin the client connected to: the
+/// protected-resource metadata names that origin's `/mcp`, and a 401 challenge
+/// points at that origin's metadata. Tokens are unchanged; the resource
+/// validator already treats configured aliases as the canonical MCP resource.
+async fn with_mcp_resource_origin(
+    config: &AppConfig,
+    mut request: Request<Body>,
+    trusted: bool,
+    next: Next,
+) -> Response {
+    let base = config.base_url.trim_end_matches('/');
+    let Some(origin) = callback_origin(config, request.headers(), trusted)
+        .map(|origin| origin.trim_end_matches('/').to_owned())
+        .filter(|origin| origin != base)
+    else {
+        return next.run(request).await;
+    };
+    request
+        .extensions_mut()
+        .insert(McpResourceOrigin(origin.clone()));
+    let mut response = next.run(request).await;
+    if response.status() == axum::http::StatusCode::UNAUTHORIZED
+        && response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .is_some_and(|value| {
+                value.as_bytes() == mcp_resource_metadata_challenge(base).as_bytes()
+            })
+        && let Ok(value) = mcp_resource_metadata_challenge(&origin).parse()
+    {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
 pub async fn middleware(
     State(state): State<AppState>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    let path = request.uri().path();
+    let mcp_route = is_mcp_metadata_route(path);
     if (state.config.domain_aliases.cookie_domains.is_empty()
         && state.config.domain_aliases.base_urls.is_empty())
-        || !request.uri().path().starts_with("/api/v1/auth/")
+        || !(mcp_route || path.starts_with("/api/v1/auth/"))
     {
         return next.run(request).await;
     }
@@ -99,6 +160,9 @@ pub async fn middleware(
         .is_some_and(|ConnectInfo(peer)| {
             super::rate_limit::is_trusted_proxy(peer.ip(), &state.config.trusted_proxy_ips)
         });
+    if mcp_route {
+        return with_mcp_resource_origin(&state.config, request, trusted, next).await;
+    }
     let domain = alias_domain(&state.config, request.headers(), trusted).map(str::to_owned);
     if let Some(origin) = callback_origin(&state.config, request.headers(), trusted) {
         request
@@ -351,5 +415,130 @@ mod tests {
             .await;
             assert!(cookies.iter().all(|c| c.contains("Domain=.new.example")));
         }
+    }
+
+    /// MCP clients reject protected-resource metadata whose `resource` is on
+    /// another origin, so a client still configured with the old API host must
+    /// see that host in both the 401 challenge and the metadata document.
+    #[tokio::test]
+    async fn domain_alias_mcp_discovery_names_the_api_origin_the_client_used() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.base_url = "https://new.example".into();
+        state.config.jwt_issuer = "https://old.example".into();
+        state.config.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
+        let (unaliased, _) = crate::routes::build_router_with_state(state.clone());
+        let unaliased = unaliased.with_state(state.clone());
+        state.config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        let (public, private) = crate::routes::build_router_with_state(state.clone());
+        let public = public.with_state(state.clone());
+        let private = private.with_state(state);
+
+        async fn send(
+            app: &Router,
+            method: &str,
+            uri: &str,
+            host: &str,
+            forwarded: Option<&str>,
+            peer: &str,
+        ) -> Response {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, host)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream");
+            if let Some(value) = forwarded {
+                request = request.header("x-forwarded-host", value);
+            }
+            let body = if method == "POST" {
+                Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            } else {
+                Body::empty()
+            };
+            let mut request = request.body(body).unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            app.clone().oneshot(request).await.unwrap()
+        }
+        async fn metadata(response: Response) -> serde_json::Value {
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        let untrusted = "127.0.0.2:1234";
+        for (host, forwarded, peer, expected) in [
+            ("old.example", None, untrusted, "https://old.example"),
+            ("OLD.EXAMPLE:443", None, untrusted, "https://old.example"),
+            ("new.example", None, untrusted, "https://new.example"),
+            (
+                "unconfigured.example",
+                None,
+                untrusted,
+                "https://new.example",
+            ),
+            ("old.example.evil", None, untrusted, "https://new.example"),
+            (
+                "internal",
+                Some("old.example"),
+                "127.0.0.1:1234",
+                "https://old.example",
+            ),
+            // An untrusted peer cannot select an alias through a forwarded host.
+            (
+                "new.example",
+                Some("old.example"),
+                untrusted,
+                "https://new.example",
+            ),
+        ] {
+            let value = metadata(
+                send(
+                    &public,
+                    "GET",
+                    "/.well-known/oauth-protected-resource",
+                    host,
+                    forwarded,
+                    peer,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(value["resource"], format!("{expected}/mcp"), "{host}");
+            // The issuer identity is never taken from the request.
+            assert_eq!(
+                value["authorization_servers"],
+                serde_json::json!(["https://old.example"]),
+                "{host}"
+            );
+
+            let response = send(&private, "POST", "/mcp", host, forwarded, peer).await;
+            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers()[header::WWW_AUTHENTICATE],
+                format!(
+                    "Bearer resource_metadata=\"{expected}/.well-known/oauth-protected-resource\""
+                ),
+                "{host}"
+            );
+        }
+
+        // Without aliases the request host never changes the metadata.
+        let value = metadata(
+            send(
+                &unaliased,
+                "GET",
+                "/.well-known/oauth-protected-resource",
+                "old.example",
+                None,
+                untrusted,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(value["resource"], "https://new.example/mcp");
     }
 }
