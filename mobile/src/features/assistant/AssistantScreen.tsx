@@ -1411,7 +1411,6 @@ export function AssistantScreen({
             </View>
           ) : null}
           <ComposerConnectionPicker state={connection} />
-          <ComposerDictationReview dictation={dictation} />
           <AssistantPendingUploads
             files={uploads.files}
             remove={uploads.remove}
@@ -1427,114 +1426,125 @@ export function AssistantScreen({
               {uploads.error ?? uploads.notice}
             </Label>
           ) : null}
-          <AssistantMentionInput
-            value={draft}
-            onChangeText={updateDraft}
-            generation={`${draftKey}:${composerGeneration}`}
-            editable={
-              !destroyed &&
-              !assistant.recoveryRequired &&
-              !route?.params?.openLatest &&
-              (!running || guidance.canSteer)
+          <ComposerDictationReview dictation={dictation} />
+          {/* Collapsed rather than unmounted: a held microphone press must still
+              receive its release while dictation covers the field. */}
+          <View
+            style={dictation.active ? styles.dictationHidden : undefined}
+            accessibilityElementsHidden={dictation.active}
+            importantForAccessibility={
+              dictation.active ? "no-hide-descendants" : "auto"
             }
-            accessibilityLabel="Message to assistant"
-            placeholder={
-              guidance.canSteer
-                ? "Guide this running reply…"
-                : `Message ${agentName}`
-            }
-            renderActions={(mentionAction) => (
-              <ChatComposerRow>
-                <ComposerAttachButton
-                  label="Attach photos or files, or take a photo"
-                  busy={uploads.picking}
-                  disabled={
-                    !canCompose ||
-                    dictation.active ||
-                    uploads.picking ||
-                    uploads.session.sending ||
-                    uploads.files.length >= 10
-                  }
-                  onPress={() =>
-                    uploads.choose([
-                      { label: "Use a connection", onPress: connection.choose },
-                    ])
-                  }
-                />
-                {mentionAction}
-                <AssistantComposerSettings
-                  scope={`${getAuthEpoch()}:${draftKey}`}
-                  agentOverride={assistant.agent?.access_mode_override}
-                  activeTurn={permissionsLocked}
-                  disabled={
-                    !assistant.online ||
-                    !assistant.agent ||
-                    !!destroyed ||
-                    assistant.loading ||
-                    assistant.recoveryRequired ||
-                    uploads.picking ||
-                    openingVoice ||
-                    !!voiceThread
-                  }
-                  visible={sheet === "permissions"}
-                  onOpenChange={(open) =>
-                    setSheet(open ? "permissions" : undefined)
-                  }
-                />
-                <View style={{ flex: 1 }} />
-                <ComposerDictationButton
-                  dictation={dictation}
-                  disabled={
-                    !canCompose ||
-                    uploads.picking ||
-                    uploads.session.sending ||
-                    openingVoice ||
-                    !!voiceThread
-                  }
-                />
-                {guidance.canSteer && draft.trim() ? (
-                  <ActionButton
-                    label="Steer"
-                    accessibilityLabel="Send guidance"
-                    compact
-                    disabled={!canGuideSend}
-                    loading={guidance.submitting}
-                    onPress={() => void sendDraft()}
-                  />
-                ) : null}
-                {running && assistant.conversationId ? (
-                  <ComposerSubmitButton
-                    kind="stop"
-                    label="Stop assistant"
+          >
+            <AssistantMentionInput
+              value={draft}
+              onChangeText={updateDraft}
+              generation={`${draftKey}:${composerGeneration}`}
+              editable={
+                !destroyed &&
+                !assistant.recoveryRequired &&
+                !route?.params?.openLatest &&
+                (!running || guidance.canSteer)
+              }
+              accessibilityLabel="Message to assistant"
+              placeholder={
+                guidance.canSteer
+                  ? "Guide this running reply…"
+                  : `Message ${agentName}`
+              }
+              renderActions={(mentionAction) => (
+                <ChatComposerRow>
+                  <ComposerAttachButton
+                    label="Attach photos or files, or take a photo"
+                    busy={uploads.picking}
                     disabled={
-                      stopProtected ||
-                      assistant.mutating ||
-                      conversation?.active_turn?.stop_requested
+                      !canCompose ||
+                      dictation.active ||
+                      uploads.picking ||
+                      uploads.session.sending ||
+                      uploads.files.length >= 10
                     }
-                    onPress={() => {
-                      if (composerPress.current("stop")) void assistant.stop();
-                    }}
+                    onPress={() =>
+                      uploads.choose([
+                        { label: "Use a connection", onPress: connection.choose },
+                      ])
+                    }
                   />
-                ) : voiceAvailable &&
-                  (!voiceThread || voiceThread !== assistant.conversationId) ? (
-                  <ComposerSubmitButton
-                    kind="voice"
-                    label="Open voice call"
-                    disabled={!canCompose || openingVoice}
-                    busy={openingVoice}
-                    onPress={() => void openVoice()}
+                  {mentionAction}
+                  <AssistantComposerSettings
+                    scope={`${getAuthEpoch()}:${draftKey}`}
+                    agentOverride={assistant.agent?.access_mode_override}
+                    activeTurn={permissionsLocked}
+                    disabled={
+                      !assistant.online ||
+                      !assistant.agent ||
+                      !!destroyed ||
+                      assistant.loading ||
+                      assistant.recoveryRequired ||
+                      uploads.picking ||
+                      openingVoice ||
+                      !!voiceThread
+                    }
+                    visible={sheet === "permissions"}
+                    onOpenChange={(open) =>
+                      setSheet(open ? "permissions" : undefined)
+                    }
                   />
-                ) : (
-                  <ComposerSubmitButton
-                    kind="send"
-                    label="Send message"
-                    disabled={!canSend}
-                    onPress={() => void sendDraft()}
+                  <View style={{ flex: 1 }} />
+                  <ComposerDictationButton
+                    dictation={dictation}
+                    disabled={
+                      !canCompose ||
+                      uploads.picking ||
+                      uploads.session.sending ||
+                      openingVoice ||
+                      !!voiceThread
+                    }
                   />
-                )}
-              </ChatComposerRow>
-            )}
-          />
+                  {guidance.canSteer && draft.trim() ? (
+                    <ActionButton
+                      label="Steer"
+                      accessibilityLabel="Send guidance"
+                      compact
+                      disabled={!canGuideSend}
+                      loading={guidance.submitting}
+                      onPress={() => void sendDraft()}
+                    />
+                  ) : null}
+                  {running && assistant.conversationId ? (
+                    <ComposerSubmitButton
+                      kind="stop"
+                      label="Stop assistant"
+                      disabled={
+                        stopProtected ||
+                        assistant.mutating ||
+                        conversation?.active_turn?.stop_requested
+                      }
+                      onPress={() => {
+                        if (composerPress.current("stop")) void assistant.stop();
+                      }}
+                    />
+                  ) : voiceAvailable &&
+                    (!voiceThread || voiceThread !== assistant.conversationId) ? (
+                    <ComposerSubmitButton
+                      kind="voice"
+                      label="Open voice call"
+                      disabled={!canCompose || openingVoice}
+                      busy={openingVoice}
+                      onPress={() => void openVoice()}
+                    />
+                  ) : (
+                    <ComposerSubmitButton
+                      kind="send"
+                      label="Send message"
+                      disabled={!canSend}
+                      onPress={() => void sendDraft()}
+                    />
+                  )}
+                </ChatComposerRow>
+              )}
+            />
+          </View>
           {assistant.recoveryRequired || uploads.blocked ? (
             <Label muted style={styles.composerHint}>
               {assistant.recoveryRequired
@@ -1802,6 +1812,7 @@ const styles = StyleSheet.create({
   chatPage: { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 4, gap: 8 },
   composer: { marginBottom: 0 },
   composerHint: { fontSize: 11, lineHeight: 16, paddingHorizontal: 12 },
+  dictationHidden: { height: 0, overflow: "hidden", opacity: 0 },
   errorRow: { gap: 8, marginHorizontal: 12 },
   sheet: { flex: 1, paddingTop: 20 },
   sheetHeader: {

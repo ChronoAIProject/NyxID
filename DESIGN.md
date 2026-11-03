@@ -602,7 +602,13 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   full-width text sits above a toolbar with Attach, optional mentions, dictation
   and a trailing Send/Stop circle inside a 44pt target. Attach offers Camera,
   Photos and Files through their native pickers. Dictation requires review before text is
-  inserted into the draft and never sends a message automatically. Chat pages
+  inserted into the draft and never sends a message automatically. While it runs
+  it takes over the pill (the draft field collapses but stays mounted so a held
+  mic press still releases): a status line with a live dot and mono timer, the
+  transcript at 17/24pt with interim words in tertiary, then a 44pt Discard
+  circle, a microphone level meter (3pt bars, peak per 90ms) and one filled
+  Done pill, which becomes Insert in review. Idle errors stay a compact notice
+  above the field. Chat pages
   use an edge-to-edge transcript viewport within the system safe area, so its
   scroll indicator sits at the window edge. The centered transcript content
   retains 12pt horizontal padding and the configured column maximum; composers

@@ -134,7 +134,11 @@ export function Card({
     <View
       style={[
         styles.card,
-        { backgroundColor: colors.card, borderColor: colors.border },
+        {
+          backgroundColor: colors.card,
+          borderColor: colors.border,
+          shadowColor: colors.shadowColor,
+        },
         style,
       ]}
     >
@@ -322,7 +326,7 @@ export function ActionButton({
                     : compact
                       ? colors.navActive
                       : colors.card,
-              borderWidth: compact && variant === "secondary" ? 0 : 1,
+              borderWidth: 1,
               borderColor:
                 variant === "danger" ? colors.danger : colors.controlBorder,
             },
@@ -375,7 +379,18 @@ const styles = StyleSheet.create({
     letterSpacing: -0.6,
   },
   subtitle: { fontFamily: fonts.bodyRegular, fontSize: 13, lineHeight: 20 },
-  card: { padding: 16, gap: 12, borderWidth: 1, borderRadius: radius.lg },
+  // DESIGN.md: elevated cards carry shadow-sm, which separates them from the
+  // white light-mode slab where the border alone is faint.
+  card: {
+    padding: 16,
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: radius.lg,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 1,
+    shadowRadius: 3,
+    elevation: 1,
+  },
   label: { fontFamily: fonts.body, fontSize: 13, lineHeight: 20 },
   field: { gap: 8 },
   input: {

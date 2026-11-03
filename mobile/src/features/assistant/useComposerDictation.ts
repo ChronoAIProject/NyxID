@@ -238,6 +238,9 @@ export function useComposerDictation({
   return {
     phase,
     text,
+    /** Settled words and the provider's still-changing tail, for display only. */
+    final: caption.final,
+    interim: caption.interim,
     error,
     permissionDenied,
     media,
