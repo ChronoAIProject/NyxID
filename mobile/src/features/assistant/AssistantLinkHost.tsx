@@ -87,6 +87,16 @@ export function ScopedAssistantLinkHost({
       if (!value) return false;
       if (!available.current()) return true;
       trigger.current = source;
+      if (value.kind === "service") {
+        navigation.dispatch(
+          value.slug
+            ? workspaceNavigateAction("ServiceSetup", {
+                catalogSlug: value.slug,
+              })
+            : workspaceNavigateAction("Plugins", { tab: "connectors" }),
+        );
+        return true;
+      }
       if (value.kind === "account" && value.panel !== "nyxbot") {
         if (value.panel === "billing")
           navigation.dispatch(

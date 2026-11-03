@@ -9,6 +9,8 @@ const ACCOUNT_KEYS = new Set([
 export type AssistantLinkTarget =
   | { kind: "connect"; href: string; token: string }
   | { kind: "channel"; href: string; platform: string }
+  /** NyxBot's "add a service" settings link, optionally for one catalog service. */
+  | { kind: "service"; href: string; slug?: string }
   | {
       kind: "account";
       href: string;
@@ -50,6 +52,19 @@ export function assistantLinkTarget(
         token: url.pathname.slice("/connect/".length),
       };
     }
+    if (url.pathname === "/keys") {
+      const keys = [...url.searchParams.keys()];
+      const slug = url.searchParams.get("slug") ?? undefined;
+      if (
+        url.searchParams.get("tab") === "services" &&
+        url.searchParams.get("action") === "add-service" &&
+        keys.every((key) => ["tab", "action", "slug"].includes(key)) &&
+        new Set(keys).size === keys.length &&
+        (slug === undefined || /^[a-z0-9][a-z0-9_-]{0,127}$/.test(slug))
+      )
+        return { kind: "service", href: url.href, ...(slug ? { slug } : {}) };
+      return null;
+    }
     const channel = /^\/channel-bots\/connect\/([^/]+)$/.exec(url.pathname);
     if (channel) {
       const platform = decodeURIComponent(channel[1]!);
@@ -87,7 +102,7 @@ export function assistantLinkLabel(
 ): string {
   if (target?.kind === "channel")
     return `Continue on the web${label.trim() && !label.startsWith("http") ? ` · ${label.trim()}` : ""}`;
-  if (target?.kind !== "connect") return label;
+  if (target?.kind !== "connect" && target?.kind !== "service") return label;
   const trimmed = label.trim();
   return /^connect\b/i.test(trimmed)
     ? trimmed

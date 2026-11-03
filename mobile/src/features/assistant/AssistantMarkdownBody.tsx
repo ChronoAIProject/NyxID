@@ -43,7 +43,7 @@ function nodeText(node: MarkdownNode): string {
     .join("");
 }
 
-/** Hosted connect links inside one block, in reading order. */
+/** Connector links (hosted connect and add-service) inside one block, in reading order. */
 function connectLinks(
   node: MarkdownNode | undefined,
   found: { href: string; label: string }[] = [],
@@ -52,7 +52,7 @@ function connectLinks(
   if (node.type === "link") {
     const href = node.attributes?.href ?? "";
     const target = assistantLinkTarget(href, firstPartyFrontendUrls());
-    if (target?.kind === "connect")
+    if (target?.kind === "connect" || target?.kind === "service")
       found.push({ href, label: assistantLinkLabel(target, nodeText(node)) });
     return found;
   }
@@ -186,7 +186,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
     () => ({
       ...assistantSelectableMarkdown,
       body: (node, children, _parents, styles) => {
-        // Each hosted connect link gets one button under the block that names it.
+        // Each connector link gets one button under the block that names it.
         const shown = new Set<string>();
         return (
           <View key={node.key} style={styles._VIEW_SAFE_body}>
@@ -236,8 +236,8 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
         const label = node.children
           .map((child) => child.content ?? "")
           .join("");
-        // The body renders the connect action as a button; the sentence keeps its words.
-        if (target?.kind === "connect")
+        // The body renders connector actions as buttons; the sentence keeps its words.
+        if (target?.kind === "connect" || target?.kind === "service")
           return (
             <Text key={node.key} style={{ fontFamily: fonts.bodySemi }}>
               {assistantLinkLabel(target, label)}

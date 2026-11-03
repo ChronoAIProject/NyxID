@@ -287,9 +287,17 @@ test("hosted connect links render one button under their block and keep plain wo
       ]),
       paragraph("b", [link("https://example.test/docs", "docs")]),
       paragraph("c", [link(href, href)]),
+      paragraph("d", [
+        link(
+          `${origin}/keys?tab=services&action=add-service&slug=api-github`,
+          "Connect another GitHub account",
+        ),
+      ]),
     ],
   };
-  const body = rules.body(ast, ["A", "B", "C"], [], { _VIEW_SAFE_body: {} });
+  const body = rules.body(ast, ["A", "B", "C", "D"], [], {
+    _VIEW_SAFE_body: {},
+  });
   const blocks = body.props.children;
   const buttons = (block: any) =>
     block.props.children[1].filter(
@@ -304,6 +312,13 @@ test("hosted connect links render one button under their block and keep plain wo
   );
   assert.equal(buttons(blocks[1]).length, 0, "ordinary links stay links");
   assert.equal(buttons(blocks[2]).length, 0, "one button per connect link");
+  assert.equal(
+    buttons(blocks[3])
+      .map((button: any) => button.props.label)
+      .join("|"),
+    "Connect another GitHub account",
+    "add-service links are connector buttons too",
+  );
   buttons(blocks[0])[0].props.onPress(42);
   assert.equal(
     JSON.stringify(opened),

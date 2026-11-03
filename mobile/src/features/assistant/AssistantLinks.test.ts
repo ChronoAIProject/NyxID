@@ -113,6 +113,35 @@ test("connect links from any embedded domain set open native UI, resolving relat
   assert.equal(assistantLinkTarget(`/connect/${token}`, []), null);
 });
 
+test("NyxBot add-service links select native service setup; anything else stays a web link", () => {
+  const github = assistantLinkTarget(
+    `${origin}/keys?tab=services&action=add-service&slug=api-github`,
+    origin,
+  )!;
+  assert.equal(github.kind, "service");
+  assert.equal(github.kind === "service" && github.slug, "api-github");
+  assert.equal(
+    assistantLinkLabel(github, "Connect another GitHub account"),
+    "Connect another GitHub account",
+  );
+  assert.equal(assistantLinkLabel(github, "GitHub"), "Connect GitHub");
+  const any = assistantLinkTarget(
+    "/keys?action=add-service&tab=services",
+    origin,
+  )!;
+  assert.equal(any.kind, "service");
+  assert.equal(any.kind === "service" && any.slug, undefined);
+  for (const bad of [
+    `${origin}/keys?tab=services`,
+    `${origin}/keys?tab=nyxid&action=create-key`,
+    `${origin}/keys?tab=services&action=add-service&slug=api-github&next=x`,
+    `${origin}/keys?tab=services&action=add-service&slug=api-github&slug=x`,
+    `${origin}/keys?tab=services&action=add-service&slug=..%2Fadmin`,
+    `https://other.test/keys?tab=services&action=add-service&slug=api-github`,
+  ])
+    assert.equal(assistantLinkTarget(bad, origin), null, bad);
+});
+
 test("hosted connection form validation, challenge merging and polling policy match the web", () => {
   const p = {
     ...preview(),
@@ -515,6 +544,20 @@ test("real link host routes account panels, preserves channel URL, retains the t
   assert.equal(actions.at(-1).payload.params.screen, "AccountSecurity");
   open(`${origin}/assistant?panel=settings&panelTab=display`);
   assert.equal(actions.at(-1).payload.params.params.section, "display");
+  assert.equal(
+    open(`${origin}/keys?tab=services&action=add-service&slug=api-github`),
+    true,
+  );
+  assert.equal(actions.at(-1).payload.params.screen, "ServiceSetup");
+  assert.equal(actions.at(-1).payload.params.params.catalogSlug, "api-github");
+  open(`${origin}/keys?tab=services&action=add-service`);
+  assert.equal(actions.at(-1).payload.params.screen, "Plugins");
+  assert.equal(actions.at(-1).payload.params.params.tab, "connectors");
+  assert.equal(
+    nodes(h.value()).find((n) => n.type === "Modal")?.props.visible ?? false,
+    false,
+    "service setup opens a native page, not the link modal",
+  );
   const channel = `${origin}/channel-bots/connect/telegram?label=Release%20crew&target_org_id=org&x=kept`;
   open(channel);
   nodes(h.value())
@@ -564,8 +607,14 @@ test("real link host routes account panels, preserves channel URL, retains the t
   epoch++;
   h.render();
   availability.active = false;
+  const before = actions.length;
   open(`${origin}/assistant?panel=billing`);
-  assert.equal(actions.length, 3, "inactive account/thread does not navigate");
+  open(`${origin}/keys?tab=services&action=add-service&slug=api-github`);
+  assert.equal(
+    actions.length,
+    before,
+    "inactive account/thread does not navigate",
+  );
   h.unmount();
 });
 
