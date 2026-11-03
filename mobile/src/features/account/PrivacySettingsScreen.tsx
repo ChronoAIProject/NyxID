@@ -79,7 +79,6 @@ export function PrivacySettingsScreen(
         >
           <SettingsRow
             icon={ChartColumn}
-            tone="primary"
             label={accountLabel}
             accessory={
               <Switch
@@ -97,7 +96,6 @@ export function PrivacySettingsScreen(
           />
           <SettingsRow
             icon={Smartphone}
-            tone="neutral"
             label="Allow on this device"
             accessory={
               <Switch

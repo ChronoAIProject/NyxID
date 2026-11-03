@@ -85,7 +85,6 @@ export function DisplaySettingsScreen(
         </View>
         <SettingsRow
           icon={SunMoon}
-          tone="primary"
           label="Use system setting"
           accessory={
             <Switch

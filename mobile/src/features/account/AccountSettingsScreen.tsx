@@ -1,15 +1,32 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Alert, Image, Linking, StyleSheet, View, useWindowDimensions, type TextProps,
+  Alert,
+  Image,
+  Linking,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+  type TextProps,
 } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bell, FileText, Lock, Mail, Palette, ScrollText, ShieldCheck, Wallet,
+  Bell,
+  FileText,
+  Lock,
+  Mail,
+  Palette,
+  ScrollText,
+  ShieldCheck,
+  Wallet,
 } from "lucide-react-native";
 import type { WorkspaceScreenProps } from "../../app/navigationTypes";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { OfflineBanner } from "../../components/OfflineBanner";
-import { ToastOverlay, type ToastKind, type ToastState } from "../../components/ToastOverlay";
+import {
+  ToastOverlay,
+  type ToastKind,
+  type ToastState,
+} from "../../components/ToastOverlay";
 import {
   SettingsGroup,
   SettingsPage,
@@ -68,29 +85,51 @@ function resolveDeleteAccountError(error: unknown): {
   // Use errorKey for reliable matching when available (machine-readable, stable)
   if (isApiError(error)) {
     const key = error.errorKey;
-    if (key === "unauthorized" || key === "authentication_failed" || key === "token_expired") {
-      return { message: "Session expired. Please sign in again.", shouldForceSignOut: true };
+    if (
+      key === "unauthorized" ||
+      key === "authentication_failed" ||
+      key === "token_expired"
+    ) {
+      return {
+        message: "Session expired. Please sign in again.",
+        shouldForceSignOut: true,
+      };
     }
     if (key === "not_found" || error.statusCode === 404) {
-      return { message: "Account not found or already deleted.", shouldForceSignOut: true };
+      return {
+        message: "Account not found or already deleted.",
+        shouldForceSignOut: true,
+      };
     }
   }
 
   const raw = error instanceof Error ? error.message : "";
   const lower = raw.toLowerCase();
 
-  if (lower.includes("auth_session_missing") || lower.includes("request_failed_401")) {
-    return { message: "Session expired. Please sign in again.", shouldForceSignOut: true };
+  if (
+    lower.includes("auth_session_missing") ||
+    lower.includes("request_failed_401")
+  ) {
+    return {
+      message: "Session expired. Please sign in again.",
+      shouldForceSignOut: true,
+    };
   }
 
-  if (lower.includes("network request failed") || lower.includes("failed to fetch")) {
-    return { message: "Network error. Check API server and try again.", shouldForceSignOut: false };
+  if (
+    lower.includes("network request failed") ||
+    lower.includes("failed to fetch")
+  ) {
+    return {
+      message: "Network error. Check API server and try again.",
+      shouldForceSignOut: false,
+    };
   }
 
-  const fallback = __DEV__ && raw ? raw : "Failed to delete account. Please try again.";
+  const fallback =
+    __DEV__ && raw ? raw : "Failed to delete account. Please try again.";
   return { message: fallback, shouldForceSignOut: false };
 }
-
 
 function getInitials(name?: string | null, email?: string): string {
   const trimmedName = name?.trim();
@@ -105,7 +144,10 @@ function getInitials(name?: string | null, email?: string): string {
   return (email?.[0] ?? "?").toUpperCase();
 }
 
-function getIdentityName(name?: string | null, provider?: string | null): string {
+function getIdentityName(
+  name?: string | null,
+  provider?: string | null,
+): string {
   const trimmedName = name?.trim();
   if (trimmedName) return trimmedName;
   if (provider === "apple") return "Apple account";
@@ -147,15 +189,13 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
   const { signOut } = useAuthSession();
   const { isConnected, recheckConnection } = useNetworkStatus();
 
-  const {
-    data: profile,
-    refetch: refetchProfile,
-  } = useQuery({
+  const { data: profile, refetch: refetchProfile } = useQuery({
     queryKey: ["account", "profile"],
     queryFn: () => mobileApi.getAccountProfile(),
   });
 
-  const showToast = (message: string, kind: ToastKind) => setToast({ message, kind });
+  const showToast = (message: string, kind: ToastKind) =>
+    setToast({ message, kind });
 
   useEffect(() => {
     if (!toast) return;
@@ -166,15 +206,24 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
   const deleteAccountMutation = useMutation({
     mutationFn: () => mobileApi.deleteAccount(),
     onSuccess: async (result) => {
-      showToast(result.status === "complete" ? "Account erasure complete. You have been signed out." : "Account deletion accepted. Cleanup continues until verified. You have been signed out.", "success");
-      try { await signOut(); } catch {}
+      showToast(
+        result.status === "complete"
+          ? "Account erasure complete. You have been signed out."
+          : "Account deletion accepted. Cleanup continues until verified. You have been signed out.",
+        "success",
+      );
+      try {
+        await signOut();
+      } catch {}
       queryClient.clear();
     },
     onError: (error) => {
       const resolved = resolveDeleteAccountError(error);
       showToast(resolved.message, "error");
       if (resolved.shouldForceSignOut) {
-        void signOut().then(() => queryClient.clear()).catch(() => {});
+        void signOut()
+          .then(() => queryClient.clear())
+          .catch(() => {});
       }
     },
   });
@@ -187,7 +236,9 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         style: "destructive",
         onPress: () => {
           showToast("You are signed out.", "info");
-          void signOut().then(() => queryClient.clear()).catch(() => {});
+          void signOut()
+            .then(() => queryClient.clear())
+            .catch(() => {});
         },
       },
     ]);
@@ -200,63 +251,86 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     // its lifecycle from us); the confirm path emits destructive_confirmed.
     capture({
       name: "ui.mobile_dialog_opened",
-      props: { dialog_id: "delete_account_confirm", entry_point: "account_settings" },
+      props: {
+        dialog_id: "delete_account_confirm",
+        entry_point: "account_settings",
+      },
     });
-    Alert.alert(
-      "Delete Account",
-      ACCOUNT_DELETION_DISCLOSURE,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: () => {
-            capture({
-              name: "ui.mobile_destructive_confirmed",
-              props: { domain: "account", action: "delete_account" },
-            });
-            setToast(null);
-            deleteAccountMutation.mutate();
-          },
+    Alert.alert("Delete Account", ACCOUNT_DELETION_DISCLOSURE, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: () => {
+          capture({
+            name: "ui.mobile_destructive_confirmed",
+            props: { domain: "account", action: "delete_account" },
+          });
+          setToast(null);
+          deleteAccountMutation.mutate();
         },
-      ]
-    );
+      },
+    ]);
   };
 
   const initials = getInitials(profile?.display_name, profile?.email);
-  const identityName = getIdentityName(profile?.display_name, profile?.social_provider);
+  const identityName = getIdentityName(
+    profile?.display_name,
+    profile?.social_provider,
+  );
   const isOffline = !isConnected;
   const deleting = deleteAccountMutation.isPending;
 
   return (
     <>
       <SettingsPage>
-        {isOffline && <OfflineBanner subtitle="Some features unavailable" onRetry={async () => {
-          const online = await recheckConnection();
-          if (online) void refetchProfile();
-          else showToast("Still offline — will retry when connected", "error");
-        }} />}
+        {isOffline && (
+          <OfflineBanner
+            subtitle="Some features unavailable"
+            onRetry={async () => {
+              const online = await recheckConnection();
+              if (online) void refetchProfile();
+              else
+                showToast("Still offline — will retry when connected", "error");
+            }}
+          />
+        )}
 
         <SettingsGroup inset={false}>
           <View style={styles.identity}>
             <View style={styles.avatarCircle}>
               {profile?.avatar_url ? (
-                <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} />
+                <Image
+                  source={{ uri: profile.avatar_url }}
+                  style={styles.avatarImage}
+                />
               ) : (
                 <Text style={styles.avatarText}>{initials}</Text>
               )}
             </View>
             <View style={styles.identityInfo}>
               <Text style={styles.identityName}>{identityName}</Text>
-              <Text style={styles.identityEmail}>{profile?.email ?? "..."}</Text>
+              <Text style={styles.identityEmail}>
+                {profile?.email ?? "..."}
+              </Text>
               {profile ? (
                 <Text style={styles.identityMethod}>
                   Signs in with {formatSignInMethod(profile.social_provider)}
                 </Text>
               ) : null}
             </View>
-            <View style={[styles.statusBadge, isOffline && styles.statusBadgeOffline]}>
-              <Text style={[styles.statusBadgeText, isOffline && styles.statusBadgeTextOffline]}>
+            <View
+              style={[
+                styles.statusBadge,
+                isOffline && styles.statusBadgeOffline,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.statusBadgeText,
+                  isOffline && styles.statusBadgeTextOffline,
+                ]}
+              >
                 {isOffline ? "Offline" : "Active"}
               </Text>
             </View>
@@ -266,13 +340,11 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         <SettingsGroup title="Account">
           <SettingsRow
             icon={ShieldCheck}
-            tone="primary"
             label="Account & security"
             onPress={() => navigation.push("AccountSecurity")}
           />
           <SettingsRow
             icon={Wallet}
-            tone="success"
             label="Usage & credits"
             onPress={() => navigation.push("UsageCredits")}
           />
@@ -281,19 +353,16 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         <SettingsGroup title="Preferences">
           <SettingsRow
             icon={Bell}
-            tone="danger"
             label="Notifications"
             onPress={() => navigation.push("NotificationSettings")}
           />
           <SettingsRow
             icon={Palette}
-            tone="info"
             label="Display"
             onPress={() => navigation.push("DisplaySettings")}
           />
           <SettingsRow
             icon={Lock}
-            tone="neutral"
             label="Privacy"
             onPress={() => navigation.push("PrivacySettings")}
           />
@@ -302,7 +371,6 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         <SettingsGroup title="Support">
           <SettingsRow
             icon={ScrollText}
-            tone="neutral"
             label="Terms of Service"
             onPress={() => {
               capture({
@@ -314,7 +382,6 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           />
           <SettingsRow
             icon={FileText}
-            tone="neutral"
             label="Privacy Policy"
             onPress={() => {
               capture({
@@ -326,7 +393,6 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           />
           <SettingsRow
             icon={Mail}
-            tone="neutral"
             label="Contact support"
             value={SUPPORT_EMAIL}
             accessibilityRole="link"
@@ -334,7 +400,9 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             onPress={() => {
               Linking.openURL(
                 `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("NyxID app support")}`,
-              ).catch(() => Alert.alert("Contact support", `Email us at ${SUPPORT_EMAIL}.`));
+              ).catch(() =>
+                Alert.alert("Contact support", `Email us at ${SUPPORT_EMAIL}.`),
+              );
             }}
           />
         </SettingsGroup>
@@ -371,70 +439,71 @@ const createStyles = (
   stacked: boolean,
   fontScale: number,
   avatarSize = Math.ceil(44 * Math.max(1, fontScale)),
-) => StyleSheet.create({
-  identity: {
-    flexDirection: stacked ? "column" : "row",
-    alignItems: stacked ? "flex-start" : "center",
-    gap: spacing.lg,
-    padding: spacing.xxl,
-  },
-  avatarCircle: {
-    width: avatarSize,
-    height: avatarSize,
-    borderRadius: radius.full,
-    backgroundColor: c.primary,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  avatarImage: {
-    width: avatarSize,
-    height: avatarSize,
-    borderRadius: radius.full,
-  },
-  avatarText: {
-    ...typeScale.h2,
-    color: c.onPrimary,
-  },
-  identityInfo: {
-    flex: stacked ? undefined : 1,
-    width: stacked ? "100%" : undefined,
-    minWidth: 0,
-  },
-  identityName: {
-    ...typeScale.h2,
-    color: c.textPrimary,
-  },
-  identityEmail: {
-    ...typeScale.caption,
-    color: c.textMuted,
-    marginTop: 1,
-  },
-  // DESIGN.md §Badges: rounded-md (6px), px-2 py-0.5, text-[10px] font-medium.
-  // Theme-aware via `successTone` / `dangerTone` so light + dark both render correctly.
-  statusBadge: {
-    maxWidth: "100%",
-    flexShrink: 0,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-    backgroundColor: c.successTone.bg,
-    borderWidth: 1,
-    borderColor: c.successTone.border,
-  },
-  statusBadgeOffline: {
-    backgroundColor: c.dangerTone.bg,
-    borderColor: c.dangerTone.border,
-  },
-  statusBadgeText: {
-    ...typeScale.badge,
-    color: c.successTone.text,
-  },
-  statusBadgeTextOffline: {
-    color: c.dangerTone.text,
-  },
-  identityMethod: {
-    ...typeScale.small,
-    color: c.textMuted,
-    marginTop: 1,
-  },
-});
+) =>
+  StyleSheet.create({
+    identity: {
+      flexDirection: stacked ? "column" : "row",
+      alignItems: stacked ? "flex-start" : "center",
+      gap: spacing.lg,
+      padding: spacing.xxl,
+    },
+    avatarCircle: {
+      width: avatarSize,
+      height: avatarSize,
+      borderRadius: radius.full,
+      backgroundColor: c.primary,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    avatarImage: {
+      width: avatarSize,
+      height: avatarSize,
+      borderRadius: radius.full,
+    },
+    avatarText: {
+      ...typeScale.h2,
+      color: c.onPrimary,
+    },
+    identityInfo: {
+      flex: stacked ? undefined : 1,
+      width: stacked ? "100%" : undefined,
+      minWidth: 0,
+    },
+    identityName: {
+      ...typeScale.h2,
+      color: c.textPrimary,
+    },
+    identityEmail: {
+      ...typeScale.caption,
+      color: c.textMuted,
+      marginTop: 1,
+    },
+    // DESIGN.md §Badges: rounded-md (6px), px-2 py-0.5, text-[10px] font-medium.
+    // Theme-aware via `successTone` / `dangerTone` so light + dark both render correctly.
+    statusBadge: {
+      maxWidth: "100%",
+      flexShrink: 0,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 2,
+      borderRadius: radius.sm,
+      backgroundColor: c.successTone.bg,
+      borderWidth: 1,
+      borderColor: c.successTone.border,
+    },
+    statusBadgeOffline: {
+      backgroundColor: c.dangerTone.bg,
+      borderColor: c.dangerTone.border,
+    },
+    statusBadgeText: {
+      ...typeScale.badge,
+      color: c.successTone.text,
+    },
+    statusBadgeTextOffline: {
+      color: c.dangerTone.text,
+    },
+    identityMethod: {
+      ...typeScale.small,
+      color: c.textMuted,
+      marginTop: 1,
+    },
+  });

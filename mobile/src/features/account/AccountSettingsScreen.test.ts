@@ -31,11 +31,18 @@ test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hol
     assert.equal(row.props.accessibilityHint, `Opens ${label}`, label);
     const parts = elements(row).map((node) => node.type);
     assert.ok(parts.includes("ChevronRight"), `${label} has a chevron`);
-    assert.ok(
-      elements(row).some(
-        (node) => style(node).width === 30 && style(node).height === 30,
-      ),
-      `${label} has a leading icon tile`,
+    const tile = elements(row).find(
+      (node) => style(node).width === 30 && style(node).height === 30,
+    );
+    assert.ok(tile, `${label} has a leading icon tile`);
+    // Duotone: every tile is the page background with a text-coloured glyph.
+    assert.equal(style(tile).backgroundColor, lightColors.bg, label);
+    assert.equal(
+      elements(tile).find(
+        (node) => typeof node.type === "string" && node.props.size === 17,
+      )!.props.color,
+      lightColors.textPrimary,
+      label,
     );
     row.props.onPress();
     assert.deepEqual(structuredClone(env.pushes.at(-1)), [route], label);

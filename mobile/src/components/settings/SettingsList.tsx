@@ -13,35 +13,10 @@ import { ChevronRight, type LucideIcon } from "lucide-react-native";
 import { DynamicTypeText as Text } from "../DynamicTypeText";
 import { ScreenContainer } from "../ScreenContainer";
 import { useTheme } from "../../theme/ThemeContext";
-import type { ThemeColors, ToneTriple } from "../../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
-
-export type SettingsTone =
-  "primary" | "success" | "info" | "warning" | "danger" | "neutral";
 
 // Leading inset of the hairline between rows: past the icon tile, as on iOS.
 const ICON_TILE = 30;
-
-function tone(colors: ThemeColors, name: SettingsTone): ToneTriple {
-  switch (name) {
-    case "primary":
-      return colors.primaryTone;
-    case "success":
-      return colors.successTone;
-    case "info":
-      return colors.infoTone;
-    case "warning":
-      return colors.warningTone;
-    case "danger":
-      return colors.dangerTone;
-    case "neutral":
-      return {
-        bg: colors.cardSoft,
-        text: colors.textSecondary,
-        border: colors.borderSoft,
-      };
-  }
-}
 
 /** Rows wrap to stacked label/value when scaled text leaves too little width. */
 export function useSettingsStacked() {
@@ -145,12 +120,11 @@ export function SettingsGroup({
 }
 
 /**
- * One settings row: tinted icon tile, label (and optional detail line), then a
+ * One settings row: duotone icon tile, label (and optional detail line), then a
  * value, an inline control, or a chevron when it opens a sub-page.
  */
 export function SettingsRow({
   icon: Icon,
-  tone: toneName = "neutral",
   label,
   detail,
   value,
@@ -165,7 +139,6 @@ export function SettingsRow({
   accessibilityHint,
 }: {
   icon?: LucideIcon;
-  tone?: SettingsTone;
   label: string;
   detail?: string;
   value?: string;
@@ -182,15 +155,21 @@ export function SettingsRow({
 }) {
   const { colors } = useTheme();
   const stacked = useSettingsStacked();
-  const tint = tone(colors, toneName);
   // Rows that open a sub-page get a chevron; centred actions never do.
   const chevron = !centered && (chevronProp ?? (!!onPress && !accessory));
   const labelColor = destructive ? colors.danger : colors.textPrimary;
   const content = (
     <>
       {Icon && !centered ? (
-        <View style={[styles.tile, { backgroundColor: tint.bg }]}>
-          <Icon size={17} color={tint.text} strokeWidth={2} />
+        // Duotone tiles follow the theme: white tile and black glyph in
+        // light mode, dark tile and white glyph in dark mode.
+        <View
+          style={[
+            styles.tile,
+            { backgroundColor: colors.bg, borderColor: colors.borderSoft },
+          ]}
+        >
+          <Icon size={17} color={colors.textPrimary} strokeWidth={2} />
         </View>
       ) : null}
       <View
@@ -293,6 +272,7 @@ const styles = StyleSheet.create({
     width: ICON_TILE,
     height: ICON_TILE,
     borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
     alignItems: "center",
     justifyContent: "center",
   },

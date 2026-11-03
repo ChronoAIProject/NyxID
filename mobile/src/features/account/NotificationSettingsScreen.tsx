@@ -345,7 +345,6 @@ export function NotificationSettingsScreen(
             >
               <SettingsRow
                 icon={Bell}
-                tone="danger"
                 label="Push Notifications"
                 accessory={
                   notifSettings.push_device_count > 0 ? (
@@ -375,7 +374,6 @@ export function NotificationSettingsScreen(
               {notifSettings.telegram_connected ? (
                 <SettingsRow
                   icon={Send}
-                  tone="info"
                   label="Telegram"
                   detail={`@${notifSettings.telegram_username ?? "linked"}`}
                   accessory={
@@ -391,7 +389,6 @@ export function NotificationSettingsScreen(
               ) : (
                 <SettingsRow
                   icon={Send}
-                  tone="info"
                   label="Telegram"
                   value="Link account"
                   onPress={() => {
