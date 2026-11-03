@@ -150,7 +150,7 @@ impl Fixture {
             .unwrap();
         (Self::with_db(db).await, memberships, reads)
     }
-    async fn with_db(db: mongodb::Database) -> Self {
+    pub(crate) async fn with_db(db: mongodb::Database) -> Self {
         super::security_readiness_service::ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();

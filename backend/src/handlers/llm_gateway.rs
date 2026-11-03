@@ -1015,7 +1015,7 @@ pub async fn llm_proxy_request(
         })),
     );
 
-    request_audit.response(response.status().as_u16());
+    request_audit.response(response.status().as_u16()).await;
     Ok(response)
 }
 
@@ -1828,7 +1828,7 @@ async fn gateway_provider_request(
         })),
     );
 
-    request_audit.response(response.status().as_u16());
+    request_audit.response(response.status().as_u16()).await;
     Ok(response)
 }
 

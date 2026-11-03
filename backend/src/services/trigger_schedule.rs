@@ -182,6 +182,7 @@ pub async fn set_schedule_job(
 
 pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) -> TriggerRun {
     TriggerRun {
+        work: None,
         trigger_generation: None,
         dispatch_at: None,
         terminal_result_recorded: false,
