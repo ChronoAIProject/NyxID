@@ -247,6 +247,7 @@ function reconstructRotationAck(claim: ClaimResponse): AckPayload | null {
 
 function StageRouter() {
   const [stage, setStage] = useState<Stage>({ phase: "enter-code" });
+  const [slugPicked, setSlugPicked] = useState(false);
   // Pairing-side liveness. Once a claim lands, poll the backend
   // every 4s for status so we notice when the CLI cancels or the
   // record TTLs out without requiring the user to click a button.
@@ -395,7 +396,15 @@ function StageRouter() {
       : resolveStep(stage.phase, stageFlow(stage));
 
   return (
-    <WizardShell context="pair" step={step}>
+    <WizardShell
+      context="pair"
+      step={step}
+      narrow={
+        stage.phase === "claimed" &&
+        stage.claim.kind === "ai-key" &&
+        slugPicked
+      }
+    >
       {pairingLost ? (
         <DisconnectBanner
           state="disconnected"
@@ -461,6 +470,9 @@ function StageRouter() {
       return (
         <ConfirmPanel
           claim={stage.claim}
+          onSlugPicked={(slug) => {
+            setSlugPicked(Boolean(slug));
+          }}
           onActionComplete={(result) => {
             // Show the notifying/acking UI immediately AND fire
             // the POST in the same tick. The fetch starts before
@@ -727,9 +739,11 @@ function codeFromQueryString(): string {
 
 function ConfirmPanel({
   claim,
+  onSlugPicked,
   onActionComplete,
 }: {
   readonly claim: ClaimResponse;
+  readonly onSlugPicked: (slug: string) => void;
   readonly onActionComplete: (result: ActionResult) => void;
 }) {
   // `claim.prefill` is `null` whenever the pairing was created without a
@@ -755,6 +769,7 @@ function ConfirmPanel({
           prefill={parseAiKeyPrefill(prefill) as AiKeyPrefill}
           pairingId={claim.id}
           onSuccess={onActionComplete}
+          onSlugPicked={onSlugPicked}
         />
       );
     case "api-key-create":
