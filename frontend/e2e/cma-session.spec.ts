@@ -159,7 +159,7 @@ test("automatically shows running CMA, streams while minimised, restores, and re
   const bounds = await panel.boundingBox();
   expect(bounds!.x).toBeGreaterThanOrEqual(main!.x + main!.width - 1);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(1440 - 12);
-  expect(bounds!.y).toBeGreaterThan(52);
+  expect(bounds!.y).toBeGreaterThanOrEqual(main!.y);
   expect(bounds!.height).toBeLessThan(480);
   expect(bounds!.y + bounds!.height).toBeLessThan(main!.y + main!.height - 100);
   await sendMessage(page, "List connected services");
@@ -348,4 +348,45 @@ test("shows simultaneous CMA sessions and minimises each independently", async (
     second.getByRole("region", { name: "CMA activity" }),
   ).toBeVisible();
   await expect(composerInput(page)).toBeVisible();
+});
+
+test("keeps the CMA card beside the resizable machine and usable chat", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockCma(page);
+  await page.route("**/api/v1/assistant/nyxagent/machines?*", (route) =>
+    route.fulfill({
+      json: [{
+        node_id: "node-1",
+        session_id: "s1",
+        conversation_id: null,
+        status: "agent",
+        reason: null,
+        display: "secure",
+      }],
+    }),
+  );
+  await page.route("**/api/v1/assistant/nyxagent/machines/*/contexts", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Use GitHub");
+  await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
+  const machine = page.getByRole("complementary", { name: "Machine" });
+  await expect(machine.getByRole("region", { name: "Live machine desktop" })).toBeVisible();
+  const panel = card(page);
+  await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  const machineBounds = (await machine.boundingBox())!;
+  const cmaBounds = (await panel.boundingBox())!;
+  expect(cmaBounds.x).toBeGreaterThanOrEqual(machineBounds.x + machineBounds.width);
+  const divider = page.getByRole("separator", { name: "Resize machine column" });
+  await divider.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(divider).toHaveAttribute("aria-valuenow", "52");
+  await expect(composerInput(page)).toBeInViewport({ ratio: 1 });
+  await panel.getByRole("button", { name: "Minimise CMA session" }).click();
+  await expect(machine).toBeVisible();
+  await expect(composerInput(page)).toBeInViewport({ ratio: 1 });
+  await page.screenshot({ path: "/tmp/nyxid-cma-with-machine.png" });
 });

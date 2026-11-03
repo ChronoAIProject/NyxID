@@ -122,6 +122,39 @@ describe("CMA public event projection", () => {
       status: "completed",
     });
   });
+
+  it("does not infer resumed work from an approval decision", () => {
+    for (const decision of ["allow", "deny"]) {
+      const waiting = applyCmaEvent(
+        initial,
+        cmaEvent(11, { type: "approval_requested", approval_id: "approval-1" }),
+      );
+      const resolved = applyCmaEvent(
+        waiting,
+        cmaEvent(12, {
+          type: "approval_resolved",
+          approval_id: "approval-1",
+          decision,
+        }),
+      );
+      expect(resolved).toMatchObject({
+        status: "waiting",
+        notice: "CMA recorded an approval decision. Waiting for a status update.",
+      });
+      expect(
+        applyCmaEvent(
+          resolved,
+          cmaEvent(13, { type: "status_changed", to: "working" }),
+        ),
+      ).toMatchObject({ status: "working", notice: undefined });
+    }
+    expect(
+      applyCmaEvent(
+        { ...initial, status: "completed" },
+        cmaEvent(14, { type: "approval_resolved", decision: "allow" }),
+      ).status,
+    ).toBe("completed");
+  });
 });
 
 describe("CMA SSE framing", () => {

@@ -78,9 +78,15 @@ successfully returned a real Agent list, a v2 event head, and a finite v2 SSE
 replay (`follow=false`). That replay contained 50 durable events, including
 `status_changed`, `turn_started`, and `turn_completed`. The sampled session had
 no tool events, so tool-summary fields were verified against current source,
-not observed in that live sample. This confirms deployed read endpoints through
-the tool gateway; it does not establish an authenticated browser-to-NyxID-proxy
-end-to-end check of the new card or a new task's live follow.
+not observed in that live sample.
+
+A read-only browser integration check also mounted the actual card component
+against the deployed NyxID REST proxy using the existing CLI credential on the
+local test server. It discovered three real active sessions, received successful
+detail/head/follow responses, displayed live stream connections, and exercised
+minimise/maximise and session details. The harness rejected non-GET requests.
+This verifies the component and deployed proxy together; it does not test web
+login/cookie authentication or start a new task to exercise live tool updates.
 
 The local preview's website-review title and action descriptions are authored
 sample fixtures. In the actual observer, task labels are deterministic mappings
@@ -139,7 +145,9 @@ The card projects public tool titles, tool status, turn outcomes, approval or
 sign-in waits, pause, stop, deletion, and title changes. Messages, model text,
 reasoning deltas, tool arguments, results, and approval details are not rendered.
 Finishing a turn does not mark an unfinished tool as successful; its outcome
-becomes unknown. History and live gaps produce a notice.
+becomes unknown. An approval decision alone does not imply resumed work; the
+card waits for a subsequent status or turn event. History and live gaps produce
+a notice.
 
 Transport state is displayed independently as Connecting, Live, Reconnecting,
 or Disconnected. A lost connection retains the last observed task state.

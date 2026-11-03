@@ -110,7 +110,13 @@ export function applyCmaEvent(
             : "CMA is waiting for sign-in.",
       };
     case "approval_resolved":
-      return { ...next, status: "working", notice: undefined };
+      return {
+        ...next,
+        notice:
+          state.status === "waiting"
+            ? "CMA recorded an approval decision. Waiting for a status update."
+            : state.notice,
+      };
     case "conversation_available":
       return {
         ...next,
