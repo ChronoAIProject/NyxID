@@ -261,6 +261,91 @@ credential provisioning.
 
 ---
 
+## Lark/Feishu message text and image uploads
+
+The compiled `lark` and `lark-bot` overlays cover `api-lark`, `api-lark-bot`,
+`api-feishu` and `api-feishu-bot`. Hosted MCP offers additive typed input for
+`im_message_create` and `im_message_reply`:
+
+```json
+{
+  "receive_id_type": "chat_id",
+  "receive_id": "oc_example",
+  "msg_type": "text",
+  "text": "第一行\n第二行 🎉"
+}
+```
+
+Choose exactly one of `text` (only for `msg_type=text`) or `content`. `content`
+accepts a JSON object, including structured `post`/`interactive` content, or a
+JSON-encoded object string. NyxID parses raw strings locally and preserves their
+bytes, including whitespace and escapes; objects and typed text are serialized
+once. It never guesses that a literal backslash-n meant a newline. Text raw
+objects must contain a string `text`; other message types retain provider schema
+validation. Invalid or double-encoded JSON returns `lark_message_content_invalid`
+before dispatch. Use the same typed mode independently for each split message;
+NyxID does not split, resend or invent idempotency keys. Existing `uuid` passes
+through unchanged. A Lark 230001 response becomes an MCP error with only
+`msg_type`, `mode` (`typed`/`raw`), `local_json_parsed`, `request_sent` and the
+provider error code. Logs contain the same metadata, never message content.
+
+`im_image_create` accepts exactly one of `image_url` or `image_base64`, with
+optional `filename` and `mime_type`. NyxID uploads multipart `image_type=message`
+to `POST /open-apis/im/v1/images` using the selected connection's normal user or
+tenant credential, and returns only `{ "image_key": "img_..." }`. Use that key
+in an ordinary image, post or interactive message. The tenant must grant
+`im:resource`; adding the catalog operation does not provision provider scopes
+or approve a tenant's application.
+
+Only verified PNG, JPEG, GIF and WebP images are accepted, up to 10 MiB of actual
+bytes. Downloads require HTTPS and a public address, use the existing DNS-pinned,
+credential-free media client, follow zero redirects, and have a 30-second total
+deadline. URL responses must supply a matching image Content-Type; optional
+`mime_type` must also match. Base64 is standard padded base64 without a data-URL
+prefix. NyxID checks magic bytes and decodes the raster with the existing pixel
+and allocation limits. Neither fetch errors nor upload failures expose source
+URLs, base64, image bytes, credentials or provider error prose.
+
+These adapters are derived only from an exact published SYSTEM catalog contract,
+using compiled NyxID markers. Mounted/remote or edited specifications cannot grant
+image materialization. Ordinary MCP service grants, operation selections, guest
+levels and confirmation gates still apply before fetching; live authority and
+contract checks remain at execution. Image upload is a POST change, not a read,
+and does not modify existing data. It is independently selectable in operation
+scopes; existing closed selections do not acquire it. Unscoped service grants
+retain their existing all-operation semantics. No special default agent grant is
+created. This upload accepts caller-supplied public images, not private conversation
+attachment IDs, so the Base attachment-write flag is not required.
+
+The legacy `/mcp/config` HTTP bridge keeps the existing raw-string message schema
+and omits the managed image operation. Typed messages and JSON-to-multipart image
+uploads require hosted NyxID MCP. Raw HTTP proxy requests retain the provider's
+native contract. Image upload is excluded from exact-operation descriptors and
+refuses exact/background async execution. Sync updates the existing message rows
+and adds one image row per overlay family without renaming other operations or
+editing Aevatar markers. The image adapter has only a NyxID-owned marker; it does
+not advertise Aevatar workflow authority. The schema admission guard checks the
+legacy bridge's projected raw-message schemas against Aevatar's unchanged subset,
+while hosted MCP uses the richer mutually exclusive input schemas.
+Deploy all replicas before using the new input modes;
+older replicas continue handling legacy raw messages but cannot materialize the
+new JSON image input. Rollback callers to raw messages before rolling back servers.
+
+Two related requests remain separate follow-ups:
+
+- TriggerRun completion currently reflects the turn error and NyxID-managed result
+  delivery (`handlers/trigger_scheduler.rs`), not whether a tool action was required
+  by the automation. This change makes provider application errors visible as MCP
+  errors, but an agent can still finish its turn successfully after a failed send.
+  A reliable “completed with errors” outcome needs explicit required-effect and
+  recovery tracking across retries/continuations, additive stored outcome detail,
+  and corresponding UI. Do not infer it from operation names or message text.
+- Unattended `llm-openai__images_generate` grants scoped to specific automations,
+  with a daily image quota, expiry and revocation, need an explicit authority and
+  quota contract. No such grant is added here; existing service and confirmation
+  policies continue to apply. A pre-generated public image URL works without
+  changing image-generation authority.
+
 ## Managed Lark Base writes
 
 `bitable_fields_list` is an ordinary read-only GET with `page_size` and

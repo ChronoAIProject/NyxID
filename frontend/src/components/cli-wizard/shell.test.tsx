@@ -31,6 +31,24 @@ describe("WizardShell", () => {
     expect(body.closest("main")).not.toBeNull()
   })
 
+  it("narrows to the connector column only for single-form steps", () => {
+    const { rerender } = render(
+      <WizardShell context="local">
+        <div data-testid="step-body">body</div>
+      </WizardShell>,
+    )
+    const column = () => screen.getByTestId("step-body").closest("main")?.parentElement
+    expect(column()).toHaveClass("max-w-[1040px]")
+
+    rerender(
+      <WizardShell context="local" narrow>
+        <div data-testid="step-body">body</div>
+      </WizardShell>,
+    )
+    expect(column()).toHaveClass("max-w-[640px]")
+    expect(column()).not.toHaveClass("max-w-[1040px]")
+  })
+
   it("renders the formatted step indicator in the header when a step is given", () => {
     render(
       <WizardShell context="local" step={sampleStep}>

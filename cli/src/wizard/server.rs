@@ -880,6 +880,11 @@ where
             "/nyxid-coloured-logo-dark.svg",
             get(|| async { embedded_asset_response("nyxid-coloured-logo-dark.svg") }),
         )
+        // `NyxidIcon` on the shared "NyxID managed" OAuth-app card.
+        .route(
+            "/nyxid-coloured-icon.svg",
+            get(|| async { embedded_asset_response("nyxid-coloured-icon.svg") }),
+        )
         .route(
             "/favicon.ico",
             get(|| async { embedded_asset_response("favicon.ico") }),
@@ -2485,7 +2490,8 @@ mod tests {
     /// browser. Every path below is requested by the shipped bundle: a
     /// 404 on `nyxid-app-icon.svg` silently downgrades the tab icon to
     /// the .ico (NyxID#706 follow-up), and a 404 on either
-    /// `nyxid-coloured-logo*.svg` renders a broken image in the header.
+    /// `nyxid-coloured-logo*.svg` renders a broken image in the header, as
+    /// a 404 on `nyxid-coloured-icon.svg` does on the OAuth-app card.
     #[tokio::test]
     async fn root_brand_assets_are_routed_and_typed() {
         let app: Router = brand_asset_routes();
@@ -2495,6 +2501,7 @@ mod tests {
             ("/nyxid-app-icon.svg", "image/svg+xml"),
             ("/nyxid-coloured-logo.svg", "image/svg+xml"),
             ("/nyxid-coloured-logo-dark.svg", "image/svg+xml"),
+            ("/nyxid-coloured-icon.svg", "image/svg+xml"),
             ("/favicon.ico", "image/x-icon"),
         ] {
             let response = app
