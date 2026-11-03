@@ -535,6 +535,7 @@ async fn event_images(
             fence: None,
         },
         &ImageSendPlan {
+            delegated: message.delegated_images.references.clone(),
             attachments: message.attachments.clone(),
         },
     )
