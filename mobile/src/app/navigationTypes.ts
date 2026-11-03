@@ -9,6 +9,7 @@ import type {
 } from "@react-navigation/native-stack";
 import type { UsageCreditsRouteParams } from "../features/billing/UsageCreditsScreen";
 import type { MachineDesktopRouteParams } from "../features/machines/desktopEntry";
+import type { ConnectionHistoryGroup } from "../features/plugins/pluginConnectionHistoryTypes";
 
 export type AssistantParams = {
   home?: boolean;
@@ -81,6 +82,8 @@ export type WorkspaceContentParamList = Omit<
   AgentMachineEditor: { agentId: string; machineId: string };
   MachineDetail: { machineId: string };
   PluginConnections: { connectorId: string };
+  /** Metadata-only change set from a connection's History tab. */
+  ConnectionHistoryDetail: { title: string; group: ConnectionHistoryGroup };
   ActiveGrants: undefined;
   MachinePolicy: { machineId: string; ownerId: string };
   MachineActivity: { machineId: string; ownerId: string };
@@ -160,6 +163,7 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "AgentMachineEditor",
   "MachineDetail",
   "PluginConnections",
+  "ConnectionHistoryDetail",
   "ActiveGrants",
   "MachinePolicy",
   "MachineActivity",

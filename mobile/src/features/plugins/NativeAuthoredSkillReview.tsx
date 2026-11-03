@@ -4,20 +4,25 @@ import {
   AppState,
   ScrollView,
   StyleSheet,
+  Text,
   View,
 } from "react-native";
+import { BookOpen } from "lucide-react-native";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import {
   ActionButton,
-  Card,
   Label,
   Notice,
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
 import { pluginSkillsApi as api } from "../../lib/api/pluginSkillsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { fonts } from "../../theme/designTokens";
+import { spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import type {
   AuthoredSkillPageParams,
@@ -294,46 +299,46 @@ export function AuthoredSkillReviewContent({
         )}
         {data && (
           <>
-            <Card>
-              <Label style={styles.title}>
-                {data.name} · {data.version}
-              </Label>
-              <Label muted>Attach to {data.agent_name}</Label>
-              <Label muted style={styles.caption}>
-                Draft revision {data.revision} · Skills revision{" "}
-                {data.skills_revision}
-              </Label>
-              {data.state !== "active" && (
-                <Notice
-                  tone={data.state === "pinned" ? "success" : "info"}
-                  message={authoredSkillStateLabel(data.state)}
-                />
-              )}
-            </Card>
+            <SettingsGroup
+              footer={
+                active
+                  ? "Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions."
+                  : undefined
+              }
+            >
+              <SettingsRow
+                icon={BookOpen}
+                label={data.name}
+                detail={`Attach to ${data.agent_name}`}
+                value={data.version}
+              />
+              <SettingsRow label="Draft revision" value={String(data.revision)} />
+              <SettingsRow
+                label="Skills revision"
+                value={String(data.skills_revision)}
+              />
+            </SettingsGroup>
             {!matched && (
               <Notice message="This confirmation does not match the current reviewed draft, or it predates supported review metadata. Reload the confirmation from the conversation." />
             )}
             {active && (
               <>
-                <Label muted>
-                  Allow publishes these files privately to Ornn under your
-                  identity and attaches this exact version to the agent. Skill
-                  instructions never grant permissions.
-                </Label>
                 {data.base_scripts_not_copied && (
                   <Notice message="Scripts and executable files from the source skill are not copied into this draft." />
                 )}
                 {data.files.map((file, index) => (
-                  <Card key={`${file.path}:${index}`}>
-                    <Label>{file.path}</Label>
-                    <ScrollView style={styles.fileScroll} nestedScrollEnabled>
+                  <SettingsGroup key={`${file.path}:${index}`} title={file.path}>
+                    <ScrollView
+                      style={styles.fileScroll}
+                      contentContainerStyle={styles.file}
+                      nestedScrollEnabled
+                    >
                       <Label selectable mono style={styles.fileContent}>
                         {file.content}
                       </Label>
                     </ScrollView>
-                  </Card>
+                  </SettingsGroup>
                 ))}
-                <Label muted>To change this skill, ask NyxBot.</Label>
               </>
             )}
             {data.status === "publishing" && (
@@ -351,45 +356,83 @@ export function AuthoredSkillReviewContent({
                 message={publicationFailureText(data.failure_code, data.status)}
               />
             )}
-            {AUTHORED_SKILL_ACTIONS.filter(({ action }) =>
-              actions.includes(action),
-            ).map(({ action, label }) => (
-              <ActionButton
-                key={action}
-                label={label}
-                variant={
-                  action === "deny" ||
-                  action === "dismiss_card" ||
-                  action === "discard"
-                    ? "secondary"
-                    : "primary"
-                }
-                disabled={blocked || !matched || preview.isFetching}
-                onPress={() => void act(action)}
-              />
-            ))}
+            {[false, true].map((negative) => {
+              const rows = AUTHORED_SKILL_ACTIONS.filter(
+                ({ action }) =>
+                  actions.includes(action) &&
+                  NEGATIVE_ACTIONS.has(action) === negative,
+              );
+              return rows.length ? (
+                <SettingsGroup
+                  key={negative ? "negative" : "positive"}
+                  inset={false}
+                  footer={
+                    active && !negative
+                      ? "To change this skill, ask NyxBot."
+                      : undefined
+                  }
+                >
+                  {rows.map(({ action, label }) => (
+                    <SettingsRow
+                      key={action}
+                      label={label}
+                      tone={
+                        action === "deny" || action === "discard"
+                          ? "danger"
+                          : "action"
+                      }
+                      disabled={blocked || !matched || preview.isFetching}
+                      onPress={() => void act(action)}
+                    />
+                  ))}
+                </SettingsGroup>
+              ) : null;
+            })}
+            {active &&
+              !AUTHORED_SKILL_ACTIONS.some(
+                ({ action }) =>
+                  actions.includes(action) && !NEGATIVE_ACTIONS.has(action),
+              ) && (
+                <Text style={[styles.note, { color: colors.textMuted }]}>
+                  To change this skill, ask NyxBot.
+                </Text>
+              )}
           </>
         )}
-        <ActionButton
-          label="Reload confirmation"
-          variant="secondary"
-          disabled={busy || !online}
-          onPress={() => {
-            void refresh().catch(() =>
-              setError("The confirmation could not be refreshed. Try again."),
-            );
-          }}
-        />
+        <SettingsGroup inset={false}>
+          <SettingsRow
+            label="Reload confirmation"
+            tone="action"
+            disabled={busy || !online}
+            onPress={() => {
+              void refresh().catch(() =>
+                setError("The confirmation could not be refreshed. Try again."),
+              );
+            }}
+          />
+        </SettingsGroup>
       </ScrollView>
     </View>
   );
 }
+// Declines and discards sit apart from the actions that move publication on.
+const NEGATIVE_ACTIONS = new Set<AuthoredSkillAction>([
+  "deny",
+  "dismiss_card",
+  "discard",
+]);
+
 const styles = StyleSheet.create({
   page: { flex: 1, padding: 0 },
   fill: { flex: 1 },
-  content: { padding: 20, paddingBottom: 40, gap: 16 },
-  title: { fontFamily: fonts.bodySemi, fontSize: 16, lineHeight: 23 },
-  caption: { fontSize: 11, lineHeight: 17 },
+  content: {
+    paddingHorizontal: spacing.xxl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.huge * 2,
+    gap: spacing.huge,
+  },
+  note: { ...typeScale.small, paddingHorizontal: spacing.xxl },
   fileScroll: { maxHeight: 320 },
+  file: { paddingHorizontal: spacing.xxl, paddingVertical: spacing.md },
   fileContent: { fontSize: 11, lineHeight: 18 },
 });

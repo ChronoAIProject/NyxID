@@ -36,6 +36,7 @@ export const contentNames = [
   "AgentMachineEditor",
   "MachineDetail",
   "PluginConnections",
+  "ConnectionHistoryDetail",
   "ActiveGrants",
   "MachinePolicy",
   "MachineActivity",

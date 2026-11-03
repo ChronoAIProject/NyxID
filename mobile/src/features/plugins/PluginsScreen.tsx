@@ -13,20 +13,18 @@ import {
 } from "react-native";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, RefreshCw, Search, X } from "lucide-react-native";
+import { RefreshCw, Search, X } from "lucide-react-native";
 import type { WorkspaceNavigationProp } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { SegmentControl } from "../../components/SegmentControl";
 import {
-  ActionButton,
-  Card,
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { servicesApi } from "../../lib/api/servicesApi";
-import { fonts } from "../../theme/designTokens";
+import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import { connectionOwner } from "../services/serviceContracts";
 import {
@@ -130,57 +128,77 @@ export function PluginsScreen({
       <WorkspacePage
         title={manageItem?.name ?? "Connections"}
         showHeading={false}
+        contentStyle={styles.grouped}
+        refreshing={refreshing}
+        onRefresh={refresh}
       >
-        <Label muted>Choose a connection to manage.</Label>
         {loadError && <Notice message={errorText(loadError)} tone="error" />}
-        {manageItem?.connections.map((connection) => (
-          <Pressable
-            key={connection.id}
-            accessibilityRole="button"
-            accessibilityLabel={`Manage ${connection.label}`}
-            onPress={() =>
-              navigation.push("ServiceSetup", { connectionId: connection.id })
-            }
+        {manageItem ? (
+          <SettingsGroup
+            title={manageItem.name}
+            footer="Choose a connection to manage."
           >
-            <Card>
-              <View style={styles.row}>
-                <ServiceIcon
-                  iconUrl={
-                    connection.icon_url ||
-                    connection.catalog_icon_url ||
-                    manageItem?.iconUrl
-                  }
-                  slug={
-                    connection.catalog_service_slug ??
-                    manageItem?.iconSlug ??
-                    connection.slug
-                  }
-                  size="lg"
-                  color={colors.textSecondary}
-                />
-                <View style={styles.flex}>
-                  <Label style={styles.name}>{connection.label}</Label>
-                  <Label muted style={styles.description}>
-                    {connectionOwner(connection)} ·{" "}
-                    {connection.credential_type.replaceAll("_", " ")}
-                  </Label>
-                  <Label muted style={styles.description}>
-                    {connection.is_active
-                      ? connection.status.replaceAll("_", " ")
-                      : "Disabled"}
-                  </Label>
-                </View>
-                <ArrowRight size={16} color={colors.textMuted} />
-              </View>
-            </Card>
-          </Pressable>
-        ))}
-        {!manageItem && (
-          <Notice message="These connections are no longer in your list. Refresh Plugins to see the current catalog." />
+            {manageItem.connections.map((connection) => (
+              <SettingsRow
+                key={connection.id}
+                leading={
+                  <ServiceIcon
+                    iconUrl={
+                      connection.icon_url ||
+                      connection.catalog_icon_url ||
+                      manageItem.iconUrl
+                    }
+                    slug={
+                      connection.catalog_service_slug ??
+                      manageItem.iconSlug ??
+                      connection.slug
+                    }
+                    size="md"
+                    color={colors.textSecondary}
+                  />
+                }
+                label={connection.label}
+                detail={`${connectionOwner(connection)} · ${connection.credential_type.replaceAll("_", " ")}`}
+                value={
+                  connection.is_active
+                    ? sentence(connection.status.replaceAll("_", " "))
+                    : "Disabled"
+                }
+                accessibilityLabel={`Manage ${connection.label}`}
+                onPress={() =>
+                  navigation.push("ServiceSetup", {
+                    connectionId: connection.id,
+                  })
+                }
+              />
+            ))}
+          </SettingsGroup>
+        ) : (
+          <SettingsGroup footer="These connections are no longer in your list. Refresh Plugins to see the current catalog.">
+            <SettingsRow
+              label="Refresh plugins"
+              tone="action"
+              disabled={refreshing}
+              onPress={refresh}
+            />
+          </SettingsGroup>
         )}
       </WorkspacePage>
     );
 
+  const rows = connectorTab === "added" ? added : available;
+  const emptyMessage =
+    connectorTab === "added"
+      ? connections.isError
+        ? "Your connections could not be loaded."
+        : query.trim()
+          ? "No added connectors match this search."
+          : "No connectors added yet. Discover a service to connect."
+      : catalog.isError || !catalogKnown
+        ? "The available catalog could not be confirmed. Retry loading plugins."
+        : query.trim()
+          ? "No available connectors match this search."
+          : "All available connectors are already added.";
   return (
     <WorkspacePage title="Plugins" showHeading={false} scroll={false}>
       <SegmentControl
@@ -224,7 +242,7 @@ export function PluginsScreen({
             }}
             style={styles.tabs}
           />
-          <View style={styles.row}>
+          <View style={styles.searchRow}>
             <PluginSearch
               value={query}
               discover={connectorTab === "discover"}
@@ -250,87 +268,77 @@ export function PluginsScreen({
               )}
             </Pressable>
           </View>
-          <View
-            style={[
-              styles.list,
-              { borderColor: colors.border, backgroundColor: colors.card },
-            ]}
-          >
-            <FlatList
-              key={connectorTab}
-              accessibilityLabel={
-                connectorTab === "added"
-                  ? "Added connectors"
-                  : "Discover connectors"
-              }
-              data={connectorTab === "added" ? added : available}
-              keyExtractor={(item) => item.id}
-              renderItem={({ item }) => (
-                <ConnectorCard
-                  item={item}
-                  onPress={() => openConnector(item)}
-                />
-              )}
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode="on-drag"
-              initialNumToRender={12}
-              refreshing={refreshing}
-              onRefresh={refresh}
-              ListHeaderComponent={
-                loadError ? (
-                  <View style={styles.listNotice}>
-                    <Notice
-                      message={`Some plugins could not be loaded. ${errorText(loadError)}`}
-                      tone="error"
-                    />
-                    <ActionButton
+          <FlatList
+            key={connectorTab}
+            style={styles.body}
+            contentContainerStyle={styles.listContent}
+            accessibilityLabel={
+              connectorTab === "added"
+                ? "Added connectors"
+                : "Discover connectors"
+            }
+            data={rows}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item, index }) => (
+              <View
+                style={[
+                  { backgroundColor: colors.card },
+                  index === 0 && styles.firstRow,
+                  index === rows.length - 1 && styles.lastRow,
+                ]}
+              >
+                <ConnectorRow item={item} onPress={() => openConnector(item)} />
+              </View>
+            )}
+            ItemSeparatorComponent={RowSeparator}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            initialNumToRender={12}
+            refreshing={refreshing}
+            onRefresh={refresh}
+            ListHeaderComponent={
+              loadError ? (
+                <View style={styles.listHeader}>
+                  <Notice
+                    message={`Some plugins could not be loaded. ${errorText(loadError)}`}
+                    tone="error"
+                  />
+                  <SettingsGroup>
+                    <SettingsRow
                       label="Retry loading plugins"
-                      variant="secondary"
+                      tone="action"
                       onPress={refresh}
                     />
-                  </View>
-                ) : null
-              }
-              ListEmptyComponent={
-                <View style={styles.empty}>
-                  {loading ? (
-                    <ActivityIndicator
-                      color={colors.primary}
-                      accessibilityLabel="Loading plugins"
-                    />
-                  ) : (
-                    <>
-                      <Notice
-                        message={
-                          connectorTab === "added"
-                            ? connections.isError
-                              ? "Your connections could not be loaded."
-                              : query.trim()
-                                ? "No added connectors match this search."
-                                : "No connectors added yet. Discover a service to connect."
-                            : catalog.isError || !catalogKnown
-                              ? "The available catalog could not be confirmed. Retry loading plugins."
-                              : query.trim()
-                                ? "No available connectors match this search."
-                                : "All available connectors are already added."
-                        }
-                      />
-                      {connectorTab === "added" && !connections.isError && (
-                        <ActionButton
-                          label="Discover connectors"
-                          variant="secondary"
-                          onPress={() => {
-                            Keyboard.dismiss();
-                            setConnectorTab("discover");
-                          }}
-                        />
-                      )}
-                    </>
-                  )}
+                  </SettingsGroup>
                 </View>
-              }
-            />
-          </View>
+              ) : null
+            }
+            ListEmptyComponent={
+              loading ? (
+                <View style={styles.loading}>
+                  <ActivityIndicator
+                    color={colors.primary}
+                    accessibilityLabel="Loading plugins"
+                  />
+                </View>
+              ) : connectorTab === "added" && !connections.isError ? (
+                <SettingsGroup inset={false} footer={emptyMessage}>
+                  <SettingsRow
+                    label="Discover connectors"
+                    tone="action"
+                    onPress={() => {
+                      Keyboard.dismiss();
+                      setConnectorTab("discover");
+                    }}
+                  />
+                </SettingsGroup>
+              ) : (
+                <Text style={[styles.empty, { color: colors.textMuted }]}>
+                  {emptyMessage}
+                </Text>
+              )
+            }
+          />
         </View>
       )}
     </WorkspacePage>
@@ -339,7 +347,11 @@ export function PluginsScreen({
 
 export function AgentSkillsScreen({ agentId }: { agentId: string }) {
   return (
-    <WorkspacePage title="Agent skills" showHeading={false}>
+    <WorkspacePage
+      title="Agent skills"
+      showHeading={false}
+      contentStyle={styles.grouped}
+    >
       <PluginSkills agentId={agentId} />
     </WorkspacePage>
   );
@@ -356,34 +368,22 @@ function PluginSearch({
 }) {
   const { colors } = useTheme();
   return (
-    <View
-      style={[
-        styles.search,
-        { borderColor: colors.border, backgroundColor: colors.card },
-      ]}
-    >
-      <Search size={18} color={colors.textMuted} accessible={false} />
+    <View style={[styles.search, { backgroundColor: colors.card }]}>
+      <Search size={17} color={colors.textMuted} accessible={false} />
       <TextInput
         accessibilityLabel={
           discover ? "Search connector catalog" : "Search added connectors"
         }
         value={value}
         onChangeText={onChange}
-        placeholder={
-          discover ? "Search connector catalog…" : "Search added connectors…"
-        }
+        placeholder={discover ? "Search catalog" : "Search added connectors"}
         placeholderTextColor={colors.textMuted}
         selectionColor={colors.primary}
         autoCapitalize="none"
         autoCorrect={false}
         returnKeyType="search"
         onSubmitEditing={Keyboard.dismiss}
-        style={[
-          styles.input,
-          {
-            color: colors.textPrimary,
-          },
-        ]}
+        style={[styles.input, { color: colors.textPrimary }]}
       />
       {value.length > 0 && (
         <Pressable
@@ -400,7 +400,26 @@ function PluginSearch({
   );
 }
 
-function ConnectorCard({
+function RowSeparator() {
+  const { colors } = useTheme();
+  return (
+    <View style={{ backgroundColor: colors.card }}>
+      <View
+        style={[styles.separator, { backgroundColor: colors.borderSoft }]}
+      />
+    </View>
+  );
+}
+
+const sentence = (value: string) =>
+  value.charAt(0).toUpperCase() + value.slice(1);
+
+// Discover rows show how the service authenticates, as the Web catalog does.
+const authLabel = (meta: string) =>
+  meta === "oauth" ? "OAuth" : meta === "api key" ? "API key" : sentence(meta);
+
+/** One connector: brand icon, name, summary and its status or "Connect". */
+function ConnectorRow({
   item,
   onPress,
 }: {
@@ -408,113 +427,86 @@ function ConnectorCard({
   onPress: () => void;
 }) {
   const { colors } = useTheme();
-  const statusColor = item.added
-    ? item.statusTone === "success"
-      ? colors.success
-      : item.statusTone === "error"
-        ? colors.danger
-        : item.statusTone === "warning"
-          ? colors.warning
-          : colors.textSecondary
-    : colors.primary;
   return (
-    <Pressable
-      accessibilityRole="button"
+    <SettingsRow
+      leading={
+        <ServiceIcon
+          iconUrl={item.iconUrl}
+          slug={item.iconSlug ?? "custom"}
+          size="md"
+          color={colors.textSecondary}
+        />
+      }
+      label={item.name}
+      detail={item.added ? item.summary : item.description}
+      detailLines={2}
+      value={item.added ? item.status : authLabel(item.meta)}
+      valueTone={item.added && item.statusTone === "error" ? "danger" : "default"}
       accessibilityLabel={`${item.added ? "Manage" : "Connect"} ${item.name}, ${item.added ? item.status : "Available to add"}`}
       accessibilityHint={item.added ? item.summary : item.description}
       onPress={onPress}
-      style={[styles.connectorRow, { borderBottomColor: colors.border }]}
-    >
-      <ServiceIcon
-        iconUrl={item.iconUrl}
-        slug={item.iconSlug ?? "custom"}
-        size="lg"
-        color={colors.textSecondary}
-      />
-      <View style={styles.flex}>
-        <Text
-          style={[styles.name, { color: colors.textPrimary }]}
-          numberOfLines={2}
-        >
-          {item.name}
-        </Text>
-        <Label muted style={styles.description} numberOfLines={2}>
-          {item.added ? item.summary : item.description}
-        </Label>
-        <View style={styles.metadata}>
-          <Label style={[styles.badge, { color: statusColor }]}>
-            {item.added ? `● ${item.status}` : "Connect"}
-          </Label>
-          {!item.added && (
-            <Label muted style={styles.externalLabel}>
-              · {item.meta}
-            </Label>
-          )}
-        </View>
-      </View>
-      <ArrowRight size={16} color={colors.textMuted} />
-    </Pressable>
+    />
   );
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1, minWidth: 0, gap: 3 },
-  body: { flex: 1 },
-  skillContent: { paddingBottom: 8 },
-  connectorBody: { flex: 1, minHeight: 0, gap: 12 },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
+  grouped: {
+    paddingHorizontal: spacing.xxl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.huge * 2,
+    gap: spacing.huge,
   },
+  body: { flex: 1 },
+  skillContent: { paddingBottom: spacing.huge },
+  connectorBody: { flex: 1, minHeight: 0, gap: spacing.lg },
+  searchRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
   search: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    minHeight: 44,
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingLeft: 12,
-    gap: 8,
+    minHeight: 40,
+    borderRadius: radius.md + 2,
+    paddingLeft: spacing.md,
+    gap: spacing.sm - 2,
   },
   input: {
     flex: 1,
     minWidth: 0,
-    minHeight: 44,
-    paddingVertical: 10,
-    paddingRight: 8,
-    fontFamily: fonts.bodyRegular,
-    fontSize: 13,
+    minHeight: 40,
+    paddingVertical: spacing.sm,
+    paddingRight: spacing.sm,
+    ...typeScale.label,
   },
   tabs: { marginBottom: 0 },
-  list: { flex: 1, borderWidth: 1, borderRadius: 12, overflow: "hidden" },
-  connectorRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    minHeight: 88,
-    padding: 12,
-    gap: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+  listContent: { paddingBottom: spacing.huge, flexGrow: 1 },
+  firstRow: {
+    borderTopLeftRadius: radius.lg,
+    borderTopRightRadius: radius.lg,
+    overflow: "hidden",
   },
-  metadata: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    gap: 4,
+  lastRow: {
+    borderBottomLeftRadius: radius.lg,
+    borderBottomRightRadius: radius.lg,
+    overflow: "hidden",
   },
-  listNotice: { padding: 12, gap: 8 },
-  empty: { padding: 16, gap: 12 },
+  // Past the 30pt icon slot, as SettingsGroup insets its own separators.
+  separator: {
+    height: StyleSheet.hairlineWidth,
+    marginLeft: spacing.xxl + 30 + spacing.lg,
+  },
+  listHeader: { gap: spacing.lg, paddingBottom: spacing.lg },
+  loading: { padding: spacing.xxl },
+  empty: {
+    ...typeScale.small,
+    paddingHorizontal: spacing.xxl,
+    paddingTop: spacing.sm,
+  },
   clearSearch: {
     minWidth: 44,
     minHeight: 44,
     alignItems: "center",
     justifyContent: "center",
   },
-  badge: { fontFamily: fonts.bodySemi, fontSize: 10, lineHeight: 14 },
-  name: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 20 },
-  description: { fontFamily: fonts.bodyRegular, fontSize: 12, lineHeight: 18 },
-  externalLabel: { fontSize: 10, lineHeight: 15 },
   refresh: {
     minWidth: 44,
     minHeight: 44,

@@ -3,6 +3,7 @@ import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import * as skillTypes from "./pluginSkillsTypes";
+import * as designTokens from "../../theme/designTokens";
 import type { AssistantAgent } from "../agents/agentContracts";
 import type { AssistantParams } from "../../app/navigationTypes";
 
@@ -16,7 +17,7 @@ type QueryOptions = {
 function elements(root: Element): Element[] {
   return [
     root,
-    ...[root.props.children]
+    ...[root.props.children, root.props.leading, root.props.accessory]
       .flat(Infinity)
       .flatMap((child) =>
         child && typeof child === "object" && "props" in child
@@ -98,6 +99,10 @@ function setup({
   let routeView = initialPage ? "versions" : "detail";
   const routes: { name: string; params: any }[] = [];
   const chats: AssistantParams[] = [];
+  const alerts: {
+    title: string;
+    buttons: { text: string; style?: string; onPress?: () => void }[];
+  }[] = [];
   const navigation = {
     push: (name: string, params: any) => {
       routes.push(JSON.parse(JSON.stringify({ name, params })));
@@ -194,6 +199,10 @@ function setup({
         currentState: "active",
         addEventListener: () => ({ remove: () => {} }),
       },
+      Alert: {
+        alert: (title: string, _message: string, buttons: never) =>
+          alerts.push({ title, buttons }),
+      },
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "@react-navigation/native": {
@@ -217,6 +226,7 @@ function setup({
         "BookOpen",
         "Check",
         "ChevronDown",
+        "ChevronsUpDown",
         "ChevronLeft",
         "ChevronRight",
         "X",
@@ -227,11 +237,12 @@ function setup({
       SafeAreaView: "SafeAreaView",
     },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice"].map((name) => [
-        name,
-        name,
-      ]),
+      ["Label", "Notice", "WorkspacePage"].map((name) => [name, name]),
     ),
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
     "../../components/workspace/WorkspaceSelectionField": {
       WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
     },
@@ -252,7 +263,7 @@ function setup({
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../../theme/designTokens": { fonts: {} },
+    "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": {
       useTheme: () => ({ colors: { primaryTone: {} } }),
     },
@@ -299,6 +310,7 @@ function setup({
     state,
     routes,
     chats,
+    alerts,
     navigation: navigation.push,
     elements: () => elements(harness.flush()),
     manager: () => manager!,
@@ -674,9 +686,7 @@ test("skill detail is read-only with version choice, newest supported pin and ag
     assert.ok(
       env
         .elements()
-        .some(
-          (row) => row.props.children === "To change this skill, ask NyxBot.",
-        ),
+        .some((row) => row.props.footer === "To change this skill, ask NyxBot."),
     );
     env.state.get("versions").data.items = [
       { ...version, version: "deprecated", deprecated: true },
@@ -702,7 +712,23 @@ test("skill detail is read-only with version choice, newest supported pin and ag
       name: "dns-helper",
     });
     env.control("Remove from agent").props.onPress();
-    env.control("Confirm remove from agent").props.onPress();
+    assert.equal(
+      env.calls.filter((call) => call.method === "write").length,
+      0,
+      "removal waits for the system confirmation",
+    );
+    const confirm = env.alerts.at(-1)!;
+    assert.equal(confirm.title, "Remove from agent?");
+    assert.deepEqual(
+      JSON.parse(
+        JSON.stringify(confirm.buttons.map((button) => [button.text, button.style])),
+      ),
+      [
+        ["Cancel", "cancel"],
+        ["Remove", "destructive"],
+      ],
+    );
+    confirm.buttons[1]!.onPress!();
     await env.harness.settle();
     const written = env.calls.find((call) => call.method === "write")!;
     assert.equal(written.args[0], first.id);
@@ -744,7 +770,9 @@ test("skill guidance opens a fresh normal NyxBot chat while retaining the exact 
 test("skill details distinguish loading or failed pin reads from a known unattached skill and retry only that read", async () => {
   const env = setup();
   const text = (value: string) =>
-    env.elements().some((item) => item.props.children === value);
+    env
+      .elements()
+      .some((item) => item.props.children === value || item.props.value === value);
   try {
     const query = env.state.get(first.id);
     Object.assign(query, { data: undefined, isPending: true });
@@ -788,7 +816,14 @@ test("skill details distinguish loading or failed pin reads from a known unattac
 test("cached pin details survive refresh and a failed refresh blocks pin changes until a successful read", async () => {
   const env = setup();
   const text = (value: string) =>
-    env.elements().some((item) => item.props.children === value);
+    env
+      .elements()
+      .some(
+        (item) =>
+          item.props.children === value ||
+          item.props.value === value ||
+          item.props.label === value,
+      );
   try {
     env.library().props.onOpenSkill("pin-original", "dns-helper");
     const query = env.state.get(first.id);
@@ -862,24 +897,10 @@ test("the latest pinned version is badged and does not offer a redundant latest 
       { ...version, version: "1.0.0", sha256: "sha-original" },
     ];
     env.harness.render();
-    assert.ok(
-      env
-        .elements()
-        .some(
-          (row) =>
-            typeof row.type === "function" && row.type.name === "LatestBadge",
-        ),
-    );
+    assert.equal(env.control("Pinned version").props.detail, "Latest version");
     assert.throws(() => env.control("Use latest (v1.0.0)"));
     env.control("Choose exact version").props.onPress();
-    assert.ok(
-      env
-        .elements()
-        .some(
-          (row) =>
-            typeof row.type === "function" && row.type.name === "LatestBadge",
-        ),
-    );
+    assert.equal(env.control("Select version 1.0.0").props.value, "Latest");
     assert.equal(env.calls.filter((call) => call.method === "write").length, 0);
   } finally {
     env.unmount();

@@ -4,6 +4,7 @@ import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
 import { deriveConnectorItems, matchesPluginQuery } from "./pluginConnectors";
+import * as designTokens from "../../theme/designTokens";
 import type {
   CatalogEntry,
   ServiceConnection,
@@ -18,7 +19,8 @@ type QueryOptions = {
 
 function elements(root: Element): Element[] {
   if (typeof root.type === "function") return elements(root.type(root.props));
-  const children = [root.props.children];
+  // Settings rows carry brand icons and controls outside their children.
+  const children = [root.props.children, root.props.leading, root.props.accessory];
   if (root.type === "FlatList") {
     children.push(
       root.props.ListHeaderComponent,
@@ -194,7 +196,7 @@ function setup({
         },
       },
       Keyboard: { dismiss: record("dismissKeyboard") },
-      StyleSheet: { create: (styles: unknown) => styles },
+      StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 0.5 },
     },
     "@react-navigation/native": {
       useNavigation: () => navigation,
@@ -208,8 +210,12 @@ function setup({
       },
     },
     "lucide-react-native": Object.fromEntries(
-      ["ArrowRight", "RefreshCw", "Search", "X"].map((name) => [name, name]),
+      ["RefreshCw", "Search", "X"].map((name) => [name, name]),
     ),
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
     "../../app/WorkspaceHeader": {
       useOpenWorkspaceChat: () => openChat,
       useWorkspaceBack: (options: typeof back) => {
@@ -221,9 +227,7 @@ function setup({
       SegmentControl: renderSegmentControl,
     },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Label", "Notice", "WorkspacePage"].map(
-        (name) => [name, name],
-      ),
+      ["Notice", "WorkspacePage"].map((name) => [name, name]),
     ),
     "../../lib/api/servicesApi": {
       servicesApi: {
@@ -231,7 +235,7 @@ function setup({
         catalog: record("catalog"),
       },
     },
-    "../../theme/designTokens": { fonts: {} },
+    "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../services/serviceContracts": {
       connectionOwner: (connection: ServiceConnection) =>
@@ -511,6 +515,31 @@ test("Skills switches to the agent-scoped manager and connector queries pause wh
     assert.equal(env.queries.get("plugins")?.enabled, false);
     env.foreground(true);
     assert.equal(env.queries.get("plugins")?.enabled, true);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("connector rows read as label/value rows: status for Added, auth method for Discover", () => {
+  const env = setup({
+    connections: [personal, { ...dnsPersonal, status: "failed" }],
+  });
+  try {
+    const rows = () => env.all().filter((node) => node.type === "SettingsRow");
+    assert.deepEqual(
+      rows().map((row) => [row.props.label, row.props.value, row.props.valueTone]),
+      [
+        ["GitHub", "Enabled", "default"],
+        ["Cloudflare", "Needs attention", "danger"],
+      ],
+    );
+    assert.equal(rows()[0]!.props.detailLines, 2);
+    env.control("Discover connectors, 1").props.onPress();
+    assert.deepEqual(
+      rows().map((row) => [row.props.label, row.props.value]),
+      [["Slack", "OAuth"]],
+    );
+    assert.equal(env.calls.some((call) => call.method === "push"), false);
   } finally {
     env.unmount();
   }

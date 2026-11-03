@@ -1,13 +1,21 @@
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronDown } from "lucide-react-native";
+import { BookOpen, Check, ChevronsUpDown } from "lucide-react-native";
+import {
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
 import {
-  ActionButton,
-  Card,
   Label,
   Notice,
   WorkspacePage,
@@ -15,7 +23,7 @@ import {
 import { agentsApi } from "../../lib/api/agentsApi";
 import { pluginSkillsApi as api } from "../../lib/api/pluginSkillsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { fonts } from "../../theme/designTokens";
+import { spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import type { AssistantAgent } from "../agents/agentContracts";
 import type {
@@ -36,24 +44,6 @@ import {
   type SkillChange,
   type SkillVersion,
 } from "./pluginSkillsTypes";
-
-function LatestBadge() {
-  const { colors } = useTheme();
-  return (
-    <View
-      style={{
-        borderRadius: 6,
-        paddingHorizontal: 7,
-        paddingVertical: 2,
-        backgroundColor: colors.cardSoft,
-      }}
-    >
-      <Label style={{ fontSize: 11, color: colors.textSecondary }}>
-        Latest
-      </Label>
-    </View>
-  );
-}
 
 const ROOT = ["workspace", "plugins", "skills"] as const;
 const titleOf = (agent: AssistantAgent) => agent.display_name || agent.name;
@@ -96,61 +86,54 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
   }, [selectionScope, focused]);
   return (
     <View style={styles.stack}>
-      <View style={styles.stackSmall}>
-        <Pressable
-          accessibilityRole="button"
+      <SettingsGroup title="Agent">
+        <SettingsRow
+          leading={agent ? <AgentAvatar agent={agent} size="md" /> : undefined}
+          label={agent ? titleOf(agent) : "Choose an agent"}
+          detail={
+            agent
+              ? agent.owner_kind === "org"
+                ? (agent.owner_name ?? "Organization")
+                : "Personal"
+              : undefined
+          }
           accessibilityLabel={`Agent for skills: ${agent ? titleOf(agent) : "Choose an agent"}`}
+          accessibilityHint="Opens a list of agents whose skills you can manage"
           accessibilityState={{
             expanded: picking,
             disabled: !manageable.length,
           }}
           disabled={!manageable.length}
+          accessory={<ChevronsUpDown size={16} color={colors.textMuted} />}
           onPress={() => setPicking((value) => !value)}
-          style={[styles.agentContext, { backgroundColor: colors.cardSoft }]}
-        >
-          {agent ? <AgentAvatar agent={agent} size="lg" /> : null}
-          <View style={styles.flex}>
-            <Label muted style={styles.caption}>
-              Skills for
-            </Label>
-            <Label numberOfLines={2} style={styles.agentName}>
-              {agent ? titleOf(agent) : "Choose an agent"}
-            </Label>
-            {agent?.owner_kind === "org" && (
-              <Label muted style={styles.caption}>
-                {agent.owner_name ?? "Organization"}
-              </Label>
-            )}
-          </View>
-          <ChevronDown color={colors.textSecondary} size={18} />
-        </Pressable>
-        {picking && (
-          <WorkspaceSelectionSheet
-            label="Agent for skills"
-            title="Choose an agent"
-            options={manageable.map((item) => ({
-              value: item.id,
-              label: titleOf(item),
-              leading: <AgentAvatar agent={item} size="lg" />,
-              description:
-                item.owner_kind === "org"
-                  ? (item.owner_name ?? "Organization")
-                  : "Personal",
-            }))}
-            value={agent ? [agent.id] : []}
-            allowEmpty={false}
-            scopeKey={selectionScope}
-            onChange={(values) => {
-              if (
-                values.length === 1 &&
-                manageable.some((item) => item.id === values[0])
-              )
-                setChosen(values[0]!);
-            }}
-            onClose={() => setPicking(false)}
-          />
-        )}
-      </View>
+        />
+      </SettingsGroup>
+      {picking && (
+        <WorkspaceSelectionSheet
+          label="Agent for skills"
+          title="Choose an agent"
+          options={manageable.map((item) => ({
+            value: item.id,
+            label: titleOf(item),
+            leading: <AgentAvatar agent={item} size="lg" />,
+            description:
+              item.owner_kind === "org"
+                ? (item.owner_name ?? "Organization")
+                : "Personal",
+          }))}
+          value={agent ? [agent.id] : []}
+          allowEmpty={false}
+          scopeKey={selectionScope}
+          onChange={(values) => {
+            if (
+              values.length === 1 &&
+              manageable.some((item) => item.id === values[0])
+            )
+              setChosen(values[0]!);
+          }}
+          onClose={() => setPicking(false)}
+        />
+      )}
       {agents.isPending && (
         <ActivityIndicator
           accessibilityLabel="Loading agents for skills"
@@ -160,21 +143,21 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
       {agents.isError && (
         <>
           <Notice tone="error" message={failure(agents.error)} />
-          <ActionButton
-            label="Retry agents"
-            variant="secondary"
-            onPress={() => void agents.refetch()}
-          />
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              label="Retry agents"
+              tone="action"
+              onPress={() => void agents.refetch()}
+            />
+          </SettingsGroup>
         </>
       )}
       {!agents.isPending && !agents.isError && !agent && (
-        <Notice
-          message={
-            chosen
-              ? "Requested agent unavailable. It may have been deleted or your maintenance access changed. Choose another agent to manage its skills."
-              : "No agent you can maintain is available."
-          }
-        />
+        <Text style={[styles.note, { color: colors.textMuted }]}>
+          {chosen
+            ? "Requested agent unavailable. It may have been deleted or your maintenance access changed. Choose another agent to manage its skills."
+            : "No agent you can maintain is available."}
+        </Text>
       )}
       {agent && <AgentSkillsManager key={agent.id} agent={agent} />}
     </View>
@@ -191,6 +174,7 @@ const skillRoutes = {
 export function PluginSkillPage({
   route,
 }: ContentScreenProps<"SkillDetail" | "SkillVersions" | "SkillHistory">) {
+  const { colors } = useTheme();
   const focused = useIsFocused();
   const agent = useQuery({
     queryKey: ["workspace", "agents", "detail", route.params.agentId],
@@ -203,7 +187,11 @@ export function PluginSkillPage({
     (key) => skillRoutes[key] === route.name,
   )!;
   return (
-    <WorkspacePage title={route.params.name} showHeading={false}>
+    <WorkspacePage
+      title={route.params.name}
+      showHeading={false}
+      contentStyle={styles.grouped}
+    >
       {agent.isPending && (
         <ActivityIndicator accessibilityLabel="Loading skill agent" />
       )}
@@ -211,7 +199,9 @@ export function PluginSkillPage({
       {agent.data &&
         (agent.data.agent.can_maintain === false ||
           agent.data.agent.status === "destroyed") && (
-          <Notice message="This agent is unavailable or your maintenance access changed." />
+          <Text style={[styles.note, { color: colors.textMuted }]}>
+            This agent is unavailable or your maintenance access changed.
+          </Text>
         )}
       {agent.data &&
         agent.data.agent.can_maintain !== false &&
@@ -227,17 +217,16 @@ export function PluginSkillPage({
   );
 }
 
+/** Back stays native, but cannot leave while a pin write is in flight. */
 function SkillPageGuard({
   busy,
-  confirmDetach,
   onBack,
 }: {
   busy: boolean;
-  confirmDetach: boolean;
   onBack: () => void;
 }) {
   useWorkspaceBack({
-    active: confirmDetach,
+    active: false,
     onBack,
     defaultRole: "back",
     disabled: busy,
@@ -274,7 +263,6 @@ function AgentSkillsManager({
   const [versionPage, setVersionPage] = useState(1);
   const [selectedVersion, setSelectedVersion] = useState<SkillVersion>();
   const [testing, setTesting] = useState(false);
-  const [confirmDetach, setConfirmDetach] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
@@ -402,7 +390,6 @@ function AgentSkillsManager({
         );
       await api.write(agent.id, selection);
       await refresh();
-      setConfirmDetach(false);
       setTesting(false);
       setNotice(
         change.type === "detach"
@@ -477,97 +464,121 @@ function AgentSkillsManager({
       )}
       {skillPage && (
         <View style={styles.stack}>
-          <SkillPageGuard
-            busy={busy}
-            confirmDetach={confirmDetach}
-            onBack={() =>
-              confirmDetach ? setConfirmDetach(false) : navigation.goBack()
-            }
-          />
+          <SkillPageGuard busy={busy} onBack={() => navigation.goBack()} />
           {error && (
             <>
               <Notice tone="error" message={error} />
-              <ActionButton
-                label="Reload current skills"
-                variant="secondary"
-                disabled={busy}
-                onPress={() => void refresh().then(() => setError(undefined))}
-              />
+              <SettingsGroup inset={false}>
+                <SettingsRow
+                  label="Reload current skills"
+                  tone="action"
+                  disabled={busy}
+                  onPress={() => void refresh().then(() => setError(undefined))}
+                />
+              </SettingsGroup>
             </>
           )}
           {notice && <Notice tone="success" message={notice} />}
           {current.isError && (
             <>
               <Notice tone="error" message={failure(current.error)} />
-              {current.data && (
-                <Label muted>
-                  Showing last loaded attached skills. Retry to confirm before
-                  changing versions or removing a skill.
-                </Label>
-              )}
-              <ActionButton
-                label="Retry attached skills"
-                variant="secondary"
-                loading={current.isFetching}
-                disabled={busy || !focused}
-                onPress={() => void current.refetch()}
-              />
+              <SettingsGroup
+                inset={false}
+                footer={
+                  current.data
+                    ? "Showing last loaded attached skills. Retry to confirm before changing versions or removing a skill."
+                    : undefined
+                }
+              >
+                <SettingsRow
+                  label="Retry attached skills"
+                  tone="action"
+                  disabled={busy || !focused || current.isFetching}
+                  accessory={
+                    current.isFetching ? (
+                      <ActivityIndicator color={colors.primary} />
+                    ) : undefined
+                  }
+                  onPress={() => void current.refetch()}
+                />
+              </SettingsGroup>
             </>
           )}
           {view === "detail" && detail && (
             <>
-              <View style={styles.detailIdentity}>
-                <View
-                  style={[
-                    styles.icon,
-                    { backgroundColor: colors.primaryTone.bg },
-                  ]}
-                >
-                  <BookOpen size={26} color={colors.primaryOnTint} />
-                </View>
-                <View style={styles.flex}>
-                  <Label style={styles.cardTitle}>{detail.name}</Label>
-                  <Label muted>
-                    {pin ? `Attached to ${titleOf(agent)}` : "Ornn catalog"}
-                  </Label>
-                </View>
-              </View>
-              {(metadata?.description ?? detail.description) && (
-                <Label muted>
-                  {metadata?.description ?? detail.description}
-                </Label>
-              )}
-              <Card>
-                <Label muted style={styles.caption}>
-                  {current.isError && current.data
-                    ? "Last loaded version"
-                    : "Pinned version"}
-                </Label>
-                <View style={styles.versionHeading}>
-                  <Label mono>
-                    {pin?.version ??
-                      (current.isPending
-                        ? "Loading attached version…"
-                        : currentReady
-                          ? "Not attached"
-                          : "Attachment status unavailable")}
-                  </Label>
-                  {pinnedLatest && <LatestBadge />}
-                </View>
-                {pin && (
-                  <Label muted style={styles.caption}>
-                    {metadata?.size_bytes !== undefined
-                      ? `${metadata.size_bytes.toLocaleString()} bytes · `
-                      : ""}
-                    {pin.dependencies.length} pinned dependencies
-                  </Label>
+              <SettingsGroup
+                footer={metadata?.description || detail.description || undefined}
+              >
+                <SettingsRow
+                  icon={BookOpen}
+                  label={detail.name}
+                  detail={pin ? `Attached to ${titleOf(agent)}` : "Ornn catalog"}
+                />
+              </SettingsGroup>
+              <SettingsGroup
+                title="Version"
+                inset={false}
+                footer={
+                  pin?.disabled
+                    ? "This skill is disabled. Ask NyxBot to enable it before changing its version."
+                    : undefined
+                }
+              >
+                <SettingsRow
+                  label={
+                    current.isError && current.data
+                      ? "Last loaded version"
+                      : "Pinned version"
+                  }
+                  detail={pinnedLatest ? "Latest version" : undefined}
+                  value={
+                    pin?.version ??
+                    (current.isPending
+                      ? "Loading attached version…"
+                      : currentReady
+                        ? "Not attached"
+                        : "Attachment status unavailable")
+                  }
+                />
+                {pin && metadata?.size_bytes !== undefined && (
+                  <SettingsRow
+                    label="Package size"
+                    value={`${metadata.size_bytes.toLocaleString()} bytes`}
+                  />
                 )}
-              </Card>
-              <Card>
-                <Label muted>To change this skill, ask NyxBot.</Label>
-                <ActionButton
+                {pin && (
+                  <SettingsRow
+                    label="Pinned dependencies"
+                    value={String(pin.dependencies.length)}
+                  />
+                )}
+                {latestVersion && !pinnedLatest && (
+                  <SettingsRow
+                    label={`Use latest (v${latestVersion.version})`}
+                    tone="action"
+                    disabled={busy || !currentReady || Boolean(pin?.disabled)}
+                    onPress={() => {
+                      openView("versions", latestVersion.version);
+                    }}
+                  />
+                )}
+                <SettingsRow
+                  label={pin ? "Choose exact version" : "Attach exact version"}
+                  disabled={busy || !currentReady}
+                  onPress={() => {
+                    openView("versions");
+                    setVersionPage(1);
+                    setSelectedVersion(undefined);
+                  }}
+                />
+              </SettingsGroup>
+              <SettingsGroup
+                inset={false}
+                footer="To change this skill, ask NyxBot."
+              >
+                <SettingsRow
                   label="Ask NyxBot"
-                  variant="secondary"
+                  tone="action"
                   disabled={busy || !focused}
                   onPress={() => {
                     if (
@@ -578,133 +589,94 @@ function AgentSkillsManager({
                       openChat(newAssistantChatParams());
                   }}
                 />
-              </Card>
-              {pin?.disabled && (
-                <Notice message="This skill is disabled. Ask NyxBot to enable it before changing its version." />
-              )}
-              {latestVersion && !pinnedLatest && (
-                <ActionButton
-                  label={`Use latest (v${latestVersion.version})`}
-                  variant="secondary"
-                  disabled={busy || !currentReady || Boolean(pin?.disabled)}
-                  onPress={() => {
-                    openView("versions", latestVersion.version);
-                  }}
-                />
-              )}
-              <ActionButton
-                label={pin ? "Choose exact version" : "Attach exact version"}
-                variant="secondary"
-                disabled={busy || !currentReady}
-                onPress={() => {
-                  openView("versions");
-                  setVersionPage(1);
-                  setSelectedVersion(undefined);
-                }}
-              />
+              </SettingsGroup>
               {pin && (
                 <>
-                  <Card>
-                    <Label>Test attached skill</Label>
-                    <Label muted style={styles.caption}>
-                      Read the exact package this agent uses.
-                    </Label>
-                    <ActionButton
+                  <SettingsGroup
+                    title="Test attached skill"
+                    inset={false}
+                    footer="Read the exact package this agent uses."
+                  >
+                    <SettingsRow
                       label={
                         tested.isFetching && testing
                           ? "Testing attached skill…"
                           : "Read pinned package"
                       }
-                      variant="secondary"
-                      loading={testing && tested.isFetching}
-                      disabled={busy}
+                      tone="action"
+                      disabled={busy || (testing && tested.isFetching)}
+                      accessory={
+                        testing && tested.isFetching ? (
+                          <ActivityIndicator color={colors.primary} />
+                        ) : undefined
+                      }
                       onPress={() => {
                         if (testing) void tested.refetch();
                         else setTesting(true);
                       }}
                     />
-                    {testing && tested.isError && (
-                      <Notice
-                        tone="error"
-                        message={`Test failed: ${failure(tested.error)}`}
-                      />
-                    )}
                     {testing &&
                       tested.data &&
                       !tested.isFetching &&
-                      !tested.isError && (
-                        <>
-                          <Notice
-                            tone={tested.data.readable ? "success" : "info"}
-                            message={
-                              tested.data.readable
-                                ? `Test passed: the agent reads ${tested.data.name} ${tested.data.version} (${tested.data.size_bytes.toLocaleString()} bytes).`
-                                : `${tested.data.name} ${tested.data.version} is disabled, so the agent does not read it.`
-                            }
-                          />
-                          {tested.data.excerpt ? (
-                            <Label
-                              selectable
-                              mono
-                              style={[
-                                styles.excerpt,
-                                { backgroundColor: colors.cardSoft },
-                              ]}
-                            >
-                              {tested.data.excerpt}
-                            </Label>
-                          ) : null}
-                        </>
-                      )}
-                  </Card>
-                  <ActionButton
-                    label="Skill history"
-                    variant="secondary"
-                    disabled={busy}
-                    onPress={() => openView("history")}
-                  />
-                  {confirmDetach ? (
-                    <Card>
+                      !tested.isError &&
+                      tested.data.excerpt ? (
+                      <View style={styles.excerpt}>
+                        <Label selectable mono style={styles.excerptText}>
+                          {tested.data.excerpt}
+                        </Label>
+                      </View>
+                    ) : null}
+                  </SettingsGroup>
+                  {testing && tested.isError && (
+                    <Notice
+                      tone="error"
+                      message={`Test failed: ${failure(tested.error)}`}
+                    />
+                  )}
+                  {testing &&
+                    tested.data &&
+                    !tested.isFetching &&
+                    !tested.isError && (
                       <Notice
-                        message={`Remove ${pin.name} from ${titleOf(agent)}? Other attached skills stay in place. The skill stays in Ornn.`}
+                        tone={tested.data.readable ? "success" : "info"}
+                        message={
+                          tested.data.readable
+                            ? `Test passed: the agent reads ${tested.data.name} ${tested.data.version} (${tested.data.size_bytes.toLocaleString()} bytes).`
+                            : `${tested.data.name} ${tested.data.version} is disabled, so the agent does not read it.`
+                        }
                       />
-                      <ActionButton
-                        label="Confirm remove from agent"
-                        variant="danger"
-                        loading={busy}
-                        disabled={!currentReady}
-                        onPress={() =>
+                    )}
+                  <SettingsGroup inset={false}>
+                    <SettingsRow
+                      label="Skill history"
+                      disabled={busy}
+                      onPress={() => openView("history")}
+                    />
+                  </SettingsGroup>
+                  <SettingsGroup
+                    inset={false}
+                    footer="Other attached skills stay in place. The skill stays in Ornn."
+                  >
+                    <SettingsRow
+                      label="Remove from agent"
+                      tone="danger"
+                      disabled={busy || !currentReady}
+                      onPress={() =>
+                        confirmRemoval(pin.name, titleOf(agent), () =>
                           void change({
                             type: "detach",
                             skillId: pin.skill_id,
-                          })
-                        }
-                      />
-                      <ActionButton
-                        label="Cancel"
-                        variant="secondary"
-                        disabled={busy}
-                        onPress={() => setConfirmDetach(false)}
-                      />
-                    </Card>
-                  ) : (
-                    <ActionButton
-                      label="Remove from agent"
-                      variant="danger"
-                      disabled={busy || !currentReady}
-                      onPress={() => setConfirmDetach(true)}
+                          }),
+                        )
+                      }
                     />
-                  )}
+                  </SettingsGroup>
                 </>
               )}
             </>
           )}
           {view === "versions" && detail && (
             <>
-              <Label muted>
-                Choose which version of {detail.name} this agent uses. Skills
-                change how the agent works.
-              </Label>
               {versions.isFetching && (
                 <ActivityIndicator
                   accessibilityLabel="Loading skill versions"
@@ -714,59 +686,68 @@ function AgentSkillsManager({
               {versions.isError && (
                 <>
                   <Notice tone="error" message={failure(versions.error)} />
-                  <ActionButton
-                    label="Retry versions"
-                    variant="secondary"
-                    onPress={() => void versions.refetch()}
-                  />
+                  <SettingsGroup inset={false}>
+                    <SettingsRow
+                      label="Retry versions"
+                      tone="action"
+                      onPress={() => void versions.refetch()}
+                    />
+                  </SettingsGroup>
                 </>
               )}
               {versions.data?.items.length === 0 && (
-                <Label muted>
+                <Text style={[styles.note, { color: colors.textMuted }]}>
                   No published versions are visible through your Ornn access.
-                </Label>
+                </Text>
               )}
-              {versions.data?.items.map((item) => (
-                <Pressable
-                  key={item.version}
-                  accessibilityRole="radio"
-                  accessibilityState={{
-                    checked: selectedVersion?.version === item.version,
-                  }}
-                  accessibilityLabel={`Select version ${item.version}${item.deprecated ? ", deprecated" : ""}`}
-                  disabled={busy}
-                  onPress={() => setSelectedVersion(item)}
-                  style={[
-                    styles.versionRow,
-                    {
-                      backgroundColor: colors.card,
-                      borderColor:
-                        selectedVersion?.version === item.version
-                          ? colors.primary
-                          : colors.border,
-                    },
-                  ]}
+              {versions.data?.items.length ? (
+                <SettingsGroup
+                  title="Versions"
+                  inset={false}
+                  footer={`Choose which version of ${detail.name} this agent uses. Skills change how the agent works.`}
                 >
-                  <View style={styles.flex}>
-                    <View style={styles.versionHeading}>
-                      <Label mono>{item.version}</Label>
-                      {item.version === latestVersion?.version && (
-                        <LatestBadge />
-                      )}
-                    </View>
-                    <Label muted style={styles.caption}>
-                      {item.deprecated
-                        ? "Deprecated version"
-                        : pin?.version === item.version
-                          ? "Current pinned version"
-                          : "Published version"}
-                    </Label>
-                  </View>
-                  {selectedVersion?.version === item.version && (
-                    <Check color={colors.primary} size={20} />
-                  )}
-                </Pressable>
-              ))}
+                  {versions.data.items.map((item) => {
+                    const selected = selectedVersion?.version === item.version;
+                    return (
+                      <SettingsRow
+                        key={item.version}
+                        label={item.version}
+                        mono
+                        detail={
+                          item.deprecated
+                            ? "Deprecated version"
+                            : pin?.version === item.version
+                              ? "Current pinned version"
+                              : "Published version"
+                        }
+                        value={
+                          item.version === latestVersion?.version
+                            ? "Latest"
+                            : undefined
+                        }
+                        chevron={false}
+                        accessibilityRole="radio"
+                        accessibilityState={{ checked: selected, selected }}
+                        accessibilityLabel={`Select version ${item.version}${item.deprecated ? ", deprecated" : ""}`}
+                        accessibilityHint={selected ? "Selected" : undefined}
+                        disabled={busy}
+                        onPress={() => setSelectedVersion(item)}
+                        accessory={
+                          selected ? (
+                            <Check
+                              color={colors.primary}
+                              size={18}
+                              strokeWidth={2.5}
+                            />
+                          ) : (
+                            <View style={styles.checkSpace} />
+                          )
+                        }
+                      />
+                    );
+                  })}
+                </SettingsGroup>
+              ) : null}
               {versions.data && versions.data.total_pages > 1 && (
                 <Pagination
                   page={versionPage}
@@ -779,70 +760,96 @@ function AgentSkillsManager({
                 />
               )}
               {selectedVersion && preview.isFetching && (
-                <Label muted>Verifying package…</Label>
+                <Text style={[styles.note, { color: colors.textMuted }]}>
+                  Verifying package…
+                </Text>
               )}
               {preview.isError && (
                 <>
                   <Notice tone="error" message={failure(preview.error)} />
-                  <ActionButton
-                    label="Retry package preview"
-                    variant="secondary"
-                    onPress={() => void preview.refetch()}
-                  />
+                  <SettingsGroup inset={false}>
+                    <SettingsRow
+                      label="Retry package preview"
+                      tone="action"
+                      onPress={() => void preview.refetch()}
+                    />
+                  </SettingsGroup>
                 </>
               )}
               {preview.data && selectedVersion && !preview.isFetching && (
-                <Card>
-                  <Label muted>{preview.data.description}</Label>
-                  <Label muted style={styles.caption}>
-                    {preview.data.size_bytes.toLocaleString()} bytes ·{" "}
-                    {preview.data.reference.dependencies.length} pinned
-                    dependencies
-                  </Label>
-                  <Label mono style={styles.caption} selectable>
-                    Skill ID: {preview.data.reference.skill_id}
-                  </Label>
-                  <Label mono style={styles.caption} selectable>
-                    SHA-256: {preview.data.reference.sha256}
-                  </Label>
-                  {selectedVersion.deprecated && (
-                    <Notice message="This version is deprecated. Choose a supported version unless you intentionally need this exact package." />
-                  )}
-                </Card>
+                <SettingsGroup
+                  title="Package"
+                  inset={false}
+                  footer={
+                    selectedVersion.deprecated
+                      ? "This version is deprecated. Choose a supported version unless you intentionally need this exact package."
+                      : preview.data.description || undefined
+                  }
+                >
+                  <SettingsRow
+                    label="Size"
+                    value={`${preview.data.size_bytes.toLocaleString()} bytes`}
+                  />
+                  <SettingsRow
+                    label="Pinned dependencies"
+                    value={String(preview.data.reference.dependencies.length)}
+                  />
+                  <SettingsRow
+                    label={preview.data.reference.skill_id}
+                    detail="Skill ID"
+                    mono
+                    selectable
+                  />
+                  <SettingsRow
+                    label={preview.data.reference.sha256}
+                    detail="SHA-256"
+                    mono
+                    selectable
+                  />
+                </SettingsGroup>
               )}
-              <ActionButton
-                label={pin ? "Update exact version" : "Attach skill"}
-                loading={busy}
-                disabled={
-                  !currentReady ||
-                  Boolean(pin?.disabled) ||
-                  !selectedVersion ||
-                  !preview.data ||
-                  preview.isFetching ||
-                  (!pin && pins.length >= 16) ||
-                  Boolean(
-                    pin &&
-                    preview.data &&
-                    pin.version === preview.data.reference.version &&
-                    pin.sha256 === preview.data.reference.sha256,
-                  )
+              <SettingsGroup
+                inset={false}
+                footer={
+                  pin?.disabled
+                    ? "Ask NyxBot to enable this skill before updating its exact version."
+                    : !pin && pins.length >= 16
+                      ? "This agent already has 16 skills. Remove one from this agent before attaching another."
+                      : undefined
                 }
-                onPress={() => {
-                  if (detail && selectedVersion && preview.data)
-                    void change({
-                      type: "attach",
-                      skillId: detail.id,
-                      selected: selectedVersion,
-                      preview: preview.data,
-                    });
-                }}
-              />
-              {pin?.disabled && (
-                <Notice message="Ask NyxBot to enable this skill before updating its exact version." />
-              )}
-              {!pin && pins.length >= 16 && (
-                <Notice message="This agent already has 16 skills. Remove one from this agent before attaching another." />
-              )}
+              >
+                <SettingsRow
+                  label={pin ? "Update exact version" : "Attach skill"}
+                  tone="action"
+                  accessory={
+                    busy ? <ActivityIndicator color={colors.primary} /> : undefined
+                  }
+                  disabled={
+                    busy ||
+                    !currentReady ||
+                    Boolean(pin?.disabled) ||
+                    !selectedVersion ||
+                    !preview.data ||
+                    preview.isFetching ||
+                    (!pin && pins.length >= 16) ||
+                    Boolean(
+                      pin &&
+                      preview.data &&
+                      pin.version === preview.data.reference.version &&
+                      pin.sha256 === preview.data.reference.sha256,
+                    )
+                  }
+                  onPress={() => {
+                    if (detail && selectedVersion && preview.data)
+                      void change({
+                        type: "attach",
+                        skillId: detail.id,
+                        selected: selectedVersion,
+                        preview: preview.data,
+                      });
+                  }}
+                />
+              </SettingsGroup>
             </>
           )}
           {view === "history" && (
@@ -856,40 +863,60 @@ function AgentSkillsManager({
               {history.isError && (
                 <>
                   <Notice tone="error" message={failure(history.error)} />
-                  <ActionButton
-                    label="Retry skill history"
-                    variant="secondary"
-                    onPress={() => void history.refetch()}
-                  />
+                  <SettingsGroup inset={false}>
+                    <SettingsRow
+                      label="Retry skill history"
+                      tone="action"
+                      onPress={() => void history.refetch()}
+                    />
+                  </SettingsGroup>
                 </>
               )}
               {history.data?.items.length === 0 && (
-                <Label muted>No skill history yet.</Label>
+                <Text style={[styles.note, { color: colors.textMuted }]}>
+                  No skill history yet.
+                </Text>
               )}
-              {history.data?.items.map((item) => (
-                <Card key={item.id}>
-                  <Label>
-                    {SKILL_HISTORY_LABELS[item.event_type] ?? "Skill activity"}
-                  </Label>
-                  <Label muted style={styles.caption}>
-                    {new Date(item.created_at).toLocaleString()}
-                    {item.revision !== null
-                      ? ` · Revision ${item.revision}`
-                      : ""}
-                  </Label>
-                  {item.skills.map((skill) => (
-                    <Label key={skill.skill_id} muted>
-                      {skill.name} · {skill.version}
-                      {skill.disabled ? " · Disabled" : ""}
-                    </Label>
+              {history.data?.items.length ? (
+                <SettingsGroup title="History" inset={false}>
+                  {history.data.items.map((item) => (
+                    <SettingsRow
+                      key={item.id}
+                      label={
+                        SKILL_HISTORY_LABELS[item.event_type] ?? "Skill activity"
+                      }
+                      detail={[
+                        `${new Date(item.created_at).toLocaleString()}${
+                          item.revision !== null
+                            ? ` · Revision ${item.revision}`
+                            : ""
+                        }`,
+                        ...item.skills.map(
+                          (skill) =>
+                            `${skill.name} · ${skill.version}${skill.disabled ? " · Disabled" : ""}`,
+                        ),
+                      ].join("\n")}
+                    />
                   ))}
-                </Card>
-              ))}
+                </SettingsGroup>
+              ) : null}
             </>
           )}
         </View>
       )}
     </View>
+  );
+}
+
+/** iOS confirms removal in a system alert; the destructive choice is explicit. */
+function confirmRemoval(skill: string, agent: string, onConfirm: () => void) {
+  Alert.alert(
+    "Remove from agent?",
+    `Remove ${skill} from ${agent}? Other attached skills stay in place. The skill stays in Ornn.`,
+    [
+      { text: "Cancel", style: "cancel" },
+      { text: "Remove", style: "destructive", onPress: onConfirm },
+    ],
   );
 }
 
@@ -905,68 +932,35 @@ function Pagination({
   onChange: (page: number) => void;
 }) {
   return (
-    <View style={styles.row}>
-      <View style={styles.flex}>
-        <ActionButton
-          label="Previous"
-          variant="secondary"
-          disabled={disabled || page <= 1}
-          onPress={() => onChange(page - 1)}
-        />
-      </View>
-      <Label muted style={styles.caption}>
-        {page} / {total}
-      </Label>
-      <View style={styles.flex}>
-        <ActionButton
-          label="Next"
-          variant="secondary"
-          disabled={disabled || page >= total}
-          onPress={() => onChange(page + 1)}
-        />
-      </View>
-    </View>
+    <SettingsGroup title={`Page ${page} / ${total}`} inset={false}>
+      <SettingsRow
+        label="Previous"
+        tone="action"
+        disabled={disabled || page <= 1}
+        onPress={() => onChange(page - 1)}
+      />
+      <SettingsRow
+        label="Next"
+        tone="action"
+        disabled={disabled || page >= total}
+        onPress={() => onChange(page + 1)}
+      />
+    </SettingsGroup>
   );
 }
 const styles = StyleSheet.create({
-  versionHeading: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    flexWrap: "wrap",
+  grouped: {
+    paddingHorizontal: spacing.xxl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.huge * 2,
+    gap: spacing.huge,
   },
-  stack: { gap: 16 },
-  stackSmall: { gap: 8 },
-  flex: { flex: 1, minWidth: 0 },
-  caption: { fontSize: 11, lineHeight: 17 },
-  section: { fontFamily: fonts.bodySemi, fontSize: 11, letterSpacing: 0.8 },
-  row: { flexDirection: "row", alignItems: "center", gap: 12 },
-  agentContext: {
-    minHeight: 64,
-    borderRadius: 12,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
+  stack: { gap: spacing.huge },
+  note: { ...typeScale.small, paddingHorizontal: spacing.xxl },
+  checkSpace: { width: 18 },
+  excerpt: {
+    paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.md,
   },
-  agentName: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 20 },
-  cardTitle: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 22 },
-  icon: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  detailIdentity: { flexDirection: "row", alignItems: "center", gap: 14 },
-  excerpt: { padding: 12, borderRadius: 8, fontSize: 11, lineHeight: 18 },
-  versionRow: {
-    borderWidth: 1,
-    borderRadius: 12,
-    minHeight: 68,
-    padding: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
+  excerptText: { fontSize: 11, lineHeight: 18 },
 });

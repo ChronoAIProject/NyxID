@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
+import * as designTokens from "../../theme/designTokens";
+import * as historyTypes from "./pluginConnectionHistoryTypes";
 
 type Element = { type: unknown; props: Record<string, any> };
 type QueryOptions = {
@@ -25,8 +27,9 @@ function elements(root: Element): Element[] {
   ];
 }
 
-function setup() {
+function setup({ groups = [] as unknown[] } = {}) {
   let serviceId = "connection-a";
+  const pushes: { name: string; params: any }[] = [];
   let epoch = 1;
   let focused = true;
   let appStateChange: (state: string) => void = () => {};
@@ -55,7 +58,10 @@ function setup() {
   const harness = hookHarness<Element>({
     "react-native": {
       ...Object.fromEntries(
-        ["ActivityIndicator", "Pressable", "View"].map((name) => [name, name]),
+        ["ActivityIndicator", "Pressable", "Text", "View"].map((name) => [
+          name,
+          name,
+        ]),
       ),
       AppState: {
         currentState: "active",
@@ -66,13 +72,18 @@ function setup() {
       },
       StyleSheet: { create: (styles: unknown) => styles },
     },
-    "@react-navigation/native": { useIsFocused: () => focused },
+    "@react-navigation/native": {
+      useIsFocused: () => focused,
+      useNavigation: () => ({
+        push: (name: string, params: unknown) => pushes.push({ name, params }),
+      }),
+    },
     "@tanstack/react-query": {
       useQueryClient: () => ({ cancelQueries: record("cancel") }),
       useInfiniteQuery: (value: QueryOptions) => {
         history = value;
         return {
-          data: { pages: [{ groups: [] }] },
+          data: { pages: [{ groups }] },
           isPending: false,
           isError: false,
         };
@@ -83,13 +94,14 @@ function setup() {
       },
     },
     "lucide-react-native": Object.fromEntries(
-      ["ChevronDown", "ChevronRight", "SlidersHorizontal"].map((name) => [
-        name,
-        name,
-      ]),
+      ["ChevronsUpDown", "SlidersHorizontal"].map((name) => [name, name]),
     ),
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Label", "Notice"].map((name) => [name, name]),
+      ["ActionButton", "Notice", "WorkspacePage"].map((name) => [name, name]),
     ),
     "../../components/workspace/WorkspaceSelectionField": {
       WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
@@ -102,15 +114,17 @@ function setup() {
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../../theme/designTokens": { fonts: {} },
+    "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
-    "./pluginConnectionHistoryTypes": {},
+    "./pluginConnectionHistoryTypes": historyTypes,
   });
-  const { PluginConnectionHistory } = harness.load(
+  const module = harness.load(
     fileURLToPath(new URL("./PluginConnectionHistory.tsx", import.meta.url)),
   ) as {
     PluginConnectionHistory: (props: { serviceId: string }) => Element;
+    ConnectionHistoryDetailScreen: (props: unknown) => Element;
   };
+  const { PluginConnectionHistory } = module;
   harness.mount(() => PluginConnectionHistory({ serviceId }));
   const find = (predicate: (item: Element) => boolean) => {
     const result = elements(harness.flush()).find(predicate);
@@ -119,6 +133,9 @@ function setup() {
   };
   return {
     harness,
+    module,
+    pushes,
+    all: () => elements(harness.flush()),
     calls,
     actions,
     history: () => history,
@@ -259,6 +276,72 @@ test("connection and account changes clear applied filters and any open draft; b
     assert.equal(env.hasSheet(), false);
     assert.equal(env.history().enabled, false);
     assert.equal(env.options().enabled, false);
+  } finally {
+    env.unmount();
+  }
+});
+
+const event = (overrides: Record<string, unknown> = {}) => ({
+  id: "event-1",
+  schema_version: 1,
+  action: "service.updated",
+  action_label: "Connection updated",
+  actor: {
+    kind: "api_key",
+    id: "actor-1",
+    name: "Deploy key",
+    person_id: null,
+    api_key_id: "key-1",
+    app_id: null,
+  },
+  committed_at: "2026-10-30T10:00:00Z",
+  additional_changes: true,
+  audit_status: "mismatch",
+  changes: [{ field: "is_active", label: "Enabled", before: true, after: false }],
+  ...overrides,
+});
+
+test("history lists change sets as rows that open a metadata-only detail page", () => {
+  const group = { id: "group-1", events: [event(), event({ id: "event-2" })] };
+  const env = setup({ groups: [group, { id: "empty", events: [] }] });
+  try {
+    const rows = env
+      .all()
+      .filter(
+        (item) => item.type === "SettingsRow" && item.props.label === "Connection updated",
+      );
+    assert.equal(rows.length, 1, "empty groups never render");
+    assert.equal(rows[0]!.props.accessibilityLabel, "Connection updated, Deploy key (API key)");
+    assert.match(rows[0]!.props.detail, /Deploy key \(API key\) · .* · 2 changes/);
+    rows[0]!.props.onPress();
+    assert.equal(env.pushes.length, 1);
+    assert.equal(env.pushes[0]!.name, "ConnectionHistoryDetail");
+    assert.equal(env.pushes[0]!.params.title, "Connection updated");
+    assert.equal(env.pushes[0]!.params.group, group);
+    assert.equal(
+      env.calls.filter((call) => call.method !== "cancel").length,
+      0,
+      "opening a change reads nothing new",
+    );
+
+    const detail = env.module.ConnectionHistoryDetailScreen({
+      route: { params: env.pushes[0]!.params },
+    });
+    const nodes = elements(detail);
+    const value = (label: string) =>
+      nodes.filter((item) => item.props.label === label).map((item) => item.props.value);
+    assert.deepEqual(value("Changed by"), ["Deploy key (API key)", "Deploy key (API key)"]);
+    assert.deepEqual(value("Authenticated"), ["API key", "API key"]);
+    assert.deepEqual(value("Enabled"), ["Yes → No", "Yes → No"]);
+    assert.equal(
+      nodes.filter((item) => item.type === "Notice" && item.props.tone === "error").length,
+      2,
+    );
+    assert.ok(
+      nodes.some((item) =>
+        String(item.props.footer).startsWith("Other service settings updated."),
+      ),
+    );
   } finally {
     env.unmount();
   }
