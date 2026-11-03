@@ -48,7 +48,12 @@ import {
 } from "../features/display/ChatLayoutEditScreen";
 import { AccountSecurityScreen } from "../features/account/AccountSecurityScreen";
 import { MachinePolicyScreen } from "../features/machines/MachinePolicyScreen";
-import { MachineActivityScreen } from "../features/machines/MachineActivityScreen";
+import {
+  MachineActivityDetailScreen,
+  MachineActivityFilterScreen,
+  MachineActivityScreen,
+} from "../features/machines/MachineActivityScreen";
+import { SavedLoginScreen } from "../features/machines/SavedLogins";
 import { AgentMachinesScreen } from "../features/machines/AgentMachinesScreen";
 import { MachineDesktopRoute } from "../features/machines/MachineDesktopRoute";
 import { MachinesScreen } from "../features/machines/MachinesScreen";
@@ -467,6 +472,21 @@ function WorkspaceNavigator() {
           title: "Machine activity",
           header: WorkspacePageHeader,
         }}
+      />
+      <ContentStack.Screen
+        name="MachineActivityFilter"
+        component={MachineActivityFilterScreen}
+        options={{ title: "Agent", header: WorkspacePageHeader }}
+      />
+      <ContentStack.Screen
+        name="MachineActivityDetail"
+        component={MachineActivityDetailScreen}
+        options={{ title: "Activity", header: WorkspacePageHeader }}
+      />
+      <ContentStack.Screen
+        name="MachineSavedLogin"
+        component={SavedLoginScreen}
+        options={{ title: "Saved login", header: WorkspacePageHeader }}
       />
       <ContentStack.Screen
         name="AgentMachines"

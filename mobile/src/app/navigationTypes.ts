@@ -83,7 +83,23 @@ export type WorkspaceContentParamList = Omit<
   PluginConnections: { connectorId: string };
   ActiveGrants: undefined;
   MachinePolicy: { machineId: string; ownerId: string };
-  MachineActivity: { machineId: string; ownerId: string };
+  MachineActivity: { machineId: string; ownerId: string; agent?: string };
+  MachineActivityFilter: {
+    machineId: string;
+    ownerId: string;
+    agent: string;
+    agents: { id: string; label: string }[];
+  };
+  MachineActivityDetail: {
+    id: string;
+    action: string;
+    outcome: string;
+    agent: string;
+    createdAt: string;
+    durationMs?: number;
+    exitCode?: number;
+  };
+  MachineSavedLogin: { loginId: string; ownerLabel: string };
   AutomationDetail: { id: string };
   AutomationRuns: { id: string };
   ActivityDetail: { challengeId: string; entryPoint?: string };
@@ -163,6 +179,9 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "ActiveGrants",
   "MachinePolicy",
   "MachineActivity",
+  "MachineActivityFilter",
+  "MachineActivityDetail",
+  "MachineSavedLogin",
   "AutomationDetail",
   "AutomationRuns",
   "ActivityDetail",
