@@ -304,7 +304,7 @@ const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
 /// Flags read before any user or organization is known; only a global override applies.
 const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[INVITATION_CODE_FLAG_KEY, MOBILE_NEW_DOMAINS_FLAG_KEY];
 
-fn is_global_only(flag_key: &str) -> bool {
+pub(crate) fn is_global_only(flag_key: &str) -> bool {
     GLOBAL_ONLY_FLAG_KEYS.contains(&flag_key)
 }
 
