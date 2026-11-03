@@ -58,19 +58,17 @@ function setup() {
     },
     retries: () => retries,
     prompt: async () => {
-      await harness
-        .value()
-        .handle(
-          new ApiError({
-            statusCode: 403,
-            errorCode: 2003,
-            errorKey: "mfa_step_up_required",
-            message: "Verify this session",
-          }),
-          async () => {
-            retries++;
-          },
-        );
+      await harness.value().handle(
+        new ApiError({
+          statusCode: 403,
+          errorCode: 2003,
+          errorKey: "mfa_step_up_required",
+          message: "Verify this session",
+        }),
+        async () => {
+          retries++;
+        },
+      );
       harness.flush();
       assert.ok(harness.value().prompt);
       return harness.value().prompt;
@@ -116,5 +114,28 @@ test("account replacement discards the pending step-up without retrying its writ
   env.verification.resolve();
   await pending;
   assert.equal(env.retries(), 0);
+  env.harness.unmount();
+});
+
+test("screen cancellation clears step-up and permanently fences its in-flight verification", async () => {
+  const env = setup();
+  const prompt = await env.prompt();
+  const pending = prompt.props.verify("123456");
+  const authorityGuard = env.requests[0][1].authorityGuard;
+  assert.doesNotThrow(authorityGuard);
+  env.harness.value().reset();
+  env.harness.flush();
+  assert.equal(env.harness.value().prompt, null);
+  assert.throws(authorityGuard, { name: "AbortError" });
+  env.verification.resolve();
+  await pending;
+  env.harness.flush();
+  assert.equal(env.retries(), 0);
+  assert.equal(env.harness.value().busy, false);
+  await env.prompt();
+  assert.ok(
+    env.harness.value().prompt,
+    "new active-screen requests can still step up",
+  );
   env.harness.unmount();
 });
