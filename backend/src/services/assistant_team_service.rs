@@ -96,7 +96,10 @@ pub async fn in_progress(
         .collection::<bson::Document>(CONVERSATIONS)
         .find(
             doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},
-            "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
+            "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
+            "channel": bson::Bson::Null,
+            "$or": [{"guest_turn": false}, {"guest_turn": {"$exists": false}}],
+            "active_turn.started_at": {"$gt": fresh}},
         )
         .projection(doc! {"title": 1, "active_turn.turn_id": 1, "active_turn.question": 1, "active_turn.question_key": 1})
         .limit(5)

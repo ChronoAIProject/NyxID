@@ -62,7 +62,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12600 service concurrency: 12600 `ServiceConcurrencyLimited` (HTTP 429, `Retry-After: 1`); client capacity rejection, never a server fault.
 - 12700 `ToolOperationNotPublished` (HTTP 404): unpublished or unknown operation on a tool offering.
 - 12800-12801: 12800 `ManagedExecutionPending` (HTTP 409), 12801 `ErasurePreparing` (HTTP 409, `erasure_preparing`).
-- 12900 `OAuthAuthorityUnavailable` (HTTP 503, `oauth_authority_unavailable`): a live OAuth authority read could not complete; retry the request without discarding tokens or reauthorizing.
+- 12900 `OAuthAuthorityUnavailable` (HTTP 503, `oauth_authority_unavailable`): a live OAuth authority read could not complete; retry the request without discarding tokens or reauthorizing. `SecurityReadinessUnavailable` also uses 12900 (HTTP 503, `security_readiness_unavailable`); clients must distinguish these errors by the response `error` key.
 - 13300 `MonitoringUnavailable` (HTTP 503, `monitoring_unavailable`): configured chrono-probe failed or returned an unusable response.
 - 13301 `MonitoringNotConfigured` (HTTP 404, `monitoring_not_configured`): `CHRONO_PROBE_URL` is unset or invalid; monitoring UI stays hidden.
 - 12500-12501 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503).

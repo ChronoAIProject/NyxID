@@ -3320,6 +3320,10 @@ async fn resolve_proxy_execution_inner(
         .extensions()
         .get::<super::agent_skills::OrnnSkillRead>()
         .is_some()
+        || request
+            .extensions()
+            .get::<super::agent_skills::OrnnIdentityRead>()
+            .is_some()
         || pre_resolved
             .as_ref()
             .is_some_and(|target| target.require_identity_assertion);
@@ -4010,10 +4014,14 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
-    let assistant_projection =
+    let mut assistant_projection =
         crate::services::assistant_service_execution::HttpProjection::for_machine(
             machine_ingress.as_ref(),
         );
+    assistant_projection.skill_read = request
+        .extensions()
+        .get::<super::agent_skills::OrnnSkillRead>()
+        .is_some();
     if machine_git {
         let git = machine_ingress
             .as_ref()
@@ -4030,10 +4038,14 @@ async fn execute_resolved_proxy_inner<'a>(
 
     // Dedicated skill reads must retain the person's signed Ornn identity and
     // must never dispatch with a shared catalog credential, even after fallback.
-    if request
+    if (request
         .extensions()
         .get::<super::agent_skills::OrnnSkillRead>()
         .is_some()
+        || request
+            .extensions()
+            .get::<super::agent_skills::OrnnIdentityRead>()
+            .is_some())
         && (master_credential
             || proxy_service::uses_server_held_master(&target)
             || catalog_service_slug.as_deref() != Some("ornn-api")
@@ -4235,6 +4247,11 @@ async fn execute_resolved_proxy_inner<'a>(
         billing_resource_owner_id,
         &billing_request_id,
         credential_class,
+    );
+    request_audit.business_service(
+        auth_user.assistant_chat.as_deref(),
+        &target.service,
+        is_auto_connected_for_approval,
     );
     let billing_owner = state
         .billing
@@ -5260,7 +5277,7 @@ async fn execute_resolved_proxy_inner<'a>(
             .map_err(|_| AppError::Internal("Could not construct managed response".into()))?;
         apply_agent_attribution_headers(&mut response, auth_user.api_key_id.as_deref(), None);
         destination_audit.complete(managed.status);
-        request_audit.response(managed.status);
+        request_audit.response(managed.status).await;
         return Ok(ProxyExecutionPhase::Complete(response));
     }
     // Billing and durable-grant admission carry their own database state.
@@ -5521,8 +5538,10 @@ async fn execute_resolved_proxy_inner<'a>(
                             ws_egress.as_ref(),
                         )
                     })
-                    .await
-                    .inspect(|response| request_audit.response(response.status().as_u16()));
+                    .await;
+                    if let Ok(response) = &result {
+                        request_audit.response(response.status().as_u16()).await;
+                    }
                     return result;
                 }
 
@@ -5559,8 +5578,10 @@ async fn execute_resolved_proxy_inner<'a>(
                         ws_egress.as_ref(),
                     )
                 })
-                .await
-                .inspect(|response| request_audit.response(response.status().as_u16()));
+                .await;
+                if let Ok(response) = &result {
+                    request_audit.response(response.status().as_u16()).await;
+                }
                 return result;
             }
 
@@ -6206,7 +6227,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             }
 
                             destination_audit.complete(response.status().as_u16());
-                            request_audit.response(response.status().as_u16());
+                            request_audit.response(response.status().as_u16()).await;
                             return observe_model_response(model_request, path, response).await;
                         }
                         Err(NodeProxyFailure {
@@ -6758,7 +6779,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 }
 
                 destination_audit.complete(response.status().as_u16());
-                request_audit.response(response.status().as_u16());
+                request_audit.response(response.status().as_u16()).await;
                 return observe_model_response(model_request, path, response).await;
             }
 
@@ -7031,7 +7052,9 @@ async fn execute_resolved_proxy_inner<'a>(
                     .transpose()?
                     .flatten()
                     .ok_or(AppError::AssistantTurnRequired)?;
-                request_audit.response(downstream_response.status().as_u16());
+                request_audit
+                    .response(downstream_response.status().as_u16())
+                    .await;
                 destination_audit.complete(downstream_response.status().as_u16());
                 return shared_connect::start(
                     state,
@@ -7215,7 +7238,7 @@ async fn execute_resolved_proxy_inner<'a>(
             );
 
             destination_audit.complete(response.status().as_u16());
-            request_audit.response(response.status().as_u16());
+            request_audit.response(response.status().as_u16()).await;
             Ok(response)
         },
     )))
@@ -16292,3 +16315,7 @@ mod nyxbot_readiness_tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "proxy_real_work_tests.rs"]
+mod real_work_tests;

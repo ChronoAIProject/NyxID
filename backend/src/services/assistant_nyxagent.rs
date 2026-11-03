@@ -439,6 +439,9 @@ pub fn base_prompt(
             ));
         }
     }
+    if row.collaboration.is_some() {
+        prompt.push_str("\n\nIn this collaboration group, address participants and agents only by their public @handles in the current turn roster, never by account or agent IDs. Only current group members are targets; never use a private roster. Images on the original request may be supplied as image input in any lane; availability notices are authoritative. Never claim to see an image that was not delivered.");
+    }
     if row.guest_turn {
         prompt.push_str(guest_note(row.is_subagent()));
     } else {
@@ -2644,7 +2647,9 @@ pub(crate) async fn begin_owner_turn_in_session(
         super::assistant_upload_retention::settled_in_session(
             db,
             session,
-            user_id,
+            row.collaboration
+                .as_ref()
+                .map_or(user_id, |b| b.original_requester_id.as_str()),
             &id,
             &old.turn_id,
         )
@@ -2652,7 +2657,12 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     if let Some(lost) = row.active_turn.take() {
         let lost_turn = lost.clone();
-        let lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
+        let mut lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
+        lost_metadata.work = Some(super::assistant_real_work::evidence(
+            &row,
+            &lost_turn,
+            Some(now),
+        ));
         Box::pin(super::assistant_turn_observability::failed_in_session(
             db,
             session,
@@ -2862,9 +2872,18 @@ pub(crate) async fn begin_owner_turn_in_session(
                 .await?;
         }
     }
+    // Collaboration notes include up to 16 bounded public participant labels
+    // and eight group agents. Preserve the full roster without widening private notes.
+    let note_limit = if row.collaboration.is_some() {
+        6000
+    } else {
+        1200
+    };
     let note = match (start.note.as_deref(), retry.as_ref()) {
-        (Some(note), Some(retry)) => Some(format!("{}\n\n{}", excerpt(note, 1200), retry.note)),
-        (Some(note), None) => Some(excerpt(note, 1200)),
+        (Some(note), Some(retry)) => {
+            Some(format!("{}\n\n{}", excerpt(note, note_limit), retry.note))
+        }
+        (Some(note), None) => Some(excerpt(note, note_limit)),
         (None, Some(retry)) => Some(retry.note.clone()),
         (None, None) => None,
     };
@@ -2872,6 +2891,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        business_system_success: false,
         delegated_images: Default::default(),
         timing: Default::default(),
         collaboration: row.collaboration.clone(),
@@ -3142,7 +3162,11 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
     }
-    if start.guest && (!start.attachment_ids.is_empty() || !start.channel_uploads.is_empty()) {
+    if start.guest
+        && (!start.attachment_ids.is_empty()
+            || !start.channel_uploads.is_empty()
+            || (row.collaboration.is_none() && !start.group_attachments.is_empty()))
+    {
         return Err(AppError::Forbidden("Uploads are owner-only".into()));
     }
     if start.channel_uploads.len() + start.attachment_ids.len() + start.group_attachments.len()
@@ -3182,7 +3206,9 @@ pub(crate) async fn begin_owner_turn_in_session(
     Box::pin(super::assistant_upload_retention::used_in_turn(
         db,
         session,
-        user_id,
+        row.collaboration
+            .as_ref()
+            .map_or(user_id, |b| b.original_requester_id.as_str()),
         &id,
         turn_id,
         &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
@@ -3248,7 +3274,12 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_queue_notice_id: None,
         media_pending: (media_declared > 0).then_some(media_declared),
         media_bound: None,
-        turn_metadata: None,
+        turn_metadata: row.active_turn.as_ref().map(|turn| {
+            crate::models::assistant_message::TurnMetadata {
+                work: Some(super::assistant_real_work::evidence(&row, turn, None)),
+                ..Default::default()
+            }
+        }),
         platform_delivery_recovery_queued: false,
         platform_reply: row
             .active_turn
@@ -3848,6 +3879,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 timing: saved.turn_metadata.as_ref().and_then(|data| data.timing.clone()),
                                 channel_delivery:None,
@@ -3897,7 +3929,11 @@ async fn finish_turn_inner(
                     |turn| super::assistant_model_observer::attribute(&error, turn, Utc::now()),
                 ));
                 let turn = current.active_turn.as_ref().expect("matched turn");
-                let mut turn_metadata = super::assistant_turn_observability::metadata(turn, Utc::now());
+                let settled_at = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
+                    Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
+                });
+                let mut turn_metadata = super::assistant_turn_observability::metadata(turn, settled_at);
+                turn_metadata.work = Some(super::assistant_real_work::evidence(&current, turn, Some(settled_at)));
                 turn_metadata.failure_reason = error.as_ref().and_then(|error|
                     super::assistant_model_observer::failure_reason(error, turn, Utc::now()));
                 if let Some(error) = error.as_mut() {
@@ -3950,9 +3986,7 @@ async fn finish_turn_inner(
                     .active_turn
                     .as_ref()
                     .and_then(|turn| turn.report_to.clone());
-                let now = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
-                    Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
-                });
+                let now = settled_at;
                 // Conflict with concurrent revocation or rotation before rebinding.
                 let credential_alive = db
                     .collection::<bson::Document>(
@@ -4112,7 +4146,8 @@ async fn finish_turn_inner(
                     .insert_one(message)
                     .session(&mut *session)
                     .await?;
-                Box::pin(super::assistant_upload_retention::settled_in_session(&db,session,&row.user_id,&row.id,&turn_id)).await?;
+                let upload_owner=row.collaboration.as_ref().map_or(row.user_id.as_str(), |b|b.original_requester_id.as_str());
+                Box::pin(super::assistant_upload_retention::settled_in_session(&db,session,upload_owner,&row.id,&turn_id)).await?;
                 collection
                     .replace_one(doc! {"_id": &row.id, "user_id": &row.user_id}, current)
                     .session(&mut *session)
@@ -5768,6 +5803,18 @@ pub async fn recap(
             Some(50),
         )
         .await?;
+    }
+    if let Some(binding) = &row.collaboration {
+        let access = super::collaboration_group_service::identity::load(
+            db,
+            &binding.original_requester_id,
+            &binding.group_id,
+            Some(&binding.request_id),
+        )
+        .await?;
+        for message in &mut owners {
+            message.text = access.public_text(&message.text);
+        }
     }
     let recap = render_recap_with_owner_total(
         history,

@@ -323,6 +323,8 @@ pub struct StreamReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default)]
+    pub business_system_success: bool,
+    #[serde(default)]
     pub delegated_images: super::assistant_delegated_image::DelegatedImages,
     #[serde(default)]
     pub timing: super::assistant_message::TurnTiming,

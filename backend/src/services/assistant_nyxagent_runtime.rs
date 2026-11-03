@@ -467,8 +467,9 @@ async fn in_progress_note(
         .as_ref()
         .and_then(|turn| turn.question_key.as_deref());
     let mut note = String::from(
-        "\n\nOther-thread question excerpts for duplicate-work discovery only (not execution evidence; \
-        consult nyxid__task_status before reporting progress, and say unknown without evidence):",
+        "\n\nQuestion excerpts from the owner's other private threads are for duplicate-work discovery only, never execution evidence. \
+        Answer the user in this thread; never tell them that their question is being handled in another conversation. \
+        Cross-chat delivery is handled separately by NyxID. Consult nyxid__task_status before reporting progress, and say unknown without evidence:",
     );
     for other in others {
         note.push_str(&format!(
@@ -1665,20 +1666,32 @@ async fn execute_turn_inner(
     )
     .await
     .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
-        &state.db,
-        &row.user_id,
-        &attachments.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
-    ))
-    .await
-    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     let mut listing = crate::services::assistant_upload_service::listing(&attachments);
-    if !expired.is_empty() {
-        listing.push_str(&format!(
+    if row.collaboration.is_some() {
+        let (available, notice) = super::collaboration_group_service::uploads::input_for_turn(
+            &state.db,
+            row,
+            attachments,
+        )
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+        attachments = available;
+        listing.push_str(&notice);
+    } else {
+        let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
+            &state.db,
+            &row.user_id,
+            &attachments.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+        ))
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+        if !expired.is_empty() {
+            listing.push_str(&format!(
             "\nAttachments expired per retention policy; ask the owner to upload them again: {}",
             serde_json::json!(expired)
         ));
-        attachments.retain(|a| !expired.contains(&a.id));
+            attachments.retain(|a| !expired.contains(&a.id));
+        }
     }
     let capabilities = if attachments
         .iter()

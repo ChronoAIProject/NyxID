@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub struct AnalyticsQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    pub threshold: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -53,6 +54,8 @@ pub struct AnalyticsResponse {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
     pub generated_at: DateTime<Utc>,
+    pub real_work: Option<analytics::real_work::Weekly>,
+    pub real_work_unavailable: bool,
     pub active_sessions: i64,
     pub active_accounts: i64,
     pub running_now: u64,
@@ -70,10 +73,27 @@ pub async fn analytics(
         .await?;
     let now = Utc::now();
     let (from, to) = query.window(now)?;
-    let summary = analytics::summary(&state.db, from, to, now).await?;
+    let threshold = analytics::real_work::threshold(query.threshold)?;
+    let (summary, real_work) = tokio::join!(
+        analytics::summary(&state.db, from, to, now),
+        analytics::real_work::weekly(&state.db, from, to, threshold),
+    );
+    let summary = summary?;
+    let real_work = match real_work {
+        Ok(work) => Some(work),
+        Err(error) => {
+            tracing::warn!(
+                error_code = error.error_code(),
+                "NyxBot real-work analytics unavailable"
+            );
+            None
+        }
+    };
     Ok(Json(AnalyticsResponse {
         from,
         to,
+        real_work_unavailable: real_work.is_none(),
+        real_work,
         generated_at: now,
         active_sessions: summary.sessions,
         active_accounts: summary.accounts,
@@ -98,6 +118,37 @@ pub async fn model_usage(
     ))
 }
 
+/// Same read audience as Usage. Internal classification never exposes content.
+pub async fn internal_owners(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<analytics::real_work::InternalOwners>> {
+    super::admin_helpers::require_admin_usage_read(
+        &state,
+        &auth,
+        "admin.assistant.internal_owners",
+    )
+    .await?;
+    Ok(Json(analytics::real_work::internal(&state.db).await?))
+}
+
+pub async fn set_internal_owners(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(input): Json<analytics::real_work::InternalOwners>,
+) -> AppResult<Json<analytics::real_work::InternalOwners>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    super::admin_helpers::require_reconciliation_operator(&state, &auth).await?;
+    Ok(Json(
+        analytics::real_work::set_internal(
+            &state.db,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            input,
+        )
+        .await?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,7 +167,8 @@ mod tests {
             assert!(
                 AnalyticsQuery {
                     from: Some(from),
-                    to: Some(now)
+                    to: Some(now),
+                    threshold: None,
                 }
                 .window(now)
                 .is_err()

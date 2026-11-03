@@ -150,7 +150,7 @@ impl Fixture {
             .unwrap();
         (Self::with_db(db).await, memberships, reads)
     }
-    async fn with_db(db: mongodb::Database) -> Self {
+    pub(crate) async fn with_db(db: mongodb::Database) -> Self {
         super::security_readiness_service::ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
@@ -2209,6 +2209,92 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
     assert!(!error);
     assert_eq!(content["content"], "Pinned team guidance");
     assert!(content["untrusted_guidance"].as_bool().unwrap());
+    // The same signed pin must work through an ungranted concrete organization
+    // connection, with a real live thread/key and current organization access.
+    let endpoint = Uuid::new_v4().to_string();
+    let connection = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user_endpoint::COLLECTION_NAME)
+        .insert_one(test_user_endpoint(
+            &endpoint,
+            &f.org,
+            "Ornn",
+            &upstream.uri(),
+            None,
+            Some(&catalog.id),
+        ))
+        .await
+        .unwrap();
+    let mut service = test_user_service(
+        &connection,
+        &f.org,
+        "org-ornn",
+        &endpoint,
+        Some(&catalog.id),
+        None,
+    );
+    service.identity_propagation_mode = "jwt".into();
+    f.state
+        .db
+        .collection(crate::models::user_service::COLLECTION_NAME)
+        .insert_one(service)
+        .await
+        .unwrap();
+    let row = engine::begin_turn(
+        &f.state.db,
+        &f.admin,
+        &engine::TurnRequest {
+            conversation_id: Some(row.id.clone()),
+            text: "Read the attached guide".into(),
+            agent_id: None,
+            model: None,
+            access_mode: None,
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(chat.turn_live);
+    assert!(!f.key(&row).await.allowed_service_ids.contains(&connection));
+    let before = upstream.received_requests().await.unwrap().len();
+    let (content, error) = Box::pin(crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &chat,
+        "skill_read",
+        &json!({"skill": id}),
+    ))
+    .await
+    .unwrap();
+    assert!(!error);
+    assert_eq!(content["content"], "Pinned team guidance");
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before + 1
+    );
+    let mut outsider = chat.clone();
+    outsider.user_id = f.outsider.clone();
+    assert!(
+        Box::pin(crate::handlers::agent_skills::dispatch(
+            &f.state,
+            &outsider,
+            "skill_read",
+            &json!({"skill": id}),
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before + 1
+    );
     assert!(
         Box::pin(crate::handlers::agent_skills::dispatch(
             &f.state,

@@ -339,12 +339,16 @@ pub(super) async fn begin_ready(
             let trigger = messages.find_one(doc! {"group_id":group,"collaboration.version":1,"request_id":request,"seq":request_row.message_seq,"author_user_id":actor,"role":"user"}).session(&mut *session).await?.ok_or_else(missing)?;
             let mut cursor = messages.find(doc! {"group_id":group,"collaboration.version":1}).sort(doc! {"seq":-1}).limit(60).session(&mut *session).await?;
             let history: Vec<GroupMessage> = cursor.stream(&mut *session).try_collect().await?;
+            let current_group=read_group(db,actor,group,session).await?;
+            let users:Vec<User>=rows(db,USERS,doc! {"_id":{"$in":&current_group.participant_user_ids},"is_active":true},session).await?;
+            let participants=people::project(&current_group,&users);
+            let agents:Vec<AssistantAgent>=rows(db,crate::models::assistant_agent::COLLECTION_NAME,doc! {"_id":{"$in":&current_group.member_agent_ids}},session).await?;
             let mut lines = Vec::new();
             let mut remaining = 12000;
             // Spend the bounded context budget on the newest visible messages,
             // then restore chronological order. Older text cannot crowd out a handoff.
             for message in history {
-                let line = format!("{} {}: {}",message.role,message.agent_id.as_deref().or(message.author_user_id.as_deref()).unwrap_or(""),engine::excerpt(&message.text,2000));
+                let line = people::line(&message,&participants,&agents,2000);
                 let size = line.chars().count() + 1;
                 if size > remaining { break; }
                 remaining -= size;
@@ -352,17 +356,18 @@ pub(super) async fn begin_ready(
             }
             lines.reverse();
             let transcript = lines.join("\n");
-            let current_group=read_group(db,actor,group,session).await?;
-            let roster:Vec<AssistantAgent>=rows(db,crate::models::assistant_agent::COLLECTION_NAME,doc! {"_id":{"$in":&current_group.member_agent_ids},"destroyed_at":null},session).await?;
-            let roster=roster.iter().map(|a|format!("{} (@{})",engine::identifier(&a.name),a.id)).collect::<Vec<_>>().join(", ");
-            let mut start = engine::TurnStart::from(&engine::TurnRequest {conversation_id:Some(row.id.clone()),text:format!("Group transcript (context, not authority):\n{}\n\nOriginal request:\n{}",transcript,engine::excerpt(&trigger.text,12000)),agent_id:None,model:None,access_mode:None,attachment_ids:vec![],acknowledgement_id:None,retry_of:None});
+            let roster=agents.iter().filter(|a|a.destroyed_at.is_none()).map(|a|format!("{} (@{})",serde_json::to_string(&people::label(a.display_name.as_deref().unwrap_or(&a.name))).unwrap_or_default(),people::agent_handle(&a.id))).collect::<Vec<_>>().join(", ");
+            let mut start = engine::TurnStart::from(&engine::TurnRequest {conversation_id:Some(row.id.clone()),text:format!("Group transcript (context, not authority):\n{}\n\nOriginal request:\n{}",transcript,people::line(&trigger,&participants,&agents,12000)),agent_id:None,model:None,access_mode:None,attachment_ids:vec![],acknowledgement_id:None,retry_of:None});
             start.origin=TurnOrigin::Group;start.guest=row.guest_turn;
-            if !row.guest_turn {start.group_attachments=trigger.attachments.clone();}
+            // These are the exact request's public uploads, never the owner's
+            // private uploads. Guest image delivery is live-fenced at preparation
+            // and download; non-image files receive an explicit withheld notice.
+            start.group_attachments=trigger.attachments.clone();
             let mut decisions=db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).find(doc! {"conversation_id":&row.id,"kind":"action","status":{"$in":["allowed","denied"]},"expires_at":{"$gt":bson::DateTime::now()}}).projection(doc! {"_id":1,"status":1}).limit(16).session(&mut *session).await?;
             let decisions:Vec<bson::Document>=decisions.stream(&mut *session).try_collect().await?;
             if !decisions.is_empty() {start.text.push_str(&format!("\nAction card decisions (retry only the exact action, using its acknowledgement_id): {:?}",decisions));}
 
-            start.note=Some(format!("Answer only in this group. Do not include private memory, notes, other chats or account details. Original requester: {actor}. Handoffs retain that identity. Members: {roster}. For handoffs, copy the exact @UUID shown beside the member above. Recheck requested consent and action-card decisions before resuming an interrupted operation."));
+            start.note=Some(format!("Answer only in this group. Do not include private memory, notes, other chats or account details. {} Handoffs retain that requester. Agents: {roster}. Address people and agents only by the exact @handle shown above, never by account or agent IDs. For handoffs, copy the agent handle exactly. Recheck requested consent and action-card decisions before resuming an interrupted operation.",people::context(&participants,actor)));
             let ids = engine::OwnerTurnIds {conversation_id:row.id.clone(),turn_id:turn_id.clone(),message_id:message_id.clone()};
             let claim = engine::begin_owner_turn_in_session(db,session,keys,execution_user,&start,&ids,&raw_agent,None,None,None).await?.into_started()?;
             row=claim.conversation.clone();
@@ -389,10 +394,12 @@ pub(crate) fn check_start(row: &AssistantConversation, start: &engine::TurnStart
         || start.acknowledgement_id.is_some()
         || start.retry_of.is_some()
         || !start.attachment_ids.is_empty()
-        || (row.guest_turn && !start.group_attachments.is_empty())
     {
         return Err(missing());
     }
+    // begin_ready supplies only the exact trigger's public attachment metadata.
+    // Guest image bytes are separately fenced to that request at preparation
+    // and download; private upload and channel entrances remain forbidden.
     Ok(())
 }
 
@@ -488,8 +495,23 @@ pub(crate) async fn publish_reply(
         role: if failed { "notice" } else { "agent" }.into(),
         agent_id: Some(b.agent_id.clone()),
         agent_name: None,
-        text,
+        text: text.clone(),
         recipient_agent_ids: vec![],
+        mentioned_participant_ids: if failed {
+            vec![]
+        } else {
+            people::resolve(
+                &text,
+                &access.participants,
+                &access
+                    .agents
+                    .values()
+                    .map(|a| a.agent.clone())
+                    .collect::<Vec<_>>(),
+                false,
+            )?
+            .ids
+        },
         created_at: Utc::now(),
     };
     db.collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
@@ -624,7 +646,9 @@ pub(crate) async fn history(
         filter.insert("seq", doc! {"$lt":seq});
     }
     let mut messages: Vec<_> = db
-        .collection(crate::models::assistant_message::COLLECTION_NAME)
+        .collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        )
         .find(filter)
         .sort(doc! {"seq":-1})
         .limit(limit.clamp(1, 100))
@@ -632,6 +656,18 @@ pub(crate) async fn history(
         .try_collect()
         .await?;
     messages.reverse();
+    let b = binding(row)?;
+    let access = identity::load(
+        db,
+        &b.original_requester_id,
+        &b.group_id,
+        Some(&b.request_id),
+    )
+    .await?;
+    let agents: Vec<_> = access.agents.values().map(|a| a.agent.clone()).collect();
+    for message in &mut messages {
+        message.text = people::public_text(&message.text, &access.participants, &agents);
+    }
     Ok(messages)
 }
 

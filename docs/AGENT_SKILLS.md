@@ -19,6 +19,19 @@ The catalog integration must propagate a signed person identity (`jwt` or
 Shared master credentials are forbidden, including legacy fallback and platform
 bindings. Missing identity fails closed. No cross-person package cache exists.
 
+The internal bound-skill reader may read the agent's attached root or pinned
+dependency through the owner's concrete Ornn connection without an ordinary
+Ornn service grant. This exception applies only to the exact version's GET
+download; content is hash-checked before use. Signed identity, live key/turn,
+owner or organization connection access, revocation, and explicit operation
+restrictions still apply. Other Ornn calls receive no exception.
+
+Runtime refusals emit the metadata-only `assistant_skill_read_refused` audit
+event with `skill_not_bound`, `grant_refused`, or `operation_restriction`.
+Catalog availability and transport failures use `service_unavailable`,
+`proxy_error`, or `upstream_error` rather than claiming a grant denial.
+No package or message content is recorded.
+
 ## Packages and disclosure
 
 Search uses Ornn's mixed-visibility keyword search. Version discovery and exact
@@ -321,6 +334,12 @@ that outbox delivers owner-allowed `kind: skills` requests as
 turn. The publication event does not duplicate that request notification.
 
 ## Editable pin controls and routes
+
+The page's **Test skill** verifies the attached version and package integrity as
+the signed-in owner, without starting a turn. It does not simulate the agent's
+live thread key, operation restrictions, or execution confirmations, so page
+success alone is not proof of runtime access. Its `readable` field describes
+the enabled pin's availability to the signed-in owner.
 
 Agent pin references include `disabled` (default `false`, omitted while false); disabled pins are excluded from `skill_read` and prompt injection. Writing one requires the default-off `assistant:skill-pin-disable` flag; deploy every backend replica, then the frontend, then enable the flag. Re-enabling a pin through NyxBot follows its effective permission mode. Under `/assistant/nyxagent/agents/{id}`: `GET skills/{skill_id}/preview` tests an attached pin (exact version check plus a SKILL.md read through the agent's reader; `readable: false` while disabled); `POST skills/{skill_id}/improve` starts an authored improve draft from the exact package; `GET skills/history` lists the agent's newest 50 pin changes (with each pin's disabled state) and learning/authoring events to anyone who can read the agent; `POST learning/proposals/{proposal_id}/validate` with `{draft}` dry-runs the proposal's own validator. Proposal edits use `{revision, draft}` with the top-level revision canonical. Draft refusals carry field diagnostics `{rule, field, line?, limit?, actual?, unit?}`. All NyxAgent routes enforce the engine flag and first-party human sessions; writes require maintain access to the agent.
 

@@ -31,6 +31,7 @@ mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_model_observer;
 pub mod assistant_readiness_service;
+pub mod assistant_real_work;
 pub(crate) mod assistant_record_service;
 pub mod assistant_resource_service;
 pub mod assistant_service;
@@ -530,6 +531,7 @@ pub mod telegram_manager_registry;
 pub(crate) mod nyxbot_channel_continuity_service;
 pub(crate) mod nyxbot_chat_settings_service;
 pub(crate) mod nyxbot_event_binding_service;
+pub(crate) mod nyxbot_gateway_host_move;
 pub(crate) mod nyxbot_gateway_release_service;
 
 pub mod discord_gateway;
