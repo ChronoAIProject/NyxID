@@ -3,7 +3,8 @@ import {
   GroupedFormScope,
   GroupedFormBar,
 } from "@/components/ui/grouped-form";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useId, useRef, useState } from "react";
+import { GroupedDraftOwnerContext, useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { createPortal } from "react-dom";
 import { coverGroupedContent } from "@/lib/grouped-detail";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -54,6 +55,9 @@ export function AgentOperationScopes({
   readonly detailContainer?: HTMLElement | null;
 }) {
   const [active, setActive] = useState<string>();
+  const guard = useGroupedDraftGuard();
+  const parentOwner = useContext(GroupedDraftOwnerContext);
+  const owner = `${parentOwner}/${useId()}`;
   const [visited, setVisited] = useState<string[]>([]);
   const root = useRef<HTMLDivElement>(null);
   const views = useRef(new Map<string, HTMLElement>());
@@ -211,8 +215,8 @@ export function AgentOperationScopes({
                 type="button"
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  setActive(undefined);
+                onClick={async () => {
+                  if (!guard || await guard.confirmDiscard(`${owner}/${service.service_id}`)) setActive(undefined);
                 }}
               >
                 <ChevronLeft aria-hidden />
@@ -228,6 +232,7 @@ export function AgentOperationScopes({
             </div>
             <div className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto">
               <GroupedFormScope inherit>
+                <GroupedDraftOwnerContext.Provider value={`${owner}/${service.service_id}`}>
                 <ServiceOperationForm
                   key={`${service.service_id}:${service.revision}`}
                   agentId={agentId}
@@ -235,6 +240,7 @@ export function AgentOperationScopes({
                   service={service}
                   disabled={disabled}
                 />
+                </GroupedDraftOwnerContext.Provider>
                 <GroupedFormBar />
               </GroupedFormScope>
             </div>

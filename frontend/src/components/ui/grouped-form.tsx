@@ -25,24 +25,31 @@ export function GroupedFormScope({
     new Map(),
   );
   const [saving, setSaving] = useState(false);
+  const currentEntries = useRef(entries);
   const lock = useRef(false);
   const register = useCallback((id: string, entry: GroupedFormEntry) => {
-    setEntries((current) => new Map(current).set(id, entry));
+    currentEntries.current = new Map(currentEntries.current).set(id, entry);
+    setEntries(currentEntries.current);
   }, []);
   const remove = useCallback((id: string) => {
-    setEntries((current) => {
-      const next = new Map(current);
-      next.delete(id);
-      return next;
-    });
+    const next = new Map(currentEntries.current);
+    next.delete(id);
+    currentEntries.current = next;
+    setEntries(next);
   }, []);
   async function save() {
     if (lock.current) return;
     lock.current = true;
     setSaving(true);
     try {
-      for (const entry of entries.values()) {
-        if (!entry.dirty || entry.disabled || entry.pending) continue;
+      const attempted = new Set<string>();
+      while (true) {
+        const next = [...currentEntries.current].find(
+          ([id, entry]) => !attempted.has(id) && entry.dirty && !entry.disabled && !entry.pending,
+        );
+        if (!next) break;
+        const [id, entry] = next;
+        attempted.add(id);
         // A failure belongs to its form. Continue so independent forms can still succeed.
         try {
           await entry.save();
@@ -90,8 +97,7 @@ export function GroupedFormBar() {
       </Button>
       <Button
         type="button"
-        variant="ghost"
-        className="text-primary-text"
+        variant="primary"
         disabled={busy || dirty.some((entry) => entry.disabled)}
         onClick={() => void context.save()}
       >
@@ -134,8 +140,7 @@ export function GroupedFormActions({
       </Button>
       <Button
         type="button"
-        variant="ghost"
-        className="text-primary-text"
+        variant="primary"
         disabled={disabled || pending}
         onClick={() => void save()}
       >

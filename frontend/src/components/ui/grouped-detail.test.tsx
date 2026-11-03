@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it } from "vitest";
 import { GroupedDetailContext } from "@/lib/grouped-detail";
 import { GroupedDetail } from "./grouped-detail";
+import { GroupedDraftBoundary, GroupedDraftDialog } from "./grouped-drafts";
+import { GroupedFormActions, GroupedFormScope } from "./grouped-form";
 import {
   GroupedDisclosure,
   GroupedInput,
@@ -164,4 +166,41 @@ it("reopens a retained shared picker above a detail page mounted later", async (
   expect(disclosure).toHaveFocus();
   await user.click(screen.getByRole("button", { name: "Back to Skills" }));
   expect(screen.getByRole("button", { name: "Second skill" })).toHaveFocus();
+});
+
+function DirtyDetail() {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  return <GroupedDraftBoundary>
+    <div ref={setContainer} role="dialog" aria-label="Details">
+      <GroupedDetailContext.Provider value={{ container, visible: true }}>
+        <GroupedFormScope>
+          <button onClick={() => setOpen(true)}>Open detail</button>
+          <GroupedDetail open={open} title="Machine access" backLabel="Back to Access" onBack={() => setOpen(false)}>
+            <GroupedInput aria-label="Machine draft" value={draft} onChange={(event) => setDraft(event.target.value)} />
+            <GroupedFormActions label="machine access" dirty={!!draft} save={async () => setDraft("")} discard={() => setDraft("")} />
+          </GroupedDetail>
+        </GroupedFormScope>
+      </GroupedDetailContext.Provider>
+      <GroupedDraftDialog />
+    </div>
+  </GroupedDraftBoundary>;
+}
+
+it("guards drill-in Back, keeps editing, and discards only after confirmation", async () => {
+  const user = userEvent.setup();
+  render(<DirtyDetail />);
+  await user.click(screen.getByRole("button", { name: "Open detail" }));
+  await user.type(screen.getByRole("textbox", { name: "Machine draft" }), "draft");
+  await user.click(screen.getByRole("button", { name: "Back to Access" }));
+  expect(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Keep editing" }));
+  expect(screen.getByRole("textbox", { name: "Machine draft" })).toHaveValue("draft");
+  await user.click(screen.getByRole("button", { name: "Back to Access" }));
+  const prompt = screen.getByRole("dialog", { name: "Discard unsaved changes?" });
+  await user.click(within(prompt).getByRole("button", { name: "Discard" }));
+  expect(screen.queryByRole("heading", { name: "Machine access" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Open detail" }));
+  expect(screen.getByRole("textbox", { name: "Machine draft" })).toHaveValue("");
 });

@@ -199,7 +199,7 @@ export function GroupedSaveBar({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
       className={cn(
-        "sticky bottom-0 z-10 flex shrink-0 flex-wrap justify-end gap-2 bg-background px-4 py-3",
+        "sticky bottom-0 z-10 flex shrink-0 flex-wrap justify-end gap-2 border-t border-border/50 bg-background px-4 py-3",
         className,
       )}
       {...props}

@@ -1,3 +1,4 @@
+import { useGroupedDraft } from "@/lib/grouped-drafts";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -194,6 +195,11 @@ export function LearningDraftEditor({
   const form = useAppForm<SkillDraftForm>({
     resolver: zodResolver(skillDraftFormSchema),
     defaultValues: formValues(draft),
+  });
+  useGroupedDraft({
+    dirty: form.formState.isDirty,
+    pending: edit.isPending,
+    discard: () => form.reset(formValues(draft)),
   });
   // Rows are keyed by RHF's generated id, never by the editable path.
   const files = useFieldArray({ control: form.control, name: "files" });

@@ -2,6 +2,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useRef,
   useState,
   type ReactNode,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/grouped-detail";
 import { GroupedFormBar } from "./grouped-form";
 import { Button } from "./button";
+import { GroupedDraftOwnerContext, useGroupedDraftGuard } from "@/lib/grouped-drafts";
 
 /** A retained sheet page: navigation changes visibility without discarding its forms. */
 export function GroupedDetail({
@@ -32,6 +34,10 @@ export function GroupedDetail({
   readonly level?: number;
 }) {
   const context = useContext(GroupedDetailContext);
+  const parentOwner = useContext(GroupedDraftOwnerContext);
+  const id = useId();
+  const owner = `${parentOwner}/${id}`;
+  const guard = useGroupedDraftGuard();
   const level = requestedLevel ?? (context.level ?? 0) + 1;
   const page = useRef<HTMLElement>(null);
   const [fallback, setFallback] = useState<HTMLElement | null>(null);
@@ -90,7 +96,7 @@ export function GroupedDetail({
       className={`${container === document.body ? "fixed" : "absolute"} inset-0 z-10 flex flex-col bg-background p-4`}
     >
       <div className="shrink-0 pb-4">
-        <Button variant="ghost" onClick={onBack}>
+        <Button variant="ghost" onClick={async () => { if (!guard || await guard.confirmDiscard(owner)) onBack(); }}>
           <ChevronLeft aria-hidden />
           {backLabel}
         </Button>
@@ -105,7 +111,9 @@ export function GroupedDetail({
         <GroupedDetailContext.Provider
           value={{ container, visible: active, level }}
         >
-          {children}
+          <GroupedDraftOwnerContext.Provider value={owner}>
+            {children}
+          </GroupedDraftOwnerContext.Provider>
         </GroupedDetailContext.Provider>
       </div>
       <GroupedFormBar />

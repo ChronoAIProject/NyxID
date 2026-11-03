@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useRef,
 } from "react";
+import { GroupedDraftContext, GroupedDraftOwnerContext } from "./grouped-drafts";
 
 export interface GroupedFormEntry {
   readonly label: string;
@@ -30,21 +31,27 @@ export function useGroupedForm(entry: GroupedFormEntry) {
   const register = context?.register;
   const remove = context?.remove;
   const id = useId();
+  const guard = useContext(GroupedDraftContext);
+  const owner = useContext(GroupedDraftOwnerContext);
+  const registerDraft = guard?.register;
+  const removeDraft = guard?.remove;
   const latest = useRef(entry);
   useLayoutEffect(() => {
     latest.current = entry;
   });
   const { label, dirty, pending, disabled } = entry;
-  useEffect(() => {
-    register?.(id, {
+  useLayoutEffect(() => {
+    const current = {
       label,
       dirty,
       pending,
       disabled,
       save: () => latest.current.save(),
       discard: () => latest.current.discard(),
-    });
-  }, [register, id, label, dirty, pending, disabled]);
-  useEffect(() => () => remove?.(id), [remove, id]);
+    };
+    register?.(id, current);
+    registerDraft?.(id, { ...current, owner });
+  }, [register, registerDraft, owner, id, label, dirty, pending, disabled]);
+  useEffect(() => () => { remove?.(id); removeDraft?.(id); }, [remove, removeDraft, id]);
   return context !== null;
 }

@@ -204,33 +204,32 @@ export function MachineCapabilityForm({
         title="Workspace and browser"
         footer={
           <>
-            <p>
-              {needsSelection
-                ? "Execution is blocked until the owner records a supported choice or explicitly approves legacy access."
-                : machine.mode === "separated"
-                  ? "This agent has its own workspace and browser profiles. Use a separate machine container or VM per agent for stronger separation; containers still share their host kernel."
-                  : "Workspace and browser sessions are shared with other agents in shared legacy mode on this machine."}
-            </p>
-            <p role="status">
-              {humanReason(
-                machine.execution_note,
-                needsSelection
-                  ? "Execution is blocked until the owner completes separation selection."
-                  : machine.mode === "separated"
-                    ? separationAvailable
-                      ? "Granted commands and file tools use this agent’s separated workspace. No shared fallback."
-                      : "This assignment requires separated mode, but separation is unavailable. Execution is refused. Restore support or ask the owner to change mode through an owner action card; no automatic shared fallback."
-                    : "Granted commands and file tools run in shared mode, as configured, even when separation is unavailable. Shell uses the command user’s full OS permissions.",
-              )}
-            </p>
             {needsSelection ? (
               <p role="status" data-selection-reason={machine.selection_reason}>
                 {humanReason(
-                  machine.selection_reason,
-                  "Choose a separation mode. Old nodes without capability evidence require an upgrade for separated access or an informed explicit legacy choice.",
+                  machine.execution_note ?? machine.selection_reason,
+                  "Execution is blocked until the owner chooses a supported separation mode or explicitly approves shared legacy access. Open Assistant → Machines to review and approve the selection.",
                 )}
               </p>
-            ) : null}
+            ) : (
+              <>
+                <p>
+                  {machine.mode === "separated"
+                    ? "This agent has its own workspace and browser profiles. Use a separate machine container or VM per agent for stronger separation; containers still share their host kernel."
+                    : "Workspace and browser sessions are shared with other agents in shared legacy mode on this machine."}
+                </p>
+                <p role="status">
+                  {humanReason(
+                    machine.execution_note,
+                    machine.mode === "separated"
+                      ? separationAvailable
+                        ? "Granted commands and file tools use this agent’s separated workspace. No shared fallback."
+                        : "This assignment requires separated mode, but separation is unavailable. Execution is refused. Restore support or ask the owner to change mode through an owner action card; no automatic shared fallback."
+                      : "Granted commands and file tools run in shared mode, as configured, even when separation is unavailable. Shell uses the command user’s full OS permissions.",
+                  )}
+                </p>
+              </>
+            )}
             {machine.can_edit && machine.mode !== "shared_legacy" ? (
               <p className="text-warning">{SHARED_LEGACY_WARNING}</p>
             ) : null}

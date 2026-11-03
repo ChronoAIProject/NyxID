@@ -194,3 +194,18 @@ it("keeps owner selection available with capability editing off and disables it 
   expect(consent).toBeDisabled();
   expect(screen.getByRole("button", { name: "Request shared legacy owner approval" })).toBeDisabled();
 });
+
+it("renders one selection explanation before the legacy warning and support note", () => {
+  render(<MachineCapabilityForm machine={{ ...machine,
+    mode: "selection_required", selection_required: true,
+    execution_note: "machine_selection_required: Owner separation selection is required. Open Assistant → Machines to choose a mode.",
+    selection_reason: "This assignment needs an owner separation selection before execution.",
+  }} agentId="agent" />);
+  const note = screen.getByText(/Owner separation selection is required/);
+  expect(screen.queryByText(/This assignment needs an owner/)).toBeNull();
+  expect(screen.queryByText(/Execution is blocked until/)).toBeNull();
+  expect(note.textContent).not.toContain("machine_selection_required:");
+  const footer = note.closest("[data-grouped-footer]")!;
+  expect(footer.textContent!.indexOf("Owner separation selection")).toBeLessThan(footer.textContent!.indexOf("Shared legacy"));
+  expect(screen.getByLabelText("Separation support")).toBeInTheDocument();
+});

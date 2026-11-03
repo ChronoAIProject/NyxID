@@ -254,7 +254,16 @@ eight items, and scroll internally only for long lists. `GroupedFormScope` gives
 each tab one dirty-only `GroupedFormBar`, naming its unsaved forms. Save runs each
 dirty form in order with its own validation, payload and revision fence. A failed
 form keeps its draft and local error; successful forms stay saved. Discard resets
-all dirty forms in that scope. Drill-ins share the tab scope and preserve each
+all dirty forms in that scope. Save uses `variant="primary"`; Discard uses ghost
+or outline. The sticky bar has an opaque `bg-background` and a top hairline
+`border-border/50` so scrolled footer text cannot show through. Each save pass
+reads current registrations and attempts each eligible form at most once; a form
+that becomes dirty while an earlier request awaits is included in that pass.
+Removed forms are skipped. Changes after a form's attempt remain dirty for the
+next pass. Closing the drawer or leaving a detail page with its own dirty forms
+asks “Discard unsaved changes?” with Keep editing and Discard actions. Drawer
+closure checks all tabs; detail Back checks only that page and its descendants.
+Drill-ins share the tab scope and preserve each
 operation editor's revision fence. Covered save bars leave interaction and
 accessibility navigation. Immediate controls remain immediate only where their
 existing behavior requires it.

@@ -4,6 +4,8 @@ import {
   GroupedFormBar,
 } from "@/components/ui/grouped-form";
 import { GroupedDetailContext } from "@/lib/grouped-detail";
+import { GroupedDraftBoundary, GroupedDraftDialog, GroupedDraftNavigation } from "@/components/ui/grouped-drafts";
+import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { CollaborationGuestControls } from "./collaboration-guest-controls";
 import { GuestReadiness } from "./guest-readiness";
 import { ShareAgentDialog, SharedAgentMemory, SharedAgentProfile, SharedConsentCards } from "./shared-agent-controls";
@@ -14,7 +16,7 @@ import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
@@ -198,7 +200,11 @@ function ReadOnlyNote({ agent }: { readonly agent: AssistantAgent }) {
  * Everything about one agent: its role, grants, memory, channel bots and
  * lifecycle. Opened from the thread header.
  */
-export function AgentDetailsSheet({
+export function AgentDetailsSheet(props: ComponentProps<typeof AgentDetailsSheetContent>) {
+  return <GroupedDraftBoundary><AgentDetailsSheetContent {...props} /></GroupedDraftBoundary>;
+}
+
+function AgentDetailsSheetContent({
   agentId,
   agents,
   proposalId,
@@ -223,8 +229,13 @@ export function AgentDetailsSheet({
   const agent = detail.data?.agent;
   const requestMode = useNyxBotSettings(open).data?.specialist_access_requests;
   const noAccess = detail.error ? isNoAccess(detail.error) : false;
+  const guard = useGroupedDraftGuard();
+  async function close() {
+    if (await guard!.confirmDiscard()) onOpenChange(false);
+  }
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
+    <Sheet open={open} onOpenChange={(next) => { if (next) onOpenChange(true); else void close(); }}>
+      <GroupedDraftNavigation active={open} />
       <SheetContent
         ref={setDetailContainer}
         className="flex w-full flex-col overflow-clip bg-background p-0 sm:max-w-lg"
@@ -312,10 +323,11 @@ export function AgentDetailsSheet({
             requestMode={requestMode}
             memory={detail.data?.memory ?? []}
             onDeleted={onDeleted}
-            onClose={() => onOpenChange(false)}
+            onClose={() => void close()}
             detailContainer={detailContainer}
           />
         ) : null}
+        <GroupedDraftDialog />
       </SheetContent>
     </Sheet>
   );

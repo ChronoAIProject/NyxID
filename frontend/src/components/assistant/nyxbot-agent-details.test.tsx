@@ -7,6 +7,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { AgentDetailsSheet } from "./nyxbot-agent-details";
 
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   Link: ({ to, search, ...props }: ComponentProps<"a"> & { to: string; search?: Record<string, string> }) => (
     <a href={to + (search ? `?${new URLSearchParams(search)}` : "")} {...props} />
   ),
@@ -808,7 +809,6 @@ async function editGrantsAndMachine() {
   await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
   await user.click(await screen.findByRole("button", { name: /Work Mac/ }));
   await user.click(screen.getByRole("checkbox", { name: "Shell commands" }));
-  await user.click(screen.getByRole("button", { name: "Back to Access" }));
   const bar = screen.getByRole("region", { name: "Unsaved changes" });
   expect(
     screen.getAllByRole("region", { name: "Unsaved changes" }),
@@ -863,8 +863,8 @@ it.each(["grants", "machine access"])(
         screen.getByRole("region", { name: "Unsaved changes" }),
       ).toHaveTextContent(`Unsaved: ${failed}`),
     );
-    if (failed === "machine access")
-      await user.click(screen.getByRole("button", { name: /Work Mac/ }));
+    if (failed === "grants")
+      await user.click(screen.getByRole("button", { name: "Back to Access" }));
     const failedForm = screen.getByRole("form", {
       name: failed === "grants" ? "Grants" : "Work Mac capabilities",
     });
@@ -900,10 +900,38 @@ it("discards every dirty Access form including retained machine drafts", async (
       screen.queryByRole("region", { name: "Unsaved changes" }),
     ).not.toBeInTheDocument(),
   );
+  await user.click(screen.getByRole("button", { name: "Back to Access" }));
   expect(screen.getByRole("checkbox", { name: /Slack/ })).not.toBeChecked();
   await user.click(screen.getByRole("button", { name: /Work Mac/ }));
   expect(
     screen.getByRole("checkbox", { name: "Shell commands" }),
   ).not.toBeChecked();
   expect(writes).toEqual([]);
+});
+
+it.each(["X", "Escape"])("guards dirty sheet dismissal via %s and preserves edits on Keep editing", async (method) => {
+  const onOpenChange = vi.fn();
+  const { user } = renderSheet({ onOpenChange });
+  const description = await screen.findByRole("textbox", { name: "Role" });
+  await user.type(description, " unsaved");
+  if (method === "X") await user.click(screen.getByRole("button", { name: "Close" }));
+  else await user.keyboard("{Escape}");
+  expect(onOpenChange).not.toHaveBeenCalled();
+  const prompt = screen.getByRole("dialog", { name: "Discard unsaved changes?" });
+  await user.click(within(prompt).getByRole("button", { name: "Keep editing" }));
+  expect(description).toHaveValue("Finds urgent issues unsaved");
+  expect(onOpenChange).not.toHaveBeenCalled();
+  await user.keyboard("{Escape}");
+  await user.click(within(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).getByRole("button", { name: "Discard" }));
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+  expect(writes).toEqual([]);
+});
+
+it("closes a pristine sheet immediately", async () => {
+  const onOpenChange = vi.fn();
+  const { user } = renderSheet({ onOpenChange });
+  await screen.findByRole("textbox", { name: "Role" });
+  await user.click(screen.getByRole("button", { name: "Close" }));
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+  expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).toBeNull();
 });
