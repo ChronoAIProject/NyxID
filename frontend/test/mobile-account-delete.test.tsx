@@ -28,6 +28,12 @@ function harness() {
   const native = {
     Alert: { alert: (title: string, message: string, buttons: NativeButton[]) => alerts.push({ title, message, buttons }) },
     AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
+    // SegmentControl slides its indicator; the animation itself is irrelevant here.
+    Animated: {
+      Value: class { setValue() {} },
+      spring: () => ({ start: () => undefined, stop: () => undefined }),
+      View: box,
+    },
     AppState: { currentState: "active", addEventListener: () => ({ remove: () => undefined }) },
     Keyboard: { addListener: () => ({ remove: () => undefined }), dismiss: () => undefined },
     Share: { share: async () => ({}) },
@@ -75,7 +81,7 @@ function harness() {
         if (name === "lucide-react-native") return new Proxy({ __esModule: true }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => null });
         if (name === "expo-linear-gradient") return { LinearGradient: box };
         if (name === "expo-constants") return { __esModule: true, default: { expoConfig: { version: "test" } } };
-        if (name.endsWith("/ThemeContext")) return { useTheme: () => ({ colors: load(resolve(mobileRoot, "theme/mobileTheme.ts")).darkColors, mode: "dark", preference: "dark", setPreference: vi.fn(), lightBubblePalette: "gray", setLightBubblePalette: vi.fn() }) };
+        if (name.endsWith("/ThemeContext")) return { useTheme: () => ({ colors: load(resolve(mobileRoot, "theme/mobileTheme.ts")).darkColors, mode: "dark", preference: "dark", setPreference: vi.fn(), bubblePalette: "gray", setBubblePalette: vi.fn() }) };
         if (name.endsWith("/AuthSessionContext")) return { useAuthSession: () => ({ signOut: vi.fn() }) };
         if (name.endsWith("/useNetworkStatus")) return { useNetworkStatus: () => ({ isConnected: true, recheckConnection: vi.fn() }) };
         if (name.endsWith("/sessionStore")) return { loadStoredAuthSession: async () => ({ accessToken: "fixture-token" }), clearStoredAuthSession: vi.fn(), persistAuthSession: vi.fn(), authSessionGeneration: () => 0, commitRefreshedAuthSession: vi.fn() };

@@ -54,7 +54,7 @@
 
 | 项 | 状态 | 说明 |
 |----|------|------|
-| 提审/生产 API | ✅ | `pnpm build:ios` / `pnpm release:ios` 默认使用 `PROD_API_BASE_URL`；`PROD_USE_NEW_DOMAINS=true` 时使用 `PROD_NEW_API_BASE_URL`（`https://api.nyxid.ai/api/v1`）。见 [域名迁移](DOMAIN_MIGRATION.md)，所选 API 须在审核环境可访问 |
+| 提审/生产 API | ✅ | `pnpm build:ios` / `pnpm release:ios` 内置 `PROD_API_BASE_URL` 与可选的 `PROD_NEW_API_BASE_URL`（`https://api.nyxid.ai/api/v1`），启动时由 NyxID 管理后台功能开关 `mobile:new-domains` 选择。见 [域名迁移](DOMAIN_MIGRATION.md)，两个 API 域名在审核期间都须可访问 |
 | URL Scheme | ✅ | `nyxid`，用于 OAuth 回调 |
 | Associated Domains | ✅ | 根据所选 API / Universal Link 域名生成；新域名模式包含 `applinks:api.nyxid.ai`，保留已有 Universal Link 域名与路径（构建时 prebuild 更新 entitlements） |
 | 最低系统版本 | ✅ | LSMinimumSystemVersion 12.0 |

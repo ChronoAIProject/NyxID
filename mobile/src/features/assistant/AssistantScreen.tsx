@@ -154,8 +154,8 @@ export function AssistantScreen({
 }: AssistantScreenProps) {
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const linkHost = useContext(AssistantLinkContext);
-  const { colors, mode, lightBubblePalette } = useTheme();
-  const bubble = chatBubbleColors(mode, lightBubblePalette);
+  const { colors, mode, bubblePalette } = useTheme();
+  const bubble = chatBubbleColors(mode, bubblePalette);
   const chatColumn = useChatColumn();
   const transcriptEdges = useScrollEdges();
   const adoptedId = useRef<string | undefined>(undefined);
