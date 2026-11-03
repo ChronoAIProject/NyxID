@@ -276,6 +276,14 @@ async fn setup_options_with_tool_gate(
                         engine::attach_routed_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
                             "camera__snapshot", "image/png", b"fixture pixels", true).await.unwrap();
                     }
+                    if matches!(failure, Some("http_dependency" | "http_dependency_after_activity")) {
+                        if failure == Some("http_dependency_after_activity") {
+                            let row = image_state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                                .find_one(doc! {"user_id":OWNER,"active_turn.turn_id":{"$exists":true}}).await.unwrap().unwrap();
+                            engine::activity_started_for_turn(&image_state.db, OWNER, &row.id, &row.active_turn.unwrap().turn_id, "tool").await.unwrap();
+                        }
+                        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"code":"dependency_unavailable"}}))).into_response();
+                    }
                     if matches!(failure, Some("http_capacity" | "http_capacity_long" | "http_capacity_observed" | "http_draining" | "http_busy" | "http_slow_body")) {
                         let status = if failure == Some("http_busy") { StatusCode::CONFLICT } else { StatusCode::SERVICE_UNAVAILABLE };
                         let code = if failure == Some("http_draining") { "draining" } else if failure == Some("http_busy") { "session_busy" } else { "capacity_exceeded" };
@@ -302,6 +310,10 @@ async fn setup_options_with_tool_gate(
                         };
                         return (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], Body::from_stream(body)).into_response();
                     }
+                    let failure = if failure == Some("http_start_window_passed") {
+                        tokio::time::sleep(Duration::from_secs(16)).await;
+                        None
+                    } else { failure };
                     let failure = if failure == Some("http_delayed_accept") {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         None
@@ -664,8 +676,14 @@ async fn unreachable_upstream_fails_at_connect() {
     server.abort();
     let _ = server.await;
     let reply = run_turn_to_reply(&state).await;
-    assert_eq!(reply.error_code.as_deref(), Some("assistant_unavailable"));
+    assert_eq!(
+        reply.error_code.as_deref(),
+        Some("assistant_start_unavailable")
+    );
     assert_eq!(reply.upstream_error_code, None);
+    assert_eq!(reply.turn_metadata.as_ref().unwrap().attempts, Some(3));
+    assert_eq!(reply.activity_total, 0);
+    assert!(reply.text.is_empty());
     assert_eq!(reply.error_detail.unwrap().stage, "connect");
 }
 fn turn_request(id: Option<&str>) -> Request<Body> {
@@ -6048,4 +6066,74 @@ async fn a_queued_turn_gives_up_at_its_deadline_without_resetting_context() {
     assert!(!permit.is_queued());
     assert!(calls.lock().await.is_empty());
     server.abort();
+}
+
+#[tokio::test]
+async fn channel_start_dependency_retry_keeps_same_command_and_stops_after_three_attempts() {
+    for (failures, expected, code) in [
+        (vec!["http_dependency"], 2, None),
+        (
+            vec!["http_dependency"; 5],
+            3,
+            Some("assistant_start_unavailable"),
+        ),
+        (
+            vec!["http_dependency_after_activity"],
+            1,
+            Some("assistant_unavailable"),
+        ),
+    ] {
+        let (state, calls, server) = setup_script(None, Duration::ZERO, failures).await;
+        let reply = run_turn_to_reply(&state).await;
+        assert_eq!(reply.error_code.as_deref(), code);
+        let seen = calls.lock().await;
+        assert_eq!(seen.len(), expected);
+        for request in seen.iter().skip(1) {
+            assert_eq!(
+                request.headers.get("idempotency-key"),
+                seen[0].headers.get("idempotency-key")
+            );
+            assert_eq!(request.body, seen[0].body);
+        }
+        if code == Some("assistant_start_unavailable") {
+            assert!(
+                engine::TurnError::new(code.unwrap())
+                    .message
+                    .contains("Nothing was done")
+            );
+        }
+        assert!(reply.turn_metadata.as_ref().unwrap().timing.is_some());
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn channel_start_retry_does_not_shorten_a_later_continuation() {
+    let (state, calls, server) = setup_script(
+        None,
+        Duration::ZERO,
+        vec![
+            "http_dependency",
+            "tool_budget_exhausted",
+            "http_start_window_passed",
+        ],
+    )
+    .await;
+    let reply = run_turn_to_reply(&state).await;
+    assert!(reply.error_code.is_none(), "{:?}", reply.error_code);
+    let seen = calls.lock().await;
+    assert_eq!(seen.len(), 3);
+    assert_eq!(
+        seen[0].headers["idempotency-key"],
+        seen[1].headers["idempotency-key"]
+    );
+    assert!(
+        seen[2].headers["idempotency-key"]
+            .to_str()
+            .unwrap()
+            .ends_with(":continuation:1")
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
 }

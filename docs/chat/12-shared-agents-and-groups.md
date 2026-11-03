@@ -1,7 +1,6 @@
 # Shared agents and multi-person groups
 
-Status: approved with corrections; Phase 1 implementation complete. Baseline: `origin/main` at `38bae2f78`
-(NyxID 0.75.0, including #1996 guest-access helpers and #1995 guest model routing). Phase 2 remains planned.
+Status: Phase 1 and Phase 2 implemented; rollout remains default off and requires fleet readiness. Phase 2 retains the crews fix merged in #2114. See §11 for activation and rollback and §13 for verification.
 
 This extends [NyxBot groups and guests](09-nyxbot-orchestrator.md) and the
 [organization-agent contract](../ORG_AGENTS.md). The existing
@@ -9,8 +8,9 @@ This extends [NyxBot groups and guests](09-nyxbot-orchestrator.md) and the
 [connection selection](../API_DISCOVERY.md#connection-selection-and-slug-collisions),
 and [service execution](../NYXBOT_SERVICE_EXECUTION.md) remain the foundations.
 Where this proposal changes behavior, it applies only to explicitly shared
-specialists and the new multi-person group surface. Legacy personal groups,
-organization groups and channel guests retain their contracts.
+specialists, including in a recipient's own single-person personal groups
+(crews), and the explicit multi-person group surface. Organization groups and
+channel guests retain their contracts.
 
 ## 1. Outcome and fixed boundaries
 
@@ -19,6 +19,32 @@ recipient gets private conversations, their own thread key, action cards and
 billing. Owners and managers cannot read those conversations. In a multi-person
 group, participants see one transcript while each agent answers through an
 isolated execution thread for the original requester.
+
+Recipients can also add shared specialists to their existing personal crews,
+alongside their own NyxBot and other eligible agents. These remain single-person
+groups; there are no invites, additional people or guest fallback. Existing
+stored shared member IDs work without recreating the crew. Each shared member
+uses its own hidden `(recipient, group, agent)` thread and the private shared-chat
+contract: live ACL, recipient key/cards/consents/billing, pinned skills, published
+team memory and that recipient's private notes. NyxBot's presence or handoff
+never transfers its account or decision authority to that member.
+
+Lost access or destruction leaves an unavailable member in the roster, excluded
+from the picker and recipient pills. Addressing it posts the fixed refusal below
+without a model turn or charge; re-sharing restores it. Explicit recipient UUIDs
+and `@UUID` select the exact member. Duplicate bare handles are ambiguous, including
+unavailable namesakes: human text without an explicit selection is refused and
+agent handoffs do not route that token. The picker and group instructions use IDs
+for colliding names. Org groups, automation and platform/channel threads refuse
+shared agents before execution. Shared consent cards are scoped to the hidden
+member thread and remain human-only.
+
+These crew changes add response metadata only, with no new persisted enum or
+group kind. The composer binds displayed recipients, including sticky selections,
+to explicit IDs so revocation cannot silently redirect a stale selection. UUID mentions also send explicit recipient IDs,
+so older replicas reject unavailable shared recipients rather than falling back
+to a different member. During a mixed deployment, old replicas may still omit
+or refuse shared members; upgrade all replicas for consistent crew availability.
 
 Shared chats use the agent's pinned skills for instructions and package reads,
 just as the owner's turns do. Skills are untrusted behavior and never grant a
@@ -100,8 +126,8 @@ New model collections have `COLLECTION_NAME`, UUID-v4 string `_id` values,
 redacted Debug implementations where needed, and BSON datetime helpers. Optional
 dates use `bson_datetime::optional`. Model fields must serialize to MongoDB;
 there is no `skip_serializing`. API responses are dedicated, role-filtered DTOs.
-The Phase 1 storage and API names below track this implementation. Group models
-remain Phase 2 proposals and are not present in 0.73.1.
+The storage names below track Phase 1 and the Phase 2 backend foundation. New
+collaboration-group writers remain unmounted until the later review steps in §12.
 
 ### Agent sharing and memory
 
@@ -149,14 +175,19 @@ consent.
 | --- | --- |
 | `AssistantGroup` | Defaulted optional `collaboration` object containing `version: 1`, creator ID and membership revision. For new groups `user_id` remains the personal creator; reuse `participant_user_ids` (1–16 active people), `member_agent_ids` (1–8 specialists), per-actor sticky recipients and lead. |
 | `assistant_group_invites` | Group, creator/issuer, SHA-256 token hash, optional intended person, expiry, acceptance/cancellation timestamps and accepting person. Unique token hash; group/state lookup and expiry cleanup indexes. Raw random 256-bit token is returned once and never logged. |
-| `assistant_group_agent_access` | Unique `(group_id, agent_id)`, authoritative agent owner, adding participant, membership generation, `guest_enabled: false`, consenting owner representative, revision/timestamps. Only the live owner/authorized org Admin can enable; the creator can disable or remove the agent. Removing/readding the agent resets opt-in to off. |
+| `assistant_group_agent_access` | Unique `(group_id, agent_id)`, authoritative agent owner, adding participant, membership generation, `guest_enabled: false`, consenting owner, revision/timestamps. Only the live personal specialist owner can enable; the creator can disable or remove the agent. Organization-owned specialists cannot opt into guests. Removing/readding the agent resets opt-in to off. |
 | `GroupRequest` | Reuse immutable original `actor_user_id`, request ID, trigger sequence, pending recipients, attachments and handoff budget; add defaulted collaboration marker and membership generation. Client input cannot set requester identity. |
 | `GroupMessage` | Add a defaulted collaboration routing marker independent of author, plus optional execution attribution and original requester. Keep role strings `user`/`agent`/`notice`; do not add persisted variants to old role enums. |
+| `assistant_group_transfers` | One expiring proposal per group, bound to the current creator, accepting participant and membership revision. Acceptance changes group management only, invalidates outstanding invitations and fences existing execution; it never transfers an agent or its credentials. |
+| `assistant_group_execution_slots` | Unique `(group_id, agent_id, original_requester_id, lane)`; lane partitions `authenticated` and `guest`. The slot captures the concrete owner/org-member/shared/guest authority, membership revision, conversation ID and revocation state. Changed authority retires the old thread/key before attaching a new one. |
+| `AssistantConversation` / `ActiveTurn` | Defaulted optional `collaboration: ExecutionBinding` with version, group/slot/agent/request IDs, immutable original requester, membership revision and authority. Initial admission writes the thread, encrypted credential and turn in one transaction. Legacy `group_id`/`group_request_id` stay null on these threads so legacy indexes and workers cannot reinterpret them. |
+| `AssistantAgentCredential` | Defaulted `collaboration: false` dispatch hint. A true value selects the exact conversation binding; it confers no authority by itself. Keys retain the existing `assistant_group_id` and owner markers, and authentication validates them against the live slot, requester, request and turn. |
 
-`org_group_service::is_org` currently tests `created_by_user_id.is_some()`.
-Do not set that field on new personal multi-person groups. Centralize group
-classification: explicit collaboration marker first, otherwise the existing
-org discriminator, otherwise legacy personal. All group handlers, sweepers,
+
+`assistant_group_kind::classify` centralizes group classification: explicit
+collaboration marker first, otherwise `created_by_user_id.is_some()` for an org
+group, otherwise legacy personal. `org_group_service::is_org` delegates to it.
+Do not set `created_by_user_id` on new personal multi-person groups. All group handlers, sweepers,
 purges, upload readers and live routing must use that classifier. Unknown
 collaboration versions fail closed. No lazy conversion of a legacy group occurs
 when someone reads it; these phases create new groups to avoid exposing old
@@ -326,8 +357,8 @@ the owner's account. The actor's own action confirmation can further restrict
 an otherwise permitted operation, but cannot widen the shared level. This
 matches the guest machinery's owner-approval ceiling.
 
-For a platform-bound connection, apply the live platform-key ACL to the acting
-person before decryption. The owner's restricted platform grant is not
+For a platform-bound connection, apply the live platform-key ACL to the exact
+connection owner and, separately, the acting person before decryption. The owner's restricted platform grant is not
 transferable through sharing. Reuse the request membership/provider snapshot.
 Exclude Internal account-service exposure and node routes. Never forward an
 owner access token, delegation token or owner machine/login authority. If the
@@ -400,16 +431,21 @@ credential refresh, retries and outages cannot swap between these accounts;
 another pool member needs the same fresh explicit admission. Unknown or
 withheld owner resources are not disclosed through search or fallback hints.
 
-Require a live bound turn unconditionally for new shared keys, independent of
-the older `assistant:live-turn-gate` rollout. Set node authority empty, do not
+Require a live bound turn unconditionally for ordinary shared-key requests, independent of
+the older `assistant:live-turn-gate` rollout. Only server-owned, leased async watches
+and human-started private voice sessions can authenticate an idle key, against
+their exact durable binding; neither creates a synthetic live turn. Set node authority empty, do not
 copy `assistant:account`, and enforce forbidden protocols/meta-tools after
 resolution as well as in discovery. A key allowlist alone is insufficient.
 NyxAgent's bounded model-transport exception remains available as the actor;
 it must never select an owner's unshared inference connection. Actor-owned
 model credentials also require the applicable explicit connection consent;
-an eligible platform model can bootstrap the first turn. A model bootstrap
-consent uses the existing bounded stateless-model turn scope, not a blanket
-provider grant, and excludes stateful provider actions.
+an eligible recipient-bound platform model bootstraps stateless inference
+without a personal-connection consent card, because it delegates no personal
+credential. Live platform ACL, exact connection, normal approvals and caller
+billing still apply. BYOK model calls require explicit connection consent in
+the existing bounded stateless-model scope; stateful provider actions and other
+service calls retain their exact consent requirements.
 
 ## 7. Billing and audit attribution
 
@@ -510,6 +546,48 @@ and delivery; on removal send no subsequent content and close/revalidate group
 streams. Dropped identifier events retain polling/sweep as backstop. Do not route
 by `GroupMessage.user_id` or author: even system notices need the group marker.
 
+### Participant chat and requests for guest access
+
+Participation grants the right to post public text independently of agent use.
+An explicit empty `recipient_agent_ids` posts to people only: no request, turn,
+key or model charge. With omitted recipients, existing agent targeting remains;
+when no agent is usable and no agent is mentioned, the server posts to people
+only. Explicit unavailable targets and mentions produce an attributed refusal,
+never a silent redirect. People-only posts reject uploads with an actionable
+message; uploads on agent requests keep their existing binding rules. These
+messages are public transcript and intentionally become context for later group
+turns, subject to the same bounded public-transcript projection.
+
+Any current participant may ask a personal agent's owner to allow group guests.
+A single pending request is stored on the existing group/agent policy, with a
+UUID, requesting person and seven-day expiry. Repeated requests reuse it without
+re-notifying. The requester, creator or agent owner may cancel. Expiry is checked
+at use, independent of cleanup; removal/re-addition drops the request with the
+old policy. Notifications disclose identifiers and a link to Agent Details →
+Grants, never transcript or other participants. The owner reviews the scope and
+billing disclosure there and approves with one click through the existing
+owner-only GuestAccess decision. Approval naming a request must match its live
+ID and expiry; it cannot revive a cancelled, expired or removed request.
+A direct owner policy change remains available without a request.
+Requests share the existing per-person group-change rate limit. The human-only
+`POST /assistant/nyxagent/groups/{group}/agents/{agent}/guest-requests` route
+creates or reuses a request; `DELETE` of that route plus `/{request}` cancels it.
+The existing guest-access decision accepts an optional `request_id` binding.
+
+Owners outside the group may manage only their attached agent's policy. Their
+live person/feature eligibility is required, but participation is not. No owner
+policy action grants transcript access. Creators cannot enable foreign agents;
+organization agents cannot enable guests. Guest identity, billing, restrictions
+and lack of cards are unchanged. Request/decision audits contain metadata only.
+
+Responses add per-member unavailability reasons and request status. The composer
+stays writable for a current participant even without usable agents. It shows
+people-only delivery when no agent is selected; member/picker labels use the
+response's display names and explain who can enable access. Legacy personal
+crews and org groups retain their existing recipient requirements. Old replicas
+may refuse people-only posts, request routes or request-bound approvals; no old
+reader gains authority.
+
 ## 9. Frontend experience
 
 Use the existing Assistant shell, agent details sheet, Radix/shadcn components
@@ -557,7 +635,7 @@ All assistant management, invitation acceptance and consent decisions remain
 first-party human surfaces under `/api/v1/assistant/nyxagent`; conversation keys,
 generic API keys, OAuth-client, delegated, service-account and relay credentials
 cannot call them. Use the shared human guard and engine flag, not only a handler
-ownership comparison. Phase 1 additions and Phase 2 proposed group surfaces:
+ownership comparison. Phase 1 and Phase 2 surfaces:
 
 | Surface | Contract |
 | --- | --- |
@@ -567,8 +645,13 @@ ownership comparison. Phase 1 additions and Phase 2 proposed group surfaces:
 | `GET/PUT /agents/{id}/shared-memory` | Authorized read, owner/manager revision-fenced edit |
 | `GET /agents/{id}/consents` | Actor-only consent inventory, bounded to 100 current cards/grants |
 | `POST /shared-consents/{consent_id}` | Actor-only `once` / `always` / `skip` / `revoked`; exact binding checked transactionally; separate from legacy action-card enums |
-| Existing group CRUD/messages/attachments/live routes | Dispatch by explicit group classifier; current participant ACL |
-| `POST /groups/{id}/invites`, `DELETE /groups/{id}/invites/{invite_id}` | Creator issues/cancels; raw token returned once |
+| `GET /collaboration` | Human capability read; `available` requires the shared-agents flag and Phase 2 fleet readiness |
+| Existing group CRUD/messages/attachments/live routes | Create with `collaboration: true`, 1–8 specialist IDs and no initial people; current participant ACL; legacy groups are never converted |
+| `POST /groups/{id}/membership` | Tagged `action` plus `expected_revision`; rename/lead, participant/proposal/agent/transfer/guest mutations use the same transactional service |
+| `POST /groups/{id}/requests/{request_id}/cancel` | Original requester only; cancel queued and live work, expire decisions and revoke keys |
+| `POST /groups/{id}/decisions/{decision_id}` | Original requester only; action `allow`/`deny`, consent `once`/`always`/`skip`; resume the original chain |
+| `GET /agents/{id}/group-access` | Personal specialist owner sees only group IDs and guest/membership revisions; never group names, people or transcript |
+| `POST /groups/{id}/invites`, `DELETE /groups/{id}/invites/{invite_id}` | Creator issues/cancels; optional `intended_user_id` binds acceptance to that person, otherwise a bearer link; raw token returned once |
 | `POST /group-invites/preview`, `POST /group-invites/accept` | Body token, human account, non-mutating preview and single-use accept |
 | `POST/DELETE /groups/{id}/participants/{user_id}`, `POST /groups/{id}/leave` | Creator quick-add/remove and self-leave; membership generation fence |
 | `PUT /groups/{id}/agents/{agent_id}/guest-access` | Owner enable/disable, creator disable; revision-fenced |
@@ -605,7 +688,12 @@ labels. In Full access,
 NyxBot may apply a widening only after the owner approves that card; this remains
 an owner-scoped policy mutation and does not grant new services. Extend group management
 tools with invite/quick-add/remove/leave and per-agent guest settings, calling
-the same services as REST. Personal NyxBot cannot join/follow new multi-person
+the same services as REST. Enabling a group's agent guest opt-in also delegates
+owner authority and always requires an owner card, including in Full access.
+The membership transaction requires explicit delegation approval for a false-to-true
+write; the native caller must consume a card bound to the exact group, agent and
+both membership/guest-policy revisions. Human REST writes supply that approval;
+disabling and no-op writes retain the normal gate. Personal NyxBot cannot join/follow new multi-person
 groups or receive their transcript as an unsolicited follower. Invite acceptance,
 manager-role acceptance if added, and personal-credential consent remain human
 decisions. No tool sends an invitation message automatically.
@@ -613,7 +701,7 @@ decisions. No tool sends an invitation message automatically.
 Shared specialists cannot invoke account/team/share/grant/connection management
 tools against either person's account. The limited note interface, if exposed
 through existing `remember`/`forget`, must route to the actor's private-note store
-only in private shared threads; shared-memory edits require explicit authorized
+only in the recipient's private or personal-crew shared threads; shared-memory edits require explicit authorized
 human management. Guest turns expose none of these native tools.
 
 Execution parity means one access/selection/policy evaluator covers
@@ -660,6 +748,8 @@ Rollout sequence:
    do not change legacy thread indexes underneath old writers.
 2. Drain old API/auth/proxy/MCP/LLM/worker replicas, including alternate ingress
    and sweepers. Upgrade the full roster and verify the new readiness capability.
+   Transport extensions additionally require `assistant:shared-agent-transports-v1`
+   in the same readiness roster, under the existing shared-agents flag.
    Readiness is an operational assertion plus observations, not proof of a
    hidden old process's absence.
 3. Enable Phase 1 for test publishers and actors. Verify ACL, billing, privacy,
@@ -674,6 +764,17 @@ and revokes their execution bindings, while upgraded readers and financial
 settlement remain online. Restore the flag only after fresh ACL and consent
 validation; do not resurrect a revoked key or one-time consent.
 
+Transport rollback must drain shared voice sessions, stream sockets and managed
+exchanges, cancel or terminally refuse shared watches and stop their continuations
+before replacing workers. Keep upgraded reconciliation online until funded work
+settles or is durably classified uncertain. Existing payer fields remain the
+settlement authority; an old replica must never reconstruct payer from the
+connection owner. Old replicas ignore optional binding fields but continue their
+Phase 1 pre-effect refusals. Do not route a resumed transport to them. Inventory
+`assistant_async_operations.shared_execution`, `managed_executions.shared_execution`
+and `assistant_voice_sessions.shared_execution` plus live stream workers before
+binary rollback; no active/queued shared effects may remain.
+
 Binary rollback requires more: keep all affected read routes on upgraded
 replicas, or securely archive/remove collaboration groups, hidden/private
 thread artifacts, cards and attachments from old-readable collections after
@@ -686,14 +787,87 @@ binary rollback. Unrelated legacy data stays untouched.
 
 ## 12. Phased implementation after review
 
-Phase 1 currently supports private shared conversations and foreground HTTP/MCP
-service execution, including model callbacks. Pools, detached/managed jobs,
-async-watch continuations, voice sessions, WebSocket/CONNECT and group/channel publishing are
-refused for shared keys before effects. These transports require a separate
-extension carrying the same durable payer, consent and revocation fences.
-Consent uses separate human-only inline cards; after choosing, the person
-continues the chat. The current Share dialog accepts exact person/org UUIDs;
-there is no public user-directory enumeration.
+Phase 1 supports private shared conversations, shared members of the recipient's
+own legacy personal crews, and foreground HTTP/MCP service execution, including
+model callbacks, with the following transport extensions:
+
+- **Pools:** select only eligible connections, pin one exact member per turn and
+  pool before consent, and disable automatic account failover for shared calls.
+  A retry cannot silently switch to another member. Priority and legacy balanced
+  pools use the same recipient authority, payer and final egress checks.
+- **Managed exchanges:** retain the exact consent claim and frozen recipient
+  payer on the managed execution record. The vetted Telnyx managed contract is
+  eligible despite using an internal platform credential lane; internal account
+  services remain excluded. Before dispatch, retain the ordinary personal authority
+  check (including the original live turn) and add the durable shared binding
+  check. Owning a guard does not replace personal authority. Already dispatched
+  work uses the durable binding while waiting and preserves settlement after the
+  initiating turn ends. Interrupted dispatched work retains uncertain
+  liability through normal reconciliation; never invent a refund or redispatch.
+- **Async watches:** bind the submitting connection, contract, share revision,
+  behavior and consumed consent to the durable watch. Leased status/result calls
+  use that exact connection and payer after the initiating turn ends. A declared
+  cancel/status cleanup may survive Stop, but never share revocation. No general
+  idle-key authority is created. Result events still enter the original private
+  thread through ordinary coalescing and fresh turn admission.
+- **Voice:** a first-party human may start a private shared-agent voice session.
+  Actor connections require the ordinary private connection consent, including
+  in Full access. Once covers one session with exact settings; Always covers
+  the reviewed settings until any authority changes. Owner-shared voice needs
+  explicit All service access and cannot use owner approval grants. The recipient
+  pays voice windows and task turns. Hidden task threads are private children,
+  never automation authority. Provider commands and relayed audio recheck live
+  authority; the session monitor closes revoked calls, including an existing
+  provider WebRTC session. Cleanup and known-usage settlement remain available.
+- **WebSocket and CONNECT:** an exact connection and one stream consent govern
+  the open and every forwarded frame/buffer. Owner-shared streams require All,
+  because a GET handshake cannot prove the effects of subsequent messages.
+  CONNECT is a reverse-proxy tunnel to the selected service origin, never an
+  arbitrary client-selected host. Idle streams recheck every second. Usage and
+  disconnect records retain the recipient payer; closing never authorizes a
+  reconnect with an already consumed Once grant. Existing protocol exclusions
+  on pooled streams still apply. Opaque streams (including voice) require
+  unrestricted agent operation scopes, service approval and proxy-operation policies for the recipient
+  and credential owner: allowing a handshake cannot authorize later writes.
+  New policy restrictions invalidate the binding and stop the stream. UUID, slug,
+  exact-member and `_nyxid_via` entrances require complete shared chat authority
+  plus proof of the HTTP stream gate. Missing admission fails closed. Readiness
+  and live authority are checked before CONNECT dispatch or WebSocket connect;
+  node-routed streams and native LLM/public stream entrances remain refused.
+  MCP tool requests cannot substitute CONNECT or Upgrade headers for this gate;
+  they are refused before credential resolution and at resolved dispatch.
+- **Channel posts:** only the recipient's personally owned destinations with
+  explicit `allow_posts` are eligible. Org-owned bots remain excluded even when
+  the recipient is an org admin; shared use grants no org posting authority. Live
+  chat, bot ownership, share revision and behavior are checked after credential
+  awaits, between multipart sends and between media upload and message delivery.
+  The generic channel relay cannot accept a shared thread key as a route key. No agent-owner channel, channel-link authority or
+  automation authority is inherited. Discovery exposes only the limited chat
+  listing/posting tools alongside private notes and pinned skill reads.
+
+The durable `shared_execution` payload stores immutable identity, connection,
+consent claim, authority revision and behavior/connection digests, not a reusable
+ACL snapshot. Resume loads live shares, people/org membership, key, connection,
+policy and consent before effects. Node-backed connections, machines, saved
+logins, SSH, Oracle, owner-account tools/approvals and automation remain excluded.
+These transport extensions apply to private shared chats and legacy personal
+crews. Collaboration groups use the separate request chain below. A private
+`shared_execution` receipt cannot authorize a collaboration job, watch, voice
+session or opaque stream: it lacks the original request and audience binding,
+so revalidation refuses it before effects. Foreground HTTP/MCP and pinned pool
+members still use the group's live turn authority. Collaboration native tools
+also exclude channel discovery/posting. Guests remain owner-billed.
+
+Consent uses separate human-only inline cards. After choosing, the person
+continues the chat or retries voice start; no tool can make that decision.
+Pending/unused Once decisions retain the 25-minute decision window. Claiming
+Once for a transport permits only that exact bounded execution, for at most two
+hours; it does not authorize another job or session. Live revocation still wins.
+
+The Share dialog adds people by verified email and accepts existing recipient
+UUIDs and organizations the publisher belongs to; there is no public
+user-directory enumeration. Organization-group, platform and agent-owner
+channel publication still refuse shared agents before effects.
 
 
 **Phase 1 — shared agents.** Land the access/role model, owner publishing and
@@ -711,6 +885,53 @@ machinery with the same identity evaluator, retaining legacy entry points.
 Implement actor cards, consent audiences, uploads, live delivery, handoffs,
 queued work and cancellation, then participant/invite/guest-toggle UI and tools.
 Validate mixed owners and concurrent requesters before widening rollout.
+
+Phase 2 was implemented in three ordered steps:
+
+1. **Backend foundation.** Explicit classifier and side collections/indexes;
+   snapshot transactions for invitations, membership, transfer and guest opt-in;
+   batched identity snapshots; requester-bound requests and isolated hidden
+   thread/key/turn admission. Invite consumption and revision-fenced group writes
+   must each match one row or abort the transaction.
+2. **Public surfaces and scheduling.** The REST routes above and native/MCP tools
+   `create_collaboration_group`, `list_collaboration_groups`,
+   `manage_collaboration_group`, `post_to_collaboration_group` share the same
+   services. The runtime uses the requester's team pool for authenticated lanes
+   and the owner's existing channel pool for guests. Guest busy responses ask for
+   a retry; authenticated work queues up to 16 pending requests per requester.
+   Cards and service approvals bind their original request, and a thread with an
+   unresolved decision cannot be reused by a different chain. Cancellation and
+   membership changes expire approvals and consents before artifact cleanup.
+3. **UI and delivery.** The group creator can invite/quick-add people, accept
+   participant agent proposals, manage guests, propose/accept transfer, leave or
+   delete. Invite links carry their token in a fragment and require preview plus
+   acknowledgement of full retained history. Requester-only cards show the reply
+   audience; everyone else receives waiting status. Polling and identifier-only
+   live fan-out use current participation. Private hidden IDs are not exposed.
+
+`assistant:collaboration-groups-v1` is now advertised by complete replicas. Both
+that full-fleet readiness capability and the existing `assistant:shared-agents`
+flag are required for new collaboration work. Disabling stops admissions and
+continuations; retained history, cancellation, departure and deletion remain
+available to their authorized humans. None of these routes converts legacy
+personal crews or org groups.
+
+Only successful final text and explicitly chat-deliverable tool images are
+published as replies. Failed turns publish a deduplicated notice containing only
+the public agent name and normalized error code; failed drafts, account details
+and upstream diagnostics are never published. Guest images, inspection-only
+images, tool traces and exact cards remain private. Published image joins survive hidden-thread cleanup and follow
+group deletion and upload retention. Uploads stay private while drafts; published
+uploads require current participation, and model reads additionally bind the
+original request. Hidden-thread keys, cards, consents, resources and checkpoints
+are removed only after cancellation settles. Participant departure preserves
+public history while immediately removing server access.
+
+Native collaboration turns cannot invoke private memory/account management;
+authenticated lanes retain pinned-skill reads. Personal NyxBot can initiate work
+for its human through the tools, but cannot join, follow or become the requester
+of another participant's chain. Transfer acceptance and invite acceptance remain
+human-only. No invite is sent automatically.
 
 Expected code touchpoints are `models/assistant_{agent,group,conversation}.rs`,
 `models/api_key.rs`, new share/consent/memory/binding models and services,
@@ -734,7 +955,7 @@ implementation phases after the policy is approved.
 | Privacy | Owner/manager cannot list/read/reset/recover/export/delete another person's chat or notes; no private data in prompts, recap, checkpoint, skills/learning, title, cards, search, notifications or live events; no private history/session reused in groups |
 | Invites/groups | Expiry/cancel/single-use concurrent acceptance, full group cap, existing-account requirement, active shared-org quick-add, creator-only management, transfer/leave/last-person delete, agent remove/readd resets guest opt-in; no arbitrary owner joins through agent attachment |
 | Handoffs | Original actor preserved across owner/shared/org/guest targets; per-request and hourly limits survive retries and concurrent agents; revoked pending request drops without switching actor; no personal NyxBot follower leak |
-| Billing | Shared-lane actor wallet charged for supported model, BYOK and platform calls; unsupported pool, detached/managed-job, async-watch and WebSocket calls refuse before effect; org-member BYOK bills org and platform bills person regardless of group type; owner billing unchanged; guest owner charged; insufficient actor balance never uses owner funds; cancellation/partial stream/retry settle exactly once with persisted payer |
+| Billing | Shared-lane actor wallet charged for supported model, BYOK and platform calls; pool, managed-job, async-watch, voice and stream settlement retain the recipient payer; org-member BYOK bills org and platform bills person regardless of group type; owner billing unchanged; guest owner charged; insufficient actor balance never uses owner funds; cancellation/partial stream/retry settle exactly once with persisted payer |
 | API parity | REST UUID/slug proxy, LLM, WebSocket if supported, MCP search/list/direct/call_tool, exact approvals and worker egress agree; conversation-key management denied; human REST/CLI and NyxBot service mutations have identical role fences |
 | Compatibility | Deserialize pre-feature rows; default sharing off/withheld; no unknown variants in legacy fields; old fixture readers tolerate additive output; full-fleet activation/rollback rehearsal including history readers and #1996 downgrade |
 | Performance/UI | Constant batched ACL/consent reads as agent count grows; no new reads on unrelated turn paths; bounded live worker under overflow; dirty selects, keyboard dialogs, account choice, invite acceptance, live removal and both themes |
@@ -779,7 +1000,8 @@ Approved by the coordinating reviewer:
 - Caller-pays is exclusive to `shared`; owner/org-member/guest billing stays as
   specified in section 7.
 
-Phase 1 is implemented without a commit in this worktree. The implementation uses a thin
+Phase 1 and single-person shared crews are implemented. The implementation uses a thin
 `shared_access` adapter over the v0.75.0 #1996 helpers; absent shared policy is
-withheld and no new enum values are written to legacy fields. Phase 2 is not
-implemented here.
+withheld and no new enum values are written to legacy fields. Phase 2 includes
+the public surfaces and UI described above; new work remains default off until
+the shared-agents flag and full-fleet collaboration readiness gate allow it.

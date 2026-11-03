@@ -1952,29 +1952,9 @@ pub async fn validate_update_inputs(
         )?;
     }
 
-    // Reject injection-param AND node_id changes on services whose
-    // backing key is `node_managed` — the credential lives entirely
-    // on the node agent, so the server can't re-push when the caller
-    // changes `auth_method` / `auth_key_name` / `endpoint_url` (target
-    // URL) or rebinds/clears `node_id`. Without this guard:
-    //   * `auth_method`/`auth_key_name`/`endpoint_url` edits would
-    //     leave the node serving the stale injection config with no
-    //     path back to sync (twenty-eighth-round Codex P1).
-    //   * `node_id` moves / clears skip the push path (no server-held
-    //     credential to send) but still trigger the post-commit
-    //     `credential_remove` on the old node — the only holder of the
-    //     secret — leaving the service unusable until the user
-    //     re-enters the credential on the new target
-    //     (thirty-third-round Codex P1).
-    // Users must instead run `nyxid node credentials add` on the node
-    // directly, or promote the record first.
-    //
-    // Exception: when the caller supplies a non-empty `credential` in the
-    // same request, `ensure_user_api_key_for_update` promotes the
-    // node_managed record to a server-held credential type and the
-    // subsequent push rewrites the new node's config with the fresh
-    // secret + injection params. Blocking here would make the combined
-    // migrate-and-update flow unusable (twenty-ninth-round Codex P2).
+    // Node-local credentials cannot be rewritten or moved without promotion.
+    // Endpoint-only edits are routing metadata, synchronized separately without
+    // sending a credential. Preserve the auth/node guard for combined edits.
     let node_id_actually_changes = match node_id {
         None => false,
         Some(new_raw) => {
@@ -1989,8 +1969,8 @@ pub async fn validate_update_inputs(
     };
     let changes_injection_params = auth_method.is_some()
         || auth_key_name.is_some()
-        || new_endpoint_url.is_some()
-        || node_id_actually_changes;
+        || node_id_actually_changes
+        || (new_endpoint_url.is_some() && node_id.is_some());
     let caller_is_promoting = credential.is_some_and(|c| !c.is_empty());
     if changes_injection_params
         && !caller_is_promoting
@@ -2000,11 +1980,7 @@ pub async fn validate_update_inputs(
         && ak.credential_type == "node_managed"
     {
         return Err(AppError::BadRequest(
-            "Cannot change auth_method/auth_key_name/endpoint_url/node_id on a \
-                 node-managed service via `PUT /keys` without also supplying a \
-                 new `credential` to promote the key to a server-held record. \
-                 Either include `credential` in the same request, or run \
-                 `nyxid node credentials add <slug> …` on the node directly."
+            "Cannot change auth_method/auth_key_name/node_id on a node-managed service without a new credential to promote it to a server-held record. To keep the secret on the node, change only endpoint_url via PUT /keys/{id}, or run nyxid node credentials set-url --service <slug> --url <URL> on the node; change injection settings locally on the node."
                 .to_string(),
         ));
     }

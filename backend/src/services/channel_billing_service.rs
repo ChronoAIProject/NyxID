@@ -325,9 +325,13 @@ impl ChannelBilling {
             )
             .await?;
         self.billing.mark_forwarded(&meter).await?;
+        if let Err(error) = super::channel_platform::mark_provider_attempt().await {
+            // Admission was funded but no provider request was sent.
+            self.settle(&meter, 0).await?;
+            return Err(error);
+        }
         self.forwarded
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        super::channel_platform::mark_provider_attempt();
         let response = request
             .timeout(std::time::Duration::from_secs(20))
             .send()

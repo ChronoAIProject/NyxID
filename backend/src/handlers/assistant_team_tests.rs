@@ -4292,3 +4292,102 @@ async fn add_service_settings_link_resolves_authorized_catalog_and_returns_hoste
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn private_posts_2124_tool_refuses_guests_and_specialists_and_keeps_confirmation() {
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("posts2124_tool").await;
+    let args = json!({"channel_agent_id":Uuid::new_v4().to_string(),"private_chat_posts":true,"apply_to_existing":true});
+    assistant_team_tools::validate("update_channel_access", &args).unwrap();
+    assert_eq!(
+        acks::known_action_class("nyxid__update_channel_access", &args),
+        acks::known_action_class("nyxid__update_channel_chat", &json!({"allow_posts":true}))
+    );
+    let mut guest = f.chat.clone();
+    guest.guest = true;
+    let (value, error) =
+        execute_tool(&f.state, &guest, "nyxid__update_channel_access", &args).await;
+    assert!(error);
+    assert_eq!(value, acks::guest_refusal());
+    let specialist =
+        crate::services::assistant_authority_tests::direct_fixture("posts2124_specialist").await;
+    let (value, error) = execute_tool(
+        &specialist.state,
+        &specialist.chat,
+        "nyxid__update_channel_access",
+        &args,
+    )
+    .await;
+    assert!(error);
+    assert_eq!(value["error"], "orchestrator_only");
+    let (value, error) =
+        execute_tool(&f.state, &f.chat, "nyxid__update_channel_access", &args).await;
+    assert!(error);
+    assert!(value.get("acknowledgement_id").is_some(), "{value}");
+    // Full access dispatches the existing tool and returns the saved default.
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let id = args["channel_agent_id"].as_str().unwrap();
+    let bot = Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME).insert_one(doc!{
+        "_id":id,"user_id":&f.owner,"channel_bot_id":&bot,"platform":"telegram","bot_label":"Customer bot",
+        "transport":"gateway","status":"active","route_api_key_id":"test-route","created_at":now,"updated_at":now
+    }).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&bot,"user_id":&f.owner,"is_active":true,"status":"active"})
+        .await
+        .unwrap();
+    let (saved, error) =
+        execute_tool(&f.state, &f.chat, "nyxid__update_channel_access", &args).await;
+    assert!(!error);
+    assert_eq!(saved["private_chat_posts"], true);
+    assert_eq!(saved["applied_count"], 0);
+    let org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection("org_memberships")
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &f.owner,
+            crate::models::org_membership::OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .update_one(doc! {"_id":id}, doc! {"$set":{"bot_owner_id":&org}})
+        .await
+        .unwrap();
+    let (_, error) = execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__update_channel_access",
+        &json!({"channel_agent_id":id,"private_chat_posts":false}),
+    )
+    .await;
+    assert!(
+        error,
+        "a linking person who is no longer an org admin cannot change posting defaults"
+    );
+    f.state.db.drop().await.unwrap();
+    specialist.state.db.drop().await.unwrap();
+}

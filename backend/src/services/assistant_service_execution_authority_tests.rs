@@ -734,7 +734,7 @@ async fn exact_upload_identity_hashes_actual_bytes_without_json_expansion() {
 }
 
 #[tokio::test]
-async fn cached_model_consent_cannot_upgrade_an_autopilot_snapshot_to_auto() {
+async fn model_2142_consent_survives_access_mode_change_without_changing_action_binding() {
     let f = orchestrator_fixture("cached_model_mode_race").await;
     let owner = org(&f).await;
     let id = connection(&f, &owner, "model", None).await;
@@ -762,9 +762,11 @@ async fn cached_model_consent_cannot_upgrade_an_autopilot_snapshot_to_auto() {
     .unwrap();
     assert!(
         super::super::http::validate_model_consent_snapshot(
+            &f.state.db,
             decision.admission.as_ref(),
             &cached_binding
         )
-        .is_err()
+        .await
+        .is_ok()
     );
 }

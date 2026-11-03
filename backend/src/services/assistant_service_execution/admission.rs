@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone)]
 pub struct Admission {
     pub(super) owner_instruction_receipt: bool,
+    pub(super) shared_detached: Option<crate::models::assistant_sharing::SharedExecution>,
     pub(super) shared_permit: Option<crate::services::shared_agent_consent::Permit>,
     pub(super) connection: String,
     pub(super) binding: String,
@@ -21,6 +22,66 @@ pub struct Admission {
     pub(super) chat: acks::ChatAuthority,
 }
 impl Admission {
+    pub(crate) fn shared_execution(
+        &self,
+    ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {
+        let Some(access) = self.chat.org_agent_access.as_ref().and_then(|a| a.shared()) else {
+            return Ok(None);
+        };
+        let (consent_id, consent_claim) = self
+            .shared_permit
+            .as_ref()
+            .map(|p| {
+                let (id, claim) = p.durable();
+                (Some(id), claim)
+            })
+            .unwrap_or_default();
+        Ok(Some(crate::models::assistant_sharing::SharedExecution {
+            voice: false,
+            model: matches!(
+                self.operation_identity["kind"].as_str(),
+                Some("raw_inference" | "legacy_inference")
+            ),
+            actor: self.chat.user_id.clone(),
+            owner: access.owner().into(),
+            agent: self.chat.agent_id.clone(),
+            conversation: self.chat.conversation_id.clone(),
+            key: self.api_key_id.clone(),
+            turn: self
+                .chat
+                .turn_id
+                .clone()
+                .ok_or(AppError::AssistantTurnRequired)?,
+            connection: self.connection.clone(),
+            revision: access.revision(),
+            behavior: crate::services::shared_agent_consent::behavior(access),
+            binding: self.binding.clone(),
+            consent_id,
+            consent_claim,
+        }))
+    }
+
+    /// Evidence from the shared HTTP stream gate, never caller-supplied metadata.
+    pub(crate) fn shared_stream(
+        &self,
+        method: &str,
+    ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {
+        if !is_shared_chat(&self.chat) {
+            return Ok(None);
+        }
+        let transport = if method == "CONNECT" {
+            "connect"
+        } else {
+            "websocket"
+        };
+        if self.operation_identity["transport"] != transport {
+            return Err(AppError::Forbidden(
+                "Shared stream admission required".into(),
+            ));
+        }
+        self.shared_execution()
+    }
+
     pub fn bind_ssh(
         &mut self,
         connection: &UserService,
@@ -112,15 +173,19 @@ impl Admission {
             )
             .await?;
         }
+        // Owning the guard changes its lifetime, never its personal authority.
+        // Managed dispatch still requires the original live turn; dispatched work
+        // can settle later using its durable binding. Watches have their separate
+        // leased, exact-operation authority above.
+        if let Some(binding) = &self.shared_detached {
+            crate::services::shared_agent_transport::revalidate(db, binding).await?;
+        }
         let service =
             crate::services::user_service_service::find_user_service_by_id(db, connection)
                 .await?
                 .ok_or_else(|| AppError::NotFound("Service unavailable".into()))?;
         if let Some(original) = self.chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
-            if self.job_id.is_some()
-                || self.async_continuation.is_some()
-                || self.native_execution.is_some()
-            {
+            if self.job_id.is_some() || self.native_execution.is_some() {
                 return Err(AppError::Forbidden(
                     "Shared connections require foreground HTTP execution".into(),
                 ));
@@ -144,7 +209,9 @@ impl Admission {
                     "Shared service authority changed".into(),
                 ));
             }
-            if service.user_id == self.chat.user_id {
+            if service.user_id == self.chat.user_id
+                && !shared_platform_model(&self.chat, &service, &self.operation_identity, target)
+            {
                 self.shared_permit
                     .as_ref()
                     .ok_or_else(|| AppError::Forbidden("Connection consent required".into()))?
@@ -170,9 +237,23 @@ impl Admission {
                 return Err(AppError::Forbidden("Service access revoked".into()));
             }
         }
-        if self.connection != connection
-            || self.binding != connection_binding(db, connection, &self.api_key_id).await?
-        {
+        let model =
+            self.operation_identity["kind"] == "raw_inference" && !is_shared_chat(&self.chat);
+        let binding_matches = if model {
+            super::authority::model_bindings_match(
+                db,
+                connection,
+                &self.api_key_id,
+                &[&self.binding],
+            )
+            .await?
+        } else {
+            self.binding == connection_binding(db, connection, &self.api_key_id).await?
+        };
+        if self.connection != connection || !binding_matches {
+            if model {
+                return Err(AppError::AssistantModelAuthorityChanged);
+            }
             return Err(AppError::Conflict(
                 "Service selection changed; request a new exact confirmation".into(),
             ));
@@ -182,6 +263,9 @@ impl Admission {
                 .map(|target| execution_projection_digest(target, self.execution_credential))
                 .as_ref()
         {
+            if model {
+                return Err(AppError::AssistantModelAuthorityChanged);
+            }
             return Err(AppError::Conflict(
                 "Resolved service execution changed".into(),
             ));

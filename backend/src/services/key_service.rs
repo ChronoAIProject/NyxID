@@ -1290,6 +1290,12 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                             successor.allowed_platform_service_ids =
                                 grants.platform_service_ids.clone();
                         }
+                        super::assistant_agent_credential_service::KeyAuthority::ModelSetup(owner) => {
+                            successor.assistant_agent_owner_id = Some(owner.clone());
+                            successor.assistant_operation_scopes.clear();
+                            successor.allowed_service_ids.clear();
+                            successor.allowed_platform_service_ids.clear();
+                        }
                         super::assistant_agent_credential_service::KeyAuthority::Orchestrator => {
                             successor.assistant_operation_scopes.clear();
                             successor.allowed_service_ids.clear();

@@ -2502,9 +2502,9 @@ it.each([
   expect(reloaded.session(id).messages[1]?.errorDetail?.failureReason).toEqual(failure);
 });
 
-it.each([undefined, "no_admission", "shared_chat", "method_override", "pool", "handle_present", "future_reason"])("does not invent an owner notice for %s", (reason) => {
+it.each([undefined, "no_admission", "shared_chat", "method_override", "pool", "handle_present", "future_reason", "connection_not_platform", "route_mismatch", "unknown_field"])("does not invent an owner notice for %s", (reason) => {
   expect(storedError("guest_model_route_required", undefined, reason)).toBe("This assistant can't answer right now. Please try again later.");
 });
-it("renders setup wording only with a recorded setup diagnostic", () => {
-  expect(storedError("guest_model_route_required", undefined, "connection_not_platform")).toContain("has been notified");
+it.each(["model_route_unavailable", "model_connection_unavailable", "credits_unavailable", "setup_timeout", "setup_capacity"])("renders setup failure wording for %s", (reason) => {
+  expect(storedError("guest_model_route_required", undefined, reason)).toBe("Visitor setup could not finish. The owner has been notified. Please try again later.");
 });

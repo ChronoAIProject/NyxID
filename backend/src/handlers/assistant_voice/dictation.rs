@@ -18,24 +18,85 @@ const CONTROL_FRAME_ALLOWANCE: usize = 32;
 const MAX_INGRESS_FRAMES: usize =
     dictation::MAX_SECONDS as usize * PCM_FRAMES_PER_SECOND + CONTROL_FRAME_ALLOWANCE;
 
+// Two seconds of normal 20 ms PCM frames (at most 400 KiB at the wire bound).
+const INPUT_CAPACITY: usize = 2 * PCM_FRAMES_PER_SECOND;
+const BACKPRESSURE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Default)]
 struct Ingress {
     frames: usize,
 }
 impl Ingress {
-    fn forward(&mut self, message: Message, input: &tokio::sync::mpsc::Sender<Input>) -> bool {
+    fn parse(&mut self, message: Message) -> Result<Option<Input>, &'static str> {
         if self.frames >= MAX_INGRESS_FRAMES {
-            return false;
+            return Err("dictation_frame_limit");
         }
         self.frames += 1;
-        let message = match message {
-            Message::Binary(bytes) => Input::Audio(bytes.to_vec()),
-            Message::Text(text) if text.as_str() == r#"{"type":"stop"}"# => Input::Stop,
-            Message::Ping(_) | Message::Pong(_) => return true,
-            _ => return false,
-        };
-        input.try_send(message).is_ok()
+        match message {
+            Message::Binary(bytes) => Ok(Some(Input::Audio(bytes.to_vec()))),
+            Message::Text(text) if text.as_str() == r#"{"type":"stop"}"# => Ok(Some(Input::Stop)),
+            Message::Ping(_) | Message::Pong(_) => Ok(None),
+            _ => Err("dictation_invalid_frame"),
+        }
     }
+}
+
+fn terminal(code: &'static str) -> serde_json::Value {
+    let message = match code {
+        "dictation_backpressure" => {
+            "Dictation could not keep up. Review the captured text and try again."
+        }
+        "dictation_invalid_frame" | "dictation_frame_limit" => {
+            "Dictation audio was not accepted. Review the captured text and start again."
+        }
+        "dictation_start_timeout" => "Dictation did not start in time. Try again.",
+        _ => "Dictation was interrupted. Review the captured text and try again.",
+    };
+    serde_json::json!({"type":"error","stage":"transport","code":code,
+        "error":{"error":code,"message":message}})
+}
+fn terminal_close(event: &serde_json::Value) -> axum::extract::ws::CloseFrame {
+    use axum::extract::ws::close_code;
+    let (code, reason) = if event["type"] == "stopped" {
+        (close_code::NORMAL, "dictation_stopped")
+    } else {
+        match event["code"].as_str() {
+            Some("dictation_backpressure") => (close_code::AGAIN, "dictation_backpressure"),
+            Some("dictation_invalid_frame" | "dictation_frame_limit") => {
+                (close_code::POLICY, "dictation_invalid_audio")
+            }
+            _ => (close_code::ERROR, "dictation_failed"),
+        }
+    };
+    axum::extract::ws::CloseFrame {
+        code,
+        reason: reason.into(),
+    }
+}
+async fn send_event<S>(sender: &mut S, event: serde_json::Value) -> bool
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    let terminal = matches!(event["type"].as_str(), Some("error" | "stopped"));
+    let close = terminal.then(|| terminal_close(&event));
+    if !matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sender.send(Message::Text(event.to_string().into()))
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        return false;
+    }
+    if let Some(close) = close {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sender.send(Message::Close(Some(close))),
+        )
+        .await;
+    }
+    !terminal
 }
 
 #[derive(Deserialize)]
@@ -94,16 +155,21 @@ async fn serve(
     thread: String,
     human_session: String,
 ) -> AppResult<()> {
-    let first = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
-        .await
-        .map_err(|_| AppError::ClientDisconnected)?;
-    let Some(Ok(Message::Text(text))) = first else {
-        return Err(AppError::ClientDisconnected);
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next()).await;
+    let start = match first {
+        Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<Start>(&text).ok(),
+        Err(_) => {
+            send_event(&mut socket, terminal("dictation_start_timeout")).await;
+            return Ok(());
+        }
+        _ => None,
     };
-    let start: Start = serde_json::from_str(&text)
-        .map_err(|_| AppError::ValidationError("Invalid dictation request".into()))?;
-    let (input, receive) = tokio::sync::mpsc::channel(8);
-    let (output, mut events) = tokio::sync::mpsc::channel(8);
+    let Some(start) = start else {
+        send_event(&mut socket, terminal("dictation_invalid_frame")).await;
+        return Ok(());
+    };
+    let (input, receive) = tokio::sync::mpsc::channel(INPUT_CAPACITY);
+    let (output, events) = tokio::sync::mpsc::channel(8);
     let task = tokio::spawn(dictation::serve(
         state,
         user,
@@ -114,19 +180,55 @@ async fn serve(
         receive,
         output,
     ));
+    relay(socket, input, events).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), task).await;
+    Ok(())
+}
+
+async fn relay(
+    socket: WebSocket,
+    input: tokio::sync::mpsc::Sender<Input>,
+    mut events: tokio::sync::mpsc::Receiver<serde_json::Value>,
+) {
     let (mut sender, mut reader) = socket.split();
     let mut ingress = Ingress::default();
+    let mut pending = None;
+    let mut deadline = tokio::time::Instant::now();
+    let mut stopped = false;
     loop {
-        tokio::select! {
-            event=events.recv()=> {
-                let Some(event)=event else {break};
-                let terminal=event["type"]=="error" || event["type"]=="stopped";
-                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(2),sender.send(Message::Text(event.to_string().into()))).await,Ok(Ok(()))) {break;}
-                if terminal {break;}
+        tokio::select! { biased;
+            event = events.recv() => {
+                let event = event.unwrap_or_else(|| terminal("dictation_worker_ended"));
+                if !send_event(&mut sender, event).await { break; }
             }
-            event=reader.next()=> {
-                let Some(Ok(message))=event else {break};
-                if !ingress.forward(message,&input) {break;}
+            _ = tokio::time::sleep_until(deadline), if pending.is_some() => {
+                send_event(&mut sender, terminal("dictation_backpressure")).await;
+                break;
+            }
+            permit = input.reserve(), if pending.is_some() => {
+                match permit {
+                    Ok(permit) => { permit.send(pending.take().expect("pending input")); }
+                    Err(_) => {
+                        // A finishing actor can close ingress before its terminal output.
+                        pending = None;
+                        stopped = true;
+                    }
+                }
+            }
+            event = reader.next(), if pending.is_none() && !stopped => {
+                match event {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(message)) => match ingress.parse(message) {
+                        Ok(Some(message)) => {
+                            stopped = matches!(message, Input::Stop);
+                            pending = Some(message);
+                            deadline = tokio::time::Instant::now() + BACKPRESSURE_WAIT;
+                        }
+                        Ok(None) => {},
+                        Err(code) => { send_event(&mut sender, terminal(code)).await; break; }
+                    },
+                    Some(Err(_)) => { send_event(&mut sender, terminal("dictation_transport_failed")).await; break; }
+                }
             }
         }
     }
@@ -134,78 +236,19 @@ async fn serve(
     // the server actor: it owns durable confirmed usage and bounded provider drain.
     drop(input);
     drop(events);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), task).await;
-    Ok(())
+    // Complete the close handshake while discarding buffered ingress. Dropping
+    // TCP with unread audio can reset the peer before it receives our close frame.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        for _ in 0..MAX_INGRESS_FRAMES {
+            match reader.next().await {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dictation_handler_ingress_forwards_two_minutes_of_worklet_pcm_and_stop() {
-        let (input, mut receive) = tokio::sync::mpsc::channel(8);
-        let mut ingress = Ingress::default();
-        let samples_per_frame = 480;
-        let sample_rate = 24_000;
-        let duration_seconds = 120;
-        let mut forwarded_bytes = 0;
-        // Exercise the actual handler dispatch/channel path with 6,000 normal
-        // 20 ms packets, consuming each as the relay does during capture.
-        for _ in 0..duration_seconds * sample_rate / samples_per_frame {
-            let bytes = vec![0x42; samples_per_frame * 2];
-            assert!(ingress.forward(Message::Binary(bytes.clone().into()), &input));
-            match receive.try_recv().unwrap() {
-                Input::Audio(forwarded) => {
-                    assert_eq!(forwarded, bytes);
-                    forwarded_bytes += forwarded.len();
-                }
-                Input::Stop => panic!("PCM was dispatched as Stop"),
-            }
-        }
-        assert_eq!(forwarded_bytes, duration_seconds * sample_rate * 2);
-        // Transport controls and Stop fit the explicit control allowance;
-        // Ping/Pong must not enter the PCM channel.
-        assert!(ingress.forward(Message::Ping(Vec::new().into()), &input));
-        assert!(ingress.forward(Message::Pong(Vec::new().into()), &input));
-        assert!(ingress.forward(Message::Text(r#"{"type":"stop"}"#.into()), &input));
-        assert!(matches!(receive.try_recv().unwrap(), Input::Stop));
-        assert!(matches!(
-            receive.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-    }
-
-    #[test]
-    fn dictation_handler_ingress_bounds_control_floods_and_channel_backpressure() {
-        let (input, mut receive) = tokio::sync::mpsc::channel(8);
-        let mut ingress = Ingress::default();
-        let mut refused = false;
-        for index in 0..10_000 {
-            let message = if index % 2 == 0 {
-                Message::Ping(Vec::new().into())
-            } else {
-                Message::Pong(Vec::new().into())
-            };
-            if !ingress.forward(message, &input) {
-                refused = true;
-                break;
-            }
-        }
-        assert!(refused, "control-only traffic must exhaust a finite budget");
-        assert!(!ingress.forward(Message::Binary(vec![0; 960].into()), &input));
-        assert!(!ingress.forward(Message::Text(r#"{"type":"stop"}"#.into()), &input));
-        assert!(matches!(
-            receive.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-
-        // Enlarging the lifetime frame count must not enlarge the eight-frame
-        // transient channel or replace its immediate backpressure refusal.
-        let mut ingress = Ingress::default();
-        for _ in 0..8 {
-            assert!(ingress.forward(Message::Binary(vec![0; 960].into()), &input));
-        }
-        assert!(!ingress.forward(Message::Binary(vec![0; 960].into()), &input));
-    }
-}
+#[path = "dictation_tests.rs"]
+mod tests;

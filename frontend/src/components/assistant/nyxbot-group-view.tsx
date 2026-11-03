@@ -1,3 +1,7 @@
+import { GroupAgentAccessRequest } from "./group-agent-access";
+import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
+import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
+import { collaborationApi } from "@/hooks/use-collaboration-groups";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
@@ -47,9 +51,12 @@ import {
   withDisplayName,
   workingLabel,
 } from "@/lib/assistant/nyxbot-labels";
-import { mentionSegments } from "@/lib/assistant/nyxbot-mentions";
+import { mentionSegments, mentionTokens } from "@/lib/assistant/nyxbot-mentions";
+import { SharedConsentCards } from "./shared-agent-controls";
 import {
   NO_RECIPIENT_EDITS,
+  memberMention,
+  mentionedIds,
   resolveRecipients,
   withAdded,
   withDraft,
@@ -128,12 +135,14 @@ export function GroupMessageRow({
   message,
   names,
   members = [],
+  participants = [],
   onOpenAgent,
 }: {
   readonly groupId: string;
   readonly message: AssistantGroupMessage;
   readonly names: readonly string[];
   readonly members?: readonly AssistantGroupMember[];
+  readonly participants?: readonly { id: string; display_name: string }[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
   const feedback = useReplyFeedback({
@@ -151,6 +160,11 @@ export function GroupMessageRow({
           aria-label="Group notice"
           className="text-center text-11 text-text-tertiary"
         >
+          {/* Name the agent unless the notice already starts with it
+              ("<agent> could not reply (…)"). */}
+          {message.agent && !message.text.startsWith(message.agent.name)
+            ? `${agentTitle(message.agent)}: `
+            : ""}
           {message.text}
         </p>
         {message.activities
@@ -222,6 +236,7 @@ export function GroupMessageRow({
             <span className="text-10 text-text-tertiary">Personal agent</span>
           ) : null}
           <MessageTime value={message.created_at} />
+          {message.requester_user_id ? <span className="text-11 text-text-tertiary">For {participants.find((p) => p.id === message.requester_user_id)?.display_name ?? "participant"}{message.execution_mode === "guest" ? " · Guest reply (owner pays)" : ""}</span> : null}
         </div>
         <div className="px-px text-foreground">
           {message.activities
@@ -385,6 +400,7 @@ function GroupTranscript({
               groupId={group.id}
               names={names}
               members={group.members}
+              participants={group.participants}
               onOpenAgent={onOpenAgent}
             />
           ))}
@@ -426,10 +442,10 @@ function MemberButton({
         <button
           type="button"
           onClick={onOpen}
-          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
+          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : member.unavailable ? " (unavailable)" : member.shared ? " (shared agent)" : ""} — agent details`}
           className={cn(
             "relative rounded-full transition-opacity hover:opacity-80",
-            member.destroyed && "opacity-50",
+            (member.destroyed || member.unavailable) && "opacity-50",
           )}
         >
           <AgentAvatar agent={member} size={size} />
@@ -444,6 +460,7 @@ function MemberButton({
       <TooltipContent side="bottom" className="text-11">
         <p className="font-medium">{agentTitle(member)}</p>
         {handle ? <p className="text-text-tertiary">{handle}</p> : null}
+        {member.unavailable ? <p>{groupAgentUnavailableReason(member)}</p> : member.shared ? <p>Shared agent{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -513,7 +530,7 @@ function GroupHeader({
         </HeaderBar>
         {compact ? null : (
           <p className="text-11 text-text-tertiary">
-            {group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
+            {group?.collaboration ? "Everyone in the group sees your messages. Select agents for a reply, or remove all recipients to chat with people only." : group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
           </p>
         )}
       </div>
@@ -643,13 +660,15 @@ export function GroupRecipientPills({
   recipientIds,
   onRemove,
   onAdd,
+  group,
 }: {
+  readonly group?: AssistantGroup;
   readonly members: readonly AssistantGroupMember[];
   readonly recipientIds: readonly string[];
   readonly onRemove: (id: string) => void;
   readonly onAdd: (id: string) => void;
 }) {
-  const live = members.filter((member) => !member.destroyed);
+  const live = members.filter((member) => !member.destroyed && !member.unavailable);
   const others = live.filter((member) => !recipientIds.includes(member.id));
   return (
     <div
@@ -671,17 +690,17 @@ export function GroupRecipientPills({
                 aria-label={`Remove recipient ${agentTitle(member)}`}
                 onClick={() => onRemove(id)}
               >
-                {agentTitle(member)} ×
+                {agentTitle(member)}{member.shared ? ` · Shared agent${member.owner_name ? ` · ${member.owner_name}` : ""}` : ""} ×
               </Button>,
             ]
           : [];
       })}
       {recipientIds.length ? null : (
-        <span role="status" className="text-11 text-destructive">
-          Choose at least one recipient.
+        <span role="status" className="text-11 text-muted-foreground">
+          {group?.collaboration ? "Everyone in the group · no agent reply" : "Choose at least one recipient."}
         </span>
       )}
-      {others.length ? (
+      {others.length || (group?.collaboration && members.some((m) => m.unavailable || m.destroyed)) ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -697,9 +716,16 @@ export function GroupRecipientPills({
           <DropdownMenuContent align="start">
             {others.map((member) => (
               <DropdownMenuItem key={member.id} onSelect={() => onAdd(member.id)}>
-                {agentTitle(member)}
+                {agentTitle(member)}{member.shared ? " · Shared agent" : ""}
               </DropdownMenuItem>
             ))}
+            {group?.collaboration ? members.filter((m) => m.unavailable || m.destroyed).map((member) => (
+              <div key={member.id} className="max-w-sm space-y-2 p-2 text-12">
+                <p className="font-medium">{agentTitle(member)}{member.owner_name ? ` · ${member.owner_name}` : ""}</p>
+                <p className="text-muted-foreground">{groupAgentUnavailableReason(member)}</p>
+                <GroupAgentAccessRequest group={group} member={member} />
+              </div>
+            )) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       ) : null}
@@ -732,7 +758,7 @@ export function NyxAgentGroupPage({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recipientSelection, setRecipientSelection] =
     useState<RecipientSelection>(NO_RECIPIENT_EDITS);
-  // Group payloads name agents by handle; their display names live on the agent list.
+  // Server names are authoritative; the inventory only fills older payloads.
   const group =
     transcript.data && !transcript.error
     ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
@@ -779,12 +805,14 @@ export function NyxAgentGroupPage({
   }
 
   const mentions = (group?.members ?? [])
-    .filter((member) => !member.destroyed)
+    .filter((member) => !member.destroyed && !member.unavailable)
     .map((member) => ({
       id: member.id,
-      name: member.name,
+      name: memberMention(member, group?.members ?? []),
       kind: member.kind,
-      display_name: withDisplayName(member, agents.data?.agents).display_name,
+      display_name: withDisplayName(member, agents.data?.agents).display_name || member.name,
+      shared: member.shared,
+      owner_name: member.owner_name,
     }));
 
   return (
@@ -824,7 +852,7 @@ export function NyxAgentGroupPage({
                 bottomInset={composerHeight}
               />
             </AssistantLinkModalHost>
-            {settingsOpen ? (
+            {settingsOpen && group.collaboration ? <CollaborationSettings group={group} agents={agents.data?.agents ?? []} onClose={() => setSettingsOpen(false)} onLeft={() => {setSettingsOpen(false); goTo();}} /> : settingsOpen ? (
               <GroupSettingsDialog
                 group={group}
                 agents={agents.data?.agents ?? []}
@@ -858,6 +886,14 @@ export function NyxAgentGroupPage({
           onDeleted={() => setDetailsAgentId(undefined)}
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          {(group?.members ?? []).filter((member) => member.shared && !member.unavailable && member.conversation_id).map((member) => (
+            <SharedConsentCards key={member.id} agentId={member.id} conversationId={member.conversation_id!} />
+          ))}
+          {group?.collaboration ? <CollaborationCards group={group} decisions={transcript.data?.collaboration_decisions ?? []} /> : null}
+          {group?.collaboration?.your_request_ids.length ? <div className="mx-auto flex max-w-3xl justify-end px-4"><Button size="sm" onClick={async () => {
+            try {for (const request of group.collaboration!.your_request_ids) await collaborationApi.cancel(group.id, request); await transcript.refetch();}
+            catch (cause) {reportError(cause,"Could not stop your group work.");}
+          }}>Stop my work</Button></div> : null}
           <GroupPendingActions
             actions={
               transcript.error ? [] : (transcript.data?.pending_actions ?? [])
@@ -902,9 +938,9 @@ export function NyxAgentGroupPage({
             scope={{ kind: "groups", id: groupId }}
             active={false}
             sending={transcript.post.isPending}
-            // Read-only once every member is gone (destroyed or removed).
+            // Collaboration participants may chat even without agent authority.
             disabled={
-              Boolean(transcript.error) || Boolean(group && !mentions.length)
+              Boolean(transcript.error) || !group || Boolean(!group.collaboration && !mentions.length)
             }
             ownerUserId={user?.id ?? null}
             draftKey={`group:${groupId}`}
@@ -912,18 +948,32 @@ export function NyxAgentGroupPage({
             mentions={mentions}
             onSend={async (text, uploads) => {
               setRequestError(undefined);
-              if (recipients.edited && !recipients.ids.length) {
+              if (!group?.collaboration && recipients.edited && !recipients.ids.length) {
                 const error = new Error("Choose at least one recipient.");
                 toast.error(error.message);
                 throw error;
               }
               try {
+                const members = group?.members ?? [];
+                const tokens = mentionTokens(text);
+                const ambiguous = tokens.some(({ name }) =>
+                  !members.some((member) => member.id.toLowerCase() === name.toLowerCase())
+                  && members.filter((member) => member.name.toLowerCase() === name.toLowerCase()).length > 1,
+                );
+                // Bind the displayed selection (including sticky defaults) to
+                // exact IDs. Preserve stale mentions for the server's refusal;
+                // never replace an unavailable target with the lead.
+                const exactRecipients = mentionedIds(text, members.map((member) => ({
+                  ...member, destroyed: false, unavailable: false,
+                })));
                 await transcript.post.mutateAsync({
                   text,
                   attachmentIds: uploads?.attachmentIds ?? [],
                   ...(recipients.edited
                     ? { recipientAgentIds: recipients.ids }
-                    : {}),
+                    : !ambiguous
+                      ? { recipientAgentIds: exactRecipients.length ? exactRecipients : recipients.ids }
+                      : {}),
                 });
                 setRecipientSelection(NO_RECIPIENT_EDITS);
               } catch (error) {
@@ -935,6 +985,7 @@ export function NyxAgentGroupPage({
             recipients={
               group ? (
                 <GroupRecipientPills
+                  group={group}
                   members={group.members}
                   recipientIds={recipients.ids}
                   onRemove={(id) =>

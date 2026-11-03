@@ -372,6 +372,20 @@ describe("NyxBot team, settings and channel schemas", () => {
       .follow_readiness).toBe("ready");
   });
 
+  it("defaults private chat posting off for older channel responses", () => {
+    const channel = {
+      id: "c", channel_bot_id: "bot", platform: "telegram", bot_label: "Bot",
+      transport: "gateway", status: "active", owner_linked: true, created_at: at,
+    };
+    expect(nyxAgentChannelAgentSchema.parse(channel).private_chat_posts).toBe(false);
+    for (const enabled of [false, true]) {
+      expect(nyxAgentChannelAgentSchema.parse({ ...channel, private_chat_posts: enabled })
+        .private_chat_posts).toBe(enabled);
+    }
+    expect(nyxAgentChannelAgentSchema.safeParse({ ...channel, private_chat_posts: "true" })
+      .success).toBe(false);
+  });
+
   it("keeps only https owner links", () => {
     const channel_agent = {
       id: "c",
@@ -446,6 +460,14 @@ describe("group schemas", () => {
         before_seq: null,
       }),
     ).toThrow();
+  });
+
+  it("retains server member names and unavailable reasons without a viewer agent inventory", () => {
+    const agent = { ...group.members[1], display_name: "Office Agent", unavailable: true, unavailable_reason: "not_shared_with_you", owner_name: "Share Ops" };
+    const page = assistantGroupMessagesSchema.parse({ group: { ...group, members: [agent] }, messages: [{ id: "m", seq: 1, role: "notice", agent, text: "Ask the owner", created_at: at }] });
+    expect(page.group.members[0]).toMatchObject(agent);
+    expect(page.messages[0]?.agent?.display_name).toBe("Office Agent");
+    expect(assistantGroupPostedSchema.parse({ message: { id: "p", seq: 2, role: "user", text: "People only", created_at: at, recipient_agent_ids: [] }, addressed_agent_ids: [], request_id: null }).addressed_agent_ids).toEqual([]);
   });
 
   it("parses the accepted post response", () => {

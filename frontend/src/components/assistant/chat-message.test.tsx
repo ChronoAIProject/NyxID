@@ -382,7 +382,20 @@ describe("canonical chat presentation", () => {
     }} />);
     expect(screen.getByText("The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.")).toBeVisible();
     fireEvent.click(screen.getByText("Details"));
-    expect(screen.getByText("Send one message to this agent as its owner using its configured model to record the route for guest replies.")).toBeVisible();
+    expect(screen.getByText("Check this assistant's configured model and model connection. Visitor setup retries automatically.")).toBeVisible();
+    expect(screen.queryByText(/Send one message to this agent/)).not.toBeInTheDocument();
+  });
+
+  it("shows the actual visitor setup failure without requesting an owner warm-up", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error",
+      error: "Visitor setup could not finish. The owner has been notified. Please try again later.",
+      errorDetail: { stage: "guest_setup", turnId: "turn-guest", continuations: 0, failureReason: {
+        source: "nyxid", stage: "guest_setup", code: "credits_unavailable",
+        model_route: { reason: "credits_unavailable", unknown_fields: [] },
+      } },
+    }} />);
+    fireEvent.click(screen.getByText("Details"));
+    expect(screen.getByText("Add credits to the linking owner's account. Visitor setup retries automatically.")).toBeVisible();
   });
 
   it("shows thinking treatment only for a content-free streaming message", () => {

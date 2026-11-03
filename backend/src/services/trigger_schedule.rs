@@ -195,6 +195,7 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         outcome: RunOutcome::Pending,
         confirmation_policy: None,
         reason: None,
+        failure_reason: None,
         started_at: None,
         finished_at: None,
         thread_id: None,

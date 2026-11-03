@@ -287,6 +287,7 @@ With a NyxID account, pick the workflow that matches what you want to build and 
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |
+| Service Monitoring | [docs/SERVICE_MONITORING.md](docs/SERVICE_MONITORING.md) | Scoped chrono-probe status, owner configuration, and explicit checks |
 | API Reference | [docs/API.md](docs/API.md) | Full endpoint documentation |
 | Credential Nodes | [docs/NODE_PROXY.md](docs/NODE_PROXY.md) | NAT traversal setup |
 | MCP Integration | [docs/MCP_DELEGATION_FLOW.md](docs/MCP_DELEGATION_FLOW.md) | MCP protocol details |

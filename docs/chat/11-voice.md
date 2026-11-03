@@ -1791,3 +1791,39 @@ rechecked during implementation; this document records the observed contract.
 [oa-transcription]: https://developers.openai.com/api/docs/guides/realtime-transcription
 [oa-transcription-model]: https://developers.openai.com/api/docs/models/gpt-live-transcribe
 [oa-realtime-events]: https://developers.openai.com/api/reference/resources/realtime/server-events
+
+
+### Private shared-agent voice
+
+Shared-agent recipients can start voice in their own private thread once the
+shared transport readiness gate is satisfied. Voice binds the exact connection,
+settings and recipient consent to the durable session. Allow once starts one
+session; Always is revalidated against live share, behavior, connection and
+approval policy. Revocation closes running sessions; every provider command and
+relayed audio effect checks the binding again. Provider WebRTC calls are closed
+by the live session monitor. The recipient pays duration, tokens and delegated
+task usage. Hidden tasks are private children, never automation authority, and
+cannot use machines or saved logins. See [Shared agents §12](12-shared-agents-and-groups.md#12-phased-implementation-after-review).
+
+### Task failures and dictation backpressure (#2142 / #2138)
+
+A failed delegated turn records its stable terminal error code. New responses add
+an `outcome` (`failed` or `cancelled`) to the legacy terminal `state: cancelled`
+bucket, keeping old replicas and clients parse-compatible. Receipts and the task
+panel show **Failed** for failures; **Cancelled** means explicit Stop/cancel.
+Visible result publication preserves retry evidence and the server-owned source
+link; the engine's normal completed-action replay fences apply to voice Retry.
+
+Dictation buffers 100 input frames (two seconds of normal 20 ms PCM; at most
+400 KiB at the 4096-byte frame limit), plus one pending frame. A full queue waits
+at most two more seconds while transcript/terminal output remains drainable.
+Persistent overload emits `dictation_backpressure` then closes with 1013. Invalid
+frames close with 1008; worker/provider failures with 1011; successful `stopped`
+with 1000. Startup and server failures send a structured `error` event with fixed
+stage/code and a sanitized error envelope before closing when transport permits.
+After sending Close, ingress is discarded for at most one second to complete the
+handshake and avoid a TCP reset hiding the close frame behind buffered audio.
+No audio/transcript/provider prose is added to diagnostics. The browser retains
+close code, clean/unclean status and capture stage, accepts only fixed close
+reasons, and leaves partial text reviewable. The 120-second audio and lifetime
+frame budgets remain unchanged and include room for Stop and transport controls.

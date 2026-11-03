@@ -131,10 +131,7 @@ impl AsyncContinuation {
         if key.expires_at.is_some_and(|at| at <= now) {
             return Err(denied());
         }
-        let auth = Box::pin(crate::mw::auth::api_key_auth_user(
-            db, &key, None, None, None,
-        ))
-        .await?;
+        let auth = Box::pin(crate::mw::auth::api_key_auth_user_for_watch(db, &key, w)).await?;
         crate::services::org_agent_service::authorize_execution(db, &auth, Some(&w.service_id))
             .await?;
         if !auth.allow_all_services && !auth.allowed_service_ids.contains(&w.service_id) {
@@ -145,12 +142,8 @@ impl AsyncContinuation {
         } else {
             mcp_service::NodeScope::Allowed(&auth.allowed_node_ids)
         };
-        let scope = if auth
-            .assistant_agent_owner_id
-            .as_deref()
-            .is_some_and(|owner| owner != w.user_id)
-        {
-            mcp_service::ServiceScope::Allowed(&auth.allowed_service_ids)
+        let scope = if let Some(access) = auth.org_agent_access.as_deref() {
+            mcp_service::ServiceScope::Organization { access }
         } else {
             mcp_service::ServiceScope::Unrestricted
         };
@@ -288,6 +281,9 @@ impl AsyncContinuation {
         target: &crate::services::proxy_service::ProxyTarget,
         operation: &Value,
     ) -> AppResult<Decision> {
+        // Ordinary watch revalidation runs below, after a legacy organization
+        // watch has had the chance to present its bounded continuation card.
+        crate::services::shared_agent_transport::revalidate_watch(db, &self.watch).await?;
         if connection != self.watch.service_id {
             return Err(denied());
         }
@@ -380,7 +376,12 @@ impl AsyncContinuation {
             automatic: None,
             admission: Some(Admission {
                 owner_instruction_receipt: false,
-                shared_permit: None,
+                shared_detached: None,
+                shared_permit: self
+                    .watch
+                    .shared_execution
+                    .as_ref()
+                    .and_then(crate::services::shared_agent_consent::Permit::from_execution),
                 connection: connection.into(),
                 binding,
                 execution: Some(execution_projection_digest(
@@ -406,6 +407,10 @@ impl Admission {
     /// Persist exactly the authority that passed submission consent, never a
     /// second read that could bless a replacement credential/configuration.
     pub(crate) async fn bind_async_submission(&self, db: &Database, watch: &str) -> AppResult<()> {
+        let shared = self.shared_execution()?;
+        if let Some(binding) = &shared {
+            crate::services::shared_agent_transport::revalidate(db, binding).await?;
+        }
         let updated = db.collection::<Document>(WATCHES).update_one(doc! {
             "_id":watch,"user_id":&self.chat.user_id,"conversation_id":&self.chat.conversation_id,
             "api_key_id":&self.api_key_id,"turn_id":&self.chat.turn_id,"service_id":&self.connection,
@@ -413,6 +418,7 @@ impl Admission {
             "$or":[{"execution_binding":null},{"execution_binding":&self.binding}],
         }, doc! {"$set":{"execution_binding":&self.binding,
             "instruction_receipt_version": if self.owner_instruction_receipt { 1 } else { 0 },
+            "shared_execution": bson::to_bson(&shared).map_err(|_| denied())?,
             "contract_binding":self.operation_identity["async_contract"].as_str().ok_or_else(denied)?}}).await?;
         if updated.matched_count != 1 {
             return Err(denied());

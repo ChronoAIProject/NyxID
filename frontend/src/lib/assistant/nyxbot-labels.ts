@@ -1,6 +1,7 @@
 import { getProviderBrand } from "@/lib/provider-branding";
 import type {
   AssistantAgent,
+  AssistantGroupMember,
   AssistantAgentKind,
   NyxAgentAccessMode,
   NyxAgentActionConfirmation,
@@ -304,16 +305,16 @@ export function agentHandle(agent: NamedAgent): string | undefined {
 }
 
 /**
- * Conversation and group payloads carry only `{id, name, kind}`; the display
- * name lives on the agent list. Join by id.
+ * Respect server display names, including a cleared name. Older payloads
+ * without the field can still join the viewer's agent list by id.
  */
-export function withDisplayName<T extends { readonly id: string }>(
+export function withDisplayName<T extends { readonly id: string; readonly display_name?: string | null }>(
   ref: T,
   agents: readonly { readonly id: string; readonly display_name: string | null }[] | undefined,
 ): T & { readonly display_name: string | null } {
   return {
     ...ref,
-    display_name: agents?.find((agent) => agent.id === ref.id)?.display_name ?? null,
+    display_name: ref.display_name !== undefined ? ref.display_name : agents?.find((agent) => agent.id === ref.id)?.display_name ?? null,
   };
 }
 
@@ -399,4 +400,26 @@ export function modelDisplayName(model: Pick<NyxAgentModel, "id" | "label">): st
   if (label && label !== alias && label !== model.id) return label;
   if (model.id === "nyxagent/chat") return "Default model";
   return alias.replace(/[_-]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+export function groupAgentUnavailableReason(
+  member: AssistantGroupMember,
+): string {
+  const owner = member.owner_name ?? "the agent owner";
+  switch (member.unavailable_reason) {
+    case "destroyed":
+      return "This agent was destroyed. Ask the creator to remove it.";
+    case "removed":
+      return "This agent is no longer available. Ask the creator to remove it.";
+    case "org_agent_not_guestable":
+      return "Organization agents cannot allow guests. Ask an organization administrator for access.";
+    case "owner_approval_pending":
+      return `Waiting for ${owner} to allow participants.`;
+    case "not_shared_with_you":
+      return `Not shared with you — ask ${owner} to allow participants.`;
+    case "guest_access_off":
+      return `Participant access is off — ask ${owner} to allow participants.`;
+    default:
+      return `This agent is unavailable to you. Ask ${owner} for access.`;
+  }
 }

@@ -2,11 +2,11 @@ use super::*;
 
 /// A digest only: no key material, downstream arguments or internal authority
 /// metadata is exposed to the model or forwarded to a provider.
-pub fn connection_binding<'a>(
+fn connection_projection<'a>(
     db: &'a Database,
     id: &'a str,
     api_key_id: &'a str,
-) -> futures::future::BoxFuture<'a, AppResult<String>> {
+) -> futures::future::BoxFuture<'a, AppResult<Value>> {
     Box::pin(async move {
         let service =
             crate::services::service_history::collection::<UserService>(db, "user_services")
@@ -18,7 +18,11 @@ pub fn connection_binding<'a>(
                 .find_one(doc! {"_id": &service.endpoint_id, "user_id": &service.user_id})
                 .await?
                 .ok_or_else(|| AppError::NotFound("Service destination unavailable".into()))?;
-        let credential = if let Some(key) = &service.api_key_id {
+        // Switching to a platform key deliberately retains the saved BYOK key.
+        // That inactive credential must not block or invalidate the selected
+        // platform route when it is subsequently deleted or rotated.
+        let platform = crate::services::platform_key_service::binding(&service) == "platform";
+        let credential = if let Some(key) = service.api_key_id.as_ref().filter(|_| !platform) {
             let key = db
                 .collection::<UserApiKey>("user_api_keys")
                 .find_one(doc! {"_id": key, "user_id": &service.user_id})
@@ -120,6 +124,9 @@ pub fn connection_binding<'a>(
         }
         let mut service = serde_json::to_value(service)
             .map_err(|_| AppError::Internal("Connection projection failed".into()))?;
+        if platform {
+            service["api_key_id"] = Value::Null;
+        }
         let mut endpoint = serde_json::to_value(endpoint)
             .map_err(|_| AppError::Internal("Connection projection failed".into()))?;
         let mut catalog = catalog;
@@ -142,6 +149,35 @@ pub fn connection_binding<'a>(
         if !shared_policy.is_null() {
             projection["shared_policy"] = shared_policy;
         }
-        Ok(digest(projection))
+        Ok(projection)
     })
+}
+
+/// Preserve the persisted action/consent digest for rolling compatibility.
+pub fn connection_binding<'a>(
+    db: &'a Database,
+    id: &'a str,
+    api_key_id: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<String>> {
+    Box::pin(async move { Ok(digest(connection_projection(db, id, api_key_id).await?)) })
+}
+
+/// Model consent is independent of the owner's action-confirmation mode. Compare
+/// legacy digests against the same live projection under the three known modes;
+/// every other authority field must still match. No approval or tool path uses this.
+pub(super) async fn model_bindings_match(
+    db: &Database,
+    id: &str,
+    key: &str,
+    bindings: &[&str],
+) -> AppResult<bool> {
+    let mut projection = connection_projection(db, id, key).await?;
+    let mut accepted = Vec::new();
+    for mode in ["nyxmode", "autopilot", "ask_every_time"] {
+        projection["authority"]["mode"] = json!(mode);
+        accepted.push(digest(projection.clone()));
+    }
+    Ok(bindings
+        .iter()
+        .all(|binding| accepted.iter().any(|candidate| candidate == binding)))
 }

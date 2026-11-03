@@ -39,7 +39,7 @@ pub use bootstrap::{begin_model_attempt, finish_model_attempt};
 mod authority;
 pub use authority::connection_binding;
 mod availability;
-mod guest_model;
+pub(crate) mod guest_model;
 pub(crate) mod model_diagnostic;
 pub(crate) mod readiness;
 pub(crate) mod readiness_notice;
@@ -56,8 +56,9 @@ mod resolution;
 mod selection;
 use availability::verified_unavailable;
 pub use availability::{NodeFailureEvidence, observe_transport};
+pub(crate) use guest_model::is_shared_chat;
 #[cfg(test)]
-pub(crate) use guest_model::{is_shared_chat, owner_model_route_allowed};
+pub(crate) use guest_model::owner_model_route_allowed;
 #[cfg(test)]
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
@@ -71,9 +72,65 @@ use selection::scope;
 pub use selection::{bind_owner_selection, live_authority};
 pub(crate) use selection::{personal_authority, require_catalog_only_selection};
 
+/// Either projection marks a shared request; losing the other never downgrades it.
+pub(crate) fn is_shared_auth(auth: &crate::mw::auth::AuthUser) -> bool {
+    auth.org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        || auth.assistant_chat.as_deref().is_some_and(is_shared_chat)
+}
+
+pub(crate) fn require_shared_context(auth: &crate::mw::auth::AuthUser) -> AppResult<()> {
+    let denied = || AppError::Forbidden("Complete shared turn authority required".into());
+    let access = auth
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .ok_or_else(denied)?;
+    let chat = auth.assistant_chat.as_deref().ok_or_else(denied)?;
+    let snapshot = chat
+        .org_agent_access
+        .as_ref()
+        .and_then(|a| a.shared())
+        .ok_or_else(denied)?;
+    if !access.matches(&auth.user_id.to_string(), snapshot.owner(), &chat.agent_id)
+        || !snapshot.matches(&chat.user_id, access.owner(), &chat.agent_id)
+        || access.revision() != snapshot.revision()
+        || crate::services::shared_agent_consent::behavior(access)
+            != crate::services::shared_agent_consent::behavior(snapshot)
+        || auth.api_key_id.as_deref() != Some(chat.api_key_id.as_str())
+        || !chat.turn_live
+        || chat.turn_stopped
+        || chat.guest
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 pub const COLLECTION: &str = "assistant_service_execution";
 pub const ACK_HEADER: &str = "x-nyxid-acknowledgement-id";
 const MAX_EVIDENCE: usize = 32;
+
+/// Stateless model bootstrap uses NyxID's platform credential and the acting
+/// person's billing lane. It delegates no personal account. Keep BYOK,
+/// stateful inference, tools and every other transport behind exact consent.
+fn shared_platform_model(
+    chat: &acks::ChatAuthority,
+    service: &UserService,
+    operation: &Value,
+    target: Option<&super::proxy_service::ProxyTarget>,
+) -> bool {
+    service.user_id == chat.user_id
+        && super::platform_key_service::binding(service) == "platform"
+        && operation["kind"] == "raw_inference"
+        && operation["transport"].is_null()
+        && target.is_some_and(|target| {
+            target.service.inference.is_some()
+                && service.catalog_service_id.as_deref() == Some(target.service.id.as_str())
+                && super::proxy_service::uses_server_held_master(target)
+        })
+}
 
 fn digest(value: Value) -> String {
     mcp_service::canonical_sha256(value)
@@ -175,6 +232,7 @@ async fn check_job_http_inner(
         automatic: None,
         admission: Some(Admission {
             owner_instruction_receipt: false,
+            shared_detached: None,
             shared_permit: None,
             connection: id.to_owned(),
             binding: connection_binding(&state.db, id, &chat.api_key_id).await?,
@@ -314,7 +372,7 @@ async fn check_inner(
             operation["kind"].as_str(),
             Some("raw_inference" | "legacy_inference")
         ) && access.allows_model_connection(&service);
-        if pool || !(access.allows_connection(&service) || model) {
+        if !(access.allows_connection(&service) || model) {
             return Err(AppError::Forbidden(
                 "Shared connection is unavailable".into(),
             ));
@@ -334,7 +392,13 @@ async fn check_inner(
             return Err(AppError::Forbidden("Use the person's exact selected connection; choose a new connection before changing accounts".into()));
         }
         let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
-        if service.user_id == chat.user_id
+        let needs_connection_consent = service.user_id == chat.user_id
+            && !shared_platform_model(chat, &service, operation, target);
+        if pool {
+            super::shared_agent_transport::require_ready(db).await?;
+            pools::pin_shared_pool(db, chat, connection_id, &binding, operation).await?;
+        }
+        if needs_connection_consent
             && let Some(refusal) =
                 super::shared_agent_consent::prompt(db, chat, access, &service, &binding, operation)
                     .await?
@@ -378,7 +442,7 @@ async fn check_inner(
                 });
             }
         }
-        let permit = if service.user_id == chat.user_id {
+        let permit = if needs_connection_consent {
             match super::shared_agent_consent::authorize(
                 db, chat, access, &service, &binding, operation,
             )
@@ -401,6 +465,7 @@ async fn check_inner(
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
                 owner_instruction_receipt: instruction_covered,
+                shared_detached: None,
                 shared_permit: permit,
                 connection: connection_id.into(),
                 binding,
@@ -744,6 +809,7 @@ async fn check_inner(
             refusal: None,
             admission: Some(Admission {
                 owner_instruction_receipt: false,
+                shared_detached: None,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,
@@ -823,6 +889,7 @@ async fn check_inner(
             refusal: None,
             admission: Some(Admission {
                 owner_instruction_receipt: instruction_covered,
+                shared_detached: None,
                 shared_permit: None,
                 connection: connection_id.into(),
                 binding,

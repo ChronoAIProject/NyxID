@@ -1860,6 +1860,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         auth_device_eight_char_codes: false,
         resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
+        chrono_probe_url: None,
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],
         csrf_trusted_origins: vec![],

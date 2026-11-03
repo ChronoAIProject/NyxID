@@ -77,6 +77,10 @@ pub async fn owner_scope(
     if scope.starts_with("nyxa-") {
         engine::get(db, user, scope).await?;
     } else {
+        if super::collaboration_group_service::marked(db, scope).await? {
+            super::collaboration_group_service::get(db, user, scope).await?;
+            return Ok(None);
+        }
         return Ok(Some(
             super::org_group_service::get(db, user, scope, None).await?,
         ));
@@ -255,6 +259,14 @@ async fn store_authorized(
             }
             parent_filter =
                 doc! {"_id":scope,"user_id":&access.group.user_id,"participant_user_ids":user};
+        }
+        if row.group_id.is_some()
+            && access.is_none()
+            && super::collaboration_group_service::marked(db, scope).await?
+        {
+            super::collaboration_group_service::require_available(db, user).await?;
+            parent_filter =
+                doc! {"_id":scope,"participant_user_ids":user,"collaboration.version":1};
         }
         let present = db
             .collection::<bson::Document>(parent)
@@ -509,6 +521,16 @@ pub async fn owner_read(
 ) -> AppResult<(String, Vec<u8>)> {
     let access = owner_scope(db, user, scope).await?;
     let mut filter = scope_filter(user, scope);
+    if !scope.starts_with("nyxa-") && super::collaboration_group_service::marked(db, scope).await? {
+        let published = db
+            .collection::<bson::Document>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
+            .find_one(doc! {"group_id":scope,"collaboration.version":1,"attachments.id":id})
+            .await?
+            .is_some();
+        if published {
+            filter.remove("user_id");
+        }
+    }
     if access.as_ref().is_some_and(|a| a.org.is_some()) {
         filter.remove("user_id");
         filter.insert(
@@ -603,6 +625,9 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
     if chat.guest || chat.turn_stopped || chat.turn_id.is_none() || Uuid::parse_str(id).is_err() {
         return Err(missing());
     }
+    if chat.collaboration_thread {
+        return super::collaboration_group_service::uploads::for_chat(db, chat, id).await;
+    }
     let thread = if let Some(access) = chat.org_agent_access.as_deref() {
         access
             .conversation(db, &chat.user_id, &chat.conversation_id)
@@ -670,7 +695,9 @@ async fn tool_image_for_chat(
     if chat.turn_stopped || chat.turn_id.is_none() || Uuid::parse_str(id).is_err() {
         return Err(missing());
     }
-    let thread = if let Some(access) = chat.org_agent_access.as_deref() {
+    let thread = if chat.collaboration_thread {
+        super::collaboration_group_service::uploads::thread(db, chat).await?
+    } else if let Some(access) = chat.org_agent_access.as_deref() {
         access
             .conversation(db, &chat.user_id, &chat.conversation_id)
             .await?
@@ -832,6 +859,10 @@ pub async fn list_for_chat(
 ) -> AppResult<Value> {
     if chat.guest || chat.turn_stopped || chat.turn_id.is_none() {
         return Err(missing());
+    }
+    if chat.collaboration_thread {
+        return super::collaboration_group_service::uploads::list_for_chat(db, chat, cursor, limit)
+            .await;
     }
     let thread = engine::get(db, &chat.user_id, &chat.conversation_id).await?;
     if thread.guest_turn

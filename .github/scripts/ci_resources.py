@@ -129,6 +129,7 @@ def run(label, command, interval=30, cancellation_grace=10):
 
     child = None
     received_signal = None
+    cancellation_deadline = None
     signal_errors = []
 
     def signal_child_group(signum):
@@ -142,9 +143,14 @@ def run(label, command, interval=30, cancellation_grace=10):
             signal_errors.append({"signal": signum, "errno": error.errno})
 
     def forward(signum, _frame):
-        nonlocal received_signal
-        received_signal = signum
+        nonlocal received_signal, cancellation_deadline
+        if received_signal is None:
+            received_signal = signum
         if child is not None:
+            # Start one group-wide grace period on the first forwarded signal.
+            # Further cancellation signals must not extend the shutdown bound.
+            if cancellation_deadline is None:
+                cancellation_deadline = time.monotonic() + cancellation_grace
             signal_child_group(signum)
 
     previous_handlers = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -168,23 +174,39 @@ def run(label, command, interval=30, cancellation_grace=10):
         sampler.start()
         while True:
             try:
-                code = child.wait(timeout=1)
+                code = child.wait(timeout=.1)
                 break
             except subprocess.TimeoutExpired:
                 if received_signal is not None:
-                    try:
-                        code = child.wait(timeout=cancellation_grace)
-                    except subprocess.TimeoutExpired:
-                        signal_child_group(signal.SIGKILL)
-                        try:
-                            code = child.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            code = -signal.SIGKILL
                     break
-        # Clean up descendants even if Cargo exits before its subprocesses do.
-        if received_signal is not None or code < 0:
+        if received_signal is not None:
+            # Reaping the direct child says nothing about its descendants. They
+            # received the same signal and must get the remainder of the grace
+            # period, even if the parent handles TERM by immediately exiting 0.
+            while True:
+                child.poll()
+                try:
+                    os.killpg(child.pid, 0)
+                except ProcessLookupError:
+                    break
+                except OSError as error:
+                    signal_errors.append({"signal": 0, "errno": error.errno})
+                    break
+                remaining = cancellation_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(.05, remaining))
             signal_child_group(signal.SIGKILL)
-            code = 128 + received_signal if received_signal is not None else 128 - code
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            code = 128 + received_signal
+        elif code < 0:
+            # A child killed independently of wrapper cancellation still fails
+            # the step and must not leave its descendants running.
+            signal_child_group(signal.SIGKILL)
+            code = 128 - code
         if signal_errors:
             emit("signal_delivery_errors", errors=signal_errors)
         usage = resource.getrusage(resource.RUSAGE_CHILDREN)

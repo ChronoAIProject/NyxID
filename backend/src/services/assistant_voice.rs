@@ -58,15 +58,14 @@ pub fn validate_preferences(p: &VoicePreferences) -> AppResult<()> {
 pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantConversation> {
     let row = super::assistant_nyxagent::get(db, user, id).await?;
     private_thread(&row)?;
+    if row.shared_agent_thread {
+        super::shared_agent_transport::require_ready(db).await?;
+        crate::mw::auth::api_key_auth_user_for_voice(db, &row).await?;
+    }
     Ok(row)
 }
 
 pub(crate) fn private_thread(row: &AssistantConversation) -> AppResult<()> {
-    if row.shared_agent_thread {
-        return Err(AppError::Forbidden(
-            "Shared agents support text conversations; voice sessions are unavailable".into(),
-        ));
-    }
     if row.channel.is_some() || row.group_id.is_some() || row.automation_thread || row.guest_turn {
         return Err(AppError::Forbidden(
             "Voice requires a private owner thread".into(),
@@ -240,7 +239,7 @@ pub(crate) async fn enqueue_in_session(
         db.collection::<AssistantMessage>(MESSAGES)
             .update_one(
                 doc! {"_id":&request.message_id},
-                doc! {"$set":{"turn_id":&request.turn_id,"voice.request_id":&request.id}},
+                doc! {"$set":{"turn_id":&request.turn_id,"voice.request_id":&request.id,"origin":"user"}},
             )
             .session(&mut *session)
             .await?;
@@ -414,9 +413,9 @@ pub(crate) async fn publish_result(
         platform_origin: None,
         report_to: None,
         continuation_of: None,
-        retry_of: None,
+        retry_of: source.retry_of.clone(),
                         retry_claimed_by: None,
-                        activity_count: None,
+                        activity_count: source.activity_count,
                         specialist_id: None,
                         steering: None,
                         author: None,
@@ -491,7 +490,10 @@ pub(crate) async fn claim(
     private_thread(&visible)?;
     if row.id != visible.id
         && (request.task_conversation_id.as_deref() != Some(&row.id)
-            || !row.automation_thread
+            || !(row.automation_thread
+                || row.shared_agent_thread
+                    && visible.shared_agent_thread
+                    && row.voice_parent_conversation_id.as_deref() == Some(visible.id.as_str()))
             || row.agent_id != visible.agent_id
             || row.agent_owner_id != visible.agent_owner_id)
     {
@@ -863,7 +865,7 @@ async fn settle_lost_in_session(
     requests
         .update_one(
             doc! {"_id": &row.id, "state": {"$in": ["claimed", "awaiting_confirmation"]}},
-            doc! {"$set": {"state": "cancelled", "pending_acknowledgement_ids": []}},
+            doc! {"$set": {"state": "cancelled", "terminal_error_code":"turn_lost", "pending_acknowledgement_ids": []}},
         )
         .session(&mut *session)
         .await?;
@@ -1039,7 +1041,8 @@ pub async fn recover(db: &Database) -> AppResult<()> {
                             .update_one(
                                 doc! {"_id":&row.id},
                                 doc! {"$set":{
-                                    "state":"cancelled","pending_acknowledgement_ids":[]
+                                    "state":"cancelled","pending_acknowledgement_ids":[],
+                                    "terminal_error_code":if row.state == RequestState::AwaitingConfirmation {"confirmation_expired"} else {"voice_request_expired"}
                                 }},
                             )
                             .session(&mut *session)
@@ -1208,11 +1211,17 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                 // The original task is the cancellation fence even after its first
                 // turn settled. Every later continuation checks this same root.
                 requests
-                    .update_one(doc! {"_id":root}, doc! {"$set":{"state":"cancelled"}})
+                    .update_one(
+                        doc! {"_id":root},
+                        doc! {"$set":{"state":"cancelled","terminal_error_code":"cancelled"}},
+                    )
                     .session(&mut *session)
                     .await?;
                 requests
-                    .update_many(family, doc! {"$set":{"state":"cancelled"}})
+                    .update_many(
+                        family,
+                        doc! {"$set":{"state":"cancelled","terminal_error_code":"cancelled"}},
+                    )
                     .session(&mut *session)
                     .await?;
                 super::async_service_operation::cancel_voice_in_session(&db, &user, root, session)
@@ -1527,4 +1536,20 @@ async fn audio_options(
         }
     }
     Ok(options)
+}
+
+/// Additive outcome over the legacy terminal bucket: old replicas still parse
+/// cancelled, while new clients distinguish a failed task from an explicit Stop.
+pub(crate) fn request_outcome(request: &VoiceRequest) -> Option<&'static str> {
+    (request.state == RequestState::Cancelled).then(|| {
+        if request
+            .terminal_error_code
+            .as_deref()
+            .is_some_and(|code| code != "cancelled")
+        {
+            "failed"
+        } else {
+            "cancelled"
+        }
+    })
 }

@@ -255,6 +255,7 @@ pub async fn control(
 
 #[derive(Serialize)]
 pub struct RequestResponse {
+    outcome: Option<&'static str>,
     pending_acknowledgement_ids: Vec<String>,
     id: String,
     state: crate::models::assistant_voice::RequestState,
@@ -269,6 +270,7 @@ pub async fn request(
     let user = auth.user_id.to_string();
     let row = voice::get(&state.db, &user, &id, &rid).await?;
     Ok(Json(RequestResponse {
+        outcome: voice::request_outcome(&row),
         pending_acknowledgement_ids: row.pending_acknowledgement_ids,
         id: row.id,
         state: row.state,

@@ -169,6 +169,24 @@ nyxid node credentials add \
   --query-param "api_key=sk_live_..."
 ```
 
+### Move an existing node-managed endpoint
+
+With an existing local credential and an owner login to the node's NyxID server:
+
+```bash
+nyxid node credentials set-url --service monitor --url http://new-monitor:8080
+```
+
+`set-url` updates the matching service's server endpoint and requests local target synchronization through the running node, without prompting for, uploading, or replacing its secret. The service must already be registered on this node as `node_managed`. Use the matching CLI login profile (`NYXID_PROFILE`) or `NYXID_ACCESS_TOKEN`; a node authentication token cannot authorize an owner edit. `credentials setup` also supports endpoint updates for an existing registration.
+
+From another machine, use `nyxid service update <service-id> --endpoint-url <url>`, or `PUT /api/v1/keys/{service-id}` with only `{"endpoint_url":"http://new-monitor:8080"}`. The endpoint API accepts the equivalent `PUT /api/v1/endpoints/{endpoint-id}` with `{"url":"http://new-monitor:8080"}`. Both require owner/org write access to the affected services and nodes. IDs, grants, agent bindings and operation scopes stay attached to the same records. Exact execution approvals still revalidate the changed destination and may require new approval.
+
+A nonempty server URL is authoritative for proxy routing, even on older or offline nodes. Responses report `node_target_sync` per affected service: `synced`, `offline`, `unsupported`, or `unconfirmed` (with a metadata revision). Offline/unsupported/unconfirmed sync does not roll back that URL. Upgrade/reconnect the node and repeat the same endpoint-only PUT to retry local sync; it is not queued for automatic replay. `credentials add`, including `add --service <slug> --url <url>` on an existing credential, keeps its interactive auth-method/header/secret prompts and replaces the local credential without an owner login; its local `--url` does not override a nonempty server URL.
+
+An explicit `set-url --service <slug> --url ""` is allowed. Clearing a node-managed URL to `""` would enable the local-target fallback. It therefore requires an online node advertising metadata-update support to acknowledge the local clear **before** the server commits. A failed clear leaves the server URL unchanged. Revision fences reject superseded endpoint writes and delayed metadata messages, including a delayed nonempty update after a clear. This does not change HTTP(S)/SSH URL validation or the legacy empty-URL behavior for services not undergoing a node-managed migration.
+
+Auth method, auth key name and node changes remain rejected without supplying a new credential to promote it to server-held storage. Do not supply `credential` when the intent is to keep the secret node-local.
+
 ### List Credentials
 
 ```bash

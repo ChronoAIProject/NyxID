@@ -81,6 +81,7 @@ export function useGuestReadiness(agentId: string | undefined, enabled: boolean,
   return useQuery({
     queryKey: nyxBotQueryKeys.guestReadiness(userId, agentId, conversationId),
     queryFn: () => nyxBotApi.guestReadiness(agentId!, conversationId),
+    refetchInterval: (query) => query.state.data?.status === "setting_up" ? 2_000 : false,
     enabled: enabled && Boolean(userId && agentId),
     staleTime: 30_000,
     retry: false,
@@ -198,6 +199,15 @@ export function useSetNyxBotPrivateChats() {
       channelAgentId: string;
       privateChats: "owner" | "everyone";
     }) => nyxBotApi.setPrivateChats(channelAgentId, privateChats),
+    true,
+  );
+}
+
+export function useSetNyxBotPrivateChatPosts() {
+  return useAgentsMutation(
+    ({ channelAgentId, enabled, applyToExisting }: {
+      channelAgentId: string; enabled: boolean; applyToExisting: boolean;
+    }) => nyxBotApi.setPrivateChatPosts(channelAgentId, enabled, applyToExisting),
     true,
   );
 }

@@ -1,27 +1,60 @@
 //! Durable, metadata-only setup notices. Content is rendered from closed codes.
+#[cfg(test)]
 use super::model_diagnostic::Reason;
 use super::*;
 pub const KIND: &str = "guest_model_setup_notice";
 
-pub(super) async fn enqueue(
+#[cfg(test)]
+pub(crate) async fn enqueue(
     db: &Database,
     chat: &acks::ChatAuthority,
     reason: Reason,
 ) -> AppResult<()> {
+    enqueue_setup_failure(db, chat, &reason.code(), reason.fix()).await
+}
+
+#[cfg(test)]
+pub(crate) async fn enqueue_setup_failure(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    code: &str,
+    fix: &str,
+) -> AppResult<()> {
+    enqueue_failure(db, &chat.user_id, &chat.agent_id, code, fix).await
+}
+
+pub(crate) async fn enqueue_failure(
+    db: &Database,
+    actor: &str,
+    agent_id: &str,
+    code: &str,
+    fix: &str,
+) -> AppResult<()> {
     // Use the agent row as the cross-replica serialization fence. Claim and
     // notice insertion are atomic; a crash cannot consume a notification.
-    let context = (db.clone(), chat.clone(), reason);
-    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,chat,reason)| Box::pin(async move {
-        crate::services::erasure_admission::fence_in_session(db,&chat.user_id,tx).await?;
-        let code = reason.code();
-        let field = format!("guest_model_notices.{code}");
-        let mut filter = doc! {"_id":&chat.agent_id,"user_id":&chat.user_id,"destroyed_at":null};
+    let agent = crate::services::assistant_team_service::agent(db, actor, agent_id).await?;
+    if !crate::services::assistant_guest_model_setup::eligible(db, actor, &agent).await? {
+        return Ok(());
+    }
+    let context = (
+        db.clone(),
+        actor.to_owned(),
+        agent_id.to_owned(),
+        code.to_owned(),
+        fix.to_owned(),
+        agent.user_id,
+    );
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,agent_id,code,fix,agent_owner)| Box::pin(async move {
+        crate::services::erasure_admission::fence_in_session(db,actor,tx).await?;
+        // Keep the existing flat map of timestamps readable by older replicas.
+        let field = format!("guest_model_notices.{}_{code}",crate::crypto::token::hash_token(actor));
+        let mut filter = doc! {"_id":agent_id,"user_id":agent_owner,"destroyed_at":null};
         filter.insert("$or",vec![doc! {&field:null}, doc! {&field:{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::hours(24))}}]);
         let claim=db.collection::<Document>("assistant_agents").update_one(filter,doc! {"$set":{&field:bson::DateTime::now()}}).session(&mut *tx).await?;
         if claim.modified_count == 0 {return Ok(());}
         db.collection::<Document>(COLLECTION).insert_one(doc! {
-            "_id":uuid::Uuid::new_v4().to_string(),"kind":KIND,"user_id":&chat.user_id,
-            "agent_id":&chat.agent_id,"reason":code,"fix":reason.fix(),"pending":true,
+            "_id":uuid::Uuid::new_v4().to_string(),"kind":KIND,"user_id":actor,
+            "agent_id":agent_id,"reason":code,"fix":fix,"pending":true,
             "created_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(48)),
         }).session(tx).await?;
         Ok(())
@@ -125,7 +158,7 @@ mod tests {
                 .unwrap(),
             2
         );
-        f.state.db.collection::<Document>("assistant_agents").update_one(doc! {"_id":&f.chat.agent_id},doc! {"$set":{"guest_model_notices.route_mismatch":bson::DateTime::from_chrono(Utc::now()-Duration::hours(25))}}).await.unwrap();
+        f.state.db.collection::<Document>("assistant_agents").update_one(doc! {"_id":&f.chat.agent_id},doc! {"$set":{format!("guest_model_notices.{}_route_mismatch",crate::crypto::token::hash_token(&f.owner)):bson::DateTime::from_chrono(Utc::now()-Duration::hours(25))}}).await.unwrap();
         enqueue(&f.state.db, &f.chat, Reason::RouteMismatch)
             .await
             .unwrap();
