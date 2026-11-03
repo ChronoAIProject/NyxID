@@ -749,9 +749,10 @@ export function AccountSecurityScreen() {
         ) : sessions.data?.length === 0 ? (
           <Label muted>No active sessions found.</Label>
         ) : (
-          sessions.data?.map((session) => (
+          sessions.data?.map((session, index) => (
             <SessionAccordion
               key={session.id}
+              first={index === 0}
               session={session}
               expanded={expandedSession === session.id}
               onToggle={() =>

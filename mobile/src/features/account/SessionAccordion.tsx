@@ -23,6 +23,7 @@ export function SessionAccordion({
   onSignOut,
   signOutDisabled,
   signingOut,
+  first = false,
 }: {
   session: Session;
   expanded: boolean;
@@ -31,12 +32,20 @@ export function SessionAccordion({
   onSignOut: () => void;
   signOutDisabled: boolean;
   signingOut: boolean;
+  /** The first row sits flush with its card, so it draws no divider. */
+  first?: boolean;
 }) {
   const { colors } = useTheme();
   const device = sessionDeviceLabel(session.user_agent);
   const Chevron = expanded ? ChevronUp : ChevronDown;
   return (
-    <View style={[styles.item, { borderTopColor: colors.border }]}>
+    <View
+      style={[
+        styles.item,
+        { borderTopColor: colors.border },
+        first && { borderTopWidth: 0 },
+      ]}
+    >
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${device}${session.is_current ? ", this session" : ""}, signed in ${formatDate(session.created_at)}`}
