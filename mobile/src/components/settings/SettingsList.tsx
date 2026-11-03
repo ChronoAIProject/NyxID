@@ -139,6 +139,7 @@ export function SettingsRow({
   leading,
   label,
   detail,
+  detailLines,
   value,
   accessory,
   onPress,
@@ -160,6 +161,8 @@ export function SettingsRow({
   leading?: ReactNode;
   label: string;
   detail?: string;
+  /** Clamp a long detail line (catalog descriptions) to this many lines. */
+  detailLines?: number;
   value?: string;
   accessory?: ReactNode;
   onPress?: () => void;
@@ -229,7 +232,10 @@ export function SettingsRow({
             {label}
           </Text>
           {detail ? (
-            <Text style={[styles.detail, { color: colors.textMuted }]}>
+            <Text
+              numberOfLines={detailLines}
+              style={[styles.detail, { color: colors.textMuted }]}
+            >
               {detail}
             </Text>
           ) : null}

@@ -3,18 +3,17 @@ import {
   Keyboard,
   Pressable,
   StyleSheet,
-  Text,
   TextInput,
   View,
 } from "react-native";
-import { BookOpen, Check, ChevronRight, Search, X } from "lucide-react-native";
+import { BookOpen, Search, X } from "lucide-react-native";
 import { SegmentControl } from "../../components/SegmentControl";
 import {
-  ActionButton,
-  Label,
-  Notice,
-} from "../../components/workspace/WorkspaceUI";
-import { fonts } from "../../theme/designTokens";
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import { Notice } from "../../components/workspace/WorkspaceUI";
+import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import type { CatalogSkill } from "./pluginSkillsTypes";
 
@@ -77,6 +76,7 @@ export function SkillLibrary({
     searchable(`${skill.name} ${skill.description}`).includes(needle),
   );
   const list = tab === "added" ? added : catalog;
+  const addedTitle = `Added to this agent${added.known ? ` · ${added.items.length} of 16` : ""}`;
   return (
     <View style={styles.stack}>
       <SegmentControl
@@ -99,20 +99,13 @@ export function SkillLibrary({
         }}
         style={styles.tabs}
       />
-      <View
-        style={[
-          styles.search,
-          { backgroundColor: colors.card, borderColor: colors.border },
-        ]}
-      >
-        <Search size={18} color={colors.textMuted} accessible={false} />
+      <View style={[styles.search, { backgroundColor: colors.card }]}>
+        <Search size={17} color={colors.textMuted} accessible={false} />
         <TextInput
           accessibilityLabel={
             tab === "added" ? "Search added skills" : "Search skill catalog"
           }
-          placeholder={
-            tab === "added" ? "Search added skills…" : "Search skill catalog…"
-          }
+          placeholder={tab === "added" ? "Search added skills" : "Search catalog"}
           placeholderTextColor={colors.textMuted}
           selectionColor={colors.primary}
           value={query}
@@ -131,36 +124,20 @@ export function SkillLibrary({
             onPress={() => onQueryChange("")}
             style={styles.clear}
           >
-            <X size={17} color={colors.textSecondary} />
+            <X size={16} color={colors.textMuted} />
           </Pressable>
         )}
       </View>
-      <View style={styles.heading}>
-        <Text
-          accessibilityRole="header"
-          style={[styles.sectionTitle, { color: colors.textPrimary }]}
-        >
-          {tab === "added" ? "Added to this agent" : "Skill catalog"}
-        </Text>
-        {tab === "added" && added.known && (
-          <Label muted style={styles.caption}>
-            {added.items.length} of 16
-          </Label>
-        )}
-      </View>
-      <Text style={[styles.help, { color: colors.textSecondary }]}>
-        {tab === "added"
-          ? "Open a skill to view its instructions or manage its version."
-          : `Find a skill for ${agentName}. Review its version before adding.`}
-      </Text>
       {list.error && (
         <>
           <Notice tone="error" message={list.error} />
-          <ActionButton
-            label={tab === "added" ? "Reload skills" : "Retry skill catalog"}
-            variant="secondary"
-            onPress={list.onRetry}
-          />
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              label={tab === "added" ? "Reload skills" : "Retry skill catalog"}
+              tone="action"
+              onPress={list.onRetry}
+            />
+          </SettingsGroup>
         </>
       )}
       {list.loading && (
@@ -172,106 +149,95 @@ export function SkillLibrary({
         />
       )}
       {tab === "added" ? (
-        <>
-          {filtered.map((item) => (
-            <SkillListRow
-              key={item.id}
-              item={item}
-              onPress={() => onOpenSkill(item.id, item.name, item.description)}
-            />
-          ))}
-          {added.known &&
-            !added.loading &&
-            !added.error &&
-            !filtered.length && (
-              <View
-                style={[styles.empty, { backgroundColor: colors.cardSoft }]}
-              >
-                <BookOpen size={26} color={colors.primary} />
-                <Text
-                  style={[styles.emptyTitle, { color: colors.textPrimary }]}
-                >
-                  {needle ? "No matching added skills" : "No skills added yet"}
-                </Text>
-                <Text
-                  style={[
-                    styles.help,
-                    styles.center,
-                    { color: colors.textSecondary },
-                  ]}
-                >
-                  {needle
-                    ? "Try a different name or description, or search the catalog."
-                    : "Add a skill to teach this agent a workflow. Skills do not grant service access."}
-                </Text>
-                <ActionButton
-                  label="Discover skills"
-                  variant="secondary"
-                  onPress={() => {
-                    Keyboard.dismiss();
-                    onTabChange("discover");
-                  }}
-                />
-              </View>
-            )}
-        </>
+        filtered.length ? (
+          <SettingsGroup
+            title={addedTitle}
+            footer="Open a skill to view its instructions or manage its version."
+          >
+            {filtered.map((item) => (
+              <SkillListRow
+                key={item.id}
+                item={item}
+                onPress={() => onOpenSkill(item.id, item.name, item.description)}
+              />
+            ))}
+          </SettingsGroup>
+        ) : (
+          added.known &&
+          !added.loading &&
+          !added.error && (
+            <SettingsGroup
+              title={addedTitle}
+              footer={
+                needle
+                  ? "Try a different name or description, or search the catalog."
+                  : "Add a skill to teach this agent a workflow. Skills do not grant service access."
+              }
+            >
+              <SettingsRow
+                icon={BookOpen}
+                label={needle ? "No matching added skills" : "No skills added yet"}
+              />
+              <SettingsRow
+                label="Discover skills"
+                tone="action"
+                onPress={() => {
+                  Keyboard.dismiss();
+                  onTabChange("discover");
+                }}
+              />
+            </SettingsGroup>
+          )
+        )
       ) : (
         <>
-          {catalog.items.map((item) => (
-            <SkillListRow
-              key={item.id}
-              item={item}
-              attached={added.items.some((pin) => pin.id === item.id)}
-              onPress={() => onOpenSkill(item.id, item.name, item.description)}
-            />
-          ))}
-          {catalog.known &&
+          {catalog.items.length ? (
+            <SettingsGroup
+              title="Skill catalog"
+              footer={`Find a skill for ${agentName}. Review its version before adding.`}
+            >
+              {catalog.items.map((item) => (
+                <SkillListRow
+                  key={item.id}
+                  item={item}
+                  attached={added.items.some((pin) => pin.id === item.id)}
+                  onPress={() =>
+                    onOpenSkill(item.id, item.name, item.description)
+                  }
+                />
+              ))}
+            </SettingsGroup>
+          ) : (
+            catalog.known &&
             !catalog.loading &&
-            !catalog.error &&
-            !catalog.items.length && (
-              <View
-                style={[styles.empty, { backgroundColor: colors.cardSoft }]}
+            !catalog.error && (
+              <SettingsGroup
+                title="Skill catalog"
+                footer="Try another keyword. Only skills available through your Ornn access appear here."
               >
-                <Search size={26} color={colors.textMuted} />
-                <Text
-                  style={[styles.emptyTitle, { color: colors.textPrimary }]}
-                >
-                  No skills found
-                </Text>
-                <Text
-                  style={[
-                    styles.help,
-                    styles.center,
-                    { color: colors.textSecondary },
-                  ]}
-                >
-                  Try another keyword. Only skills available through your Ornn
-                  access appear here.
-                </Text>
-              </View>
-            )}
+                <SettingsRow icon={Search} label="No skills found" />
+              </SettingsGroup>
+            )
+          )}
           {catalog.known && totalPages > 1 && (
-            <View style={styles.pagination}>
-              <View style={styles.flex}>
-                <ActionButton
-                  label="Previous"
-                  variant="secondary"
-                  disabled={catalog.loading || page <= 1}
-                  onPress={() => onPageChange(page - 1)}
-                />
-              </View>
-              <Label muted style={styles.caption}>
-                {page} / {totalPages}
-              </Label>
-              <View style={styles.flex}>
-                <ActionButton
-                  label="Next"
-                  variant="secondary"
-                  disabled={catalog.loading || page >= totalPages}
-                  onPress={() => onPageChange(page + 1)}
-                />
-              </View>
-            </View>
+            <SettingsGroup title={`Page ${page} / ${totalPages}`} inset={false}>
+              <SettingsRow
+                label="Previous"
+                tone="action"
+                accessibilityLabel="Previous"
+                accessibilityHint="Shows the previous page of results"
+                disabled={catalog.loading || page <= 1}
+                onPress={() => onPageChange(page - 1)}
+              />
+              <SettingsRow
+                label="Next"
+                tone="action"
+                accessibilityLabel="Next"
+                accessibilityHint="Shows the next page of results"
+                disabled={catalog.loading || page >= totalPages}
+                onPress={() => onPageChange(page + 1)}
+              />
+            </SettingsGroup>
           )}
         </>
       )}
@@ -279,6 +245,7 @@ export function SkillLibrary({
   );
 }
 
+/** A skill row: name, two-line description, and its pinned version or state. */
 function SkillListRow({
   item,
   attached,
@@ -288,7 +255,6 @@ function SkillListRow({
   attached?: boolean;
   onPress: () => void;
 }) {
-  const { colors } = useTheme();
   const pin = "version" in item ? item : undefined;
   const state = pin
     ? pin.disabled
@@ -298,89 +264,47 @@ function SkillListRow({
       ? "Added"
       : "View versions";
   return (
-    <Pressable
-      accessibilityRole="button"
+    <SettingsRow
+      icon={BookOpen}
+      label={skillDisplayName(item.name)}
+      detail={
+        item.description?.trim() ||
+        "Open this skill to review its details and available versions."
+      }
+      detailLines={2}
+      value={
+        pin
+          ? pin.disabled
+            ? `${pin.version} · Disabled`
+            : pin.version
+          : attached
+            ? "Added"
+            : undefined
+      }
       accessibilityLabel={`${item.name}${pin ? `, version ${pin.version}` : ""}, ${state}`}
       accessibilityHint="View skill details"
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.skill,
-        {
-          backgroundColor: pressed ? colors.cardSoft : colors.card,
-          borderColor: colors.border,
-        },
-      ]}
-    >
-      <View style={styles.skillTop}>
-        <View style={[styles.icon, { backgroundColor: colors.primaryTone.bg }]}>
-          <BookOpen size={18} color={colors.primaryOnTint} />
-        </View>
-        <Text
-          numberOfLines={2}
-          style={[styles.skillName, { color: colors.textPrimary }]}
-        >
-          {skillDisplayName(item.name)}
-        </Text>
-        <ChevronRight size={17} color={colors.textMuted} />
-      </View>
-      <Text
-        numberOfLines={2}
-        style={[styles.description, { color: colors.textSecondary }]}
-      >
-        {item.description?.trim() ||
-          "Open this skill to review its details and available versions."}
-      </Text>
-      <View style={styles.metadata}>
-        {pin && (
-          <Text
-            style={[
-              styles.version,
-              { backgroundColor: colors.cardSoft, color: colors.textSecondary },
-            ]}
-          >
-            Version {pin.version}
-          </Text>
-        )}
-        {attached && <Check size={13} color={colors.success} />}
-        <Text
-          style={[
-            styles.caption,
-            {
-              color: pin?.disabled
-                ? colors.textMuted
-                : attached
-                  ? colors.success
-                  : colors.textSecondary,
-            },
-          ]}
-        >
-          {state}
-        </Text>
-      </View>
-    </Pressable>
+    />
   );
 }
 
 const styles = StyleSheet.create({
-  stack: { gap: 12 },
+  stack: { gap: spacing.lg },
   tabs: { marginBottom: 0 },
   search: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 9,
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingLeft: 12,
-    paddingRight: 4,
+    gap: spacing.sm - 2,
+    borderRadius: radius.md + 2,
+    paddingLeft: spacing.md,
+    paddingRight: spacing.xs,
   },
   searchInput: {
     flex: 1,
     minWidth: 0,
-    minHeight: 46,
-    fontFamily: fonts.body,
-    fontSize: 13,
-    lineHeight: 20,
-    paddingVertical: 10,
+    minHeight: 40,
+    paddingVertical: spacing.sm,
+    ...typeScale.label,
   },
   clear: {
     minWidth: 44,
@@ -388,56 +312,4 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
   },
-  heading: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-    marginTop: 6,
-  },
-  sectionTitle: {
-    fontFamily: fonts.bodySemi,
-    fontSize: 14,
-    lineHeight: 20,
-    flexShrink: 1,
-  },
-  help: { fontFamily: fonts.bodyRegular, fontSize: 12, lineHeight: 18 },
-  caption: { fontFamily: fonts.body, fontSize: 11, lineHeight: 17 },
-  skill: { borderWidth: 1, borderRadius: 12, padding: 14, gap: 10 },
-  skillTop: { flexDirection: "row", alignItems: "center", gap: 10 },
-  skillName: {
-    flex: 1,
-    minWidth: 0,
-    fontFamily: fonts.bodySemi,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  icon: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-  },
-  description: { fontFamily: fonts.bodyRegular, fontSize: 12, lineHeight: 18 },
-  metadata: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    flexWrap: "wrap",
-  },
-  version: {
-    fontFamily: fonts.mono,
-    fontSize: 10,
-    lineHeight: 16,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 5,
-  },
-  empty: { padding: 20, gap: 10, alignItems: "center", borderRadius: 12 },
-  emptyTitle: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 20 },
-  center: { textAlign: "center" },
-  flex: { flex: 1 },
-  pagination: { flexDirection: "row", alignItems: "center", gap: 10 },
 });

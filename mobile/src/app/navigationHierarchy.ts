@@ -204,7 +204,7 @@ const contentParent = (name: string) =>
           ? "Automations"
           : name === "ActivityDetail"
             ? "Activity"
-            : name === "ServiceSetup"
+            : name === "ServiceSetup" || name === "ConnectionHistoryDetail"
               ? "Plugins"
               : [
                     "AgentDetail",

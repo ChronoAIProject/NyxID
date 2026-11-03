@@ -5,6 +5,7 @@ import { hookHarness } from "../assistant/assistantHookTestHarness";
 import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
 import type { AddedSkillItem } from "./SkillLibrary";
 import type { CatalogSkill } from "./pluginSkillsTypes";
+import * as designTokens from "../../theme/designTokens";
 
 type Element = { type: unknown; props: Record<string, any> };
 
@@ -38,8 +39,15 @@ function elements(root: Element): Element[] {
   ];
 }
 
+// Settings rows and groups carry their visible text in props, not children.
+const TEXT_PROPS = ["title", "label", "detail", "value", "footer"];
 function textContent(root: Element): string {
-  return [root.props.children]
+  return [
+    ...TEXT_PROPS.map((name) =>
+      typeof root.props[name] === "string" ? root.props[name] : "",
+    ),
+    root.props.children,
+  ]
     .flat(Infinity)
     .map((child) =>
       child && typeof child === "object" && "props" in child
@@ -102,20 +110,17 @@ function setup(overrides: Record<string, unknown> = {}) {
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "lucide-react-native": Object.fromEntries(
-      ["BookOpen", "Check", "ChevronRight", "Search", "X"].map((name) => [
-        name,
-        name,
-      ]),
+      ["BookOpen", "Search", "X"].map((name) => [name, name]),
     ),
-    "../../components/workspace/WorkspaceUI": {
-      ActionButton: "ActionButton",
-      Label: "Label",
-      Notice: "Notice",
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
     },
+    "../../components/workspace/WorkspaceUI": { Notice: "Notice" },
     "../../components/SegmentControl": {
       SegmentControl: renderSegmentControl,
     },
-    "../../theme/designTokens": { fonts: {} },
+    "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": {
       useTheme: () => ({ colors: { primaryTone: {} } }),
     },
@@ -186,10 +191,12 @@ test("Added gives readable names, descriptions and exact package versions with s
   assert.match(env.text(), /2 of 16/);
   assert.match(env.text(), /Cloudflare dns helper/);
   assert.match(env.text(), /Safely review and update DNS records/);
-  assert.match(env.text(), /Version 2026\.10-exactEnabled/);
   assert.match(env.text(), /Weekly report/);
-  assert.match(env.text(), /Version 1\.0\.3Disabled/);
   assert.equal(env.rows().length, 2);
+  assert.deepEqual(
+    env.rows().map((row) => row.props.value),
+    ["2026.10-exact", "1.0.3 · Disabled"],
+  );
   assert.equal(
     env.control("Added skills").props.accessibilityState.selected,
     true,
@@ -362,7 +369,7 @@ test("empty Added and local search no-match explain the next action independentl
   assert.match(added.text(), /Skills do not grant service access/);
   const discover = elements(added.tree).find(
     (item) =>
-      item.type === "ActionButton" && item.props.label === "Discover skills",
+      item.type === "SettingsRow" && item.props.label === "Discover skills",
   )!;
   discover.props.onPress();
   assert.deepEqual(added.calls, [

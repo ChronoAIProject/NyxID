@@ -62,6 +62,7 @@ import { WorkspaceDrawerHeader } from "../components/workspace/WorkspaceDrawerHe
 import { ActivityScreen } from "../features/activity/ActivityScreen";
 import { PluginSkillPage } from "../features/plugins/PluginSkills";
 import { AuthoredSkillPage } from "../features/plugins/NativeAuthoredSkillReview";
+import { ConnectionHistoryDetailScreen } from "../features/plugins/PluginConnectionHistory";
 import { ActivityDetailScreen } from "../features/activity/ActivityDetailScreen";
 import { AssistantScreen } from "../features/assistant/AssistantScreen";
 import { AssistantLinkHost } from "../features/assistant/AssistantLinkHost";
@@ -453,6 +454,11 @@ function WorkspaceNavigator() {
         name="PluginConnections"
         component={PluginConnectionsRoute}
         options={{ title: "Connections" }}
+      />
+      <ContentStack.Screen
+        name="ConnectionHistoryDetail"
+        component={ConnectionHistoryDetailScreen}
+        options={({ route }) => ({ title: route.params.title })}
       />
       <ContentStack.Screen
         name="ActiveGrants"
