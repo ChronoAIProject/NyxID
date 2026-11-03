@@ -101,11 +101,15 @@ function setup(overrides: Record<string, unknown> = {}) {
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "lucide-react-native": {
-      ChevronRight: "ChevronRight",
       RefreshCw: "RefreshCw",
       ShieldCheck: "ShieldCheck",
     },
     "../../components/ChallengeCard": { ChallengeCard: "ChallengeCard" },
+    "../../components/GroupedCell": { GroupedCell: "GroupedCell" },
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
     "../../components/HistoryCard": {
       HistoryCard: "HistoryCard",
       HistorySectionHeader: "HistorySectionHeader",
@@ -151,6 +155,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     root.props.renderItem({
       item: section(key).data[index],
       section: section(key),
+      index,
     }) as Element;
   const find = (tree: Element, label: string) => {
     const found = elements(tree).find(
@@ -159,8 +164,16 @@ function setup(overrides: Record<string, unknown> = {}) {
     assert.ok(found, `Expected control: ${label}`);
     return found;
   };
+  const grantsRow = () => {
+    const found = elements(root.props.ListHeaderComponent).find(
+      (item) => item.props.label === "Active grants",
+    );
+    assert.ok(found, "Expected the Active grants row");
+    return found;
+  };
   return {
     root,
+    grantsRow,
     sections,
     section,
     header,
@@ -183,13 +196,9 @@ test("one inbox contains pending and history with server totals and a secondary 
     ["Incoming", "History"],
   );
   assert.match(textContent(env.header("pending")), /43/);
-  assert.match(
-    textContent(env.root.props.ListHeaderComponent),
-    /Active grants · 27/,
-  );
-  env
-    .find(env.root.props.ListHeaderComponent, "View active grants")
-    .props.onPress();
+  assert.equal(env.grantsRow().type, "SettingsRow");
+  assert.equal(env.grantsRow().props.value, "27");
+  env.grantsRow().props.onPress();
   assert.deepEqual(env.callbacks, [{ type: "grants", args: [] }]);
   const visible =
     textContent(env.root.props.ListHeaderComponent) +
@@ -430,14 +439,7 @@ test("manual refresh and pull-to-refresh remain separate signals and unknown gra
     refreshing: true,
     pulling: false,
   });
-  assert.match(
-    textContent(env.root.props.ListHeaderComponent),
-    /Active grants/,
-  );
-  assert.doesNotMatch(
-    textContent(env.root.props.ListHeaderComponent),
-    /Active grants · 0/,
-  );
+  assert.equal(env.grantsRow().props.value, undefined);
   const refresh = env.find(
     env.root.props.ListHeaderComponent,
     "Refresh activity",
@@ -506,4 +508,47 @@ test("Activity owns its content inset below the opaque slab header", () => {
   assert.equal(env.root.props.automaticallyAdjustContentInsets, false);
   assert.equal(env.root.props.contentContainerStyle.paddingTop, 16);
   assert.equal(env.root.props.stickySectionHeadersEnabled, false);
+});
+
+test("rows join into inset groups: the first and last row of each list or date round its corners", () => {
+  const env = setup({
+    pending: list({ items: [challenge("a"), challenge("b"), challenge("c")] }),
+    history: list({
+      items: [
+        challenge("today-1", { created_at: "2026-10-28T12:00:00" }),
+        challenge("today-2", { created_at: "2026-10-28T11:00:00" }),
+        challenge("old", { created_at: "2026-10-01T12:00:00" }),
+      ],
+    }),
+  });
+  assert.deepEqual(
+    [0, 1, 2].map((index) => {
+      const props = env.row("pending", index).props;
+      return [props.first, props.last];
+    }),
+    [
+      [true, false],
+      [false, false],
+      [false, true],
+    ],
+  );
+  const history = Array.from(env.sections).filter(
+    (item) => item.key !== "pending",
+  );
+  assert.deepEqual(
+    history.map((item) =>
+      Array.from(item.data, (_, index) => {
+        const props = env.row(item.key, index).props;
+        return [props.first, props.last];
+      }),
+    ),
+    [
+      [
+        [true, false],
+        [false, true],
+      ],
+      [[true, true]],
+    ],
+  );
+  assert.equal(env.row("history").type, "HistoryCard");
 });

@@ -542,6 +542,9 @@ test("grant rows resolve brands and uploaded images from already-loaded connecti
       item: { ...grant, service_id: "unknown-service" },
     });
     assert.equal(unknown.props.iconSlug, "unknown-service");
+    const only = list.props.renderItem({ item: grant, index: 0 });
+    assert.equal(only.props.first, true);
+    assert.equal(only.props.last, list.props.data.length === 1);
     assert.equal(unknown.props.iconUrl, undefined);
     assert.ok(env.calls.every((call) => call.method !== "getConnections"));
   } finally {
