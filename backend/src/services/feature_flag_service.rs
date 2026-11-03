@@ -148,6 +148,12 @@ const DISCORD_GATEWAY_FLAG: FeatureFlagDef = FeatureFlagDef {
 };
 
 pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
+pub const NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY: &str = "nyxbot:relay-response-recovery";
+const NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY,
+    description: "Staged durable response recovery for relay-sourced NyxBot gateway channels. Requires fleet readiness and gateway support; enable for one owner before widening.",
+    default_enabled: false,
+};
 pub const NYXBOT_ADAPTERS_FLAG_KEY: &str = "nyxbot:service-adapters";
 const NYXBOT_ADAPTERS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXBOT_ADAPTERS_FLAG_KEY,
@@ -357,6 +363,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
@@ -401,6 +408,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
@@ -2936,6 +2944,7 @@ mod tests {
                 "assistant:workspace-preview",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
+                "nyxbot:relay-response-recovery",
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
@@ -2968,6 +2977,12 @@ mod tests {
                 "nyxbot:gateway-aurinko",
                 "nyxbot:gateway-custom-event",
             ]
+        );
+        assert!(
+            !find_flag(NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY)
+                .expect("relay response recovery flag is registered")
+                .default_enabled,
+            "relay response recovery must default to off"
         );
         assert!(
             !find_flag(ASSISTANT_MODEL_CONTROLS_FLAG_KEY)

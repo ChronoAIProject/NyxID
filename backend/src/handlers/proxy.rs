@@ -4634,13 +4634,19 @@ async fn execute_resolved_proxy_inner<'a>(
                 &all_headers,
                 &assistant_projection,
             )
-            .await?
+            .await
+            .inspect_err(|error| {
+                if matches!(error, AppError::AssistantModelAuthorityChanged) {
+                    request_audit.denied(error.status_code().as_u16());
+                }
+            })?
         },
     );
     let assistant_decision = assistant_decision_slot
         .as_ref()
         .expect("service decision was just installed");
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        request_audit.denied(axum::http::StatusCode::CONFLICT.as_u16());
         return Ok(ProxyExecutionPhase::Complete(
             (axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response(),
         ));
@@ -6954,7 +6960,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         .await;
                         return Err(AppError::DurableOperationOutcomeUncertain);
                     }
-                    if is_pool_attempt {
+                    if is_pool_attempt || nyxagent_admission {
                         return Err(encode_pool_attempt_error(error));
                     }
                     return Err(error.into_app_error());

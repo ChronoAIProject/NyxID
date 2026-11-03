@@ -888,3 +888,14 @@ it.each([
     expect(mock.hold).toHaveBeenLastCalledWith(true);
   },
 );
+
+it("2142 distinguishes a failed task from a user cancellation", () => {
+  mock.tasks = [
+    { id:"failed", state:"cancelled", outcome:"failed", title:"Inspect page", pending_acknowledgement_ids:[] },
+    { id:"stopped", state:"cancelled", outcome:"cancelled", title:"Stopped request", pending_acknowledgement_ids:[] },
+  ];
+  render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
+  expect(screen.getByText(/Inspect page · Failed/)).toBeInTheDocument();
+  expect(screen.getByText(/Stopped request · Cancelled/)).toBeInTheDocument();
+  expect(screen.queryByLabelText("Stop request 1")).not.toBeInTheDocument();
+});

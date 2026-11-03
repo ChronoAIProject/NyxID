@@ -290,6 +290,7 @@ pub struct ChannelAgentResponse {
     org_id: Option<String>,
     /// Who may talk to the agent in private chats: `owner` or `everyone`.
     private_chats: String,
+    private_chat_posts: bool,
     /// `ok` or `failing` once a message has been judged; `None` before.
     delivery_status: Option<String>,
     /// Stable code of the newest lost message (see `delivery_reason`).
@@ -320,6 +321,7 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
             agent_id: row.agent_id.clone(),
             org_id: row.bot_owner_id.clone(),
             private_chats: row.private_chats.clone().unwrap_or_else(|| "owner".into()),
+            private_chat_posts: row.private_chat_posts.unwrap_or(false),
             delivery_status: row.delivery_status.clone(),
             delivery_error: row.delivery_error.clone(),
             delivery_reason: row
@@ -694,6 +696,7 @@ async fn connect_inner(
         source_conversation_id: source_conversation_id.map(str::to_owned),
         agent_id: Some(agent.id.clone()),
         private_chats: None,
+        private_chat_posts: None,
         delivery_status: None,
         delivery_error: None,
         delivery_failed_at: None,
@@ -2679,6 +2682,9 @@ pub struct LinkRequest {
     agent_id: Option<String>,
     /// `owner` or `everyone`: who may talk to the agent in private chats.
     private_chats: Option<String>,
+    private_chat_posts: Option<bool>,
+    #[serde(default)]
+    apply_to_existing: bool,
 }
 
 pub async fn link_channel(
@@ -2690,14 +2696,23 @@ pub async fn link_channel(
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    if body.agent_id.is_none() && body.private_chats.is_none() {
+    if body.agent_id.is_none() && body.private_chats.is_none() && body.private_chat_posts.is_none()
+    {
         return Err(AppError::ValidationError(
-            "Nothing to change: pass agent_id or private_chats".into(),
+            "Nothing to change: pass agent_id, private_chats or private_chat_posts".into(),
         ));
     }
     let mut result = json!({"channel_agent_id": &id});
-    if let Some(access) = body.private_chats.as_deref() {
-        result = chats::set_private_chats(&state, &owner, &id, access).await?;
+    let settings = crate::services::nyxbot_chat_settings_service::AccessSettings {
+        private_chats: body.private_chats,
+        private_chat_posts: body.private_chat_posts,
+        apply_to_existing: body.apply_to_existing,
+    };
+    if settings.private_chats.is_some()
+        || settings.private_chat_posts.is_some()
+        || settings.apply_to_existing
+    {
+        result = chats::update_access(&state, &owner, &id, &settings).await?;
     }
     if let Some(agent_id) = body.agent_id.as_deref() {
         let agent = requested_agent(&state, &owner, Some(agent_id)).await?;
@@ -2974,8 +2989,7 @@ async fn thread_conversation(
     threads
         .update_one(
             doc! {"channel_id": &row.id, "partition": partition},
-            doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
-            "created_at": now}, "$set": {"updated_at": now}},
+            doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(row, now), "$set": {"updated_at": now}},
         )
         .upsert(true)
         .await?;
@@ -4075,8 +4089,7 @@ pub async fn put_conversation(
         .collection::<NyxbotThread>(THREADS)
         .update_one(
             doc! {"channel_id": &row.id, "partition": &conversation_id},
-            doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
-            "created_at": now}, "$set": {"updated_at": now}},
+            doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(&row, now), "$set": {"updated_at": now}},
         )
         .upsert(true)
         .await
@@ -4397,7 +4410,7 @@ async fn custom_event_thread(
             doc! {
                 "$setOnInsert": {"_id": Uuid::new_v4().to_string(), "created_at": now,
                     "channel_id": &channel.id, "user_id": &channel.user_id,
-                    "partition": partition, "kind": "private", "title": "Custom event",
+                    "partition": partition, "kind": "private", "title": "Custom event", "allow_posts": false,
                     "owner_chat": false, "agent_id": &channel.agent_id,
                     "relay_partition": &destination.relay_partition,
                     "platform_chat_id": &destination.platform_chat_id,
@@ -4787,6 +4800,23 @@ async fn responses_with_producers_impl(
     if row.platform == "discord" && !discord_provider_context(&row, context) {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     }
+    if crate::services::nyxbot_response_recovery::metadata(&request["metadata"]).is_ok() {
+        match crate::services::nyxbot_response_recovery::load(&state.db, &row, &response_id).await {
+            Ok(Some(stored)) => {
+                if stored.request_hash != sha256_hex(request.to_string()) {
+                    return problem(StatusCode::CONFLICT, "response_command_changed");
+                }
+                return native_responses::stream(state, row, headers.clone(), response_id, None);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return problem(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "response_recovery_unavailable",
+                );
+            }
+        }
+    }
     // Durable admission: one turn per idempotency key, context kept verbatim.
     let native_group_event = row.gateway_bot_mentions.enabled
         && activity["source"]["type"] == "nyxid_relay"
@@ -4945,6 +4975,67 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     }
+    let stored =
+        match relay_responses::prepare(&state, &row, &admitted, &request, &response_id).await {
+            Ok(stored) => stored,
+            Err(_) => {
+                discard_failed_provider_event(&state.db, &event_key).await;
+                return problem(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "response_recovery_unavailable",
+                );
+            }
+        };
+    if let Some(stored) = stored {
+        let task_state = state.clone();
+        let task_row = row.clone();
+        let task_response = response_id.clone();
+        tokio::spawn(async move {
+            let _ = Box::pin(dispatch_relay_response(
+                task_state,
+                task_row,
+                request,
+                text,
+                partition,
+                event_key,
+                task_response,
+                now,
+                Some(stored),
+            ))
+            .await;
+        });
+        return native_responses::stream(state, row, headers.clone(), response_id, None);
+    }
+    Box::pin(dispatch_relay_response(
+        state,
+        row,
+        request,
+        text,
+        partition,
+        event_key,
+        response_id,
+        now,
+        None,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_relay_response(
+    state: AppState,
+    row: NyxbotChannel,
+    request: Value,
+    text: String,
+    partition: String,
+    event_key: String,
+    response_id: String,
+    now: chrono::DateTime<Utc>,
+    stored: Option<crate::models::nyxbot_gateway_response::GatewayResponse>,
+) -> Response {
+    let context = &request["event_context"];
+    let activity = &context["activity"];
+    let event_id = activity["event_id"].as_str().unwrap_or_default();
+    let events = state.db.collection::<NyxbotEvent>(EVENTS);
     let sender_id = activity["actor"]["id"]
         .as_str()
         .unwrap_or_default()
@@ -4971,7 +5062,7 @@ async fn responses_with_producers_impl(
             &state.db,
             &row.channel_bot_id,
             &row.route_api_key_id,
-            &event_id,
+            event_id,
             &sender_id,
         )
         .await
@@ -5018,6 +5109,10 @@ async fn responses_with_producers_impl(
         &mut thread_reply,
     ))
     .await;
+    if let Some(stored) = stored {
+        relay_responses::settle_admission(&state, &stored, &inbound, thread_reply).await;
+        return StatusCode::ACCEPTED.into_response();
+    }
     let finish = |status: &'static str, conversation: Option<String>| {
         let state = state.clone();
         let event_key = event_key.clone();
@@ -6597,6 +6692,10 @@ mod custom_event_contract_tests {
 mod native_discord;
 #[path = "nyxbot_native_responses.rs"]
 pub(crate) mod native_responses;
+#[path = "nyxbot_relay_responses.rs"]
+mod relay_responses;
+#[path = "nyxbot_typing.rs"]
+pub(super) mod typing;
 
 fn native_callback(state: &AppState, row: &NyxbotChannel, relay: String) -> String {
     if row.gateway_source.is_some() {

@@ -391,7 +391,8 @@ Account deletion purges agents, settings, threads and channel records.
 ### Independent CMA custom-event bindings
 
 An owner may create a custom event binding for an existing NyxBot or specialist
-from the first-party NyxID API. This is an independent CMAEG source, not a
+from the first-party NyxID API (`/api/v1/assistant/nyxagent/custom-event-bindings`;
+routes in `docs/CHANNEL_EVENT_GATEWAY.md`). This is an independent CMAEG source, not a
 chat-platform bot and not a reuse of a `NyxbotChannel` provider key. The owner
 chooses the destination channel and partition; NyxID pins every delivery to
 that destination (which must have a verified relay reply anchor). CMA's producer HMAC credential is returned once at creation
@@ -761,12 +762,40 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | --- | --- | --- |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
-| `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
+| `allow_posts` | off, or the private-chat default below | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
 | agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Organization specialists are refused under the [organization-agent channel contract](../ORG_AGENTS.md) because their conversations are private member threads. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
 or `everyone`: anyone who messages the bot privately gets their own thread, as a
 guest.
+
+The linked channel also has `private_chat_posts` (absent/false by default).
+The owner can enable it in **Chats and who can talk**, through the human-only
+channel PATCH, or through NyxBot's `nyxid__update_channel_access`. New private
+customer chats then start with `allow_posts: true` when a verified message
+registers them. It does not open private-chat access, contact someone who has
+never messaged the bot, or enable groups, channels, topics, followed child
+threads, or synthetic custom-event threads. Posting still checks only each
+chat's `allow_posts`; an explicit per-chat off survives later inbound messages.
+
+`apply_to_existing: true` requires an explicit `private_chat_posts` value and
+applies that value to existing private chats on this link. Both enabling and
+disabling otherwise affect only new chats. Bulk application overrides individual
+private-chat choices and is transactional, capped at 1,000 changed chats;
+exceeding the cap changes nothing. The response and metadata-only
+`nyxbot_channel_access_updated` audit include `applied_count`. Guests and
+specialists cannot change this setting; NyxBot uses the same sensitive-action
+confirmation as per-chat permission changes. Organization links require the
+linking person's live org-admin authority.
+
+The default rides on the loaded channel; chat recording adds no DB reads.
+Gateway conversation probes cannot know the chat kind, so new probes capture
+an additive `private_chat_posts_pending` boolean without granting permission.
+The first verified chat registration consumes it atomically. Legacy placeholders
+without that marker stay off, and existing explicit permissions win. Old
+replicas ignore the additive channel field and continue creating chats with
+posting off; upgrade replicas before relying on the default for every customer.
+Reconnect continuity preserves the default alongside private-chat access.
 
 **Addressed messages.** Through the gateway, group admission is
 `mention_or_reply_to_bot` unless one of the bot's chats answers everything; then
@@ -1665,3 +1694,39 @@ then receives its answer automatically. Concurrent visitors share one setup.
 Guests never become owner events, acquire owner tools or choose setup's model.
 See [engine guest model routes](08-nyxagent-engine.md) for admission, retention,
 recovery and mixed-replica details.
+
+### Channel reliability diagnostics
+
+Channel model execution resolves its typing destination and credentials once per
+task, then refreshes an ephemeral typing indicator every four seconds where
+supported. Refresh checks the live turn, event binding and channel eligibility;
+it stops on the first refusal or platform error without decrypting again. It is cancelled at settlement or Stop and never
+appears in the transcript. The existing optional **Channel progress reply**
+setting remains default-off; typing does not enable it.
+
+The settled assistant message's additive `turn_metadata.timing` stores
+`queue_wait_ms`, `admission_wait_ms`, `first_output_ms` (null if no semantic model
+output), `model_ms`, `tool_ms`, `model_calls`, `tool_calls` and `total_ms`.
+Model/tool durations are summed wall time per observed call, including failed
+calls; parallel calls can overlap. Tool duration uses retained activity start
+times; a call evicted from the bounded 40-entry activity list before completion
+still contributes to the total call count but cannot contribute a duration. Counts include calls recorded by NyxID, not
+an estimate from prose. No content, arguments or credentials are included.
+Legacy turns default to zero/null timing observations.
+
+A transient dependency refusal before any execution can retry twice under the
+same command, with 2s/4s backoff and a 15s bound. Accepted execution, model/tool
+activity or output closes that window permanently. Exhaustion has typed code
+`assistant_start_unavailable`, with the truthful message “Nothing was done.”
+Ambiguous transport failures retain the existing failure behavior.
+
+Relay response recovery is default-off behind `nyxbot:relay-response-recovery`,
+resolved for the linking person including live org overrides, in addition to
+fleet readiness and CMA capability discovery. Enable for one owner and verify
+before widening. Capability results are cached per gateway base; a dormant flag
+never probes CMA.
+
+Gateway completion is separate from platform delivery: `recovery_ready` means
+the answer is durable and CMA can retrieve it; `streamed` means it was offered
+to the live observer. Neither claims confirmed delivery. The gateway contract
+lists the required CMA journal/replay behavior and the remaining receipt gap.

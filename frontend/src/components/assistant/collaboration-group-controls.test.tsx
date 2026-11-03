@@ -106,7 +106,7 @@ it("asks the owner before enabling guests and binds both revisions", async () =>
     { wrapper },
   );
   await userEvent.click(
-    screen.getByRole("button", { name: "Enable guest replies" }),
+    screen.getByRole("switch", { name: "Participants can use Researcher" }),
   );
   expect(requests).toHaveLength(0);
   expect(
@@ -155,7 +155,7 @@ it("keeps creator controls away from participants but always offers leave", () =
     screen.queryByRole("button", { name: "Delete group" }),
   ).not.toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "Enable guest replies" }),
+    screen.queryByRole("switch", { name: "Participants can use Researcher" }),
   ).not.toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "Leave group" }),
@@ -283,4 +283,38 @@ it("renders consent when the connection label is no longer available", () => {
     screen.getByText("Your connection: my-connection"),
   ).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Skip" })).toBeInTheDocument();
+});
+
+it("lets a participant ask the foreign owner without enabling on their behalf", async () => {
+  const participant: AssistantGroup = {
+    ...group,
+    members: [{ ...group.members[0]!, display_name: "Office Agent", owner_name: "Share Ops", unavailable: true, unavailable_reason: "not_shared_with_you" }],
+    collaboration: { ...group.collaboration!, can_manage: false, guest_access: [{ ...group.collaboration!.guest_access[0]!, can_enable: false, can_disable: false, can_request: true, lane: null }] },
+  };
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    requests.push({ endpoint, body: init.body ? JSON.parse(String(init.body)) : {} });
+    return new Response(JSON.stringify({ id: "request", status: "pending", expires_at: "2027-01-01T00:00:00Z" }));
+  };
+  render(<CollaborationSettings group={participant} agents={[]} onClose={vi.fn()} onLeft={vi.fn()} />, { wrapper });
+  expect(screen.getByText("Office Agent")).toBeVisible();
+  expect(screen.getByText("Not shared with you — ask Share Ops to allow participants.")).toBeVisible();
+  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Ask Share Ops to allow participants" }));
+  await waitFor(() => expect(requests).toEqual([{ endpoint: "/assistant/nyxagent/groups/group/agents/agent/guest-requests", body: {} }]));
+});
+
+it("shows pending owner approval and lets the requester cancel", async () => {
+  const pending: AssistantGroup = {
+    ...group,
+    collaboration: { ...group.collaboration!, can_manage: false, guest_access: [{ ...group.collaboration!.guest_access[0]!, can_enable: false, can_disable: false, can_request: true, request: { id: "request", status: "pending", expires_at: "2027-01-01T00:00:00Z", can_cancel: true } }] },
+  };
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    requests.push({ endpoint, body: {} });
+    return new Response(null, { status: 204 });
+  };
+  render(<CollaborationSettings group={pending} agents={[]} onClose={vi.fn()} onLeft={vi.fn()} />, { wrapper });
+  expect(screen.getByText("Owner approval pending")).toBeVisible();
+  expect(screen.queryByRole("button", { name: /^Ask / })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Cancel request" }));
+  await waitFor(() => expect(requests[0]?.endpoint).toBe("/assistant/nyxagent/groups/group/agents/agent/guest-requests/request"));
 });

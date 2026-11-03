@@ -208,7 +208,9 @@ impl Admission {
                     "Shared service authority changed".into(),
                 ));
             }
-            if service.user_id == self.chat.user_id {
+            if service.user_id == self.chat.user_id
+                && !shared_platform_model(&self.chat, &service, &self.operation_identity, target)
+            {
                 self.shared_permit
                     .as_ref()
                     .ok_or_else(|| AppError::Forbidden("Connection consent required".into()))?
@@ -234,9 +236,23 @@ impl Admission {
                 return Err(AppError::Forbidden("Service access revoked".into()));
             }
         }
-        if self.connection != connection
-            || self.binding != connection_binding(db, connection, &self.api_key_id).await?
-        {
+        let model =
+            self.operation_identity["kind"] == "raw_inference" && !is_shared_chat(&self.chat);
+        let binding_matches = if model {
+            super::authority::model_bindings_match(
+                db,
+                connection,
+                &self.api_key_id,
+                &[&self.binding],
+            )
+            .await?
+        } else {
+            self.binding == connection_binding(db, connection, &self.api_key_id).await?
+        };
+        if self.connection != connection || !binding_matches {
+            if model {
+                return Err(AppError::AssistantModelAuthorityChanged);
+            }
             return Err(AppError::Conflict(
                 "Service selection changed; request a new exact confirmation".into(),
             ));
@@ -246,6 +262,9 @@ impl Admission {
                 .map(|target| execution_projection_digest(target, self.execution_credential))
                 .as_ref()
         {
+            if model {
+                return Err(AppError::AssistantModelAuthorityChanged);
+            }
             return Err(AppError::Conflict(
                 "Resolved service execution changed".into(),
             ));

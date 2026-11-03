@@ -1763,6 +1763,10 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         super::agent_skills::preload_for_turn(&self.state, row, agent).await
     }
 
+    fn channel_typing(&self, row: &AssistantConversation) -> Option<tokio::task::JoinHandle<()>> {
+        super::nyxbot::typing::start(&self.state, row)
+    }
+
     fn checking_notice(&self, row: &AssistantConversation) -> Option<tokio::task::JoinHandle<()>> {
         let origin = crate::services::assistant_checking_notice::destination(row)?;
         let state = self.state.clone();

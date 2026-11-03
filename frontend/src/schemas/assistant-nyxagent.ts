@@ -683,6 +683,7 @@ export const nyxAgentChannelAgentSchema = z.object({
   org_id: z.string().nullable().default(null),
   /** Who may talk to the agent in private chats with the bot. */
   private_chats: z.enum(["owner", "everyone"]).catch("owner"),
+  private_chat_posts: z.boolean().default(false),
   /** `ok`, `failing`, `interrupted`, or `media_failed`; null before a message is judged. */
   delivery_status: z.string().nullable().default(null),
   delivery_error: z.string().nullable().default(null),
@@ -784,9 +785,11 @@ export const ASSISTANT_GROUP_NAME_MAX = 60;
 export const assistantGroupMemberSchema = z.object({
   id: z.string(),
   name: z.string(),
+  display_name: z.string().nullable().optional(),
   kind: assistantAgentKindSchema,
   destroyed: z.boolean().default(false),
   unavailable: z.boolean().optional(),
+  unavailable_reason: z.string().nullable().optional(),
   shared: z.boolean().optional(),
   owner_name: z.string().nullable().optional(),
   conversation_id: z.string().nullable().optional(),
@@ -829,7 +832,7 @@ export const assistantGroupMessageSchema = z.object({
   role: z.enum(["user", "agent", "notice"]),
   /** The speaking agent, set on `agent` messages. */
   agent: z
-    .object({ id: z.string(), name: z.string(), kind: assistantAgentKindSchema })
+    .object({ id: z.string(), name: z.string(), display_name: z.string().nullable().optional(), kind: assistantAgentKindSchema })
     .nullable()
     .default(null),
   text: z.string(),

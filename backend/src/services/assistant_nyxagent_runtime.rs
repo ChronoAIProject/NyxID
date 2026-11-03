@@ -728,6 +728,7 @@ pub(crate) async fn run_owner_turn(
     mut permit: DirectChatPermit,
     mut events: Events,
 ) -> Option<OwnerTurnSettlement> {
+    let _typing = egress.channel_typing(&row).map(AbortOnDropHandle::new);
     if row
         .active_turn
         .as_ref()
@@ -1074,8 +1075,24 @@ pub(crate) async fn wait_queued(
 }
 
 async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str) -> TurnError {
+    // Collaboration turns recheck live authority in a snapshot transaction;
+    // do that every 5 s (20 polls) and only the stored stop flag in between.
+    let mut polls: u32 = 0;
     loop {
-        match engine::stop_requested(&state.db, &row.user_id, &row.id, turn_id).await {
+        let stopped = if row.collaboration.is_some() {
+            let full = polls.is_multiple_of(20);
+            polls = polls.wrapping_add(1);
+            if full {
+                super::collaboration_group_service::runtime::stop_requested(&state.db, row, turn_id)
+                    .await
+            } else {
+                super::collaboration_group_service::runtime::stop_flag_set(&state.db, row, turn_id)
+                    .await
+            }
+        } else {
+            engine::stop_requested(&state.db, &row.user_id, &row.id, turn_id).await
+        };
+        match stopped {
             Ok(false) => tokio::time::sleep(Duration::from_millis(250)).await,
             Ok(true) => return TurnError::internal("cancelled", "stop"),
             Err(_) => return TurnError::internal("assistant_unavailable", "stop"),
@@ -1723,12 +1740,15 @@ async fn execute_turn_inner(
         });
     let mut completed = String::new();
     let mut emitted = String::new();
+    let mut first_output_recorded = false;
     let mut input = if text.trim().is_empty() {
         "Please discuss the attachments in this message."
     } else {
         text
     };
     let mut recovery = engine::Recovery::default();
+    let start_retry_deadline = tokio::time::Instant::now() + super::assistant_start_retry::BUDGET;
+    let mut start_retries = 0;
     let mut admission: Option<(String, tokio::time::Instant, DateTime<Utc>)> = None;
     let mut capacity_error: Option<TurnError> = None;
     loop {
@@ -1884,7 +1904,11 @@ async fn execute_turn_inner(
         }
         let bounds = stream_bounds();
         let first_byte_deadline = tokio::time::Instant::now() + bounds.first_byte;
-        let deadline = first_byte_deadline;
+        let deadline = if start_retries > 0 {
+            first_byte_deadline.min(start_retry_deadline)
+        } else {
+            first_byte_deadline
+        };
         let response = acknowledgement
             .wait(
                 tokio::time::timeout_at(
@@ -1907,8 +1931,30 @@ async fn execute_turn_inner(
                 egress,
             )
             .await
-            .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?
-            .map_err(proxy_turn_error)?;
+            .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?;
+        let response = match response {
+            Ok(response) => response,
+            Err(AppError::PoolAttemptTransport(
+                crate::errors::PoolAttemptTransportKind::Connect,
+            )) if partial.is_empty()
+                && super::assistant_start_retry::untouched(&state.db, row)
+                    .await
+                    .unwrap_or(false) =>
+            {
+                let error = TurnError::internal("assistant_start_unavailable", "connect");
+                let Some(delay) = super::assistant_start_retry::delay(start_retries)
+                    .filter(|delay| tokio::time::Instant::now() + *delay < start_retry_deadline)
+                else {
+                    return Err(error);
+                };
+                start_retries += 1;
+                acknowledgement
+                    .wait(tokio::time::sleep(delay), state, row, events, egress)
+                    .await;
+                continue;
+            }
+            Err(error) => return Err(proxy_turn_error(error)),
+        };
         attempt.http_status = Some(response.status().as_u16());
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -1932,6 +1978,28 @@ async fn execute_turn_inner(
             let envelope: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             let code = upstream_error_code(status, &envelope);
             attempt.upstream_code = TurnError::new(code).upstream_code;
+            if super::assistant_start_retry::refused(status, code)
+                && partial.is_empty()
+                && super::assistant_start_retry::untouched(&state.db, row)
+                    .await
+                    .unwrap_or(false)
+            {
+                let mut error =
+                    TurnError::internal("assistant_start_unavailable", "upstream_response");
+                error.http_status = Some(status);
+                error.upstream_code = Some(code.into());
+                let Some(delay) = super::assistant_start_retry::delay(start_retries)
+                    .filter(|delay| tokio::time::Instant::now() + *delay < start_retry_deadline)
+                else {
+                    return Err(error);
+                };
+                start_retries += 1;
+                attempt.log("start_backoff");
+                acknowledgement
+                    .wait(tokio::time::sleep(delay), state, row, events, egress)
+                    .await;
+                continue;
+            }
             if tool_images.fallback.is_none()
                 && matches!(code, "tool_budget_exhausted" | "turn_timeout")
             {
@@ -1949,6 +2017,7 @@ async fn execute_turn_inner(
                 .await
                 {
                     Ok(true) => {
+                        start_retries = 0;
                         input = crate::services::assistant_continuation::INSTRUCTION;
                         continue;
                     }
@@ -2059,6 +2128,9 @@ async fn execute_turn_inner(
             }
             continue;
         }
+        // The short deadline belongs only to startup refusal retries. Accepted
+        // work and its later continuations retain the normal response budget.
+        start_retries = 0;
         attempt.wait_ended = Some(Utc::now());
         attempt.log("accepted");
         acknowledgement.accepted();
@@ -2136,6 +2208,10 @@ async fn execute_turn_inner(
                     return Err(TurnError::internal("output_too_large", "stream"));
                 }
                 decoded?;
+                if !first_output_recorded && !decoder.text.is_empty() {
+                    first_output_recorded = true;
+                    let _ = super::assistant_turn_observability::first_output(&state.db, row).await;
+                }
                 if let Some(mut created) = decoder.created.take() {
                     created.credential_api_key_id = credential.api_key_id.clone();
                     running_response_id = Some(created.response_id.clone());

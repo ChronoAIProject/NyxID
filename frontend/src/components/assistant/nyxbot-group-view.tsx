@@ -1,3 +1,5 @@
+import { GroupAgentAccessRequest } from "./group-agent-access";
+import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
 import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
 import { collaborationApi } from "@/hooks/use-collaboration-groups";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
@@ -158,6 +160,11 @@ export function GroupMessageRow({
           aria-label="Group notice"
           className="text-center text-11 text-text-tertiary"
         >
+          {/* Name the agent unless the notice already starts with it
+              ("<agent> could not reply (…)"). */}
+          {message.agent && !message.text.startsWith(message.agent.name)
+            ? `${agentTitle(message.agent)}: `
+            : ""}
           {message.text}
         </p>
         {message.activities
@@ -453,7 +460,7 @@ function MemberButton({
       <TooltipContent side="bottom" className="text-11">
         <p className="font-medium">{agentTitle(member)}</p>
         {handle ? <p className="text-text-tertiary">{handle}</p> : null}
-        {member.unavailable ? <p>Unavailable</p> : member.shared ? <p>Shared agent{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
+        {member.unavailable ? <p>{groupAgentUnavailableReason(member)}</p> : member.shared ? <p>Shared agent{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -523,7 +530,7 @@ function GroupHeader({
         </HeaderBar>
         {compact ? null : (
           <p className="text-11 text-text-tertiary">
-            {group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
+            {group?.collaboration ? "Everyone in the group sees your messages. Select agents for a reply, or remove all recipients to chat with people only." : group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
           </p>
         )}
       </div>
@@ -653,7 +660,9 @@ export function GroupRecipientPills({
   recipientIds,
   onRemove,
   onAdd,
+  group,
 }: {
+  readonly group?: AssistantGroup;
   readonly members: readonly AssistantGroupMember[];
   readonly recipientIds: readonly string[];
   readonly onRemove: (id: string) => void;
@@ -687,11 +696,11 @@ export function GroupRecipientPills({
           : [];
       })}
       {recipientIds.length ? null : (
-        <span role="status" className="text-11 text-destructive">
-          Choose at least one recipient.
+        <span role="status" className="text-11 text-muted-foreground">
+          {group?.collaboration ? "Everyone in the group · no agent reply" : "Choose at least one recipient."}
         </span>
       )}
-      {others.length ? (
+      {others.length || (group?.collaboration && members.some((m) => m.unavailable || m.destroyed)) ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -710,6 +719,13 @@ export function GroupRecipientPills({
                 {agentTitle(member)}{member.shared ? " · Shared agent" : ""}
               </DropdownMenuItem>
             ))}
+            {group?.collaboration ? members.filter((m) => m.unavailable || m.destroyed).map((member) => (
+              <div key={member.id} className="max-w-sm space-y-2 p-2 text-12">
+                <p className="font-medium">{agentTitle(member)}{member.owner_name ? ` · ${member.owner_name}` : ""}</p>
+                <p className="text-muted-foreground">{groupAgentUnavailableReason(member)}</p>
+                <GroupAgentAccessRequest group={group} member={member} />
+              </div>
+            )) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       ) : null}
@@ -742,7 +758,7 @@ export function NyxAgentGroupPage({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recipientSelection, setRecipientSelection] =
     useState<RecipientSelection>(NO_RECIPIENT_EDITS);
-  // Group payloads name agents by handle; their display names live on the agent list.
+  // Server names are authoritative; the inventory only fills older payloads.
   const group =
     transcript.data && !transcript.error
     ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
@@ -922,9 +938,9 @@ export function NyxAgentGroupPage({
             scope={{ kind: "groups", id: groupId }}
             active={false}
             sending={transcript.post.isPending}
-            // Read-only once every member is gone (destroyed or removed).
+            // Collaboration participants may chat even without agent authority.
             disabled={
-              Boolean(transcript.error) || Boolean(group && !mentions.length)
+              Boolean(transcript.error) || !group || Boolean(!group.collaboration && !mentions.length)
             }
             ownerUserId={user?.id ?? null}
             draftKey={`group:${groupId}`}
@@ -932,7 +948,7 @@ export function NyxAgentGroupPage({
             mentions={mentions}
             onSend={async (text, uploads) => {
               setRequestError(undefined);
-              if (recipients.edited && !recipients.ids.length) {
+              if (!group?.collaboration && recipients.edited && !recipients.ids.length) {
                 const error = new Error("Choose at least one recipient.");
                 toast.error(error.message);
                 throw error;
@@ -969,6 +985,7 @@ export function NyxAgentGroupPage({
             recipients={
               group ? (
                 <GroupRecipientPills
+                  group={group}
                   members={group.members}
                   recipientIds={recipients.ids}
                   onRemove={(id) =>

@@ -130,6 +130,18 @@ macro_rules! proxy_billing_routes {
                 )
             ),
             (
+                // Same root as `/proxy/s/{slug}`: a catch-all never matches an
+                // empty tail, so without this the trailing-slash spelling fell
+                // through to `/proxy/{service_id}/{*path}` with service "s".
+                "/proxy/s/{slug}/",
+                "/api/v1/proxy/s/{slug}/",
+                "handlers::proxy::proxy_request_by_slug_root",
+                axum::routing::any(handlers::proxy::proxy_request_by_slug_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
                 "/proxy/{service_id}/{*path}",
                 "/api/v1/proxy/{service_id}/{*path}",
                 "handlers::proxy::proxy_request",
@@ -141,6 +153,15 @@ macro_rules! proxy_billing_routes {
             (
                 "/proxy/{service_id}",
                 "/api/v1/proxy/{service_id}",
+                "handlers::proxy::proxy_request_root",
+                axum::routing::any(handlers::proxy::proxy_request_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/proxy/{service_id}/",
+                "/api/v1/proxy/{service_id}/",
                 "handlers::proxy::proxy_request_root",
                 axum::routing::any(handlers::proxy::proxy_request_root),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
@@ -366,6 +387,15 @@ macro_rules! public_proxy_billing_routes {
             (
                 "/public/s/{slug}",
                 "/public/s/{slug}",
+                "handlers::public_proxy::public_proxy_request_root",
+                axum::routing::any(handlers::public_proxy::public_proxy_request_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "block-not-meter; billable anonymous services are invalid"
+                )
+            ),
+            (
+                "/public/s/{slug}/",
+                "/public/s/{slug}/",
                 "handlers::public_proxy::public_proxy_request_root",
                 axum::routing::any(handlers::public_proxy::public_proxy_request_root),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
@@ -2777,6 +2807,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::assistant_group::post_message),
         )
         .route(
+            "/nyxagent/groups/{id}/agents/{agent_id}/guest-requests",
+            post(handlers::collaboration_group::request_guest_access),
+        )
+        .route(
+            "/nyxagent/groups/{id}/agents/{agent_id}/guest-requests/{request_id}",
+            delete(handlers::collaboration_group::cancel_guest_request),
+        )
+        .route(
             "/nyxagent/agents/{id}/group-access",
             get(handlers::collaboration_group::owned_guest_groups),
         )
@@ -3655,6 +3693,9 @@ mod runtime_profile_tests;
 
 #[cfg(test)]
 mod service_inventory_tests;
+
+#[cfg(test)]
+mod proxy_root_tests;
 
 #[cfg(test)]
 mod retirement_tests {

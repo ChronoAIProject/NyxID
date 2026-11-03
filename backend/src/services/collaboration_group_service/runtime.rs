@@ -396,8 +396,8 @@ pub(crate) fn check_start(row: &AssistantConversation, start: &engine::TurnStart
     Ok(())
 }
 
-/// Copy only a successful final reply. Settlement still succeeds after departure
-/// or unshare; those cases simply cannot publish to the group anymore.
+/// Publish a final reply or a safe failure notice. Settlement still succeeds
+/// after departure or unshare; those cases cannot publish to the group anymore.
 pub(crate) async fn publish_reply(
     db: &Database,
     row: &AssistantConversation,
@@ -408,10 +408,10 @@ pub(crate) async fn publish_reply(
     let Some(b) = &row.collaboration else {
         return Ok(());
     };
+    let failed = message.status == "failed";
     if turn.collaboration.as_ref() != Some(b)
         || turn.stop_requested
-        || message.status != "completed"
-        || message.text.trim().is_empty()
+        || (!failed && (message.status != "completed" || message.text.trim().is_empty()))
     {
         return Ok(());
     }
@@ -426,6 +426,21 @@ pub(crate) async fn publish_reply(
         Err(error) => return Err(error),
     };
     identity::fence(db, &access, &b.agent_id, session).await?;
+    // Failed drafts, upstream diagnostics and private account/card details
+    // never cross the audience boundary. Publish only the normalized turn code.
+    let text = if failed {
+        let name = &access.agent(&b.agent_id).ok_or_else(missing)?.agent.name;
+        let code = engine::TurnError::new(
+            message
+                .error_code
+                .as_deref()
+                .unwrap_or("assistant_unavailable"),
+        )
+        .code;
+        format!("{} could not reply ({code})", engine::identifier(name))
+    } else {
+        message.text.clone()
+    };
     let claimed = db
         .collection::<GroupRequest>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
         .update_one(
@@ -442,7 +457,7 @@ pub(crate) async fn publish_reply(
     // and all tool traces remain private. Persist the public join independently
     // of the hidden thread so departure cleanup cannot break retained history.
     let mut published_images = Vec::new();
-    if !row.guest_turn {
+    if !row.guest_turn && !failed {
         for image in message
             .attachments
             .iter()
@@ -470,10 +485,10 @@ pub(crate) async fn publish_reply(
         group_id: b.group_id.clone(),
         user_id: group.user_id,
         seq: group.message_count,
-        role: "agent".into(),
+        role: if failed { "notice" } else { "agent" }.into(),
         agent_id: Some(b.agent_id.clone()),
         agent_name: None,
-        text: message.text.clone(),
+        text,
         recipient_agent_ids: vec![],
         created_at: Utc::now(),
     };
@@ -547,6 +562,54 @@ pub(crate) async fn refresh(
     }
     validate(db, &row).await?;
     Ok(row)
+}
+
+/// The detached worker polls its admitted execution receipt, never the private
+/// history reader. Cancellation, replacement and lost live authority stop the
+/// turn; a database failure remains an execution error instead of granting use.
+pub(crate) async fn stop_requested(
+    db: &Database,
+    expected: &AssistantConversation,
+    turn_id: &str,
+) -> AppResult<bool> {
+    if expected
+        .active_turn
+        .as_ref()
+        .is_none_or(|turn| turn.turn_id != turn_id)
+    {
+        return Ok(true);
+    }
+    match refresh(db, expected).await {
+        Ok(_) => Ok(false),
+        Err(error)
+            if error.is_forbidden()
+                || matches!(error, AppError::NotFound(_) | AppError::Conflict(_)) =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Cheap poll between full live-authority checks: the stored row still runs
+/// this exact turn under the same binding and Stop was not requested. Lost
+/// authority is caught by the periodic `stop_requested` and by every
+/// key-authenticated call, which validates the binding on each request.
+pub(crate) async fn stop_flag_set(
+    db: &Database,
+    expected: &AssistantConversation,
+    turn_id: &str,
+) -> AppResult<bool> {
+    let Some(row) = db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":&expected.id,"user_id":&expected.user_id,"credential_api_key_id":&expected.credential_api_key_id})
+        .await?
+    else {
+        return Ok(true);
+    };
+    Ok(row.collaboration != expected.collaboration
+        || engine::live_turn(&row, Utc::now())
+            .is_none_or(|turn| turn.turn_id != turn_id || turn.stop_requested))
 }
 
 pub(crate) async fn history(

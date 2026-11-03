@@ -821,6 +821,14 @@ pub trait NyxAgentEgress: Send + Sync {
         Ok(String::new())
     }
 
+    /// Ephemeral channel typing task; aborted at settlement/cancellation.
+    fn channel_typing(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
+
     /// Optional progress task, cancelled when execution completes or stops.
     /// Only the channel adapter implements delivery; other transports return None.
     fn checking_notice(

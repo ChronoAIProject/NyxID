@@ -2792,6 +2792,59 @@ pub(crate) async fn begin_owner_turn_in_session(
                 "This reply has already been retried".into(),
             ));
         }
+        // The visible summary and hidden execution reply share one Retry claim.
+        // This transaction also carries every completed-action digest forward.
+        let requests = db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS);
+        if let Some(link) = requests
+            .find_one(doc! {"user_id":user_id,"turn_id":start.retry_of.as_deref(),
+            "$or":[{"conversation_id":&id},{"task_conversation_id":&id}]})
+            .session(&mut *session)
+            .await?
+        {
+            let claimed = requests
+                .update_one(
+                    doc! {"_id":link.get("_id").cloned(),"retry_claimed_by":bson::Bson::Null},
+                    doc! {"$set":{"retry_claimed_by":turn_id}},
+                )
+                .session(&mut *session)
+                .await?;
+            if claimed.modified_count != 1 {
+                return Err(AppError::Conflict(
+                    "This voice task has already been retried".into(),
+                ));
+            }
+            // Old replicas know the message claim, not the additive request
+            // claim. Fence both replies in this same transaction so their hidden
+            // thread Retry cannot race the new visible-thread Retry.
+            let threads: Vec<_> = ["conversation_id", "task_conversation_id"]
+                .into_iter()
+                .filter_map(|field| link.get_str(field).ok())
+                .collect();
+            let messages = db.collection::<bson::Document>(MESSAGES);
+            let mut family = doc! {
+                "user_id":user_id,"conversation_id":{"$in":threads},
+                "turn_id":start.retry_of.as_deref(),"role":"assistant","status":"failed",
+            };
+            family.insert(
+                "retry_claimed_by",
+                doc! {"$exists":true,"$nin":[bson::Bson::Null,bson::Bson::String(turn_id.to_owned())]},
+            );
+            if messages
+                .find_one(family.clone())
+                .session(&mut *session)
+                .await?
+                .is_some()
+            {
+                return Err(AppError::Conflict(
+                    "This voice task has already been retried".into(),
+                ));
+            }
+            family.insert("retry_claimed_by", bson::Bson::Null);
+            messages
+                .update_many(family, doc! {"$set":{"retry_claimed_by":turn_id}})
+                .session(&mut *session)
+                .await?;
+        }
     }
     let note = match (start.note.as_deref(), retry.as_ref()) {
         (Some(note), Some(retry)) => Some(format!("{}\n\n{}", excerpt(note, 1200), retry.note)),
@@ -2803,6 +2856,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        timing: Default::default(),
         collaboration: row.collaboration.clone(),
         channel_adapter_origin: None,
         invocation_id: start
@@ -3621,7 +3675,10 @@ pub async fn mark_dequeued(
     db.collection::<bson::Document>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": turn_id},
-            doc! {"$unset": {"active_turn.queued_at": "", "active_turn.queue_deadline": ""}},
+            vec![doc! {"$set": {"active_turn.timing.queue_wait_ms":{"$add":[
+                {"$ifNull":["$active_turn.timing.queue_wait_ms",0]},
+                {"$max":[0,{"$subtract":["$$NOW",{"$ifNull":["$active_turn.queued_at","$$NOW"]}]}]}]}}},
+                doc! {"$unset":["active_turn.queued_at","active_turn.queue_deadline"]}],
         )
         .await?;
     Ok(())
@@ -3754,6 +3811,7 @@ async fn finish_turn_inner(
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
+                                timing: saved.turn_metadata.as_ref().and_then(|data| data.timing.clone()),
                                 channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
                             }));
@@ -3882,7 +3940,8 @@ async fn finish_turn_inner(
                     let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;
                     let update = if error.is_some() {
                         vec![doc! {"$set": {
-                            "state": "cancelled",
+                            "state": "cancelled", // Legacy terminal bucket; outcome distinguishes failure.
+                            "terminal_error_code": error.as_ref().map(|error| error.code),
                             "pending_acknowledgement_ids": [],
                         }}]
                     } else {
@@ -4735,6 +4794,7 @@ fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
             ]},
             -MAX_TURN_ACTIVITIES,
         ]},
+        "active_turn.timing.tool_calls": {"$add":[{"$ifNull":["$active_turn.timing.tool_calls",0]},1]},
         "active_turn.activity_total": {"$add": [{"$ifNull": ["$active_turn.activity_total", 0]}, 1]},
         "active_turn.activity_count": {"$cond": [
             {"$in": [{"$type": "$active_turn.activity_count"}, ["int", "long"]]},
@@ -4830,6 +4890,8 @@ struct RetryActivityEvidence {
 
 #[derive(Clone, Deserialize)]
 struct RetryEvidence {
+    #[serde(rename = "_id")]
+    id: String,
     turn_id: String,
     seq: i64,
     role: String,
@@ -4846,6 +4908,7 @@ struct RetryEvidence {
 impl From<&AssistantMessage> for RetryEvidence {
     fn from(row: &AssistantMessage) -> Self {
         Self {
+            id: row.id.clone(),
             turn_id: row.turn_id.clone(),
             seq: row.seq,
             role: row.role.clone(),
@@ -5033,15 +5096,40 @@ pub async fn recovery_previews(
         .find(doc! {
             "conversation_id": conversation_id, "user_id": user_id,
             "turn_id": {"$in": &ids}, "role": "user",
-            "origin": "user", "steering": bson::Bson::Null,
-            "via": bson::Bson::Null,
+            "origin": {"$in":[bson::Bson::Null,bson::Bson::String("user".into())]}, "steering": bson::Bson::Null,
+            "via": {"$in": [bson::Bson::Null, bson::Bson::String("voice".into())]},
             "execution_pending": {"$ne": true},
         })
         .await?
         .try_collect()
         .await?;
-    let inputs: std::collections::HashMap<_, _> =
+    let mut inputs: std::collections::HashMap<_, _> =
         inputs.into_iter().map(|m| (m.turn_id.clone(), m)).collect();
+    // Voice summaries keep the visible input and hidden execution correlated.
+    // Only a server-owned request/result link authorizes the voice input here.
+    if failed
+        .iter()
+        .any(|reply| reply.via.as_deref() == Some("voice"))
+    {
+        let links: Vec<crate::models::assistant_voice::VoiceRequest> = db
+            .collection(crate::models::assistant_voice::REQUESTS)
+            .find(doc! {"user_id":user_id,"conversation_id":conversation_id,"turn_id":{"$in":&ids}})
+            .await?
+            .try_collect()
+            .await?;
+        for reply in &failed {
+            if let Some(input) = inputs.get_mut(&reply.turn_id)
+                && links.iter().any(|link| {
+                    link.turn_id == reply.turn_id
+                        && link.message_id == input.id
+                        && link.result_message_id.as_deref() == Some(&reply.id)
+                })
+            {
+                input.via = None; // In-memory provenance normalization only; never rewrite history.
+                input.origin = Some(TurnOrigin::User);
+            }
+        }
+    }
     let attachment_ids: Vec<String> = inputs
         .values()
         .flat_map(|m| m.attachments.iter().map(|a| a.id.clone()))
@@ -5140,16 +5228,35 @@ pub async fn retry_context_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::BadRequest(RETRY_INVALID.into()))?;
-    let input = messages
+    let mut input = messages
         .find_one(doc! {
             "conversation_id": conversation_id, "user_id": user_id,
             "turn_id": retry_of, "role": "user",
-            "origin": "user", "steering": bson::Bson::Null,
-            "via": bson::Bson::Null,
+            "origin": {"$in":[bson::Bson::Null,bson::Bson::String("user".into())]}, "steering": bson::Bson::Null,
+            "via": {"$in": [bson::Bson::Null, bson::Bson::String("voice".into())]},
             "execution_pending": {"$ne": true},
         })
         .session(&mut *session)
         .await?;
+    if let Some(input) = input
+        .as_mut()
+        .filter(|input| input.via.as_deref() == Some("voice"))
+    {
+        let link = db
+            .collection::<crate::models::assistant_voice::VoiceRequest>(
+                crate::models::assistant_voice::REQUESTS,
+            )
+            .find_one(
+                doc! {"user_id":user_id,"conversation_id":conversation_id,"turn_id":retry_of,
+                "message_id":&input.id,"result_message_id":&failed.id},
+            )
+            .session(&mut *session)
+            .await?;
+        if link.is_some() {
+            input.via = None;
+            input.origin = Some(TurnOrigin::User);
+        }
+    }
     let mut ancestors: std::collections::HashMap<String, RetryEvidence> =
         std::collections::HashMap::new();
     let mut prior = failed.retry_of.clone();
@@ -5273,11 +5380,15 @@ pub async fn activity_finished_for_turn(
                 "active_turn.turn_id": turn_id,
                 "active_turn.activities.id": activity_id,
             },
-            doc! {"$set": {
-                "active_turn.activities.$.status": if ok { "completed" } else { "error" },
-                "active_turn.activities.$.ended_at": bson::DateTime::now(),
-                "active_turn.activities.$.failure": failure.map(|value| bson::to_bson(&value).expect("tool failure serialization")).unwrap_or(bson::Bson::Null),
-            }},
+            vec![doc! {"$set": {
+                "active_turn.timing.tool_ms": {"$add":[{"$ifNull":["$active_turn.timing.tool_ms",0]},
+                    {"$sum":{"$map":{"input":{"$filter":{"input":{"$ifNull":["$active_turn.activities",[]]},"as":"a","cond":{"$and":[{"$eq":["$$a.id",activity_id]},{"$eq":["$$a.status","running"]}]}}},"as":"a",
+                        "in":{"$max":[0,{"$subtract":["$$NOW","$$a.started_at"]}]}}}}]},
+                "active_turn.activities":{"$map":{"input":{"$ifNull":["$active_turn.activities",[]]},"as":"a","in":{
+                    "$cond":[{"$eq":["$$a.id",activity_id]},
+                        {"$mergeObjects":["$$a",{"status":if ok {"completed"} else {"error"},"ended_at":"$$NOW",
+                            "failure":{"$literal":failure.map(|v| bson::to_bson(&v).expect("tool failure")).unwrap_or(bson::Bson::Null)}}]},"$$a"]}}},
+            }}],
         )
         .await?;
     if !ok {
@@ -5834,7 +5945,11 @@ pub async fn conversation_history_page(
     if chat.guest || chat.turn_stopped || chat.turn_id.is_none() {
         return Err(AppError::AssistantTurnRequired);
     }
-    let thread = get(db, &chat.user_id, &chat.conversation_id).await?;
+    let thread = if chat.collaboration_thread {
+        super::collaboration_group_service::uploads::thread(db, chat).await?
+    } else {
+        get(db, &chat.user_id, &chat.conversation_id).await?
+    };
     if thread.guest_turn
         || thread.credential_api_key_id != chat.api_key_id
         || live_turn(&thread, Utc::now())
@@ -6271,6 +6386,10 @@ impl TurnError {
             && !code.starts_with("sk_"))
         .then(|| code.into());
         let (code, message) = match code {
+            "assistant_start_unavailable" => (
+                "assistant_start_unavailable",
+                "The assistant could not start because a dependency is temporarily unavailable. Nothing was done. Please try again shortly.",
+            ),
             "session_busy" => (
                 "session_busy",
                 "The assistant session is busy. Try again shortly.",
@@ -6301,6 +6420,10 @@ impl TurnError {
             "agent_key_required" | "credential_invalid" => (
                 "credential_invalid",
                 "The assistant credential could not be accepted.",
+            ),
+            "model_authority_changed" => (
+                "model_authority_changed",
+                "Your access settings or model connection changed during this task. Review the completed actions and try again.",
             ),
             "model_not_configured" => (
                 "model_not_configured",
@@ -6409,7 +6532,9 @@ pub enum RecoveryAction {
 impl Recovery {
     pub fn decide(&mut self, status: u16, code: &str, bound: bool) -> RecoveryAction {
         // Billing failures need their own remedy, never a credential replacement or rebind.
-        if super::assistant_model_observer::billing_failure_code(code).is_some() {
+        if code == "model_authority_changed"
+            || super::assistant_model_observer::billing_failure_code(code).is_some()
+        {
             return RecoveryAction::Fail;
         }
         if (status == 401 || status == 403 || code == "agent_key_required") && !self.replaced {

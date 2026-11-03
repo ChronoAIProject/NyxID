@@ -95,6 +95,16 @@ nyxid proxy request my-internal-api health
 
 An `HTTP/1.1 200` means the request reached your upstream through the node. Node-routed audit events are tagged with `"routed_via": "node"` and the `node_id`.
 
+## Move the upstream endpoint
+
+To migrate an existing node-managed service while keeping its secret on the node:
+
+```bash
+nyxid node credentials set-url --service my-internal-api --url https://new-internal.example.com
+```
+
+Run this on the node with its existing local credential and an owner CLI login. `set-url` updates routing metadata only and makes no independent local save; `credentials add` keeps its existing interactive local credential-replacement flow. From your laptop, `nyxid service update <service-id> --endpoint-url <url>` changes the same endpoint. The server URL takes effect even if the node is offline or too old for local metadata sync; repeat the update after reconnecting/upgrading to sync the fallback. `set-url --service my-internal-api --url ""` requests an empty-URL clear, which requires a confirmed local clear. See the [node reference](/docs/cli/reference/node#change-a-node-managed-services-url-without-replacing-its-secret) for details.
+
 ## Maintain a node
 
 ```bash

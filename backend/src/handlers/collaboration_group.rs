@@ -253,9 +253,23 @@ pub(crate) async fn response(
         .try_collect()
         .await?;
     let creator = group.user_id == actor;
-    let guest_settings:Vec<_>=policies.iter().map(|p|json!({"agent_id":p.agent_id,"enabled":p.guest_enabled,"revision":p.revision,
-        "can_enable":p.owner_id==actor,"can_disable":p.owner_id==actor||creator,
-        "lane":access.as_ref().and_then(|a|a.agent(&p.agent_id)).and_then(|a|a.authority()).map(|a|a.lane)})).collect();
+    let guest_settings: Vec<_> = policies.iter().map(|p| {
+        let guestable = agents.iter().any(|a| a.id==p.agent_id && a.destroyed_at.is_none())
+            && owners.iter().any(|o| o.id==p.owner_id && o.user_type.is_person());
+        json!({"agent_id":p.agent_id,"enabled":p.guest_enabled,"revision":p.revision,
+        "can_enable":guestable && p.owner_id==actor,"can_disable":p.owner_id==actor||creator,
+        "can_request":guestable && !p.guest_enabled && p.owner_id!=actor && access.is_some(),
+        "request":groups::guest_requests::projection(p,&group,actor),
+        "lane":access.as_ref().and_then(|a|a.agent(&p.agent_id)).and_then(|a|a.authority()).map(|a|a.lane)})
+    }).collect();
+    let shared_agents = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_sharing::COLLECTION_NAME)
+        .distinct(
+            "_id",
+            doc! {"_id":{"$in":&group.member_agent_ids},"enabled":true},
+        )
+        .await?;
     let transfers: Option<model::Transfer> = state
         .db
         .collection(model::TRANSFERS)
@@ -304,6 +318,30 @@ pub(crate) async fn response(
                     kind: crate::models::assistant_agent::AgentKind::Specialist,
                     destroyed: agent.is_none_or(|a| a.destroyed_at.is_some()),
                     unavailable: !available.contains(id),
+                    unavailable_reason: if available.contains(id) {
+                        None
+                    } else if agent.is_none() {
+                        Some("removed")
+                    } else if agent.is_some_and(|a| a.destroyed_at.is_some()) {
+                        Some("destroyed")
+                    } else if agent.is_some_and(|a| {
+                        owners
+                            .iter()
+                            .any(|o| o.id == a.user_id && o.user_type.is_org())
+                    }) {
+                        Some("org_agent_not_guestable")
+                    } else if policies.iter().any(|p| {
+                        p.agent_id == *id && groups::guest_requests::pending(p, &group).is_some()
+                    }) {
+                        Some("owner_approval_pending")
+                    } else if shared_agents
+                        .iter()
+                        .any(|v| v.as_str() == Some(id.as_str()))
+                    {
+                        Some("not_shared_with_you")
+                    } else {
+                        Some("guest_access_off")
+                    },
                     shared: access
                         .as_ref()
                         .and_then(|a| a.agent(id))
@@ -380,6 +418,15 @@ pub(crate) async fn post(
     recipients: Option<&[String]>,
     uploads: &[String],
 ) -> AppResult<Value> {
+    if let Some(message) =
+        groups::participant_posts::try_post(&state.db, actor, id, text, recipients, uploads).await?
+    {
+        let agents = groups::roster(&state.db, actor, id).await?;
+        return Ok(
+            json!({"message":super::assistant_group::message_response(message,&agents),
+            "addressed_agent_ids":[],"request_id":null}),
+        );
+    }
     let request =
         groups::requests::enqueue_with_uploads(&state.db, actor, id, text, recipients, uploads)
             .await?;
@@ -432,6 +479,8 @@ pub enum Operation {
         agent_id: String,
     },
     GuestAccess {
+        #[serde(default)]
+        request_id: Option<String>,
         agent_id: String,
         enabled: bool,
         guest_revision: i64,
@@ -469,10 +518,12 @@ impl Operation {
             Self::AcceptAgent { proposal_id } => C::AcceptAgent { proposal_id },
             Self::RemoveAgent { agent_id } => C::RemoveAgent { agent_id },
             Self::GuestAccess {
+                request_id,
                 agent_id,
                 enabled,
                 guest_revision,
             } => C::GuestAccess {
+                request_id,
                 agent_id,
                 enabled,
                 expected_revision: guest_revision,
@@ -784,6 +835,8 @@ pub struct RevisionInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestInput {
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub expected_revision: i64,
     pub guest_revision: i64,
     pub enabled: bool,
@@ -920,6 +973,7 @@ pub async fn guest_access(
             MembershipInput {
                 expected_revision: input.expected_revision,
                 operation: Operation::GuestAccess {
+                    request_id: input.request_id,
                     agent_id,
                     enabled: input.enabled,
                     guest_revision: input.guest_revision,
@@ -965,6 +1019,38 @@ pub async fn owned_guest_groups(
         .try_collect()
         .await?;
     Ok(Json(
-        json!({"groups":settings.iter().filter_map(|p|current.iter().find(|g|g.id==p.group_id).map(|g|json!({"group_id":g.id,"membership_revision":g.collaboration.as_ref().expect("filtered").membership_revision,"guest_revision":p.revision,"enabled":p.guest_enabled}))).collect::<Vec<_>>()}),
+        json!({"groups":settings.iter().filter_map(|p|current.iter().find(|g|g.id==p.group_id).map(|g|json!({"group_id":g.id,"membership_revision":g.collaboration.as_ref().expect("filtered").membership_revision,"guest_revision":p.revision,"enabled":p.guest_enabled,"request":groups::guest_requests::projection(p,g,&actor)}))).collect::<Vec<_>>()}),
     ))
+}
+
+/// First-party participants ask; only the live owner can approve via GuestAccess.
+pub async fn request_guest_access(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((group, agent)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    let actor = human(&state, &auth).await?;
+    let owner = groups::guest_requests::target(&state.db, &actor, &group, &agent).await?;
+    let home = Box::pin(super::assistant_team::nyxbot_home(&state, &owner)).await?;
+    let (request, created) =
+        groups::guest_requests::ask(&state.db, &actor, &group, &agent, &home.id).await?;
+    if created {
+        let state = state.clone();
+        tokio::spawn(async move {
+            Box::pin(super::assistant_team::wake(&state, &owner, &home.id)).await;
+        });
+    }
+    Ok(Json(
+        json!({"id":request.id,"status":request.status,"expires_at":request.expires_at}),
+    ))
+}
+
+pub async fn cancel_guest_request(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((group, agent, request)): Path<(String, String, String)>,
+) -> AppResult<StatusCode> {
+    let actor = human(&state, &auth).await?;
+    groups::guest_requests::cancel(&state.db, &actor, &group, &agent, &request).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

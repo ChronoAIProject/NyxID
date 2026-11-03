@@ -621,28 +621,6 @@ pub async fn llm_proxy_request(
 
     let mut target = target;
     projection.apply(&mut target);
-    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
-        &state,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        owner_for_approval.as_deref(),
-        &target,
-        &request_method_str,
-        &dispatch_path,
-        query.as_deref(),
-        &dispatch_body,
-        headers
-            .get(crate::services::assistant_service_execution::ACK_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        None,
-        &headers,
-        &projection,
-    )
-    .await?;
-    if let Some(refusal) = assistant_decision.refusal.as_ref() {
-        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
-    }
-
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = owner_for_approval
         .as_deref()
@@ -663,6 +641,30 @@ pub async fn llm_proxy_request(
         &billing_request_id,
         credential_class,
     );
+    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
+        &state,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        owner_for_approval.as_deref(),
+        &target,
+        &request_method_str,
+        &dispatch_path,
+        query.as_deref(),
+        &dispatch_body,
+        headers
+            .get(crate::services::assistant_service_execution::ACK_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        None,
+        &headers,
+        &projection,
+    )
+    .await
+    .inspect_err(|error| request_audit.admission_error(error))?;
+    if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        request_audit.denied(409);
+        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+    }
+
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -1397,28 +1399,6 @@ async fn gateway_provider_request(
 
     let mut target = target;
     projection.apply(&mut target);
-    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
-        &state,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        effective_owner_for_approval.as_deref(),
-        &target,
-        "POST",
-        &final_path,
-        query.as_deref(),
-        final_body_bytes.as_deref().unwrap_or_default(),
-        headers
-            .get(crate::services::assistant_service_execution::ACK_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        None,
-        &headers,
-        &projection,
-    )
-    .await?;
-    if let Some(refusal) = assistant_decision.refusal.as_ref() {
-        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
-    }
-
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
@@ -1439,6 +1419,30 @@ async fn gateway_provider_request(
         &billing_request_id,
         credential_class,
     );
+    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
+        &state,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        effective_owner_for_approval.as_deref(),
+        &target,
+        "POST",
+        &final_path,
+        query.as_deref(),
+        final_body_bytes.as_deref().unwrap_or_default(),
+        headers
+            .get(crate::services::assistant_service_execution::ACK_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        None,
+        &headers,
+        &projection,
+    )
+    .await
+    .inspect_err(|error| request_audit.admission_error(error))?;
+    if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        request_audit.denied(409);
+        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+    }
+
     let billing_owner = state
         .billing
         .owner_resolver()

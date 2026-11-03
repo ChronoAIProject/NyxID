@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+export const guestAccessRequestSchema = z.object({
+  id: z.string(),
+  status: z.enum(["pending", "approved", "cancelled", "expired"]),
+  expires_at: z.string(),
+  can_cancel: z.boolean().optional(),
+});
+
 export const collaborationGroupSchema = z.object({
   version: z.literal(1),
   creator_user_id: z.string(),
@@ -15,6 +22,8 @@ export const collaborationGroupSchema = z.object({
       revision: z.number().int(),
       can_enable: z.boolean(),
       can_disable: z.boolean(),
+      can_request: z.boolean().optional(),
+      request: guestAccessRequestSchema.nullable().optional(),
       lane: z.enum(["owner", "org_member", "shared", "guest"]).nullable(),
     }),
   ),
@@ -66,5 +75,6 @@ export type CollaborationChange =
       agent_id: string;
       enabled: boolean;
       guest_revision: number;
+      request_id?: string;
     }
   | { action: "rename"; name: string };

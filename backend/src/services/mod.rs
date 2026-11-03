@@ -35,6 +35,7 @@ pub(crate) mod assistant_record_service;
 pub mod assistant_resource_service;
 pub mod assistant_service;
 pub mod assistant_skill_authoring;
+pub mod assistant_start_retry;
 pub(crate) mod assistant_stream_checkpoint;
 pub mod assistant_turn_observability;
 pub mod assistant_wire_log_service;
@@ -151,6 +152,7 @@ pub mod node_owner_service;
 pub mod node_pending_credential_service;
 pub mod node_routing_service;
 pub mod node_service;
+pub mod node_target_service;
 pub mod node_ws_manager;
 pub mod notification_service;
 pub mod notion_evidence;
@@ -525,6 +527,7 @@ pub mod platform_help_service;
 pub mod telegram_manager_registry;
 
 pub(crate) mod nyxbot_channel_continuity_service;
+pub(crate) mod nyxbot_chat_settings_service;
 pub(crate) mod nyxbot_event_binding_service;
 pub(crate) mod nyxbot_gateway_release_service;
 

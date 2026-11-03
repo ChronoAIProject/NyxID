@@ -35,6 +35,7 @@ pub struct GroupMemberResponse {
     pub(crate) kind: AgentKind,
     pub(crate) destroyed: bool,
     pub(crate) unavailable: bool,
+    pub(crate) unavailable_reason: Option<&'static str>,
     pub(crate) shared: bool,
     pub(crate) owner_name: Option<String>,
     pub(crate) conversation_id: Option<String>,
@@ -144,6 +145,7 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
         members: members
             .iter()
             .map(|agent| GroupMemberResponse {
+                unavailable_reason: None,
                 id: agent.id.clone(),
                 name: agent.name.clone(),
                 display_name: agent.display_name.clone(),
@@ -332,6 +334,15 @@ async fn run_member(
         }
         Err(error) => return Err(error),
     };
+    // Refuse an unshared member before it waits for a pool slot or a busy
+    // thread, so the requester learns at once rather than after a retry.
+    if groups::members(&state.db, owner, group)
+        .await?
+        .iter()
+        .any(|m| m.id == agent_id && m.shared && !m.available)
+    {
+        return refuse_member(state, owner, group, agent_id).await;
+    }
     let thread = groups::member_thread(&state.db, owner, &group.id, agent_id).await?;
     let since = thread.as_ref().map_or(0, |row| row.group_seen_seq);
     let (transcript, newest) = groups::transcript_since(&state.db, owner, &group.id, since).await?;

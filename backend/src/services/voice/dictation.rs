@@ -265,14 +265,17 @@ async fn serve_with_provider(
     injected: Provider,
 ) {
     let mut admitted = None;
+    let mut stage = "authority";
     let result: AppResult<()> = Box::pin(async {
         let resolved = resolve(&state, &user, &thread, &preferences).await?;
         let concurrency = super::super::service_concurrency_service::acquire_policy(&state.db, resolved.concurrency_policy.as_ref(), &user).await?;
         let mut call = session::admit_dictation(&state.db,&user,&thread,&request,preferences,resolved.identity.clone(),&state.replica_identity.generation_id).await?;
         admitted = Some(call.clone());
+        stage = "billing";
         let meter = super::super::billing::voice::reserve(&state.db,&state.billing,resolved.billing.clone(),&call.id,0).await?;
         call = session::write(&state.db,&call,doc!{"reserved_until":30,"deadline":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::seconds(MAX_SECONDS+15))}).await?;
         admitted = Some(call.clone());
+        stage = "authority";
         // Recheck the browser credential after admission/funding, before provider effects.
         if state.db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
             .find_one(doc!{"_id":&human_session,"user_id":&user,"revoked":false,"expires_at":{"$gt":bson::DateTime::now()}}).await?.is_none() {
@@ -282,6 +285,7 @@ async fn serve_with_provider(
         if fresh.identity != call.credential_identity { return Err(AppError::VoiceProviderUnavailable); }
         state.billing.mark_forwarded(&meter).await?;
         super::shared::revalidate(&state.db, &call).await?;
+        stage = "provider";
         let mut provider = connect(&resolved.key, injected).await?;
         call = session::write(&state.db,&call,doc!{"state":"active"}).await?;
         admitted = Some(call.clone());
@@ -302,7 +306,9 @@ async fn serve_with_provider(
             tokio::select! { biased;
                 _ = tick.tick() => {
                     if started.elapsed().as_secs() >= MAX_SECONDS as u64 {drain.stop();}
+                    stage = "provider";
                     if pending && pending_at.elapsed().as_secs()>10 {return Err(AppError::VoiceProviderUnavailable);}
+                    stage = "authority";
                     let active = state.db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
                         .find_one(doc!{"_id":&human_session,"user_id":&user,"revoked":false,"expires_at":{"$gt":bson::DateTime::now()}}).await?.is_some();
                     if !active {return Err(AppError::Forbidden("Browser session expired".into()));}
@@ -314,6 +320,7 @@ async fn serve_with_provider(
                 }
                 () = async { if let Some(lease)=&concurrency {lease.cancelled().await} else {std::future::pending().await} } => return Err(AppError::ServiceConcurrencyLimited),
                 next = input.recv(), if !drain.stopping() => {
+                    stage = "audio";
                     match next {
                         Some(Input::Audio(bytes)) => {
                             if bytes.is_empty() || bytes.len()>4096 || bytes.len()%2!=0 || forwarded+bytes.len()>MAX_SECONDS as usize*BYTES_PER_SECOND
@@ -323,14 +330,18 @@ async fn serve_with_provider(
                             }
                             // Revalidate before each new funded window. Never spend beyond it.
                             if forwarded+bytes.len() > (call.reserved_until-10).max(0) as usize*BYTES_PER_SECOND && call.reserved_until<MAX_SECONDS {
+                                stage = "authority";
                                 let fresh = resolve(&state,&user,&thread,&call.preferences).await?;
                                 if fresh.identity!=call.credential_identity {return Err(AppError::VoiceProviderUnavailable);}
+                                stage = "billing";
                                 let meter = super::super::billing::voice::reserve(&state.db,&state.billing,fresh.billing,&call.id,call.reserved_until).await?;
                                 state.billing.mark_forwarded(&meter).await?;
                                 call=session::write(&state.db,&call,doc!{"reserved_until":call.reserved_until+30}).await?;
                                 admitted=Some(call.clone());
                             }
+                            stage = "authority";
                             super::shared::revalidate(&state.db, &call).await?;
+                            stage = "provider";
                             openai::send(&mut provider,json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(&bytes)})).await?;
                             forwarded+=bytes.len(); buffered+=bytes.len();
                         }
@@ -338,6 +349,7 @@ async fn serve_with_provider(
                     }
                 }
                 event = openai::receive(&mut provider) => {
+                    stage = "provider";
                     let event = event?.ok_or(AppError::VoiceProviderUnavailable)?;
                     match event["type"].as_str() {
                         Some("input_audio_buffer.committed") => {
@@ -365,9 +377,11 @@ async fn serve_with_provider(
                             let id = item_id(&event)?;
                             let duration = confirmed_duration(&event)?;
                             if !completed.contains(id) && (!pending || pending_item.as_deref()!=Some(id)) { return Err(AppError::VoiceProviderUnavailable); }
+                            stage = "billing";
                             call = checkpoint(&state,&call,id,duration).await?;
                             admitted = Some(call.clone());
                             if completed.insert(id.to_owned()) {
+                                stage = "provider";
                                 let text = event["transcript"].as_str().filter(|s|s.len()<=32_000).ok_or(AppError::VoiceProviderUnavailable)?;
                                 pending=false; pending_item=None;
                                 let order = orders.get(id).ok_or(AppError::VoiceProviderUnavailable)?;
@@ -381,10 +395,15 @@ async fn serve_with_provider(
 
 
             }
-            if orders.len() > 128 { return Err(AppError::VoiceProviderUnavailable); }
+            if orders.len() > 128 {
+                stage = "provider";
+                return Err(AppError::VoiceProviderUnavailable);
+            }
             if output.is_closed() { drain.stop(); }
             if !pending && buffered >= BYTES_PER_SECOND/10 && (buffered>=COMMIT_BYTES || drain.stopping()) {
+                stage = "authority";
                 super::shared::revalidate(&state.db, &call).await?;
+                stage = "provider";
                 openai::send(&mut provider,json!({"type":"input_audio_buffer.commit"})).await?;
                 pending=true; pending_at=tokio::time::Instant::now(); buffered=0;
             }
@@ -392,12 +411,16 @@ async fn serve_with_provider(
                 // Less than the provider minimum commit buffer is never billed from a clock.
                 let confirmed=buffered==0;
                 let _=tokio::time::timeout(std::time::Duration::from_secs(2),provider.close(None)).await;
+                stage = "finalizing";
                 finish(&state,&call,confirmed).await?;
                 admitted=None;
                 emit(&output,json!({"type":"stopped","confirmed":confirmed})).await?;
                 return Ok(());
             }
-            if drain.expired() {return Err(AppError::VoiceProviderUnavailable);}
+            if drain.expired() {
+                stage = "finalizing";
+                return Err(AppError::VoiceProviderUnavailable);
+            }
         }
     }).await;
     if let Some(call) = admitted {
@@ -407,7 +430,13 @@ async fn serve_with_provider(
         // Existing sanitized error envelope. Never forward provider payloads or keys.
         let _ = emit(
             &output,
-            json!({"type":"error","error":error.response_body()}),
+            json!({"type":"error","code":match stage {
+                "provider" => "dictation_provider_failed",
+                "billing" => "dictation_billing_failed",
+                "authority" => "dictation_access_changed",
+                "audio" => "dictation_invalid_frame",
+                _ => "dictation_finalization_failed",
+            },"stage":stage,"error":error.response_body()}),
         )
         .await;
     }

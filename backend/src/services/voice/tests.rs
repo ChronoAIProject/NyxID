@@ -1664,3 +1664,96 @@ async fn cross_thread_voice_stop_waits_for_the_workers_final_reply() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn voice_2142_failed_hidden_task_retries_visible_input_with_completed_action_fence() {
+    Box::pin(async {
+        use crate::services::assistant_voice as voice;
+        let (state, visible, call) = setup("voice_2142_retry").await;
+        let db = &state.db;
+        Box::pin(engine::finish_turn(db,&visible,&visible.credential_api_key_id,&Uuid::new_v4().to_string(),
+            &engine::TurnResult{text:"Ready".into(),session_id:None,response_id:None,error:None})).await.unwrap();
+        let request = voice::enqueue(db,&call.user_id,&visible.id,&call.id,"inspect","Inspect this page").await.unwrap();
+        // Existing production transcript rows predate the admitted-input origin.
+        db.collection::<bson::Document>("assistant_messages").update_one(doc!{"_id":&request.message_id},doc!{"$set":{"origin":bson::Bson::Null}}).await.unwrap();
+        let request = voice::ensure_task_conversation(db,&state.encryption_keys,&request).await.unwrap();
+        let hidden = Box::pin(engine::begin_turn_with_voice(db,&call.user_id,&turn(request.task_conversation_id.as_deref(),"Inspect this page"),&state.encryption_keys,Some(&request.id))).await.unwrap();
+        db.collection::<bson::Document>("assistant_conversations").update_one(doc!{"_id":&hidden.id},doc!{"$set":{
+            "active_turn.activities":[{"id":"action-1","label":"Inspect page","digest":"completed-computer-action","status":"completed","started_at":bson::DateTime::now()}],
+            "active_turn.activity_count":1_i64,"active_turn.activity_total":1_i64,
+        }}).await.unwrap();
+        Box::pin(engine::finish_turn(db,&hidden,&hidden.credential_api_key_id,&Uuid::new_v4().to_string(),
+            &engine::TurnResult{text:"Task interrupted".into(),session_id:None,response_id:None,error:Some(engine::TurnError::internal("model_authority_changed","model_proxy"))})).await.unwrap();
+        let failed = voice::get(db,&call.user_id,&visible.id,&request.id).await.unwrap();
+        assert_eq!(voice::request_outcome(&failed),Some("failed"));
+        let source=voice::result_message(db,&failed).await.unwrap().unwrap();
+        let published=voice::publish_result(db,&failed,&source).await.unwrap().unwrap();
+        let preview=engine::recovery_for_message(db,&call.user_id,&visible.id,&published).await.unwrap();
+        assert_eq!(preview.status,"available");
+        assert_eq!(preview.text.as_deref(),Some("Inspect this page"));
+        let mut retry=turn(Some(&visible.id),"Inspect this page");
+        retry.retry_of=Some(request.turn_id.clone());
+        // A legacy replica can only mark the hidden message. That still fences
+        // visible Retry; a refused attempt must roll back its other claims.
+        let messages=db.collection::<bson::Document>("assistant_messages");
+        messages.update_one(doc!{"_id":&source.id},doc!{"$set":{"retry_claimed_by":"legacy-retry"}}).await.unwrap();
+        assert!(Box::pin(engine::begin_turn(db,&call.user_id,&retry,&state.encryption_keys)).await.is_err());
+        messages.update_one(doc!{"_id":&source.id},doc!{"$unset":{"retry_claimed_by":""}}).await.unwrap();
+        let resumed=Box::pin(engine::begin_turn(db,&call.user_id,&retry,&state.encryption_keys)).await.unwrap();
+        assert!(engine::retry_duplicate(db,&call.user_id,&visible.id,&resumed.active_turn.as_ref().unwrap().turn_id,"completed-computer-action").await.unwrap());
+        let claimed=messages.find_one(doc!{"_id":&source.id}).await.unwrap().unwrap();
+        assert_eq!(claimed.get_str("retry_claimed_by").unwrap(),resumed.active_turn.as_ref().unwrap().turn_id);
+        // A hidden-thread retry cannot independently consume the same task.
+        retry.conversation_id=Some(hidden.id.clone());
+        assert!(Box::pin(engine::begin_turn(db,&call.user_id,&retry,&state.encryption_keys)).await.is_err());
+    }).await;
+}
+
+#[tokio::test]
+async fn voice_2142_user_stop_remains_cancelled() {
+    Box::pin(async {
+        use crate::services::assistant_voice as voice;
+        let (state, visible, call) = setup("voice_2142_stop").await;
+        let request = voice::enqueue(
+            &state.db,
+            &call.user_id,
+            &visible.id,
+            &call.id,
+            "stop",
+            "Inspect this page",
+        )
+        .await
+        .unwrap();
+        let request = voice::ensure_task_conversation(&state.db, &state.encryption_keys, &request)
+            .await
+            .unwrap();
+        let hidden = Box::pin(engine::begin_turn_with_voice(
+            &state.db,
+            &call.user_id,
+            &turn(request.task_conversation_id.as_deref(), "Inspect this page"),
+            &state.encryption_keys,
+            Some(&request.id),
+        ))
+        .await
+        .unwrap();
+        Box::pin(engine::finish_turn(
+            &state.db,
+            &hidden,
+            &hidden.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: String::new(),
+                session_id: None,
+                response_id: None,
+                error: Some(engine::TurnError::internal("cancelled", "stop")),
+            },
+        ))
+        .await
+        .unwrap();
+        let stopped = voice::get(&state.db, &call.user_id, &visible.id, &request.id)
+            .await
+            .unwrap();
+        assert_eq!(voice::request_outcome(&stopped), Some("cancelled"));
+    })
+    .await;
+}

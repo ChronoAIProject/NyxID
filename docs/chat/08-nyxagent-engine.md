@@ -2295,3 +2295,23 @@ Private voice tasks stay in recipient-owned hidden child threads without gaining
 automation authority. Channel posting targets only the recipient's explicitly
 allowed destinations and rechecks rights between parts. Guest billing and group
 membership/handoff rules are unchanged.
+
+### Live model consent and voice Retry (#2142)
+
+Workspace/specialist access-mode changes apply to subsequent actions in an
+in-flight turn. They do not revoke already admitted model inference. Model-only
+consent compares the same live connection/credential/grant projection under each
+known action mode, accepting legacy persisted digests without rewriting them.
+Action confirmations still bind the exact effective mode. A genuine model
+connection/authority change refuses with HTTP 403, `model_authority_changed`
+(12104), records a denied service request, and produces a fixed actionable turn
+failure instead of a retryable generic 409. Old replicas retain their former
+mode-change behavior until upgraded; storage remains readable by both versions.
+
+Visible voice results retain the hidden reply's exact activity count and retry
+ancestry. Retry accepts a voice input only through its owner/thread/turn-bound
+VoiceRequest and exact published result identity. A shared transactional request
+claim prevents independent retries of the visible and hidden replies. It also
+marks both messages so older replicas observe the same fence. Completed
+action digests remain fenced by `retry_duplicate_action`; missing/uncertain legacy
+activity evidence still requires review rather than replay.

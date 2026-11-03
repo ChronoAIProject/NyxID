@@ -203,6 +203,15 @@ export function useSetNyxBotPrivateChats() {
   );
 }
 
+export function useSetNyxBotPrivateChatPosts() {
+  return useAgentsMutation(
+    ({ channelAgentId, enabled, applyToExisting }: {
+      channelAgentId: string; enabled: boolean; applyToExisting: boolean;
+    }) => nyxBotApi.setPrivateChatPosts(channelAgentId, enabled, applyToExisting),
+    true,
+  );
+}
+
 /** The chats a channel bot is in (loaded when its list is opened). */
 export function useNyxBotChannelChats(channelAgentId: string, enabled = true) {
   const userId = useAuthStore((state) => state.user?.id);

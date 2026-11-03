@@ -3720,3 +3720,87 @@ async fn shared_transports_security_posts_reject_stripped_shared_context_and_dir
     assert!(server.received_requests().await.unwrap().is_empty());
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
+    use crate::{
+        models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse},
+        services::nyxbot_response_recovery as recovery,
+    };
+    let (f, server) = image_fixture("telegram", "gateway").await;
+    add_images(&f).await;
+    mock_sends(&server, "telegram", false, Duration::ZERO).await;
+    let payload = recovery::Payload::new("resp_images", "nyxbot_images", Default::default());
+    let stored = GatewayResponse {
+        id: Uuid::new_v4().to_string(),
+        response_id: "resp_images".into(),
+        user_id: OWNER.into(),
+        channel_id: f.channel.id.clone(),
+        binding_id: "images".into(),
+        partition: PARTITION.into(),
+        event_key: f.event.id.clone(),
+        request_hash: "images".into(),
+        conversation_id: f.event.conversation_id.clone(),
+        terminal: false,
+        revision: 0,
+        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + ChronoDuration::hours(1),
+    };
+    f.state
+        .db
+        .collection::<GatewayResponse>(RESPONSES)
+        .insert_one(&stored)
+        .await
+        .unwrap();
+    let fixture_ref = &f;
+    for _ in 0..2 {
+        // A stale replica can race terminalization. The shared image ledger
+        // still prevents it from sending a second copy.
+        recovery::refresh(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &stored,
+            |text| async move {
+                late_delivery::stream_images(
+                    &fixture_ref.state,
+                    &fixture_ref.event.id,
+                    &text,
+                    std::time::Instant::now() + Duration::from_secs(135),
+                )
+                .await
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let result = f
+        .state
+        .db
+        .collection::<GatewayResponse>(RESPONSES)
+        .find_one(doc! {"_id":&stored.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let payload = recovery::payload(&f.state.encryption_keys, &result)
+        .await
+        .unwrap();
+    assert!(result.terminal);
+    assert_eq!(payload.snapshot["status"], "completed");
+    assert!(payload.snapshot.to_string().contains("Useful answer"));
+    assert!(!payload.snapshot.to_string().contains("unavailable"));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("sendPhoto"))
+            .count(),
+        2
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.url.path().ends_with("sendMessage"))
+    );
+    assert_eq!(claim(&f).await.items.len(), 2);
+}
