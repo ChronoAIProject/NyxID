@@ -1,4 +1,10 @@
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
+import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
+import { ConnectLinkDetailRow } from "@/components/shared/connection-detail-row";
+import {
+  OAuthClientSourceChoice,
+  type OAuthClientSource,
+} from "@/components/shared/oauth-client-source-choice";
 import type { LanePricingView } from "@/schemas/platform-keys";
 // ai-key (service-add) pairing panel.
 //
@@ -13,7 +19,7 @@ import type { LanePricingView } from "@/schemas/platform-keys";
 
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -22,8 +28,9 @@ import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
+import { cn } from "@/lib/utils";
 import type { ScopeCatalogEntry } from "@/types/keys";
-import { Building2, ExternalLink } from "lucide-react";
+import { ArrowRight, Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
 import {
@@ -77,10 +84,19 @@ interface CatalogEntryShape {
   /**
    * `system` / `user` / `both` — whether this provider uses the
    * NyxID-admin-registered OAuth app, the user's own OAuth app, or
-   * accepts both. When `user` or `both`, the OAuth pre-step collects
-   * client_id / client_secret before the popup.
+   * accepts both. The OAuth pre-step collects client_id / client_secret
+   * for `user`, and for `both` when the user picks their own app or
+   * NyxID has none (see `requiresOwnOAuthApp`).
    */
   readonly credential_mode?: string;
+  /**
+   * NyxID has its own OAuth app for this provider, so `both`-mode sign-in
+   * can go through it (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md). Absent on
+   * older servers, which keeps the own-app form.
+   */
+  readonly has_platform_oauth_credentials?: boolean;
+  /** Scopes NyxID's OAuth app may request; `null`/absent = ungated. */
+  readonly platform_scope_allowlist?: readonly string[] | null;
   /** Admin-provided docs URL shown inside the user-OAuth-app step. */
   readonly documentation_url?: string;
   /**
@@ -275,12 +291,36 @@ export function AiKeyConfirm({
       ? "For services not in the catalog — paste your own endpoint URL and credential."
       : `Your CLI wants to add ${trimmedSlug || "a service"} to NyxID. Confirm the details here.`;
 
+  // A resolved catalog service gets the hosted connector's identity heading.
+  const serviceStep = !onCatalogStep && !onCustomStep && !entryErrorMessage;
+
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{title}</h2>
-        <p className="text-12 text-muted-foreground">{subtitle}</p>
-      </div>
+    <div
+      className={cn(
+        "flex flex-col gap-4",
+        // Same reading column as the hosted connector and OAuth consent pages.
+        serviceStep && "mx-auto w-full max-w-[560px] gap-5",
+      )}
+    >
+      {serviceStep && entry ? (
+        <>
+          <ConnectionIdentityHeading
+            serviceSlug={entry.slug}
+            serviceName={entry.name}
+            iconUrl={entry.icon_url}
+            title={`Connect ${entry.name} to NyxID`}
+            subtitle="Your CLI asked to add this service. Review the details, then continue."
+          />
+          <div className="space-y-1 border-y border-border py-4">
+            <ConnectLinkDetailRow label="Requested by" value="Your NyxID CLI" />
+          </div>
+        </>
+      ) : (
+        <div className="flex flex-col gap-1">
+          <h2 className="font-serif text-28 font-normal">{title}</h2>
+          <p className="text-12 text-muted-foreground">{subtitle}</p>
+        </div>
+      )}
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
 
@@ -466,7 +506,6 @@ function ManageScopesPanel({
         slug={key.slug}
         label={key.label}
         pairingId={pairingId}
-        credentialMode={entry.credential_mode}
         documentationUrl={entry.documentation_url}
         scopeOverride={scopeOverride}
         reconnectKeyId={keyId}
@@ -937,6 +976,19 @@ function CatalogConfirmForm({
   const [platformChoice, setPlatformChoice] = useState(true);
   const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
   const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
+  // Which OAuth app authorizes the connection. NyxID's app is the
+  // one-click default whenever it exists; the user's own app stays
+  // available for `both`-mode providers.
+  const [oauthClientSource, setOAuthClientSource] =
+    useState<OAuthClientSource>("managed");
+  const oauthClientChoice = shape === "oauth" && offersOAuthClientChoice(entry);
+  const ownOAuthApp =
+    requiresOwnOAuthApp(entry) ||
+    (oauthClientChoice && oauthClientSource === "self");
+  const platformScopeAllowlist =
+    shape === "oauth" && !ownOAuthApp
+      ? (entry.platform_scope_allowlist ?? null)
+      : null;
   const [label, setLabel] = useState(prefill.label ?? entry.name);
   const [credential, setCredential] = useState("");
   const [endpointUrl, setEndpointUrl] = useState(prefill.endpoint_url ?? "");
@@ -959,6 +1011,18 @@ function CatalogConfirmForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const viaNode = prefill.via_node?.trim() ?? "";
+
+  function chooseOAuthClient(source: OAuthClientSource) {
+    setOAuthClientSource(source);
+    // NyxID's app can only request its allowlist; drop anything picked for
+    // the user's own app so initiation isn't rejected.
+    const allowlist = entry.platform_scope_allowlist;
+    if (source === "managed" && allowlist) {
+      setSelectedScopes((current) =>
+        current.filter((scope) => allowlist.includes(scope)),
+      );
+    }
+  }
   // Set once the user clicks "Continue" for an OAuth / device-code
   // flow; drops the confirm UI and mounts the sub-flow panel. Reset
   // to `null` if the sub-flow reports cancel so the user can edit
@@ -1167,7 +1231,7 @@ function CatalogConfirmForm({
         targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
-        credentialMode={entry.credential_mode}
+        ownOAuthApp={ownOAuthApp}
         documentationUrl={entry.documentation_url}
         scopeOverride={scopeOverride}
         onSuccess={onSuccess}
@@ -1235,27 +1299,15 @@ function CatalogConfirmForm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
-        {entry.icon_url ? (
-          <img
-            src={entry.icon_url}
-            alt=""
-            className="h-8 w-8 rounded"
-            loading="lazy"
-          />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          <h3 className="font-medium">{entry.name}</h3>
-          {entry.description ? (
-            <p className="text-xs text-muted-foreground">{entry.description}</p>
-          ) : null}
-          <p className="text-xs text-muted-foreground">
-            Auth: <code>{entry.auth_method}</code>
-          </p>
-        </div>
-      </div>
 
       {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
+      {oauthClientChoice ? (
+        <OAuthClientSourceChoice
+          value={oauthClientSource}
+          onChange={chooseOAuthClient}
+          disabled={loading}
+        />
+      ) : null}
       <div className="flex flex-col gap-3">
         <Field label="Label" htmlFor="pair-aikey-label">
           <Input
@@ -1351,6 +1403,7 @@ function CatalogConfirmForm({
               shape === "oauth" ? "e.g. media.write" : "e.g. repo,read:org"
             }
             idPrefix="pair-aikey-scope"
+            platformAllowlist={platformScopeAllowlist}
           />
         ) : shape === "device-code" ? (
           <p className="text-xs text-muted-foreground">
@@ -1382,10 +1435,35 @@ function CatalogConfirmForm({
 
       {error ? <ErrorLine message={error} /> : null}
 
-      <Button variant="primary" onClick={handleSubmit} disabled={submitDisabled}>
-        {submitLabel}
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={handleSubmit}
+        disabled={submitDisabled}
+      >
+        {submitLabel}{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
       </Button>
     </div>
+  );
+}
+
+/** `both`-mode providers NyxID also has an OAuth app for offer a choice of app. */
+function offersOAuthClientChoice(entry: CatalogEntryShape): boolean {
+  return (
+    entry.credential_mode === "both" &&
+    entry.has_platform_oauth_credentials === true
+  );
+}
+
+/** Sign-in needs the user's own OAuth app because NyxID has none to offer. */
+function requiresOwnOAuthApp(entry: CatalogEntryShape): boolean {
+  return (
+    entry.credential_mode === "user" ||
+    (entry.credential_mode === "both" &&
+      entry.has_platform_oauth_credentials !== true)
   );
 }
 
