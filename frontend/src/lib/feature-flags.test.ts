@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { FEATURE_FLAG, userHasFeature } from "./feature-flags";
 
 describe("userHasFeature", () => {
+  it("pins the CRM feature key to the backend catalog", () => {
+    expect(FEATURE_FLAG.CRM).toBe("assistant:crm");
+  });
+
   it.each([null, undefined])(
     "returns false for a missing user (%s)",
     (user) => {

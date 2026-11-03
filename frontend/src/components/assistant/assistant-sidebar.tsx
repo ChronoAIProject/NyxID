@@ -29,6 +29,7 @@ import {
   Building2,
   ChevronRight,
   ChevronsUpDown,
+  ContactRound,
   FileText,
   MoreHorizontal,
   MessageSquare,
@@ -810,7 +811,8 @@ export function AssistantSidebar({
     | "plugins"
     | "approvals"
     | "automations"
-    | "machines";
+    | "machines"
+    | "crm";
   readonly deletingId?: string;
   readonly notice?: string;
   readonly onNewChat: () => void;
@@ -827,6 +829,7 @@ export function AssistantSidebar({
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
   const workspacePreview = useFeature(FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW);
+  const crmEnabled = useFeature(FEATURE_FLAG.CRM);
   const pluginsActive = activeView === "plugins";
   const approvalsActive = activeView === "approvals";
   const [deleteTarget, setDeleteTarget] = useState<Conversation | undefined>();
@@ -969,6 +972,14 @@ export function AssistantSidebar({
               label: "Machines",
               icon: MachinesGlyph,
             },
+            ...(crmEnabled
+              ? [{
+                  view: "crm" as const,
+                  to: "/assistant/crm" as const,
+                  label: "CRM",
+                  icon: ContactRound,
+                }]
+              : []),
           ] as const
         ).map((item) => (
           <Link
@@ -1225,18 +1236,20 @@ function SidebarRail({
   readonly onNewChat: () => void;
   readonly agents?: SidebarAgents;
   readonly groups?: SidebarGroups;
-  readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines";
+  readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines" | "crm";
   readonly activeConversationId: string | undefined;
   readonly pendingApprovals: number;
   readonly accountOpen: boolean;
   readonly onSelect: (conversationId: string) => void;
 }) {
   const homeActive = agents ? Boolean(agents.homeActive) : false;
+  const crmEnabled = useFeature(FEATURE_FLAG.CRM);
   const iconClass = (active: boolean) => cn("h-4 w-4", active && "text-nyx-secondary-400");
   const linkClass = (active: boolean) => cn(RAIL_BUTTON, active && "bg-overlay-strong text-foreground");
   const destinations = [
     { view: "automations", to: "/assistant/automations", label: "Automations", icon: AutomationsGlyph },
     { view: "machines", to: "/assistant/machines", label: "Machines", icon: MachinesGlyph },
+    ...(crmEnabled ? [{ view: "crm" as const, to: "/assistant/crm" as const, label: "CRM", icon: ContactRound }] : []),
     { view: "plugins", to: "/assistant/plugins", label: "Plugins", icon: PluginsGlyph },
   ] as const;
   const liveAgents = (agents?.agents ?? []).filter((agent) => agent.status !== "destroyed");

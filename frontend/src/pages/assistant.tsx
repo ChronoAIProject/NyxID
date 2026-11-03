@@ -1,6 +1,7 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AutomationsPage } from "@/pages/automations";
 import { MachinesPage } from "@/pages/machines";
+import { CrmPage } from "@/components/crm/crm-page";
 import { MachineSetupPage, MachinePairPage } from "@/pages/machine-setup";
 import {
   lazy,
@@ -112,6 +113,7 @@ type WorkspaceView =
   | "approvals"
   | "automations"
   | "machines"
+  | "crm"
   | "machine-setup"
   | "machine-pair";
 
@@ -120,6 +122,7 @@ const workspaceTitles: Record<WorkspaceView, string> = {
   approvals: "Approvals",
   automations: "Automations",
   machines: "Machines",
+  crm: "CRM",
   "machine-setup": "Add a machine",
   "machine-pair": "Pair a machine",
 };
@@ -149,6 +152,8 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
           <AutomationsPage />
         ) : view === "machines" ? (
           <MachinesPage />
+        ) : view === "crm" ? (
+          <CrmPage />
         ) : view === "machine-setup" ? (
           <MachineSetupPage />
         ) : (
