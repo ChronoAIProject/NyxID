@@ -801,7 +801,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           />
           <PrimaryButton refreshLabelOnFontScaleChange
             label={deleteAccountMutation.isPending ? "Deleting..." : "Delete Account"}
-            kind="danger"
+            kind="destructive"
             disabled={deleteAccountMutation.isPending || isOffline}
             onPress={handleDeleteAccount}
           />
