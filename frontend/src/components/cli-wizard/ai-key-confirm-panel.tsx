@@ -38,6 +38,7 @@ import {
   withRewindOnError,
 } from "@/pages/cli-pair/reserve-action";
 import { CatalogGrid } from "./catalog-grid";
+import { WizardBackFab } from "./wizard-back-fab";
 import { WizardHeading } from "./wizard-heading";
 
 /**
@@ -296,6 +297,14 @@ export function AiKeyConfirm({
   const serviceStep = !onCatalogStep && !onCustomStep && !entryErrorMessage;
 
   return (
+    <div>
+      {serviceStep || onCustomStep ? (
+        <WizardBackFab
+          onBack={() => {
+            setSlug("");
+          }}
+        />
+      ) : null}
     <div
       className={cn(
         "flex flex-col gap-4",
@@ -338,9 +347,6 @@ export function AiKeyConfirm({
           targetOrgId={targetOrgId}
           pairingId={pairingId}
           onSuccess={onSuccess}
-          onBack={() => {
-            setSlug("");
-          }}
         />
       ) : entryLoading ? (
         <Skeleton className="h-24 w-full" />
@@ -362,6 +368,7 @@ export function AiKeyConfirm({
           onSuccess={onSuccess}
         />
       ) : null}
+    </div>
     </div>
   );
 }
@@ -663,7 +670,6 @@ interface CustomServiceFormProps {
   readonly targetOrgId: string | null;
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
-  readonly onBack: () => void;
 }
 
 function RequiredMarker() {
@@ -675,7 +681,6 @@ function CustomServiceForm({
   targetOrgId,
   pairingId,
   onSuccess,
-  onBack,
 }: CustomServiceFormProps) {
   // Issue #414: when the CLI passed `--auth-method`, `--auth-key-name`,
   // `--slug`, `--via-node`, etc. alongside `--custom`, those values
@@ -945,14 +950,17 @@ function CustomServiceForm({
 
       {error ? <ErrorLine message={error} /> : null}
 
-      <div className="flex items-center justify-between gap-2">
-        <Button variant="outline" onClick={onBack} disabled={loading}>
-          ← Back
-        </Button>
-        <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
-          {loading ? "Connecting…" : "Connect service"}
-        </Button>
-      </div>
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={() => void submit()}
+        disabled={submitDisabled}
+      >
+        {loading ? "Connecting…" : "Connect service"}{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
+      </Button>
     </div>
   );
 }
@@ -1426,11 +1434,11 @@ function CatalogConfirmForm({
           </div>
         ) : null}
 
-        {shape === "no-auth" ? (
+        {/* With NyxID's key the selected card already says there is nothing to paste. */}
+        {shape === "no-auth" && !usePlatformKey ? (
           <p className="text-xs text-muted-foreground">
-            {usePlatformKey
-              ? "NyxID's key is used, so there's nothing to paste. Click Connect to add it to your services."
-              : "This service doesn't need a credential. Click Connect to add it to your services."}
+            This service doesn't need a credential. Click Connect to add it
+            to your services.
           </p>
         ) : null}
       </div>

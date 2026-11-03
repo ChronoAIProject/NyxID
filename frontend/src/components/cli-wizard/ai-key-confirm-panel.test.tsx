@@ -1223,7 +1223,9 @@ describe("CLI wizard platform-key selection", () => {
     render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-xai" }} />, { wrapper: createWrapper() });
     expect(await screen.findByRole("radio", { name: /Use NyxID's key/ })).toBeChecked();
     expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
-    expect(screen.getByText(/NyxID's key is used, so there's nothing to paste/)).toBeInTheDocument();
+    expect(screen.getByText("NyxID supplies the key. Nothing to paste.")).toBeInTheDocument();
+    expect(screen.queryByText(/credits/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/doesn't need a credential/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /Connect/ }));
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/keys", { service_slug: "llm-xai", label: "xAI", use_platform_key: true }));
   });
@@ -1303,6 +1305,24 @@ describe("CLI wizard OAuth app choice", () => {
     expect(screen.getByText("Requested by")).toBeInTheDocument();
     expect(screen.getByText("Your NyxID CLI")).toBeInTheDocument();
     expect(screen.queryByText(/^Auth:/)).not.toBeInTheDocument();
+  });
+
+  it("offers one Back button on the service step that returns to the catalog", async () => {
+    mockGet.mockImplementation(async (path: string) =>
+      path === "/catalog/api-github" ? githubEntry : { services: [] },
+    );
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-github" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    await screen.findByRole("heading", { name: "Connect GitHub to NyxID" });
+    expect(screen.getAllByRole("button", { name: "Back" })).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Add an AI service" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
   });
 
   it("explains NyxID managed in a tooltip and shows the NyxID logo", async () => {
