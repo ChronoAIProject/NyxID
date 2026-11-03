@@ -199,6 +199,7 @@ export function GroupMessageRow({
                 contentType: item.content_type,
                 origin: item.origin || undefined,
                 imageInput: item.image_input ?? undefined,
+                imageInputReason: item.image_input_reason ?? undefined,
                 expired: item.expired,
                 endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
               }}
@@ -257,6 +258,7 @@ export function GroupMessageRow({
                 contentType: item.content_type,
                 origin: item.origin || undefined,
                 imageInput: item.image_input ?? undefined,
+                imageInputReason: item.image_input_reason ?? undefined,
                 expired: item.expired,
                 endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
               }}

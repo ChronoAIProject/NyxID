@@ -921,24 +921,23 @@ impl PlatformAdapter for TelegramAdapter {
     ) -> AppResult<BotIdentity> {
         let bot_token = credentials.token;
         let url = format!("{}{bot_token}/getMe", self.base_url);
-        let resp: serde_json::Value = http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Telegram getMe request failed: {}",
-                    e.without_url()
-                ))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Telegram getMe response parse failed: {}",
-                    e.without_url()
-                ))
-            })?;
+        let response = http.get(&url).send().await.map_err(|e| {
+            AppError::ChannelPlatformError(format!(
+                "Telegram getMe request failed: {}",
+                e.without_url()
+            ))
+        })?;
+        super::check_token_verification_status(
+            &response,
+            "Telegram getMe",
+            "Telegram rejected the bot token. Copy the token from BotFather and try again.",
+        )?;
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::ChannelPlatformError(format!(
+                "Telegram getMe response parse failed: {}",
+                e.without_url()
+            ))
+        })?;
 
         if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let description = resp
@@ -1152,6 +1151,19 @@ fn photo_document_fallback(description: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn token_verification_classifies_http_rejections_before_json() {
+        let server = wiremock::MockServer::start().await;
+        let adapter = TelegramAdapter::for_api_base(&server.uri());
+        super::super::assert_token_verification_statuses(
+            &adapter,
+            &server,
+            "private-token",
+            "Telegram getMe",
+        )
+        .await;
+    }
 
     // -- parse_inbound -------------------------------------------------------
 

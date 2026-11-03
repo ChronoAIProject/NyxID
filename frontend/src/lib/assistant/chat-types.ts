@@ -70,6 +70,7 @@ export interface ChatImage {
   readonly origin?: "tool" | "user_upload";
   readonly expired?: boolean;
   readonly imageInput?: "sent" | "unavailable";
+  readonly imageInputReason?: string;
   readonly id: string;
   /** Assistant API endpoint, relative to the API root. */
   readonly endpoint: string;

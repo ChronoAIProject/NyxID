@@ -107,6 +107,12 @@ impl Fence {
         super::transaction_service::run_db_only(db, &(db.clone(), self.clone()), |tx, (db, fence)| {
             Box::pin(async move {
                 if !fence.touch(db, tx).await? { return Err(AppError::ChannelBotInactive("Discord Gateway ownership lost".into())); }
+                // A verified Gateway message proves ordinary chat is configured;
+                // it need not (and does not) prove an Interactions webhook exists.
+                let mut pending = fence.bot_filter();
+                pending.insert("status", "pending_webhook");
+                db.collection::<Document>(COLLECTION_NAME).update_one(pending,
+                    doc! {"$set":{"status":"active","updated_at":bson::DateTime::now()}}).session(&mut *tx).await?;
                 db.collection::<Document>(COLLECTION_NAME).update_one(fence.bot_filter(),
                     doc! {"$set":{"diagnostics.last_inbound_at":bson::DateTime::now(),"diagnostics.last_inbound_source":"discord_gateway"}}).session(tx).await?;
                 Ok(())

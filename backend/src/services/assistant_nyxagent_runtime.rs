@@ -1666,7 +1666,10 @@ async fn execute_turn_inner(
     )
     .await
     .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    let mut listing = crate::services::assistant_upload_service::listing(&attachments);
+    // Preserve posted metadata for explicit withheld/expired notices, while
+    // only live, authorized attachments proceed to the shared modality gate.
+    let listed_attachments = attachments.clone();
+    let mut availability_notice = String::new();
     if row.collaboration.is_some() {
         let (available, notice) = super::collaboration_group_service::uploads::input_for_turn(
             &state.db,
@@ -1676,7 +1679,7 @@ async fn execute_turn_inner(
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
         attachments = available;
-        listing.push_str(&notice);
+        availability_notice = notice;
     } else {
         let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
             &state.db,
@@ -1686,20 +1689,30 @@ async fn execute_turn_inner(
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
         if !expired.is_empty() {
-            listing.push_str(&format!(
-            "\nAttachments expired per retention policy; ask the owner to upload them again: {}",
-            serde_json::json!(expired)
-        ));
+            availability_notice = format!(
+                "\nAttachments expired per retention policy; ask the owner to upload them again: {}",
+                serde_json::json!(expired)
+            );
             attachments.retain(|a| !expired.contains(&a.id));
         }
     }
-    let capabilities = if attachments
+    let has_images = attachments
         .iter()
-        .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"))
-    {
+        .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"));
+    let model_text_only = has_images
+        && images::model_support(state, egress, authority, &row.model, policy).await == Some(false);
+    let mut listing =
+        crate::services::assistant_upload_service::listing(&listed_attachments, model_text_only);
+    listing.push_str(&availability_notice);
+    let capabilities = if has_images && !model_text_only {
         upstream_capabilities(state, egress, authority, credential, policy).await
     } else {
         Value::Null
+    };
+    let image_notice = if model_text_only {
+        crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK
+    } else {
+        crate::services::assistant_upload_service::IMAGE_FALLBACK
     };
     let (image_parts, omitted) = crate::services::assistant_upload_service::image_plan(
         &attachments,
@@ -1707,7 +1720,7 @@ async fn execute_turn_inner(
         &state.config.base_url,
     );
     if !omitted.is_empty() {
-        let notice = crate::services::assistant_upload_service::IMAGE_FALLBACK;
+        let notice = image_notice;
         listing.push_str(&format!(
             "\n{notice} Unviewable attachment IDs: {}",
             json!(omitted)
@@ -1724,40 +1737,12 @@ async fn execute_turn_inner(
         } else {
             "sent"
         };
-        state
-            .db
-            .collection::<mongodb::bson::Document>(
-                crate::models::assistant_message::COLLECTION_NAME,
-            )
-            .update_one(
-                doc! {
-                    "user_id": &row.user_id,
-                    "conversation_id": &row.id,
-                    "turn_id": turn_id,
-                    "attachments.id": &item.id,
-                },
-                doc! {"$set": {"attachments.$.image_input": status}},
-            )
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-        if let Some(group_id) = &row.group_id {
-            let group_owner = if row.group_request_id.is_some() {
-                row.agent_owner_id.as_deref().unwrap_or(&row.user_id)
-            } else {
-                &row.user_id
-            };
-            state
-                .db
-                .collection::<mongodb::bson::Document>(
-                    crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
-                )
-                .update_one(
-                    doc! {"user_id": group_owner,"group_id": group_id,"attachments.id": &item.id},
-                    doc! {"$set": {"attachments.$.image_input":status}},
-                )
-                .await
-                .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-        }
+        let reason = (status == "unavailable").then_some(if model_text_only {
+            "model_text_only"
+        } else {
+            "agent_unsupported"
+        });
+        images::record_upload_outcome(state, row, &item.id, status, reason).await?;
     }
     // The notice prompts a transcript refresh; publish only after the fallback
     // metadata is durable, so that refresh cannot miss the explanation.
@@ -1766,7 +1751,7 @@ async fn execute_turn_inner(
             "turn.notice",
             json!({
                 "code": "image_input_unavailable",
-                "message": crate::services::assistant_upload_service::IMAGE_FALLBACK,
+                "message": image_notice,
             }),
         );
     }
@@ -2292,6 +2277,28 @@ async fn execute_turn_inner(
         crate::services::assistant_steering::set_running_response(&state.db, row, None)
             .await
             .map_err(|_| TurnError::internal("assistant_unavailable", "stream"))?;
+        if decoder.image_input_unsupported {
+            for item in attachments.iter().filter(|a| {
+                a.origin == "user_upload"
+                    && a.content_type.starts_with("image/")
+                    && !omitted.contains(&a.id)
+            }) {
+                if images::record_upload_outcome(
+                    state,
+                    row,
+                    &item.id,
+                    "unavailable",
+                    Some("image_input_unsupported"),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!("Image delivery notice could not be saved");
+                }
+            }
+            tool_images.unsupported(state, row).await;
+            events.emit("turn.notice", json!({"code":"image_input_unavailable","message":crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK}));
+        }
         let mut result = decoder.terminal.ok_or_else(|| {
             let mut error = TurnError::internal("invalid_stream", "stream");
             error.response_id = running_response_id.map(String::into_boxed_str);
@@ -2393,8 +2400,9 @@ type CapabilityCache = HashMap<String, (Instant, Value)>;
 static CAPABILITIES: LazyLock<Mutex<CapabilityCache>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// One bounded metadata cache for image input and steering; never cache authority
-/// or credentials. Include the destination so catalog changes cannot reuse support.
+/// Cache successful deployment metadata for image input and steering, never
+/// authority or credentials. A turn's failed authentication must not disable
+/// capabilities for other owners. Catalog destination changes invalidate support.
 pub(crate) async fn upstream_capabilities(
     state: &AppState,
     egress: &dyn contract::NyxAgentEgress,
@@ -2402,18 +2410,31 @@ pub(crate) async fn upstream_capabilities(
     credential: &AssistantCredential,
     policy: Option<BillingRoutePolicy>,
 ) -> Value {
-    let Ok(service) =
-        assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG).await
-    else {
-        return Value::Null;
-    };
+    let service =
+        match assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG)
+            .await
+        {
+            Ok(service) => service,
+            Err(error) => {
+                tracing::warn!(
+                    failure_class = "service_resolution",
+                    http_status = error.status_code().as_u16(),
+                    "NyxAgent capability lookup failed"
+                );
+                return Value::Null;
+            }
+        };
     let key = format!("{}:{}:{}", state.db.name(), service.id, service.base_url);
-    let mut cache = CAPABILITIES.lock().await;
-    if let Some((at, value)) = cache.get(&key)
-        && at.elapsed() < Duration::from_secs(60)
     {
-        return value.clone();
+        let cache = CAPABILITIES.lock().await;
+        if let Some((at, value)) = cache.get(&key)
+            && at.elapsed() < Duration::from_secs(60)
+        {
+            return value.clone();
+        }
     }
+    // Concurrent misses may fetch in parallel. Do not hold the cache lock over
+    // network/body reads, or one slow credential would block every image turn.
     let lookup = async {
         let response = Box::pin(request(
             state,
@@ -2427,20 +2448,37 @@ pub(crate) async fn upstream_capabilities(
             policy,
         ))
         .await
-        .ok()?;
-        if !response.status().is_success() {
-            return None;
+        .map_err(|error| ("request", Some(error.status_code().as_u16())))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(("http_status", Some(status.as_u16())));
         }
         let bytes = axum::body::to_bytes(response.into_body(), 16384)
             .await
-            .ok()?;
-        serde_json::from_slice::<Value>(&bytes).ok()
+            .map_err(|_| ("body", Some(status.as_u16())))?;
+        let value = serde_json::from_slice::<Value>(&bytes)
+            .map_err(|_| ("invalid_json", Some(status.as_u16())))?;
+        if !value.is_object() {
+            return Err(("invalid_response", Some(status.as_u16())));
+        }
+        Ok(value)
     };
-    let value = tokio::time::timeout(Duration::from_secs(5), lookup)
+    let value = match tokio::time::timeout(Duration::from_secs(5), lookup)
         .await
-        .ok()
-        .flatten()
-        .unwrap_or(Value::Null);
+        .unwrap_or(Err(("timeout", None)))
+    {
+        Ok(value) => value,
+        Err((failure_class, http_status)) => {
+            tracing::warn!(
+                service_id = %service.id,
+                failure_class,
+                http_status,
+                "NyxAgent capability lookup failed"
+            );
+            return Value::Null;
+        }
+    };
+    let mut cache = CAPABILITIES.lock().await;
     if cache.len() >= 64 {
         cache.clear();
     }
@@ -2450,3 +2488,7 @@ pub(crate) async fn upstream_capabilities(
 
 #[path = "assistant_nyxagent_runtime_images.rs"]
 pub(crate) mod images;
+
+#[cfg(test)]
+#[path = "assistant_nyxagent_runtime_capability_tests.rs"]
+mod capability_tests;

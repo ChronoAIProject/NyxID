@@ -1974,12 +1974,13 @@ async fn lagged_browser_subscription_keeps_full_text_and_terminal_event() {
 }
 
 #[tokio::test]
-async fn model_fallbacks_are_uncached_and_successes_are_cached() {
+async fn model_fallbacks_are_cached_and_expire_for_later_success() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
     let (state, _, server) = setup(None, Duration::ZERO).await;
+    let cache_key = format!("{}:{OWNER}", state.db.name());
     let upstream = MockServer::start().await;
     state
         .db
@@ -2001,13 +2002,8 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         .await
         .unwrap();
     assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
-    assert!(
-        !MODELS
-            .lock()
-            .await
-            .contains_key(&format!("{}:{OWNER}", state.db.name()))
-    );
-    engine::begin_turn(
+    assert!(MODELS.lock().await[&cache_key].1.is_none());
+    let row = engine::begin_turn(
         &state.db,
         OWNER,
         &engine::TurnRequest {
@@ -2024,6 +2020,37 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
     )
     .await
     .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &row.id}, doc! {"$set": {"group_id": "crew"}})
+        .await
+        .unwrap();
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
+    let Json(fallback) = models(State(state.clone()), test_auth_user(OWNER), request())
+        .await
+        .unwrap();
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(
+                crate::models::assistant_agent_credential::COLLECTION_NAME
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        1
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &row.id}, doc! {"$unset": {"group_id": ""}})
+        .await
+        .unwrap();
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
     Mock::given(method("GET"))
         .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(503))
@@ -2039,15 +2066,16 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         .with_priority(2)
         .mount(&upstream)
         .await;
-    let _ = models(State(state.clone()), test_auth_user(OWNER), request())
-        .await
-        .unwrap();
-    assert!(
-        !MODELS
-            .lock()
+    for _ in 0..2 {
+        let Json(fallback) = models(State(state.clone()), test_auth_user(OWNER), request())
             .await
-            .contains_key(&format!("{}:{OWNER}", state.db.name()))
-    );
+            .unwrap();
+        assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
+    }
+    assert!(MODELS.lock().await[&cache_key].1.is_none());
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    // Expire the failure without sleeping; the next successful load replaces it.
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
     for _ in 0..2 {
         let Json(rows) = models(State(state.clone()), test_auth_user(OWNER), request())
             .await
@@ -2055,6 +2083,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         assert_eq!(rows.len(), 2);
     }
     assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
+    assert_eq!(MODELS.lock().await[&cache_key].1.as_ref().unwrap().len(), 2);
     server.abort();
 }
 
@@ -6138,3 +6167,6 @@ async fn channel_start_retry_does_not_shorten_a_later_continuation() {
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[path = "assistant_nyxagent_model_image_tests.rs"]
+mod model_image_tests;

@@ -791,7 +791,13 @@ as replacement original messages. Incoming media receives explicit unavailable
 feedback; tool images cannot use old relay anchors and report unavailable.
 
 Status exposes `gateway_native_phase`, `gateway_native_activation` and
-`gateway_native_delivery`. Intake refusals/unavailability and response failures
+`gateway_native_delivery`. A rejected native setup also exposes the optional
+`gateway_native_activation_detail`: CMA's problem `code`, restricted to
+`[a-z0-9_.-]{1,64}`, beside the existing NyxID activation code. It is retained
+through relay fallback and included in connect/transport audit metadata and an
+info log with the channel agent ID. Upstream prose, URLs and credentials are
+never retained; a new preparation or successful activation clears the detail.
+Intake refusals/unavailability and response failures
 use stable codes. Activation reflects CMA's bounded activation codes;
 `response_ready` means the provider answer is available, **not** a confirmed
 Discord send. The CMA owner owns native connection/runtime and final delivery
