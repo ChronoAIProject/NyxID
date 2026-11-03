@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
-import { Alert, Switch } from "react-native";
+import { Alert, Switch, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
-import { Card, Label, Notice } from "../../components/workspace/WorkspaceUI";
+import { Label, Notice, Section } from "../../components/workspace/WorkspaceUI";
 import { accountApi } from "../../lib/api/accountApi";
 import type { AccountProfile } from "../../lib/api/types";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
@@ -68,10 +68,34 @@ export function AccountSecurityControls({
   const policy = profile.profile_config?.security;
   const disabled = busy || stepUp.busy || !isConnected;
   return (
-    <Card>
-      <Label accessibilityRole="header">Approved sign-ins</Label>
+    <Section title="Approved sign-ins">
       {message ? <Notice {...message} /> : null}
-      <Label>Skip MFA for NyxID app sign-ins</Label>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+        <Label style={{ flex: 1 }}>Skip MFA for NyxID app sign-ins</Label>
+        <Switch
+          accessibilityLabel="Skip MFA for NyxID app sign-ins"
+          value={policy?.skip_mfa_for_approved_sign_ins ?? false}
+          disabled={!policy || disabled}
+          onValueChange={(enabled) => {
+            const ticket = current.capture();
+            if (!enabled) {
+              void savePolicy(false, ticket);
+              return;
+            }
+            Alert.alert(
+              "Skip MFA for app-approved sign-ins?",
+              "Anyone with access to your signed-in NyxID app or browser could approve sign-ins without another code.",
+              [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Enable",
+                  onPress: () => void savePolicy(true, ticket),
+                },
+              ],
+            );
+          }}
+        />
+      </View>
       <Label muted>
         Approve QR or typed sign-in codes without another authenticator code.
         Only approve codes shown on your own screen.{" "}
@@ -84,27 +108,7 @@ export function AccountSecurityControls({
           This server does not support changing this policy yet.
         </Label>
       ) : null}
-      <Switch
-        accessibilityLabel="Skip MFA for NyxID app sign-ins"
-        value={policy?.skip_mfa_for_approved_sign_ins ?? false}
-        disabled={!policy || disabled}
-        onValueChange={(enabled) => {
-          const ticket = current.capture();
-          if (!enabled) {
-            void savePolicy(false, ticket);
-            return;
-          }
-          Alert.alert(
-            "Skip MFA for app-approved sign-ins?",
-            "Anyone with access to your signed-in NyxID app or browser could approve sign-ins without another code.",
-            [
-              { text: "Cancel", style: "cancel" },
-              { text: "Enable", onPress: () => void savePolicy(true, ticket) },
-            ],
-          );
-        }}
-      />
       {stepUp.prompt}
-    </Card>
+    </Section>
   );
 }

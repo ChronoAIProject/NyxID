@@ -4,10 +4,10 @@ import * as WebBrowser from "expo-web-browser";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ActionButton,
-  Card,
   Field,
   Label,
   Notice,
+  Section,
 } from "../../components/workspace/WorkspaceUI";
 import { accountApi } from "../../lib/api/accountApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
@@ -142,8 +142,7 @@ export function AccountOrganizations({
   }
   const disabled = !isConnected || busy || orgs.isFetching;
   return (
-    <Card>
-      <Label accessibilityRole="header">Organizations</Label>
+    <Section title="Organizations">
       <Label muted>
         Signed in as {email}. Your personal account remains the acting identity.
         Select an organization below to manage its own resources.
@@ -252,6 +251,6 @@ export function AccountOrganizations({
           });
         }}
       />
-    </Card>
+    </Section>
   );
 }

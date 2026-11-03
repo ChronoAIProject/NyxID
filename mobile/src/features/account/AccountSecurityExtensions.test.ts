@@ -87,10 +87,9 @@ function setup(
       }),
     },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice"].map((name) => [
-        name,
-        name,
-      ]),
+      ["ActionButton", "Card", "Field", "Label", "Notice", "Section"].map(
+        (name) => [name, name],
+      ),
     ),
     "../../lib/api/accountApi": { accountApi: api },
     "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.example" },

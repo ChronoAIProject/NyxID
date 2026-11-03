@@ -6,10 +6,10 @@ import * as Clipboard from "expo-clipboard";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import {
   ActionButton,
-  Card,
   Field,
   Label,
   Notice,
+  Section,
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
@@ -433,14 +433,12 @@ export function AccountSecurityScreen() {
 
   return (
     <WorkspacePage showHeading={false} title="Account & security">
-      <Label muted>Manage your identity and protect access to NyxID.</Label>
       {!isConnected ? (
         <Notice message="You're offline. Connect to update account settings." />
       ) : null}
       {feedback ? <Notice {...feedback} /> : null}
 
-      <Card>
-        <Label accessibilityRole="header">Profile</Label>
+      <Section title="Profile">
         {profile.isPending ? (
           <Label muted>Loading your account…</Label>
         ) : profile.isError || !profile.data ? (
@@ -456,12 +454,22 @@ export function AccountSecurityScreen() {
           </>
         ) : (
           <>
-            <Label muted>{profile.data.email}</Label>
-            <Label muted>
-              {profile.data.email_verified
-                ? "Email verified"
-                : "Email not verified"}
-            </Label>
+            <View
+              style={{
+                flexDirection: "row",
+                flexWrap: "wrap",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <Label muted>Email</Label>
+              <View style={{ alignItems: "flex-end", flexShrink: 1 }}>
+                <Label selectable>{profile.data.email}</Label>
+                <Label muted style={{ fontSize: 12 }}>
+                  {profile.data.email_verified ? "Verified" : "Not verified"}
+                </Label>
+              </View>
+            </View>
             <Field
               label="Display name"
               value={displayName}
@@ -497,10 +505,9 @@ export function AccountSecurityScreen() {
             ) : null}
           </>
         )}
-      </Card>
+      </Section>
 
-      <Card>
-        <Label accessibilityRole="header">Two-factor authentication</Label>
+      <Section title="Two-factor authentication">
         {profile.isPending ? (
           <Label muted>Loading security settings…</Label>
         ) : !profile.data || !ownsPrivateState ? (
@@ -706,7 +713,7 @@ export function AccountSecurityScreen() {
             )}
           </>
         )}
-      </Card>
+      </Section>
 
       {profile.data && ownsPrivateState ? (
         <>
@@ -725,12 +732,7 @@ export function AccountSecurityScreen() {
           />
         </>
       ) : null}
-      <Card>
-        <Label accessibilityRole="header">Active sessions</Label>
-        <Label muted>
-          Review where your account is signed in. Network details come from
-          NyxID's session records.
-        </Label>
+      <Section title="Active sessions" footer="Review where your account is signed in. Network details come from NyxID's session records.">
         {sessions.isPending ? (
           <Label muted>Loading sessions…</Label>
         ) : sessions.isError ? (
@@ -777,7 +779,7 @@ export function AccountSecurityScreen() {
             void sessions.refetch();
           }}
         />
-      </Card>
+      </Section>
     </WorkspacePage>
   );
 }

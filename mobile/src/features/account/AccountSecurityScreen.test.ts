@@ -59,9 +59,15 @@ function setup(passwordAccount: boolean) {
     "expo-clipboard": {},
     "../../app/WorkspaceHeader": { useWorkspaceBack() {} },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice", "WorkspacePage"].map(
-        (name) => [name, name],
-      ),
+      [
+        "ActionButton",
+        "Card",
+        "Field",
+        "Label",
+        "Notice",
+        "Section",
+        "WorkspacePage",
+      ].map((name) => [name, name]),
     ),
     "@tanstack/react-query": {
       useQueryClient: () => ({

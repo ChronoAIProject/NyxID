@@ -6,6 +6,7 @@ import {
   Card,
   Label,
   Notice,
+  Section,
 } from "../../components/workspace/WorkspaceUI";
 import { accountApi } from "../../lib/api/accountApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
@@ -94,8 +95,7 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
   const disabled =
     !isConnected || busy || apps.isFetching || bindings.isFetching;
   return (
-    <Card>
-      <Label accessibilityRole="header">Access & authorizations</Label>
+    <Section title="Access & authorizations">
       <Label muted>
         Personal account authorizations. These are separate from approval grants
         in Activity.
@@ -187,6 +187,6 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
         loading={apps.isFetching || bindings.isFetching}
         onPress={refresh}
       />
-    </Card>
+    </Section>
   );
 }
