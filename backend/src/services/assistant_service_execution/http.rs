@@ -7,6 +7,8 @@ pub struct HttpProjection {
     pub replace_headers: bool,
     pub base_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
+    /// Server-only marker for an exact attached Ornn package read.
+    pub(crate) skill_read: bool,
     pub(crate) machine_git: Option<crate::models::downstream_service::GitHttp>,
 }
 impl Default for HttpProjection {
@@ -16,6 +18,7 @@ impl Default for HttpProjection {
             replace_headers: false,
             base_url: None,
             extra_headers: Vec::new(),
+            skill_read: false,
             machine_git: None,
         }
     }
@@ -622,7 +625,7 @@ async fn check_http_projected_inner(
             crate::services::assistant_nyxagent::identifier(&target.service.slug)
         )
     };
-    let decision = check(
+    let mut decision = check(
         &state.db,
         &state.node_ws_manager,
         chat,
@@ -646,6 +649,11 @@ async fn check_http_projected_inner(
         )),
     )
     .await?;
+    if projection.skill_read
+        && let Some(admission) = decision.admission.as_mut()
+    {
+        admission.bound_skill_read = true;
+    }
     if let Some(binding) = consent_binding.as_deref() {
         validate_model_consent_snapshot(&state.db, decision.admission.as_ref(), binding).await?;
     }

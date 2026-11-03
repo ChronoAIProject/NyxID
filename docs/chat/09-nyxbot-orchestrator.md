@@ -1090,11 +1090,15 @@ policy; successful silence closes each eligible source without a send.
 
 ### Grounded cross-thread task status
 
-Owner turns may receive other-thread title/question excerpts for duplicate-work
-**discovery only**. These do not prove that work is running. Stable instructions
-require `nyxid__task_status` evidence before reporting progress, completion or
-failure, and require “unknown” when evidence is absent or stale. Guests receive
-neither this note nor the status tool.
+Owner turns may receive title/question excerpts from the owner's other private
+threads for duplicate-work **discovery only**. Channel, guest and group-member
+threads belonging to other people are excluded because their answers do not
+reach the requester. These excerpts do not prove that work is running. Stable
+instructions require `nyxid__task_status` evidence before reporting progress,
+completion or failure, require “unknown” when evidence is absent or stale, and
+require the assistant to answer in the current thread rather than telling the
+user that a question is being handled elsewhere. Guests receive neither this
+note nor the status tool.
 
 `nyxid__task_status` is a read-only native tool for live owner turns. It reads only
 the acting person's private threads of the **same agent**, including that agent's
