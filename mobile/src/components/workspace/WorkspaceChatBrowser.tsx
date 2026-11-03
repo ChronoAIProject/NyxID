@@ -26,8 +26,13 @@ import { fonts } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import { searchDrawerItems } from "./workspaceChatListModel";
 
+// Header controls are 44pt targets; both sides reserve the same width so the
+// title stays centred whichever controls are present.
+const HEADER_CONTROL = 44;
+
 export function WorkspaceChatBrowser<T extends { id: string }>({
   title,
+  titleIcon,
   scopeKey,
   description,
   items,
@@ -46,6 +51,8 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   emptyText = "Nothing here yet.",
 }: {
   title: string;
+  /** Shown before the centred title, e.g. the agent's avatar. */
+  titleIcon?: ReactNode;
   scopeKey: string;
   description?: string;
   items: readonly T[];
@@ -113,6 +120,8 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
     onClose();
   };
   const refreshBlocked = refreshing || refreshDisabled || !visible;
+  const sideWidth =
+    HEADER_CONTROL * Math.max(onBack ? 1 : 0, onRefresh ? 2 : 1);
   const refresh = () => {
     const current = refreshRef.current;
     if (
@@ -141,57 +150,69 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
             style={styles.fill}
             behavior={Platform.OS === "ios" ? "padding" : "height"}
           >
+            <View accessible={false} style={styles.handleWrap}>
+              <View
+                style={[styles.handle, { backgroundColor: colors.border }]}
+              />
+            </View>
             <View style={[styles.header, { borderColor: colors.border }]}>
-              {onBack ? (
+              <View style={[styles.side, { width: sideWidth }]}>
+                {onBack ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Back to previous list"
+                    onPress={() => {
+                      Keyboard.dismiss();
+                      onBack();
+                    }}
+                    style={styles.iconButton}
+                  >
+                    <ChevronLeft size={22} color={colors.textSecondary} />
+                  </Pressable>
+                ) : null}
+              </View>
+              <View style={styles.titleWrap}>
+                {titleIcon}
+                <Text
+                  accessibilityRole="header"
+                  numberOfLines={2}
+                  style={[styles.heading, { color: colors.textPrimary }]}
+                >
+                  {title}
+                </Text>
+              </View>
+              <View style={[styles.side, styles.sideEnd, { width: sideWidth }]}>
+                {onRefresh ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={refreshLabel}
+                    accessibilityState={{
+                      disabled: refreshBlocked,
+                      busy: refreshing,
+                    }}
+                    disabled={refreshBlocked}
+                    onPress={refresh}
+                    style={[
+                      styles.iconButton,
+                      { opacity: refreshBlocked ? 0.4 : 1 },
+                    ]}
+                  >
+                    {refreshing ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : (
+                      <RefreshCw size={20} color={colors.textSecondary} />
+                    )}
+                  </Pressable>
+                ) : null}
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Back to previous list"
-                  onPress={() => {
-                    Keyboard.dismiss();
-                    onBack();
-                  }}
+                  accessibilityLabel={`Close ${title}`}
+                  onPress={close}
                   style={styles.iconButton}
                 >
-                  <ChevronLeft size={22} color={colors.textSecondary} />
+                  <X size={22} color={colors.textSecondary} />
                 </Pressable>
-              ) : null}
-              <Text
-                accessibilityRole="header"
-                numberOfLines={2}
-                style={[styles.heading, { color: colors.textPrimary }]}
-              >
-                {title}
-              </Text>
-              {onRefresh ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={refreshLabel}
-                  accessibilityState={{
-                    disabled: refreshBlocked,
-                    busy: refreshing,
-                  }}
-                  disabled={refreshBlocked}
-                  onPress={refresh}
-                  style={[
-                    styles.iconButton,
-                    { opacity: refreshBlocked ? 0.4 : 1 },
-                  ]}
-                >
-                  {refreshing ? (
-                    <ActivityIndicator size="small" color={colors.primary} />
-                  ) : (
-                    <RefreshCw size={20} color={colors.textSecondary} />
-                  )}
-                </Pressable>
-              ) : null}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Close ${title}`}
-                onPress={close}
-                style={styles.iconButton}
-              >
-                <X size={22} color={colors.textSecondary} />
-              </Pressable>
+              </View>
             </View>
             <View style={styles.toolbar}>
               {description ? (
@@ -201,75 +222,81 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                   {description}
                 </Text>
               ) : null}
-              {primaryAction ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={primaryAction.accessibilityLabel}
-                  onPress={() => {
-                    Keyboard.dismiss();
-                    primaryAction.onPress();
-                  }}
-                  style={[
-                    styles.primaryAction,
-                    { backgroundColor: colors.primary },
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.primaryActionLabel,
-                      { color: colors.onPrimary },
-                    ]}
-                  >
-                    {primaryAction.label}
-                  </Text>
-                </Pressable>
+              {primaryAction || items.length > 0 || searching ? (
+                <View style={styles.actionRow}>
+                  {items.length > 0 || searching ? (
+                    <View
+                      style={[
+                        styles.searchBox,
+                        {
+                          backgroundColor: colors.card,
+                          borderColor: colors.border,
+                        },
+                      ]}
+                    >
+                      <Search size={18} color={colors.textMuted} />
+                      <TextInput
+                        accessibilityLabel={`Search ${title}`}
+                        placeholder={`Search ${title.toLowerCase()}`}
+                        placeholderTextColor={colors.textMuted}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        value={query}
+                        onChangeText={setQuery}
+                        returnKeyType="search"
+                        onSubmitEditing={Keyboard.dismiss}
+                        style={[
+                          styles.searchInput,
+                          { color: colors.textPrimary },
+                        ]}
+                      />
+                      {query ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`Clear ${title} search`}
+                          onPress={() => setQuery("")}
+                          style={styles.iconButton}
+                        >
+                          <X size={18} color={colors.textMuted} />
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  ) : null}
+                  {primaryAction ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={primaryAction.accessibilityLabel}
+                      onPress={() => {
+                        Keyboard.dismiss();
+                        primaryAction.onPress();
+                      }}
+                      style={[
+                        styles.primaryAction,
+                        !(items.length > 0 || searching) &&
+                          styles.primaryActionFull,
+                        { backgroundColor: colors.primary },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.primaryActionLabel,
+                          { color: colors.onPrimary },
+                        ]}
+                      >
+                        {primaryAction.label}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
               ) : null}
               {items.length > 0 || searching ? (
-                <>
-                  <View
-                    style={[
-                      styles.searchBox,
-                      {
-                        backgroundColor: colors.card,
-                        borderColor: colors.border,
-                      },
-                    ]}
-                  >
-                    <Search size={18} color={colors.textMuted} />
-                    <TextInput
-                      accessibilityLabel={`Search ${title}`}
-                      placeholder={`Search ${title.toLowerCase()}`}
-                      placeholderTextColor={colors.textMuted}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      value={query}
-                      onChangeText={setQuery}
-                      returnKeyType="search"
-                      onSubmitEditing={Keyboard.dismiss}
-                      style={[
-                        styles.searchInput,
-                        { color: colors.textPrimary },
-                      ]}
-                    />
-                    {query ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel={`Clear ${title} search`}
-                        onPress={() => setQuery("")}
-                        style={styles.iconButton}
-                      >
-                        <X size={18} color={colors.textMuted} />
-                      </Pressable>
-                    ) : null}
-                  </View>
-                  <Text
-                    accessibilityLiveRegion="polite"
-                    style={[styles.count, { color: colors.textMuted }]}
-                  >
-                    {filtered.length}{" "}
-                    {filtered.length === 1 ? "result" : "results"}
-                  </Text>
-                </>
+                <Text
+                  accessibilityLiveRegion="polite"
+                  style={[styles.count, { color: colors.textMuted }]}
+                >
+                  {filtered.length}{" "}
+                  {filtered.length === 1 ? "result" : "results"}
+                </Text>
               ) : null}
             </View>
             <FlatList
@@ -327,20 +354,33 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
+  handleWrap: { alignItems: "center", paddingTop: 8, paddingBottom: 2 },
+  handle: { width: 36, height: 4, borderRadius: 2 },
   header: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    minHeight: 64,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    minHeight: 56,
+    paddingHorizontal: 12,
+    paddingBottom: 8,
     borderBottomWidth: 1,
   },
-  heading: {
+  side: { flexDirection: "row", alignItems: "center" },
+  sideEnd: { justifyContent: "flex-end" },
+  titleWrap: {
     flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  heading: {
+    flexShrink: 1,
     fontFamily: fonts.bodySemi,
-    fontSize: 19,
-    lineHeight: 27,
+    fontSize: 17,
+    lineHeight: 24,
+    textAlign: "center",
   },
   iconButton: {
     width: 44,
@@ -349,14 +389,21 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   toolbar: { paddingHorizontal: 20, paddingTop: 16, gap: 12 },
+  actionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8,
+  },
   primaryAction: {
-    minHeight: 44,
+    minHeight: 48,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
   },
+  primaryActionFull: { flexGrow: 1 },
   primaryActionLabel: {
     fontFamily: fonts.bodySemi,
     fontSize: 14,
@@ -368,6 +415,8 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   searchBox: {
+    flexGrow: 1,
+    flexBasis: 180,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,

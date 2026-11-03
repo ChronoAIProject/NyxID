@@ -1,6 +1,10 @@
 import { Pressable, StyleSheet, useWindowDimensions, View } from "react-native";
 import { Minus, Plus } from "lucide-react-native";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
+import {
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
 import { useChatLayout } from "./ChatLayoutContext";
 import {
   chatLayoutBounds,
@@ -8,21 +12,39 @@ import {
   type ChatLayout,
 } from "./chatLayout";
 import { useTheme } from "../../theme/ThemeContext";
-import { fonts } from "../../theme/designTokens";
+import { spacing, typeScale } from "../../theme/designTokens";
 import { ChatBubbleSettings } from "./ChatBubbleSettings";
 
-/** `embedded` drops the card and heading so a Settings group can title it. */
-export function ChatDisplaySettings({
-  embedded = false,
-}: { embedded?: boolean } = {}) {
+/** Settings › Display groups for chat bubbles and chat layout. */
+export function ChatDisplaySettings() {
   const { colors } = useTheme();
   const { width, fontScale } = useWindowDimensions();
   const stacked = width / fontScale < 340;
   const { layout, update, reset } = useChatLayout();
   function control(key: keyof ChatLayout, label: string, step: number) {
     const [min, max] = chatLayoutBounds[key];
+    const stepper = (direction: -1 | 1) => {
+      const disabled = direction < 0 ? layout[key] <= min : layout[key] >= max;
+      const Glyph = direction < 0 ? Minus : Plus;
+      return (
+        <Pressable
+          key={direction}
+          accessibilityRole="button"
+          accessibilityLabel={`${direction < 0 ? "Decrease" : "Increase"} ${label.toLowerCase()}`}
+          accessibilityState={{ disabled }}
+          disabled={disabled}
+          onPress={() => update({ [key]: layout[key] + direction * step })}
+          style={[
+            styles.step,
+            { backgroundColor: colors.navActive, opacity: disabled ? 0.4 : 1 },
+          ]}
+        >
+          <Glyph size={22} color={colors.textPrimary} accessible={false} />
+        </Pressable>
+      );
+    };
     return (
-      <View style={[styles.setting, stacked && styles.stacked]} key={key}>
+      <View style={[styles.row, stacked && styles.stacked]} key={key}>
         <Text
           style={[
             styles.label,
@@ -33,115 +55,66 @@ export function ChatDisplaySettings({
           {label}
         </Text>
         <View style={styles.controls}>
-          {([-1, 1] as const).map((direction) => {
-            const disabled =
-              direction < 0 ? layout[key] <= min : layout[key] >= max;
-            return (
-              <Pressable
-                key={direction}
-                accessibilityRole="button"
-                accessibilityLabel={`${direction < 0 ? "Decrease" : "Increase"} ${label.toLowerCase()}`}
-                accessibilityState={{ disabled }}
-                disabled={disabled}
-                onPress={() =>
-                  update({ [key]: layout[key] + direction * step })
-                }
-                style={[
-                  styles.step,
-                  {
-                    backgroundColor: colors.navActive,
-                    opacity: disabled ? 0.4 : 1,
-                  },
-                ]}
-              >
-                {direction < 0 ? (
-                  <Minus
-                    size={22}
-                    color={colors.textPrimary}
-                    accessible={false}
-                  />
-                ) : (
-                  <Plus
-                    size={22}
-                    color={colors.textPrimary}
-                    accessible={false}
-                  />
-                )}
-              </Pressable>
-            );
-          })}
+          {stepper(-1)}
           <Text
             accessibilityLiveRegion="polite"
             style={[styles.value, { color: colors.textSecondary }]}
           >
             {layout[key]} pt
           </Text>
+          {stepper(1)}
         </View>
       </View>
     );
   }
   return (
-    <View
-      style={
-        embedded
-          ? styles.embedded
-          : [
-              styles.card,
-              { backgroundColor: colors.card, borderColor: colors.border },
-            ]
-      }
-    >
-      {embedded ? null : (
-        <Text
-          accessibilityRole="header"
-          style={[styles.title, { color: colors.textPrimary }]}
-        >
-          Display
-        </Text>
-      )}
-      <Text style={{ color: colors.textSecondary }}>
-        Chat layout is saved on this device and applies to every conversation.
-      </Text>
-      {offersChatWidth(width) &&
-        control("columnWidth", "Chat column width", 40)}
-      {control("composerMaxHeight", "Maximum composer height", 20)}
-      <Text style={{ color: colors.textSecondary }}>
-        The composer grows with your draft and fits the space above the
-        keyboard.
-      </Text>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Reset chat layout"
-        onPress={reset}
-        style={[styles.reset, { borderColor: colors.textMuted }]}
-      >
-        <Text style={{ color: colors.textPrimary }}>Reset chat layout</Text>
-      </Pressable>
+    <View style={styles.groups}>
       <ChatBubbleSettings />
+      <SettingsGroup
+        title="Chat layout"
+        inset={false}
+        footer="Saved on this device for every conversation. The composer grows with your draft up to this height."
+      >
+        {offersChatWidth(width) &&
+          control("columnWidth", "Chat column width", 40)}
+        {control("composerMaxHeight", "Maximum composer height", 20)}
+        <SettingsRow centered label="Reset chat layout" onPress={reset} />
+      </SettingsGroup>
     </View>
   );
 }
 const styles = StyleSheet.create({
-  card: { borderWidth: 1, borderRadius: 16, padding: 20, gap: 16 },
-  embedded: { padding: 16, gap: 16 },
-  title: { fontFamily: fonts.bodySemi, fontSize: 16 },
-  setting: {
+  groups: { gap: spacing.huge },
+  row: {
     flexDirection: "row",
     alignItems: "center",
     flexWrap: "wrap",
-    gap: 8,
+    gap: spacing.sm,
+    minHeight: 52,
+    paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.xs,
   },
-  stacked: { flexDirection: "column", alignItems: "stretch" },
-  label: { flex: 1, minWidth: 0, flexShrink: 1 },
+  stacked: {
+    flexDirection: "column",
+    alignItems: "stretch",
+    paddingVertical: spacing.md,
+  },
+  label: { ...typeScale.label, flex: 1, minWidth: 0, flexShrink: 1 },
   stackedLabel: { flex: undefined, width: "100%" },
   controls: {
     flexDirection: "row",
     alignItems: "center",
     flexWrap: "wrap",
     maxWidth: "100%",
-    gap: 8,
+    gap: spacing.xs,
   },
-  value: { minWidth: 48, maxWidth: "100%", flexShrink: 1 },
+  value: {
+    ...typeScale.label,
+    minWidth: 52,
+    maxWidth: "100%",
+    flexShrink: 1,
+    textAlign: "center",
+  },
   step: {
     width: 44,
     height: 44,
@@ -149,13 +122,5 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
-  },
-  reset: {
-    minHeight: 44,
-    borderWidth: 1,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 8,
   },
 });

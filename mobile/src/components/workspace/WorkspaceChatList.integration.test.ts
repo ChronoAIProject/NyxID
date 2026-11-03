@@ -1189,7 +1189,9 @@ test("thread rows show newest first, relative times, running and needs-you state
       formatRelativeTimeFromMs(Date.parse(source[0]!.last_message_at)),
     ),
   );
-  assert.ok(content(rows[0]!).includes("Current · Running"));
+  // The highlight alone marks the current thread; no "Current" label.
+  assert.ok(content(rows[0]!).includes("Running"));
+  assert.ok(!content(rows[0]!).includes("Current"));
   assert.equal(rows[0]!.props.style({ pressed: false })[0].minHeight, 44);
   env.press("Collapse chats for Agent 1");
   assert.equal(env.chatRows().length, 0);

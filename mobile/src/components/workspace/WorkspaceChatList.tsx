@@ -17,10 +17,8 @@ import {
 } from "react-native";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
-  Check,
   ChevronDown,
   ChevronRight,
-  MessageSquare,
   Plus,
   RefreshCw,
   Users,
@@ -519,7 +517,7 @@ export function WorkspaceChatList({
         <View
           key={`threads:${row.id}`}
           accessibilityLabel={`Threads with ${chatAgentLabel(row)}`}
-          style={[styles.children, { borderColor: colors.border }]}
+          style={[styles.children, { borderColor: colors.borderSoft }]}
           onLayout={(event) => {
             const { y, height } = event.nativeEvent.layout;
             sticky.current.bottom = y + height;
@@ -577,7 +575,7 @@ export function WorkspaceChatList({
                 />
                 {open ? (
                   <View
-                    style={[styles.children, { borderColor: colors.border }]}
+                    style={[styles.children, { borderColor: colors.borderSoft }]}
                   >
                     {[
                       ...new Set(
@@ -753,6 +751,11 @@ export function WorkspaceChatList({
                 : agent
                   ? chatAgentLabel(agent)
                   : "Agent chats"
+          }
+          titleIcon={
+            browser.kind === "chats" && agent ? (
+              <AgentAvatar agent={agent} size="md" />
+            ) : undefined
           }
           scopeKey={
             browser.kind === "chats" ? `chats:${agent?.id}` : browser.kind
@@ -1079,8 +1082,11 @@ function DisclosureRow({
       style={({ pressed }) => [
         styles.row,
         {
+          // An expanded agent's current thread carries the highlight instead.
           backgroundColor:
-            pressed || selected ? colors.navActive : "transparent",
+            pressed || (selected && !expanded)
+              ? colors.navActive
+              : "transparent",
         },
       ]}
     >
@@ -1129,7 +1135,6 @@ function DisclosureRow({
           </Text>
         ) : null}
       </View>
-      {selected ? <Check size={16} color={colors.primaryOnTint} /> : null}
       <Chevron size={16} color={colors.textMuted} />
     </Pressable>
   );
@@ -1153,7 +1158,6 @@ function ChatRow({
   create?: boolean;
 }) {
   const { colors } = useTheme();
-  const Icon = create ? Plus : MessageSquare;
   return (
     <Pressable
       accessibilityRole="button"
@@ -1168,40 +1172,41 @@ function ChatRow({
         },
       ]}
     >
-      <Icon size={14} color={selected ? colors.primary : colors.textMuted} />
+      {create ? <Plus size={14} color={colors.textMuted} /> : null}
       <View style={styles.label}>
-        <Text
-          numberOfLines={2}
-          style={[
-            styles.chatTitle,
-            { color: selected ? colors.primaryOnTint : colors.textSecondary },
-          ]}
-        >
-          {label}
-        </Text>
-        {selected || status ? (
+        <View style={styles.chatLine}>
+          <Text
+            numberOfLines={2}
+            style={[
+              styles.chatTitle,
+              {
+                color: selected ? colors.textPrimary : colors.textSecondary,
+                fontFamily: selected ? fonts.bodySemi : fonts.body,
+              },
+            ]}
+          >
+            {label}
+          </Text>
+          {detail ? (
+            <Text
+              numberOfLines={1}
+              style={[styles.chatTime, { color: colors.textMuted }]}
+            >
+              {detail}
+            </Text>
+          ) : null}
+        </View>
+        {status ? (
           <Text
             style={[
               styles.detail,
               {
                 color:
-                  status === "Needs you"
-                    ? colors.warning
-                    : colors.primaryOnTint,
+                  status === "Needs you" ? colors.warning : colors.primaryOnTint,
               },
             ]}
           >
-            {[selected ? "Current" : undefined, status]
-              .filter(Boolean)
-              .join(" · ")}
-          </Text>
-        ) : null}
-        {detail ? (
-          <Text
-            numberOfLines={1}
-            style={[styles.detail, { color: colors.textMuted }]}
-          >
-            {detail}
+            {status}
           </Text>
         ) : null}
       </View>
@@ -1314,7 +1319,19 @@ const styles = StyleSheet.create({
     minHeight: 44,
     borderRadius: 8,
   },
-  chatTitle: { fontFamily: fonts.body, fontSize: 12, lineHeight: 18 },
+  chatLine: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "baseline",
+    columnGap: 8,
+  },
+  chatTitle: { flexGrow: 1, flexShrink: 1, fontSize: 12, lineHeight: 18 },
+  chatTime: {
+    flexShrink: 0,
+    fontFamily: fonts.bodyRegular,
+    fontSize: 10,
+    lineHeight: 15,
+  },
   message: {
     flexDirection: "row",
     alignItems: "center",

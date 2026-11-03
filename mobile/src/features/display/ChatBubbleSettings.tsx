@@ -1,78 +1,64 @@
 import { Pressable, StyleSheet, View } from "react-native";
 import { Check } from "lucide-react-native";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
+import { SettingsGroup } from "../../components/settings/SettingsList";
 import { useTheme } from "../../theme/ThemeContext";
 import { bubblePalettes, userBubbleCorners, type BubblePalette } from "../../theme/chatAppearance";
-import { fonts } from "../../theme/designTokens";
-import { darkColors, lightColors, type ThemeColors } from "../../theme/mobileTheme";
+import { spacing } from "../../theme/designTokens";
 
-function Preview({ label, page, bubble }: {
-  label: string;
-  page: ThemeColors;
-  bubble: { background: string; foreground: string };
-}) {
-  return (
-    <View style={[styles.preview, { backgroundColor: page.bg, borderColor: page.border }]}>
-      <Text style={[styles.previewLabel, { color: page.textPrimary }]}>{label}</Text>
-      <View style={[styles.bubble, { backgroundColor: bubble.background }]}>
-        <Text style={{ color: bubble.foreground }}>Show me the services I have connected.</Text>
-      </View>
-      <Text style={[styles.previewText, { color: page.textPrimary }]}>
-        You can manage your connected services in Plugins.
-      </Text>
-    </View>
-  );
-}
-
+/** Bubble colour picker with a single preview in the current theme. */
 export function ChatBubbleSettings() {
   const { colors, mode, bubblePalette, setBubblePalette } = useTheme();
-  const selected = bubblePalettes[bubblePalette];
+  const tone = (key: BubblePalette) =>
+    mode === "dark" ? bubblePalettes[key].dark : bubblePalettes[key].light;
+  const selected = tone(bubblePalette);
   return (
-    <View style={styles.section}>
-      <Text style={[styles.title, { color: colors.textPrimary }]}>Chat bubbles</Text>
-      <Text style={{ color: colors.textSecondary }}>
-        Choose a color for your messages. Each choice has a light and a dark version. Saved on this device.
-      </Text>
-      <View accessibilityRole="radiogroup" accessibilityLabel="Chat bubble color" style={styles.options}>
-        {(Object.keys(bubblePalettes) as BubblePalette[]).map((key) => {
-          const palette = bubblePalettes[key];
-          const swatch = mode === "dark" ? palette.dark : palette.light;
-          const checked = bubblePalette === key;
-          return (
-            <Pressable
-              key={key}
-              accessibilityRole="radio"
-              accessibilityLabel={`${palette.label} chat bubbles`}
-              accessibilityState={{ checked }}
-              onPress={() => setBubblePalette(key)}
-              style={[
-                styles.option,
-                {
-                  backgroundColor: swatch.background,
-                  borderColor: checked ? colors.primary : colors.controlBorder,
-                  borderWidth: checked ? 2 : 1,
-                },
-              ]}
-            >
-              <Text style={{ color: swatch.foreground }}>{palette.label}</Text>
-              {checked && <Check size={16} color={swatch.foreground} accessible={false} />}
-            </Pressable>
-          );
-        })}
+    <SettingsGroup
+      title="Chat bubbles"
+      inset={false}
+      footer="The color of your messages. Saved on this device."
+    >
+      <View style={styles.content}>
+        <View accessibilityRole="radiogroup" accessibilityLabel="Chat bubble color" style={styles.options}>
+          {(Object.keys(bubblePalettes) as BubblePalette[]).map((key) => {
+            const swatch = tone(key);
+            const checked = bubblePalette === key;
+            return (
+              <Pressable
+                key={key}
+                accessibilityRole="radio"
+                accessibilityLabel={`${bubblePalettes[key].label} chat bubbles`}
+                accessibilityState={{ checked }}
+                onPress={() => setBubblePalette(key)}
+                style={[
+                  styles.option,
+                  {
+                    backgroundColor: swatch.background,
+                    borderColor: checked ? colors.primary : colors.controlBorder,
+                    borderWidth: checked ? 2 : 1,
+                  },
+                ]}
+              >
+                <Text style={{ color: swatch.foreground }}>{bubblePalettes[key].label}</Text>
+                {checked && <Check size={16} color={swatch.foreground} accessible={false} />}
+              </Pressable>
+            );
+          })}
+        </View>
+        <View
+          accessibilityLabel="Chat bubble preview"
+          style={[styles.bubble, { backgroundColor: selected.background }]}
+        >
+          <Text style={{ color: selected.foreground }}>Show me my connected services.</Text>
+        </View>
       </View>
-      <Preview label="Chat preview · light" page={lightColors} bubble={selected.light} />
-      <Preview label="Chat preview · dark" page={darkColors} bubble={selected.dark} />
-    </View>
+    </SettingsGroup>
   );
 }
 
 const styles = StyleSheet.create({
-  section: { gap: 12 },
-  title: { fontFamily: fonts.bodySemi, fontSize: 14 },
-  options: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  option: { minHeight: 44, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, flexDirection: "row", alignItems: "center", gap: 8 },
-  preview: { borderWidth: 1, borderRadius: 12, padding: 12, gap: 16 },
-  previewLabel: { fontFamily: fonts.bodySemi, fontSize: 12 },
-  previewText: { fontSize: 14 },
-  bubble: { ...userBubbleCorners, padding: 12, marginLeft: 24, alignSelf: "flex-end" },
+  content: { padding: spacing.xxl, gap: spacing.xxl },
+  options: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
+  option: { minHeight: 44, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12, flexDirection: "row", alignItems: "center", gap: 6 },
+  bubble: { ...userBubbleCorners, paddingVertical: 10, paddingHorizontal: 12, marginLeft: 48, alignSelf: "flex-end" },
 });

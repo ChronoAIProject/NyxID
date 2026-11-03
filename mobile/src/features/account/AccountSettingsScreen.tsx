@@ -417,7 +417,6 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         </SettingsGroup>
 
         <SettingsGroup
-          danger
           footer="Permanently deletes your account and its data. This cannot be undone."
         >
           <SettingsRow

@@ -29,6 +29,24 @@ export function DisplaySettingsScreen(
   return (
     <SettingsPage>
       <SettingsGroup title="Appearance">
+        <SettingsRow
+          icon={SunMoon}
+          label="Use system setting"
+          accessory={
+            <Switch
+              accessibilityLabel="Use system setting"
+              value={preference === "system"}
+              onValueChange={(on) => {
+                capture({
+                  name: "ui.mobile_preference_toggled",
+                  props: { name: "theme_system", value: on },
+                });
+                setPreference(on ? "system" : mode);
+              }}
+              trackColor={{ false: colors.borderSoft, true: colors.success }}
+            />
+          }
+        />
         <View style={styles.segment}>
           <SegmentControl
             accessibilityLabel="Appearance"
@@ -83,28 +101,8 @@ export function DisplaySettingsScreen(
             }}
           />
         </View>
-        <SettingsRow
-          icon={SunMoon}
-          label="Use system setting"
-          accessory={
-            <Switch
-              accessibilityLabel="Use system setting"
-              value={preference === "system"}
-              onValueChange={(on) => {
-                capture({
-                  name: "ui.mobile_preference_toggled",
-                  props: { name: "theme_system", value: on },
-                });
-                setPreference(on ? "system" : mode);
-              }}
-              trackColor={{ false: colors.borderSoft, true: colors.success }}
-            />
-          }
-        />
       </SettingsGroup>
-      <SettingsGroup title="Chat layout">
-        <ChatDisplaySettings embedded />
-      </SettingsGroup>
+      <ChatDisplaySettings />
     </SettingsPage>
   );
 }

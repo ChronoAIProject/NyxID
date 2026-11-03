@@ -50,14 +50,12 @@ export function SettingsPage({
 export function SettingsGroup({
   title,
   footer,
-  danger = false,
   inset = true,
   onLayout,
   children,
 }: {
   title?: string;
   footer?: ReactNode;
-  danger?: boolean;
   /** Rows have leading icons, so separators start after the icon tile. */
   inset?: boolean;
   onLayout?: (event: LayoutChangeEvent) => void;
@@ -80,15 +78,7 @@ export function SettingsGroup({
           {title.toUpperCase()}
         </Text>
       ) : null}
-      <View
-        style={[
-          styles.card,
-          {
-            backgroundColor: colors.card,
-            borderColor: danger ? colors.dangerTone.border : colors.borderSoft,
-          },
-        ]}
-      >
+      <View style={[styles.card, { backgroundColor: colors.card }]}>
         {rows.map((row, index) => (
           <View key={row.key ?? index}>
             {index > 0 ? (
@@ -157,18 +147,15 @@ export function SettingsRow({
   const stacked = useSettingsStacked();
   // Rows that open a sub-page get a chevron; centred actions never do.
   const chevron = !centered && (chevronProp ?? (!!onPress && !accessory));
-  const labelColor = destructive ? colors.danger : colors.textPrimary;
+  // Destructive rows are a solid red button; disabled ones fall back to the
+  // neutral card so the muted label stays readable.
+  const filled = destructive && !disabled;
+  const labelColor = filled ? colors.onPrimary : colors.textPrimary;
   const content = (
     <>
       {Icon && !centered ? (
-        // Duotone tiles follow the theme: white tile and black glyph in
-        // light mode, dark tile and white glyph in dark mode.
-        <View
-          style={[
-            styles.tile,
-            { backgroundColor: colors.bg, borderColor: colors.borderSoft },
-          ]}
-        >
+        // Bare glyph in a fixed slot so separators align past every icon.
+        <View style={styles.tile}>
           <Icon size={17} color={colors.textPrimary} strokeWidth={2} />
         </View>
       ) : null}
@@ -215,7 +202,8 @@ export function SettingsRow({
       {chevron ? <ChevronRight size={18} color={colors.textMuted} /> : null}
     </>
   );
-  if (!onPress) return <View style={styles.row}>{content}</View>;
+  const fill = filled ? { backgroundColor: colors.dangerSolid } : null;
+  if (!onPress) return <View style={[styles.row, fill]}>{content}</View>;
   return (
     <Pressable
       accessibilityRole={accessibilityRole ?? "button"}
@@ -228,7 +216,13 @@ export function SettingsRow({
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
-        pressed && !disabled && { backgroundColor: colors.navActive },
+        fill,
+        pressed &&
+          !disabled && {
+            backgroundColor: filled
+              ? colors.dangerSolidPressed
+              : colors.navActive,
+          },
       ]}
     >
       {content}
@@ -250,11 +244,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
     paddingHorizontal: spacing.xxl,
   },
-  card: {
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    overflow: "hidden",
-  },
+  card: { borderRadius: radius.lg, overflow: "hidden" },
   separator: { height: StyleSheet.hairlineWidth },
   footer: {
     ...typeScale.small,
@@ -271,8 +261,6 @@ const styles = StyleSheet.create({
   tile: {
     width: ICON_TILE,
     height: ICON_TILE,
-    borderRadius: 8,
-    borderWidth: StyleSheet.hairlineWidth,
     alignItems: "center",
     justifyContent: "center",
   },

@@ -49,6 +49,11 @@ function setup(width = 402, fontScale = 3.12) {
     "lucide-react-native": { Minus: "Minus", Plus: "Plus" },
     "../../components/DynamicTypeText": dynamicText,
     "./ChatBubbleSettings": { ChatBubbleSettings: "ChatBubbleSettings" },
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
+    "../../theme/designTokens": { spacing: {}, typeScale: {} },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "./ChatLayoutContext": {
       useChatLayout: () => ({
@@ -78,7 +83,11 @@ function setup(width = 402, fontScale = 3.12) {
   harness.mount(ChatDisplaySettings);
   const all = () => elements(harness.value());
   const button = (label: string) => {
-    const node = all().find((item) => item.props.accessibilityLabel === label);
+    const node = all().find(
+      (item) =>
+        item.props.accessibilityLabel === label ||
+        (item.type === "SettingsRow" && item.props.label === label),
+    );
     assert.ok(node, label);
     return node;
   };

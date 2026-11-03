@@ -198,6 +198,36 @@ test("the primary action is rendered above saved history, outside its list foote
   env.harness.unmount();
 });
 
+const flat = (style: unknown): Record<string, any> =>
+  Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
+
+test("the sheet shows a drag handle, a centred title and one search + New chat row", () => {
+  const env = setup({ onRefresh: () => {} });
+  const rows = env.all();
+  const handle = rows.find(
+    (row) => flat(row.props.style).width === 36 && flat(row.props.style).height === 4,
+  );
+  assert.ok(handle, "drag handle");
+  const heading = rows.find((row) => row.props.accessibilityRole === "header")!;
+  assert.equal(flat(heading.props.style).textAlign, "center");
+  // Both header sides reserve the same width so the title is truly centred.
+  const sides = rows.filter(
+    (row) => row.type === "View" && typeof flat(row.props.style).width === "number" && flat(row.props.style).width >= 44,
+  );
+  assert.equal(sides.length, 2);
+  assert.equal(flat(sides[0]!.props.style).width, flat(sides[1]!.props.style).width);
+  const actionRow = rows.find(
+    (row) =>
+      flat(row.props.style).flexDirection === "row" &&
+      elements(row).some((child) => child.type === "TextInput") &&
+      elements(row).some(
+        (child) => child.props.accessibilityLabel === "Start a chat with HR Admin Bot",
+      ),
+  );
+  assert.ok(actionRow, "search and New chat share one row");
+  env.harness.unmount();
+});
+
 test("an empty history keeps its primary action while hiding unnecessary search and counts", () => {
   const env = setup({ items: [] });
   assert.equal(

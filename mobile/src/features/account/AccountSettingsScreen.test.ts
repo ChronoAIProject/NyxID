@@ -35,8 +35,8 @@ test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hol
       (node) => style(node).width === 30 && style(node).height === 30,
     );
     assert.ok(tile, `${label} has a leading icon tile`);
-    // Duotone: every tile is the page background with a text-coloured glyph.
-    assert.equal(style(tile).backgroundColor, lightColors.bg, label);
+    // Native grouped rows: a bare text-coloured glyph, no boxed tile.
+    assert.equal(style(tile).backgroundColor, undefined, label);
     assert.equal(
       elements(tile).find(
         (node) => typeof node.type === "string" && node.props.size === 17,
@@ -83,15 +83,19 @@ test("Sign Out and Delete Account are centred actions, not navigation, and delet
     );
     assert.equal(row.props.accessibilityHint, undefined, label);
   }
-  assert.equal(style(env.text("Delete Account")).color, lightColors.danger);
+  // Delete Account is a solid red button with a white label.
+  assert.equal(style(env.text("Delete Account")).color, lightColors.onPrimary);
+  assert.equal(
+    style(env.row("Delete Account")).backgroundColor,
+    lightColors.dangerSolid,
+  );
   assert.equal(style(env.text("Sign Out")).color, lightColors.textPrimary);
   const danger = env
     .all()
     .find(
       (node) =>
         elements(node).includes(env.text("Delete Account")) &&
-        style(node).borderRadius !== undefined &&
-        style(node).borderColor !== undefined,
+        style(node).borderRadius !== undefined,
     )!;
   assert.equal(
     elements(danger).includes(env.text("Sign Out")),
