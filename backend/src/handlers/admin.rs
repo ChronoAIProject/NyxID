@@ -42,6 +42,7 @@ pub struct UserListQuery {
 pub struct AuditLogQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    pub include_total: Option<bool>,
     /// Legacy exact-match filters, predating the admin table controls.
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
@@ -55,6 +56,28 @@ pub struct AuditLogQuery {
     pub created_from: Option<String>,
     pub created_to: Option<String>,
     pub sort: Option<String>,
+}
+
+impl AuditLogQuery {
+    fn list_params(&self) -> admin_audit_service::AdminAuditLogListParams<'_> {
+        admin_audit_service::AdminAuditLogListParams {
+            page: self.page.unwrap_or(1).max(1),
+            per_page: self.per_page.unwrap_or(50).clamp(1, 100),
+            include_total: self.include_total.unwrap_or(true),
+            search: self.search.as_deref(),
+            search_filters: self.search_filters.as_deref(),
+            custom_filters: self.custom_filters.as_deref(),
+            event_type: self.event_type.as_deref(),
+            status: self.status.as_deref(),
+            actor: self.actor.as_deref(),
+            user_id: self.user_id.as_deref(),
+            api_key_id: self.api_key_id.as_deref(),
+            created_dates: self.created_dates.as_deref(),
+            created_from: self.created_from.as_deref(),
+            created_to: self.created_to.as_deref(),
+            sort: self.sort.as_deref().unwrap_or("-created_at"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,10 +148,17 @@ pub struct AuditLogItem {
 #[derive(Debug, Serialize)]
 pub struct AuditLogListResponse {
     pub entries: Vec<AuditLogItem>,
-    pub total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    pub has_more: bool,
     pub page: u64,
     pub per_page: u64,
     pub filter_options: AuditLogFilterOptions,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditLogCountResponse {
+    pub total: u64,
 }
 
 /// Describes the audit table's controls to the client, so the UI never hardcodes
@@ -984,34 +1014,16 @@ pub async fn list_audit_log(
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 100);
-    let sort = query.sort.as_deref().unwrap_or("-created_at");
 
     // Summarize the applied controls as an opaque marker list rather than the raw
     // values (which are PII-adjacent). `None` when nothing was applied.
     let filter_marker = audit_log_filter_marker(&query);
 
-    let ((entries, total), event_types) = tokio::try_join!(
-        admin_audit_service::list_entries(
-            &state.db,
-            admin_audit_service::AdminAuditLogListParams {
-                page,
-                per_page,
-                search: query.search.as_deref(),
-                search_filters: query.search_filters.as_deref(),
-                custom_filters: query.custom_filters.as_deref(),
-                event_type: query.event_type.as_deref(),
-                status: query.status.as_deref(),
-                actor: query.actor.as_deref(),
-                user_id: query.user_id.as_deref(),
-                api_key_id: query.api_key_id.as_deref(),
-                created_dates: query.created_dates.as_deref(),
-                created_from: query.created_from.as_deref(),
-                created_to: query.created_to.as_deref(),
-                sort,
-            },
-        ),
+    let (result, event_types) = tokio::try_join!(
+        admin_audit_service::list_entries(&state.db, query.list_params()),
         state.audit_event_types.get(&state.db)
     )?;
+    let entries = result.entries;
 
     // Enrichment is best-effort display data: a lookup failure downgrades the
     // page to unenriched entries (fields are Option and simply stay absent)
@@ -1069,11 +1081,23 @@ pub async fn list_audit_log(
 
     Ok(Json(AuditLogListResponse {
         entries: items,
-        total,
+        total: result.total,
+        has_more: result.has_more,
         page,
         per_page,
         filter_options: audit_log_filter_options(event_types),
     }))
+}
+
+/// GET /api/v1/admin/audit-log/count
+pub async fn count_audit_log(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<AuditLogQuery>,
+) -> AppResult<Json<AuditLogCountResponse>> {
+    require_admin_or_operator(&state, &auth_user, "admin.audit_log.list").await?;
+    let total = admin_audit_service::count_entries(&state.db, query.list_params()).await?;
+    Ok(Json(AuditLogCountResponse { total }))
 }
 
 /// Names the controls that were applied, never their values.
@@ -2236,6 +2260,16 @@ mod tests {
     use crate::models::user::{PlatformRole, User, UserType};
     use chrono::Utc;
 
+    #[test]
+    fn audit_log_totals_remain_enabled_unless_explicitly_deferred() {
+        assert!(AuditLogQuery::default().list_params().include_total);
+        let deferred = AuditLogQuery {
+            include_total: Some(false),
+            ..Default::default()
+        };
+        assert!(!deferred.list_params().include_total);
+    }
+
     fn lookup_with(id: &str, slug: &str, name: &str) -> ServiceLookup {
         let resolved = ResolvedService {
             name: name.to_string(),
@@ -2913,6 +2947,45 @@ mod operator_route_tests {
             result.0.users.iter().any(|u| u.id == operator_id),
             "operator should see at least their own row in the list"
         );
+    }
+
+    #[tokio::test]
+    async fn audit_log_count_enforces_admin_or_operator_and_uses_exact_filters() {
+        let db = connect_test_database("audit_count_access")
+            .await
+            .expect("MongoDB required");
+        let operator = insert_user(&db, false, true).await;
+        let admin = insert_user(&db, true, false).await;
+        let ordinary = insert_user(&db, false, false).await;
+        db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .insert_many([
+                doc! { "_id": "match", "event_type": "login", "user_id": &ordinary },
+                doc! { "_id": "other", "event_type": "login", "user_id": &admin },
+            ])
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for actor in [&operator, &admin] {
+            let result = count_audit_log(
+                State(state.clone()),
+                test_auth_user(actor),
+                Query(AuditLogQuery {
+                    user_id: Some(ordinary.clone()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.0.total, 1);
+        }
+        let denied = count_audit_log(
+            State(state),
+            test_auth_user(&ordinary),
+            Query(AuditLogQuery::default()),
+        )
+        .await;
+        assert!(matches!(denied, Err(AppError::Forbidden(_))));
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

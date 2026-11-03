@@ -774,6 +774,7 @@ async fn admin_query_execution_stats() {
             "status",
         ] {
             let params = AdminAuditLogListParams {
+                include_total: true,
                 page: 1,
                 per_page: 50,
                 search: matches!(name, "search" | "search_date").then_some("benchmark-needle"),
@@ -840,8 +841,9 @@ async fn admin_query_execution_stats() {
                     .try_collect()
                     .await
                     .unwrap();
-                let (actual_rows, actual_count) = audit::list_entries(&db, params).await.unwrap();
-                assert_eq!(actual_count, expected_count);
+                let result = audit::list_entries(&db, params).await.unwrap();
+                let actual_rows = result.entries;
+                assert_eq!(result.total, Some(expected_count));
                 assert_eq!(
                     actual_rows
                         .iter()
