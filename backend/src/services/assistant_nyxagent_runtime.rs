@@ -1666,29 +1666,44 @@ async fn execute_turn_inner(
     )
     .await
     .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
-        &state.db,
-        &row.user_id,
-        &attachments.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
-    ))
-    .await
-    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    let has_images = attachments.iter().any(|a| {
-        a.origin == "user_upload"
-            && a.content_type.starts_with("image/")
-            && !expired.contains(&a.id)
-    });
+    // Preserve posted metadata for explicit withheld/expired notices, while
+    // only live, authorized attachments proceed to the shared modality gate.
+    let listed_attachments = attachments.clone();
+    let mut availability_notice = String::new();
+    if row.collaboration.is_some() {
+        let (available, notice) = super::collaboration_group_service::uploads::input_for_turn(
+            &state.db,
+            row,
+            attachments,
+        )
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+        attachments = available;
+        availability_notice = notice;
+    } else {
+        let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
+            &state.db,
+            &row.user_id,
+            &attachments.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+        ))
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+        if !expired.is_empty() {
+            availability_notice = format!(
+                "\nAttachments expired per retention policy; ask the owner to upload them again: {}",
+                serde_json::json!(expired)
+            );
+            attachments.retain(|a| !expired.contains(&a.id));
+        }
+    }
+    let has_images = attachments
+        .iter()
+        .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"));
     let model_text_only = has_images
         && images::model_support(state, egress, authority, &row.model, policy).await == Some(false);
     let mut listing =
-        crate::services::assistant_upload_service::listing(&attachments, model_text_only);
-    if !expired.is_empty() {
-        listing.push_str(&format!(
-            "\nAttachments expired per retention policy; ask the owner to upload them again: {}",
-            serde_json::json!(expired)
-        ));
-        attachments.retain(|a| !expired.contains(&a.id));
-    }
+        crate::services::assistant_upload_service::listing(&listed_attachments, model_text_only);
+    listing.push_str(&availability_notice);
     let capabilities = if has_images && !model_text_only {
         upstream_capabilities(state, egress, authority, credential, policy).await
     } else {

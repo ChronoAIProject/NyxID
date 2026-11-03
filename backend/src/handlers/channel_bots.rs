@@ -1774,9 +1774,9 @@ mod tests {
             db.collection::<crate::models::channel_bot::ChannelBot>(
                 crate::models::channel_bot::COLLECTION_NAME,
             )
-                .insert_one(&bot)
-                .await
-                .unwrap();
+            .insert_one(&bot)
+            .await
+            .unwrap();
             let Json(response) = get_bot(
                 State(state.clone()),
                 test_auth_user(&bot.user_id),

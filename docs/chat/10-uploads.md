@@ -33,6 +33,36 @@ retention policy below to existing and new files. Conversation/group deletion
 and owner purge remove all payload chunks, extracted text and expiry markers.
 Removing an unsent attachment deletes it.
 
+## Collaboration request images
+
+Authenticated collaboration participants may post uploads to a group. Pending
+uploads stay private; accepted message uploads are public to current participants.
+A collaboration guest execution (an authenticated NyxID participant using the
+agent owner's guest opt-in) may receive only the image attachments on the exact
+request it answers. It uses the same per-model modality gate and ordinary
+`image_plan` capability/size/type checks as owner turns; known text-only models
+receive the `model_text_only` notice without an image URL. It uses
+the same canonical `/api/v1/assistant-attachments/{id}/content` URL fetched with
+its bound thread key. The guest's model usage continues to bill the agent owner.
+
+Every preparation/download checks the exact group, request, trigger message,
+original uploader, membership revision, live turn/key, retention and current
+owner guest opt-in. Downloads recheck after decryption. Another request's images,
+other people's uploads, earlier history, pending drafts and owner uploads are
+not available. Guest discovery lists only this request's images; document reads,
+upload authoring and managed attachment egress stay denied. Channel/platform
+guests keep their existing media refusal.
+
+Never silently drop a request attachment: absent capabilities, unsupported image
+types and size/count limits produce `IMAGE_FALLBACK`; expiry and missing data
+produce explicit availability notices. Non-image files in guest requests are
+explicitly described as withheld. No notice implies that pixels or document
+contents were seen. Machine suggestions apply only where machine authority
+exists; collaboration guests have none. Retention belongs to the original
+uploader even when a guest turn runs on the agent owner's key. The delete-after-
+turn policy recognizes that requester's collaboration execution and still
+expires images at settlement.
+
 ## Inbound channel media
 
 The per-person `assistant:channel-media` flag defaults off. When enabled, verified
@@ -41,7 +71,7 @@ NyxBot or specialist through NyxID's relay or the Agent Event Gateway, including
 admitted followed threads. Telegram owner files use the same flag and shared
 byte budget; their preparation before turn admission and per-file fallback are
 described in [Telegram forwarding](../TELEGRAM_NEW.md#telegram-forwarding-and-secure-pairing).
-Other adapters and Lark audio/video retain their existing behavior. Guests never download media or
+Other adapters and Lark audio/video retain their existing behavior. Platform/channel guests never download media or
 create uploads; their admitted turn receives the fixed note
 `attachments from guests are not shared with the assistant`. Media-bearing messages cannot answer
 approval cards or text decisions and do not enter duplicate-question coalescing.
@@ -327,6 +357,8 @@ NyxAgent restricts remote images to its configured NyxID origin and the attachme
 content path, forbids redirects and credentials in URLs, uses the request's own
 key, and validates size and raster type before handing image input to Codex.
 Sessions and responses use the same validation. No arbitrary remote image fetches.
+Operators must keep NyxAgent's `NYXID_BASE_URL` aligned with NyxID's canonical
+`BASE_URL`; NyxID does not bypass or relax this origin check.
 An absent/older capability gives an explicit user and agent notice: the image was
 received but this agent version cannot view it. Offer
 `nyx__machine_save_attachment`; never silently omit an image or claim it was seen.

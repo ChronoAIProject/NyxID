@@ -9,7 +9,7 @@ import {
   type ReactNode,
   type PointerEvent,
 } from "react";
-import { ArrowUp, AudioLines, FileText, ImageIcon, Square } from "lucide-react";
+import { ArrowUp, AudioLines, FileText, ImageIcon, Square, UserRound } from "lucide-react";
 import { ComposerEditor, type ComposerEditorHandle, type ComposerSelection } from "./composer-editor";
 import { tokenSegments, type ComposerToken } from "./composer-editor-model";
 import { Button } from "@/components/ui/button";
@@ -154,12 +154,12 @@ type MentionOption =
       readonly attachment: AttachmentMention;
     };
 
-/** An agent that can be `@mentioned` from the composer (group chats). */
+/** A group member that can be `@mentioned` from the composer (group chats). */
 export interface ComposerMention {
   readonly id: string;
   /** The @handle that is inserted. */
   readonly name: string;
-  readonly kind: AssistantAgentKind;
+  readonly kind: AssistantAgentKind | "person";
   readonly display_name?: string | null;
   readonly shared?: boolean;
   readonly owner_name?: string | null;
@@ -265,7 +265,7 @@ function DraftedChatComposer({
   voiceActivity,
 }: ChatComposerProps) {
   const tokens: ComposerToken[] = [
-    ...(mentions ?? []).map((agent) => ({ id: agent.id, handle: agent.name, label: agent.display_name?.trim() || agent.name, kind: "agent" as const })),
+    ...(mentions ?? []).map((agent) => ({ id: agent.id, handle: agent.name, label: agent.display_name?.trim() || agent.name, kind: agent.kind === "person" ? "person" as const : "agent" as const })),
     ...(attachmentMentions ?? []).map((file) => ({ id: `attachment:${file.handle}`, handle: file.handle, label: file.handle, kind: file.kind })),
   ];
   const locked = active && !allowActiveInput;
@@ -1157,7 +1157,9 @@ function DraftedChatComposer({
                     id={mentionListId}
                     role="listbox"
                     aria-label={
-                      attachmentMentions?.length
+                      mentions?.some((m) => m.kind === "person")
+                        ? "Mention a person, agent or attachment"
+                        : attachmentMentions?.length
                         ? "Mention an agent or attachment"
                         : "Mention an agent"
                     }
@@ -1181,7 +1183,7 @@ function DraftedChatComposer({
                         >
                           {option.type === "agent" ? (
                             <>
-                              <AgentAvatar agent={option.agent} size="sm" />
+                              {option.agent.kind === "person" ? <UserRound aria-hidden className="h-5 w-5 text-muted-foreground" /> : <AgentAvatar agent={{ ...option.agent, kind: option.agent.kind }} size="sm" />}
                               <span className="min-w-0 flex-1 truncate">
                                 {option.agent.display_name?.trim() || option.name}
                                 {option.agent.display_name?.trim() ? (
@@ -1191,7 +1193,7 @@ function DraftedChatComposer({
                                 ) : null}
                               </span>
                               <span className="shrink-0 text-10 text-text-tertiary">
-                                {option.agent.shared ? `Shared agent${option.agent.owner_name ? ` · ${option.agent.owner_name}` : ""}` : option.agent.kind === "nyxbot"
+                                {option.agent.kind === "person" ? "Person" : option.agent.shared ? `Shared agent${option.agent.owner_name ? ` · ${option.agent.owner_name}` : ""}` : option.agent.kind === "nyxbot"
                                   ? "Personal agent"
                                   : "Specialist"}
                               </span>
@@ -1235,7 +1237,7 @@ function DraftedChatComposer({
                         className="composer-mention"
                         data-composer-mention={part.token.kind}
                       >
-                        {part.token.kind === "agent" ? "@" : ""}
+                        {(part.token.kind === "agent" || part.token.kind === "person") ? "@" : ""}
                         {part.token.label}
                       </span>
                     ) : (

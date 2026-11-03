@@ -6,6 +6,7 @@ pub mod guest_requests;
 pub mod identity;
 pub mod membership;
 pub mod participant_posts;
+pub(crate) mod people;
 pub mod requests;
 pub mod runtime;
 #[cfg(test)]
@@ -441,18 +442,7 @@ pub async fn participants(
         .await?
         .try_collect()
         .await?;
-    Ok(group
-        .participant_user_ids
-        .iter()
-        .map(|id| super::org_group_service::Participant {
-            id: id.clone(),
-            display_name: users
-                .iter()
-                .find(|u| u.id == *id)
-                .and_then(|u| u.display_name.clone())
-                .unwrap_or_else(|| "Member".into()),
-        })
-        .collect())
+    Ok(people::project(group, &users))
 }
 
 pub async fn threads(

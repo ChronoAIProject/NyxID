@@ -623,7 +623,11 @@ async fn payload(
 }
 
 pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResult<AssistantUpload> {
-    if chat.guest || chat.turn_stopped || chat.turn_id.is_none() || Uuid::parse_str(id).is_err() {
+    if (chat.guest && !chat.collaboration_thread)
+        || chat.turn_stopped
+        || chat.turn_id.is_none()
+        || Uuid::parse_str(id).is_err()
+    {
         return Err(missing());
     }
     if chat.collaboration_thread {
@@ -768,7 +772,12 @@ pub async fn chat_bytes(
     if image_only && !row.content_type.starts_with("image/") {
         return Err(missing());
     }
-    payload(db, keys, &row).await
+    let bytes = payload(db, keys, &row).await?;
+    if chat.collaboration_thread {
+        // Membership, the exact request and guest opt-in may change during decryption.
+        for_chat(db, chat, id).await?;
+    }
+    Ok(bytes)
 }
 
 pub async fn read(
@@ -858,7 +867,7 @@ pub async fn list_for_chat(
     cursor: Option<&str>,
     limit: usize,
 ) -> AppResult<Value> {
-    if chat.guest || chat.turn_stopped || chat.turn_id.is_none() {
+    if (chat.guest && !chat.collaboration_thread) || chat.turn_stopped || chat.turn_id.is_none() {
         return Err(missing());
     }
     if chat.collaboration_thread {
