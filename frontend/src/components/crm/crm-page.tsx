@@ -18,9 +18,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useCrmObjects } from "@/hooks/use-crm";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { CrmTableQuery } from "@/schemas/crm";
+import { useAuthStore } from "@/stores/auth-store";
 
-export function CrmPage() {
+function CrmWorkspace() {
   const objects = useCrmObjects();
   const [selectedKey, setSelectedKey] = useState<string>();
   const [mode, setMode] = useState<"table" | "pipeline">("table");
@@ -182,4 +185,19 @@ export function CrmPage() {
       ) : null}
     </div>
   );
+}
+
+export function CrmPage() {
+  const loading = useAuthStore((state) => state.isLoading);
+  const enabled = useFeature(FEATURE_FLAG.CRM);
+
+  if (loading) return null;
+  if (!enabled) {
+    return (
+      <p className="text-13 text-text-secondary">
+        CRM isn't available for your account.
+      </p>
+    );
+  }
+  return <CrmWorkspace />;
 }

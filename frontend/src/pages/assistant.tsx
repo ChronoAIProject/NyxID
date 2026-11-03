@@ -1,7 +1,6 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AutomationsPage } from "@/pages/automations";
 import { MachinesPage } from "@/pages/machines";
-import { CrmPage } from "@/components/crm/crm-page";
 import { MachineSetupPage, MachinePairPage } from "@/pages/machine-setup";
 import {
   lazy,
@@ -34,6 +33,12 @@ import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { Conversation } from "@/types/assistant";
+
+const CrmPage = lazy(() =>
+  import("@/components/crm/crm-page").then((module) => ({
+    default: module.CrmPage,
+  })),
+);
 
 const MockScenariosAction = import.meta.env.DEV
   ? lazy(() =>
