@@ -48,6 +48,45 @@ function validateGraph(
     return;
   }
 
+  const parents = new Map<string, string>();
+  let edgeCount = 0;
+  let edgeLimitExceeded = false;
+  for (const [elementId, element] of Object.entries(elements)) {
+    edgeCount += element.children.length;
+    if (edgeCount > 60 && !edgeLimitExceeded) {
+      edgeLimitExceeded = true;
+      errors.push({
+        path: `spec.elements.${elementId}.children`,
+        message: "A saved view can define at most 60 child edges",
+      });
+    }
+
+    const children = new Set<string>();
+    element.children.forEach((childId, index) => {
+      const path = `spec.elements.${elementId}.children.${String(index)}`;
+      if (children.has(childId)) {
+        errors.push({
+          path,
+          message: `Child element '${childId}' must not be repeated`,
+        });
+        return;
+      }
+      children.add(childId);
+
+      const parent = parents.get(childId);
+      if (parent !== undefined && parent !== elementId) {
+        errors.push({
+          path,
+          message: `Child element '${childId}' must not have multiple parents`,
+        });
+        return;
+      }
+      parents.set(childId, elementId);
+    });
+  }
+
+  if (edgeLimitExceeded) return;
+
   const visiting = new Set<string>();
   const visited = new Set<string>();
 

@@ -76,6 +76,38 @@ describe("validateCrmViewEnvelope", () => {
     }
   });
 
+  it("rejects children on leaf catalog components at the children path", () => {
+    const result = validateCrmViewEnvelope({
+      formatVersion: 1,
+      renderer: "json-render",
+      rendererSpecVersion: "nyxid-crm-v1",
+      queries: {},
+      spec: {
+        root: "main",
+        elements: {
+          main: {
+            type: "Text",
+            props: { content: "Hello", variant: "body" },
+            children: ["child"],
+          },
+          child: {
+            type: "Text",
+            props: { content: "World", variant: "body" },
+            children: [],
+          },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.errors).toContainEqual({
+        path: "spec.elements.main.children",
+        message: "Text does not accept children",
+      });
+    }
+  });
+
   it("rejects invalid element and query ids at their key paths", () => {
     const result = validateCrmViewEnvelope({
       formatVersion: 1,
@@ -169,6 +201,112 @@ describe("validateCrmViewEnvelope", () => {
           },
         ]),
       );
+    }
+  });
+
+  it("rejects duplicate children at the repeated child path", () => {
+    const result = validateCrmViewEnvelope({
+      formatVersion: 1,
+      renderer: "json-render",
+      rendererSpecVersion: "nyxid-crm-v1",
+      queries: {},
+      spec: {
+        root: "main",
+        elements: {
+          main: {
+            type: "Stack",
+            props: { gap: "md" },
+            children: ["child", "child"],
+          },
+          child: {
+            type: "Text",
+            props: { content: "Hello", variant: "body" },
+            children: [],
+          },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.errors).toContainEqual({
+        path: "spec.elements.main.children.1",
+        message: "Child element 'child' must not be repeated",
+      });
+    }
+  });
+
+  it("rejects an element referenced by multiple parents", () => {
+    const result = validateCrmViewEnvelope({
+      formatVersion: 1,
+      renderer: "json-render",
+      rendererSpecVersion: "nyxid-crm-v1",
+      queries: {},
+      spec: {
+        root: "main",
+        elements: {
+          main: {
+            type: "Stack",
+            props: { gap: "md" },
+            children: ["left", "right"],
+          },
+          left: {
+            type: "Stack",
+            props: { gap: "sm" },
+            children: ["shared"],
+          },
+          right: {
+            type: "Grid",
+            props: { columns: 1 },
+            children: ["shared"],
+          },
+          shared: {
+            type: "Text",
+            props: { content: "Shared", variant: "body" },
+            children: [],
+          },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.errors).toContainEqual({
+        path: "spec.elements.right.children.0",
+        message: "Child element 'shared' must not have multiple parents",
+      });
+    }
+  });
+
+  it("rejects more than 60 child edges before graph traversal", () => {
+    const result = validateCrmViewEnvelope({
+      formatVersion: 1,
+      renderer: "json-render",
+      rendererSpecVersion: "nyxid-crm-v1",
+      queries: {},
+      spec: {
+        root: "main",
+        elements: {
+          main: {
+            type: "Stack",
+            props: { gap: "md" },
+            children: Array.from({ length: 61 }, () => "child"),
+          },
+          child: {
+            type: "Text",
+            props: { content: "Hello", variant: "body" },
+            children: [],
+          },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.errors).toContainEqual({
+        path: "spec.elements.main.children",
+        message: "A saved view can define at most 60 child edges",
+      });
     }
   });
 });
