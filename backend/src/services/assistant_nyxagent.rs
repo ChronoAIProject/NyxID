@@ -4457,6 +4457,7 @@ pub async fn attach_routed_image(
     let meta = TurnAttachment {
         chat_delivery: Some(chat_delivery),
         image_input: None,
+        image_input_reason: None,
         image_inspection: None,
         origin: "tool".into(),
         pages: None,
@@ -4569,6 +4570,7 @@ pub(crate) async fn attach_resource_image(
         chat_delivery: Some(output == Output::Attach),
         image_inspection: Some(output == Output::Inspect),
         image_input: None,
+        image_input_reason: None,
         pages: None,
     });
     // Prepare encryption outside the retryable transaction, using the same
@@ -6749,6 +6751,8 @@ pub struct ResponseStream {
     /// otherwise ignores. Comment-only keepalive frames never count, so this
     /// is the stream's semantic-progress signal.
     pub data_events: u64,
+    /// Only the recognized bounded notice code; no provider prose is retained.
+    pub image_input_unsupported: bool,
 }
 impl ResponseStream {
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), TurnError> {
@@ -6889,6 +6893,21 @@ impl ResponseStream {
             if text.len() > MAX_OUTPUT_BYTES {
                 return Err(TurnError::internal("output_too_large", "stream"));
             }
+            self.image_input_unsupported =
+                response["nyxagent_notices"]
+                    .as_array()
+                    .is_some_and(|notices| {
+                        notices.iter().take(32).any(|notice| {
+                            notice["code"].as_str().is_some_and(|code| {
+                                !code.is_empty()
+                                    && code.len() <= 64
+                                    && code.bytes().all(|b| {
+                                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'
+                                    })
+                                    && code == "image_input_unsupported"
+                            })
+                        })
+                    });
             self.text = text;
             self.terminal = Some(TurnResult {
                 text: self.text.clone(),

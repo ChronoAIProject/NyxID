@@ -452,7 +452,7 @@ pub(crate) async fn record_activation(
         .unwrap_or("unknown");
     db.collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME).update_one(
         bson::doc! {"_id":&row.id,"gateway_source":bson::to_bson(&row.gateway_source).map_err(|_|AppError::OAuthAuthorityUnavailable)?},
-        bson::doc! {"$set":{"gateway_native_activation":status,"delivery_checked_at":bson::DateTime::now()}}).await?;
+        bson::doc! {"$set":{"gateway_native_activation":status,"gateway_native_activation_detail":bson::Bson::Null,"delivery_checked_at":bson::DateTime::now()}}).await?;
     Ok(())
 }
 pub(crate) async fn check_status(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {

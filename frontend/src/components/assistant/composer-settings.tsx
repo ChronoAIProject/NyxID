@@ -23,6 +23,7 @@ import {
 import {
   ACCESS_MODE_LABEL,
   modelDisplayName,
+  modelCannotViewImages,
 } from "@/lib/assistant/nyxbot-labels";
 import type { NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
 import { modelOptions } from "./nyxbot-access-controls";
@@ -177,6 +178,7 @@ export function ComposerSettings({
                 >
                   <span className="min-w-0 flex-1 break-words">
                     {modelDisplayName(row)}
+                    {modelCannotViewImages(row) && <span className="ml-2 text-11 text-muted-foreground">Can’t view images</span>}
                     {!row.available && !models.isPending
                       ? " (unavailable)"
                       : ""}

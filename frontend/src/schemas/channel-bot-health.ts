@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+const gatewayStateSchema = z.string();
+
+/** Optional list/detail metadata; older servers and native gateways omit it. */
+export const channelBotGatewaySchema = z.object({
+  gateway_state: gatewayStateSchema.optional(),
+});
+export type ChannelBotGateway = z.infer<typeof channelBotGatewaySchema>;
+
 const errorSchema = z.object({
   code: z.string(),
   /** Stable failure code (`rate_limited`, `scopes_missing`, ...). */
@@ -9,7 +17,7 @@ const errorSchema = z.object({
 
 export const channelBotDiagnosticsSchema = z.object({
   discord_gateway: z.object({
-    state: z.string(),
+    state: gatewayStateSchema,
     reason: z.string().nullable(),
     updated_at: z.string(),
   }).optional(),
