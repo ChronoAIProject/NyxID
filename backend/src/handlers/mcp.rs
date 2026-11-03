@@ -146,6 +146,7 @@ pub async fn get_mcp_config(
     for service in &mut catalog.services {
         service.endpoints.retain(|endpoint| {
             !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+                && !crate::services::lark_im_tool::image_candidate(endpoint)
         });
     }
     crate::services::agent_operation_scope_service::filter_catalog(
@@ -219,19 +220,23 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
             let endpoints = svc
                 .endpoints
                 .iter()
-                .map(|ep| McpEndpointConfig {
-                    endpoint_id: ep.endpoint_id.clone(),
-                    name: ep.name.clone(),
-                    description: ep.description.clone(),
-                    method: ep.method.clone(),
-                    path: ep.path.clone(),
-                    parameters: ep.parameters.clone(),
-                    request_body_schema: ep.request_body_schema.clone(),
-                    request_content_type: ep.request_content_type.clone(),
-                    request_body_required: ep.request_body_required,
-                    response_description: ep.response_description.clone(),
-                    response: ep.response.clone(),
-                    operation_digest: mcp_service::endpoint_contract_digest(ep),
+                .map(|ep| {
+                    let mut legacy = ep.clone();
+                    crate::services::lark_im_tool::legacy_message_contract(&mut legacy);
+                    McpEndpointConfig {
+                        endpoint_id: ep.endpoint_id.clone(),
+                        name: ep.name.clone(),
+                        description: ep.description.clone(),
+                        method: ep.method.clone(),
+                        path: ep.path.clone(),
+                        parameters: ep.parameters.clone(),
+                        request_body_schema: legacy.request_body_schema,
+                        request_content_type: ep.request_content_type.clone(),
+                        request_body_required: ep.request_body_required,
+                        response_description: ep.response_description.clone(),
+                        response: ep.response.clone(),
+                        operation_digest: mcp_service::endpoint_contract_digest(ep),
+                    }
                 })
                 .collect();
 
