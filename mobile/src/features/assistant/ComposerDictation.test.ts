@@ -131,13 +131,14 @@ test("idle dictation adds no blank review space, while long review text is scrol
   assert.deepEqual(x.events, ["insert", "discard"]);
 });
 
-test("hold release stops capture and suppresses the synthetic tap without blocking the next tap", () => {
+test("the first tap after a released long press starts dictation again", () => {
   const x = setup();
   const button = x.ComposerDictationButton({ dictation: x.dictation });
   button.props.onLongPress();
   button.props.onPressOut();
-  button.props.onPress();
   assert.deepEqual(x.events, ["start", "stop"]);
+  // Native Pressability does not call onPress after onLongPress. This is the
+  // next distinct gesture, after capture/review has returned to idle.
   button.props.onPress();
   assert.deepEqual(x.events, ["start", "stop", "start"]);
 });

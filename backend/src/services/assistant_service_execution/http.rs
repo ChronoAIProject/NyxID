@@ -7,6 +7,8 @@ pub struct HttpProjection {
     pub replace_headers: bool,
     pub base_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
+    /// Server-only marker for an exact attached Ornn package read.
+    pub(crate) skill_read: bool,
     pub(crate) machine_git: Option<crate::models::downstream_service::GitHttp>,
 }
 impl Default for HttpProjection {
@@ -16,6 +18,7 @@ impl Default for HttpProjection {
             replace_headers: false,
             base_url: None,
             extra_headers: Vec::new(),
+            skill_read: false,
             machine_git: None,
         }
     }
@@ -115,21 +118,61 @@ pub(super) async fn verify_resolved_projected_inner(
     projection: &HttpProjection,
     model: bool,
 ) -> AppResult<()> {
-    let before = connection_binding(db, id, &chat.api_key_id).await?;
-    let mut fresh = crate::services::proxy_service::resolve_proxy_target_by_user_service_id(
+    resolve_projected(
         db,
         keys,
-        &chat.user_id,
+        chat,
         id,
-        None,
-        None,
-        crate::services::proxy_service::ProxyExecutionContext::new(
-            None,
-            crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
-        )
-        .with_assistant_access(chat.org_agent_access.as_deref()),
+        actual,
+        method,
+        path,
+        projection,
+        !actual.credential_deferred,
+        model,
     )
-    .await?
+    .await
+    .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_projected(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    chat: &acks::ChatAuthority,
+    id: &str,
+    actual: &crate::services::proxy_service::ProxyTarget,
+    method: &str,
+    path: &str,
+    projection: &HttpProjection,
+    materialize: bool,
+    model: bool,
+) -> AppResult<crate::services::proxy_service::ProxyTarget> {
+    let before = connection_binding(db, id, &chat.api_key_id).await?;
+    let mut fresh = if materialize {
+        crate::services::proxy_service::resolve_proxy_target_by_user_service_id(
+            db,
+            keys,
+            &chat.user_id,
+            id,
+            None,
+            None,
+            crate::services::proxy_service::ProxyExecutionContext::new(
+                None,
+                crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+            )
+            .with_assistant_access(chat.org_agent_access.as_deref()),
+        )
+        .await?
+    } else {
+        crate::services::proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            db,
+            keys,
+            &chat.user_id,
+            id,
+            None,
+        )
+        .await?
+    }
     .ok_or_else(|| AppError::NotFound("Service connection unavailable".into()))?;
     let canonical = crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?;
     crate::services::destination_routing::resolve_target(
@@ -143,7 +186,8 @@ pub(super) async fn verify_resolved_projected_inner(
         .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
         .await?
         .ok_or_else(|| AppError::Forbidden("Assistant credential revoked".into()))?;
-    if projection.apply_agent_override
+    if materialize
+        && projection.apply_agent_override
         && key
             .assistant_agent_owner_id
             .as_deref()
@@ -177,7 +221,10 @@ pub(super) async fn verify_resolved_projected_inner(
     } else {
         before == connection_binding(db, id, &chat.api_key_id).await?
     };
-    if !binding_matches || execution_digest(actual) != execution_digest(&fresh.target) {
+    if !binding_matches
+        || execution_projection_digest(actual, !actual.credential_deferred)
+            != execution_projection_digest(&fresh.target, !actual.credential_deferred)
+    {
         if model {
             return Err(AppError::AssistantModelAuthorityChanged);
         }
@@ -185,7 +232,7 @@ pub(super) async fn verify_resolved_projected_inner(
             "Resolved service connection changed before execution".into(),
         ));
     }
-    Ok(())
+    Ok(fresh.target)
 }
 
 #[cfg(test)]
@@ -578,7 +625,7 @@ async fn check_http_projected_inner(
             crate::services::assistant_nyxagent::identifier(&target.service.slug)
         )
     };
-    let decision = check(
+    let mut decision = check(
         &state.db,
         &state.node_ws_manager,
         chat,
@@ -602,6 +649,11 @@ async fn check_http_projected_inner(
         )),
     )
     .await?;
+    if projection.skill_read
+        && let Some(admission) = decision.admission.as_mut()
+    {
+        admission.bound_skill_read = true;
+    }
     if let Some(binding) = consent_binding.as_deref() {
         validate_model_consent_snapshot(&state.db, decision.admission.as_ref(), binding).await?;
     }
@@ -674,4 +726,51 @@ pub(super) async fn validate_model_consent_snapshot(
         return Err(AppError::AssistantModelAuthorityChanged);
     }
     Ok(())
+}
+
+impl Admission {
+    pub(crate) async fn materialize_http(
+        &mut self,
+        db: &Database,
+        keys: &crate::crypto::aes::EncryptionKeys,
+        target: &mut crate::services::proxy_service::ProxyTarget,
+        method: &str,
+        path: &str,
+        projection: &HttpProjection,
+    ) -> AppResult<()> {
+        if !target.credential_deferred {
+            return Ok(());
+        }
+        self.revalidate(db, &self.connection, Some(target)).await?;
+        let fresh = resolve_projected(
+            db,
+            keys,
+            &self.chat,
+            &self.connection,
+            target,
+            method,
+            path,
+            projection,
+            true,
+            self.operation_identity["kind"] == "raw_inference" && !is_shared_chat(&self.chat),
+        )
+        .await?;
+        self.revalidate(db, &self.connection, Some(target)).await?;
+        target.credential = fresh.credential;
+        target.credential_deferred = false;
+        self.bind_materialized_http(db, target).await
+    }
+
+    pub(crate) async fn bind_materialized_http(
+        &mut self,
+        db: &Database,
+        target: &crate::services::proxy_service::ProxyTarget,
+    ) -> AppResult<()> {
+        target.require_credential_materialized()?;
+        self.revalidate(db, &self.connection, Some(target)).await?;
+        self.execution = Some(execution_projection_digest(target, true));
+        self.execution_credential = true;
+        self.revalidate(db, &self.connection, Some(target)).await?;
+        Ok(())
+    }
 }

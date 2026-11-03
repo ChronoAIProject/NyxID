@@ -255,6 +255,7 @@ impl Fixture {
             .unwrap()
             .unwrap();
         super::super::proxy_service::ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: service.base_url.clone(),

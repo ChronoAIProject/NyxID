@@ -61,6 +61,7 @@ function setup(
     initialCreate?: boolean;
     online?: boolean;
     maxLiveSubagents?: number;
+    listedAgents?: contracts.AssistantAgent[];
     onCreated?: (id: string) => void;
     onClose?: () => void;
   } = {},
@@ -78,6 +79,11 @@ function setup(
     },
   };
   const harness = hookHarness<Element>({
+    "./AgentCollaborationPanel": {
+      AgentCollaborationPanel: "AgentCollaborationPanel",
+      AgentOperationControls: "AgentOperationControls",
+    },
+    "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
     "../../components/AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
@@ -122,7 +128,7 @@ function setup(
             ? { agent: latest, memory: [], threads: [] }
             : queryKey[2] === "list"
               ? {
-                  agents: [agent],
+                  agents: options.listedAgents ?? [agent],
                   limits: {
                     max_live_subagents: options.maxLiveSubagents ?? 10,
                   },
@@ -446,6 +452,23 @@ test("agent filters open in a sheet and apply only after confirmation", () => {
   assert.equal(state.calls.length, 0);
 });
 
+test("shared specialists do not consume the owner's personal creation limit", () => {
+  const state = setup(false, false, {
+    initialCreate: true,
+    maxLiveSubagents: 1,
+    listedAgents: [{ ...agent, share_role: "user" }],
+  });
+  state
+    .one(
+      (row) =>
+        typeof row.type === "function" && row.type.name === "ProfileFields",
+    )
+    .props.onChange({ name: "new-specialist", description: "Personal work" });
+  state.harness.flush();
+  assert.equal(state.action("Create agent").props.disabled, false);
+  state.harness.unmount();
+});
+
 test("agent details retain their actual name and personal or organization ownership heading", () => {
   const state = setup();
   const page = () => state.one((row) => row.type === "WorkspacePage");
@@ -461,5 +484,19 @@ test("agent details retain their actual name and personal or organization owners
   state.harness.render();
   assert.equal(page().props.title, "Research specialist");
   assert.equal(page().props.subtitle, "Design review · admin");
+  state.latest({
+    owner_kind: "person",
+    owner_name: "Teammate",
+    share_role: "manager",
+  });
+  state.harness.render();
+  assert.equal(page().props.subtitle, "Teammate · shared manager");
+  assert.ok(
+    state.one(
+      (row) =>
+        row.type === "Notice" &&
+        row.props.message.startsWith("Shared Manager access"),
+    ),
+  );
   state.harness.unmount();
 });

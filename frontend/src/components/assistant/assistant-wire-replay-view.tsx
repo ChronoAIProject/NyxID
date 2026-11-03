@@ -146,7 +146,7 @@ export function AssistantWireReplayView({
           clean terminal frame.
         </p>
       ) : null}
-      <p className="text-11 leading-5 text-text-tertiary">
+      <p className="text-11 leading-normal text-text-tertiary">
         Message content uses the production chat renderer. Actor facts are
         diagnostic only and cannot be acted on here.
       </p>
@@ -171,7 +171,7 @@ export function AssistantWireReplayView({
               Diagnostic only
             </span>
           </div>
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-10 leading-5 text-muted-foreground">
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-10 leading-normal text-muted-foreground">
             {JSON.stringify(replay.actorFacts, null, 2)}
           </pre>
         </section>

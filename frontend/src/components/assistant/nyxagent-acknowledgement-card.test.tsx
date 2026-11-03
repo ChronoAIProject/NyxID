@@ -3,6 +3,15 @@ import { afterEach, expect, it, vi } from "vitest";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
+const createConnect = vi.hoisted(() => vi.fn(async () => "/connect/personal"));
+vi.mock("@/hooks/use-connect-links", () => ({
+  useCreateAssistantConnectLink: () => ({ mutateAsync: createConnect, isPending: false }),
+}));
+vi.mock("./assistant-link-modals", () => ({
+  AssistantLinkModal: ({ href }: { readonly href: string | null }) => href
+    ? <div role="dialog" aria-label="Hosted connection" data-href={href} /> : null,
+}));
+
 const acknowledgement: NyxAgentAcknowledgement = {
   id: "12345678-1234-4123-8123-123456789012",
   kind: "service",
@@ -171,4 +180,16 @@ it.each(["skills", "operations"] as const)("explains that routed %s widening fol
   expect(screen.getByRole("region")).toHaveTextContent("follows NyxBot's permission mode");
   expect(screen.getByRole("region")).not.toHaveTextContent("Widening requires your confirmation");
   expect(screen.getByRole("region")).not.toHaveTextContent("You will get a separate card");
+});
+
+it("keeps org controls in Full and offers hosted setup without a model-authored link", async () => {
+  render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, kind: "action",
+    confirmation: { risk: "read", access_mode: "autopilot", reason: "org_connection" },
+    connect_own: { supported: true, catalog_service_id: "catalog", service_slug: "github" },
+  }} accessMode="autopilot" deciding={false} onDecision={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "Allow" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Deny" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Connect your own" }));
+  expect(await screen.findByRole("dialog", { name: "Hosted connection" })).toHaveAttribute("data-href", "/connect/personal");
+  expect(createConnect).toHaveBeenCalledWith({ serviceSlug: "github", personal: true });
 });

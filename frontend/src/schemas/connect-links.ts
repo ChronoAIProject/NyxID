@@ -15,6 +15,7 @@ export const connectMethodSchema = z.enum([
 ]);
 
 export const connectLinkPreviewSchema = z.object({
+  assistant_intent_locked: z.boolean().default(false),
   use_platform_key: z.boolean().nullish(),
   scopes: z.array(z.string()).default([]),
   service_name: z.string().min(1),
@@ -148,3 +149,9 @@ export function validateConnectOAuthForm(
   }
   return null;
 }
+
+export const createConnectLinkResponseSchema = z.object({
+  id: z.string().uuid(),
+  connect_url: z.string().url(),
+  expires_at: z.string().datetime({ offset: true }),
+});

@@ -354,6 +354,8 @@ test("Create account opens the configured registration page only when registrati
   registration.props.onPress();
   await screen.harness.settle();
   assert.deepEqual(screen.registrationUrls, ["https://nyxid.example/register"]);
+  assert.equal(screen.sessions.length, 0, "closing registration cannot authenticate an account");
+  assert.match(textContent(screen.harness.value()), /Registration is not verified by closing the browser/);
   assert.deepEqual(screen.calls, []);
   screen.setEmailEnabled(false);
   registration.props.onPress();

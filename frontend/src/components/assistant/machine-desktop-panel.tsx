@@ -917,12 +917,12 @@ export function MachinePaneToggle({
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <Button
-      size="sm"
+      size={compact ? "icon" : "sm"}
       variant="ghost"
       aria-label={open ? "Hide machine" : "Show machine"}
       aria-pressed={open}
       title={open ? "Hide machine" : "Show machine"}
-      className={cn("relative", compact ? "h-7 w-7 px-0" : undefined, open && "bg-overlay-strong text-foreground")}
+      className={cn("relative", open && "bg-overlay-strong text-foreground")}
       onClick={onToggle}
     >
       <Monitor aria-hidden="true" />

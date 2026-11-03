@@ -3344,6 +3344,122 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
     )
     .await;
     assert_eq!(read["content"], "Pinned guidance only");
+    let unbound = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__skill_read",
+            json!({"skill": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(unbound["error"], "forbidden");
+    // A concrete personal Ornn connection is deliberately absent from the
+    // specialist grant. Bound skill reads may use this exact owner connection
+    // after the server has verified the pin; ordinary Ornn calls still require
+    // a grant.
+    let endpoint_id = uuid::Uuid::new_v4().to_string();
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user_endpoint::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user_endpoint(
+            &endpoint_id,
+            &f.owner,
+            "Ornn",
+            &upstream.uri(),
+            None,
+            Some(&catalog.id),
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection(crate::models::user_service::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user_service(
+            &connection_id,
+            &f.owner,
+            "ornn-owner",
+            &endpoint_id,
+            Some(&catalog.id),
+            None,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &connection_id},
+            doc! {"$set": {"identity_propagation_mode": "jwt"}},
+        )
+        .await
+        .unwrap();
+    let before_concrete = upstream.received_requests().await.unwrap().len();
+    let concrete_auth = authenticate(&f).await;
+    assert!(!concrete_auth.allow_all_services);
+    assert!(!concrete_auth.allowed_service_ids.contains(&connection_id));
+    let concrete_read = result(
+        call(&f, &concrete_auth, "nyxid__skill_read", json!({"skill":id})).await,
+        false,
+    )
+    .await;
+    assert_eq!(concrete_read["content"], "Pinned guidance only");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), before_concrete + 1);
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .headers
+            .contains_key("x-nyxid-identity-token")
+    );
+    // The actual ordinary HTTP proxy ingress cannot borrow the server marker.
+    {
+        use tower::ServiceExt;
+        let credential = credentials::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let response = Box::pin(
+            private.with_state(f.state.clone()).oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/api/v1/proxy/{connection_id}/api/v1/skills/{id}/versions/1.0/download"
+                    ))
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            upstream.received_requests().await.unwrap().len(),
+            requests.len()
+        );
+    }
+    let ordinary_ornn = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__search_agent_skills",
+            json!({"query": "private", "page": 1}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(ordinary_ornn.get("error").is_some());
     f.state
         .db
         .collection::<crate::models::assistant_agent::AssistantAgent>(
@@ -3449,6 +3565,148 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         upstream.received_requests().await.unwrap().len(),
         before_scope
     );
+    // Revoking the real thread key still fences this internal capability.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"operation_scopes": doc! {}}},
+        )
+        .await
+        .unwrap();
+    for (collection, target) in [
+        (
+            crate::models::downstream_service::COLLECTION_NAME,
+            &catalog.id,
+        ),
+        (crate::models::user_service::COLLECTION_NAME, &connection_id),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>(collection)
+            .update_one(
+                doc! {"_id": target},
+                doc! {"$set": {"identity_propagation_mode": "none"}},
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        Box::pin(crate::handlers::agent_skills::dispatch(
+            &f.state,
+            &f.chat,
+            "skill_read",
+            &json!({"skill": id}),
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before_scope
+    );
+    for (collection, target) in [
+        (
+            crate::models::downstream_service::COLLECTION_NAME,
+            &catalog.id,
+        ),
+        (crate::models::user_service::COLLECTION_NAME, &connection_id),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>(collection)
+            .update_one(
+                doc! {"_id": target},
+                doc! {"$set": {"identity_propagation_mode": "jwt"}},
+            )
+            .await
+            .unwrap();
+    }
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.api_key_id},
+            doc! {"$set": {"is_active": false}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(crate::handlers::agent_skills::dispatch(
+            &f.state,
+            &f.chat,
+            "skill_read",
+            &json!({"skill": id}),
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before_scope
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.api_key_id},
+            doc! {"$set": {"is_active": true}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &catalog.id},
+            doc! {"$set": {"is_active": false}},
+        )
+        .await
+        .unwrap();
+    let unavailable = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill": id})).await,
+        true,
+    )
+    .await;
+    assert!(unavailable.get("error").is_some());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let records: Vec<crate::models::audit_log::AuditLog> = f
+                .state
+                .db
+                .collection(crate::models::audit_log::COLLECTION_NAME)
+                .find(doc! {"event_type": "assistant_skill_read_refused"})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if ["skill_not_bound", "grant_refused", "operation_restriction"]
+                .iter()
+                .all(|reason| {
+                    records
+                        .iter()
+                        .any(|row| row.event_data == Some(json!({"reason": reason})))
+                })
+            {
+                assert!(
+                    records.iter().all(|row| row
+                        .event_data
+                        .as_ref()
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .len()
+                        == 1)
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     // Removing needs neither an owner card nor an available Ornn.
     upstream.reset().await;
     let removed = result(
@@ -4205,13 +4463,7 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     use crate::services::assistant_settings_service as settings;
     let f = fixture("strict_connect_link").await;
     let auth = authenticate(&f).await;
-    let service = connected(
-        &f.state.db,
-        &f.owner,
-        "connect-service",
-        "http://127.0.0.1:9",
-    )
-    .await;
+    let service = public_connect_catalog(&f, "connect-service").await.id;
     settings::update(
         &f.state.db,
         &f.owner,
@@ -4267,6 +4519,45 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     )
     .unwrap();
     assert!(routed_body.contains("access_request_denied"));
+    assert!(routed_body.contains("connect-service"));
+    assert!(routed_body.contains("NyxBot or Plugins"));
+    assert!(!routed_body.contains("/keys"));
+    f.state
+        .db
+        .collection::<bson::Document>("downstream_services")
+        .update_one(doc! {"_id":&service}, doc! {"$set":{"service_type":"ssh"}})
+        .await
+        .unwrap();
+    let ssh = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":service}),
+            None,
+            false,
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(ssh["connect_own"]["reason"], "ssh_requires_advanced_setup");
+    assert!(
+        ssh["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Advanced setup")
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -4802,6 +5093,7 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
     let f = crate::services::assistant_authority_tests::direct_fixture("mcp_missing_access_links")
         .await;
     let service_id = connected(&f.state.db, &f.owner, "github", "https://api.github.com").await;
+    let catalog = public_connect_catalog(&f, "personal-github").await;
     let auth = authenticate(&f).await;
     let services = load_all_services_for_meta_tools(&f.state, &auth)
         .await
@@ -4822,7 +5114,7 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
             &f.state,
             &auth,
             None,
-            &json!({"service_id": service_id}),
+            &json!({"service_id": catalog.id}),
             None,
             false,
         )
@@ -4830,18 +5122,21 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
         true,
     )
     .await;
-    for value in [service, connect] {
-        assert_eq!(value["error"], "missing_access");
-        let instructions = value["instructions"].as_str().unwrap();
-        assert!(
-            instructions.contains(&format!(
-                "({}/assistant?",
-                f.state.config.frontend_url.trim_end_matches('/')
-            )),
-            "{instructions}"
-        );
-        assert!(!instructions.contains("(/assistant?"));
-    }
+    assert_eq!(service["error"], "missing_access");
+    assert!(service["instructions"].as_str().unwrap().contains(&format!(
+        "({}/assistant?",
+        f.state.config.frontend_url.trim_end_matches('/')
+    )));
+    assert_eq!(connect["error"], "missing_access");
+    assert_eq!(connect["catalog_service_id"], catalog.id);
+    assert_eq!(connect["service_slug"], catalog.slug);
+    assert!(
+        connect["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("NyxBot or Plugins")
+    );
+    assert!(!connect.to_string().contains("/keys"));
     f.state.db.drop().await.unwrap();
 }
 
@@ -5924,5 +6219,156 @@ async fn guest_scopes_raw_proxy_and_pool_member_keep_owner_access() {
         assert_eq!(hits.load(Ordering::SeqCst), if guest { 0 } else { 3 });
     }
     server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+async fn public_connect_catalog(
+    f: &Fixture,
+    slug: &str,
+) -> crate::models::downstream_service::DownstreamService {
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = uuid::Uuid::new_v4().to_string();
+    catalog.slug = slug.into();
+    catalog.visibility = "public".into();
+    catalog.requires_user_credential = true;
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    catalog
+}
+
+#[tokio::test]
+async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_keeps_platform_one_step()
+ {
+    use crate::services::feature_flag_service as flags;
+    let f = orchestrator_fixture("assistant_hosted_connect").await;
+    flags::set_platform_override(
+        &f.state.db,
+        flags::HOSTED_CONNECT_INTENT_FLAG_KEY,
+        &flags::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let mut catalog = public_connect_catalog(&f, "personal-github").await;
+    // A credentialed HTTP catalog, as in platform_key_service tests: a
+    // no-auth row would take the no-auth platform availability path instead.
+    catalog.auth_method = "bearer".into();
+    catalog.auth_key_name = "Authorization".into();
+    catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        enabled: true,
+        audience: crate::models::downstream_service::PlatformKeyAudience::Public,
+        ..Default::default()
+    });
+    catalog.credential_encrypted = f
+        .state
+        .encryption_keys
+        .encrypt(b"fixture-platform-key")
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    // An existing organization connection must not suppress personal setup.
+    let org = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection("users")
+        .insert_one(crate::test_utils::test_user(
+            &org,
+            crate::models::user::UserType::Org,
+        ))
+        .await
+        .unwrap();
+    let connection = connected(&f.state.db, &org, "org-github", "https://example.test").await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":connection},
+            doc! {"$set":{"catalog_service_id":&catalog.id}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    for args in [
+        json!({"service_slug":catalog.slug}),
+        json!({"service_id":catalog.id}),
+    ] {
+        let value = result(
+            handle_meta_connect(&f.state, &auth, None, &args, None, false).await,
+            false,
+        )
+        .await;
+        assert_eq!(value["status"], "pending_connection");
+        assert_eq!(value["catalog_service_id"], catalog.id);
+        assert_eq!(value["service_slug"], catalog.slug);
+        let stored = f
+            .state
+            .db
+            .collection::<crate::models::connect_link::ConnectLink>("connect_links")
+            .find_one(doc! {"_id":value["connect_link_id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.assistant_intent_locked);
+        assert_eq!(stored.use_platform_key, Some(false));
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .count_documents(doc! {"user_id":&f.owner})
+            .await
+            .unwrap(),
+        0,
+        "personal intent never provisions without the human completing the link"
+    );
+    // Platform keys are outside the organization rule: one step, as before.
+    let platform = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id,"service_slug":catalog.slug,"use_platform_key":true}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(platform["status"], "connected", "{platform}");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .count_documents(doc! {"user_id":&f.owner,"credential_binding":"platform"})
+            .await
+            .unwrap(),
+        1
+    );
+    let response = handle_meta_connect(
+        &f.state,
+        &auth,
+        None,
+        &json!({"service_id":catalog.id,"service_slug":"mismatch"}),
+        None,
+        false,
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), 10000)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["result"]["isError"], true);
+    assert!(!value.to_string().contains("connect_url"));
     f.state.db.drop().await.unwrap();
 }

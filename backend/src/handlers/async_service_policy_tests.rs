@@ -625,3 +625,96 @@ async fn legacy_submitted_org_watches_keep_bounded_result_and_cancel_lifecycle()
         );
     }
 }
+
+#[tokio::test]
+async fn legacy_org_watch_pauses_after_activation_and_owner_card_authorizes_only_its_bounded_lifecycle()
+ {
+    use crate::services::feature_flag_service as flags;
+    let mut a = AsyncFixture::new().await;
+    let watch = org_watch(&mut a, false).await;
+    finish(&a, &a.f.row, "submitted before upgrade").await;
+    flags::set_platform_override(
+        &a.f.state.db,
+        flags::ORG_INSTRUCTION_FLAG_KEY,
+        &flags::FlagTarget::User(a.f.owner.clone()),
+        true,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    set_access_mode(&a.f, AccessMode::Autopilot).await;
+    a.due().await;
+    let before = a.calls.lock().unwrap().len();
+    Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    assert_eq!(
+        a.calls.lock().unwrap().len(),
+        before,
+        "unproven watch must not poll"
+    );
+    let cards = acks::history(&a.f.state.db, &a.f.owner, &a.f.row.id)
+        .await
+        .unwrap();
+    let card = cards
+        .iter()
+        .find(|c| {
+            c.tool_name.as_deref() == Some("nyxid.async_continuation") && c.status == "pending"
+        })
+        .expect("owner continuation card");
+    assert_eq!(card.confirmation.as_ref().unwrap().reason, "org_connection");
+    assert!(
+        card.connect_own.is_some(),
+        "continuation card includes setup guidance"
+    );
+    acks::decide(&a.f.state.db, &a.f.owner, &a.f.row.id, &card.id, true)
+        .await
+        .unwrap();
+    a.due().await;
+    Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    let fresh =
+        a.f.state
+            .db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(fresh.instruction_receipt_version, 1);
+    assert_eq!(fresh.state, "queued");
+    assert_eq!(fresh.reason.as_deref(), Some("completed"));
+    assert!(
+        a.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.ends_with("/result"))
+    );
+}
+
+#[tokio::test]
+async fn new_org_watch_carries_server_instruction_receipt() {
+    use crate::services::feature_flag_service as flags;
+    let mut a = AsyncFixture::new().await;
+    flags::set_platform_override(
+        &a.f.state.db,
+        flags::ORG_INSTRUCTION_FLAG_KEY,
+        &flags::FlagTarget::User(a.f.owner.clone()),
+        true,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    let watch = org_watch(&mut a, false).await;
+    assert_eq!(watch.instruction_receipt_version, 1);
+    finish(&a, &a.f.row, "submitted with instruction").await;
+    a.due().await;
+    Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    let fresh =
+        a.f.state
+            .db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(fresh.state, "queued");
+}
