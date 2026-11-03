@@ -29,6 +29,7 @@ import { createMfaRecoveryLifecycle } from "./mfaRecoveryLifecycle";
 import { AccountSecurityControls } from "./AccountSecurityControls";
 import { AccountAuthorizations } from "./AccountAuthorizations";
 import { AccountOrganizations } from "./AccountOrganizations";
+import { SessionAccordion } from "./SessionAccordion";
 import { disableMfaSchema } from "../../lib/api/accountSecurityTransport";
 
 type PrivateAction = "setup" | "confirm" | "disable" | "copy" | "share";
@@ -60,6 +61,8 @@ export function AccountSecurityScreen() {
     queryKey: ["account", "sessions"],
     queryFn: ({ signal }) => accountApi.listSessions(signal),
   });
+  // One session is open at a time; all start collapsed.
+  const [expandedSession, setExpandedSession] = useState<string>();
   const [displayName, setDisplayName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
   const profileInitialized = useRef(false);
@@ -745,41 +748,23 @@ export function AccountSecurityScreen() {
           <Label muted>No active sessions found.</Label>
         ) : (
           sessions.data?.map((session) => (
-            <View
+            <SessionAccordion
               key={session.id}
-              style={{
-                gap: 8,
-                paddingVertical: 12,
-                borderTopWidth: 1,
-                borderTopColor: colors.border,
-              }}
-            >
-              <Label>
-                {session.is_current ? "This session" : "Signed-in session"}
-              </Label>
-              <Label muted selectable>
-                {session.user_agent || "Device details unavailable"}
-              </Label>
-              <Label muted>
-                Network: {session.ip_address || "Unavailable"}
-              </Label>
-              <Label muted>Signed in {formatDate(session.created_at)}</Label>
-              <Label muted>Expires {formatDate(session.expires_at)}</Label>
-              <ActionButton
-                label={
-                  session.is_current
-                    ? "Sign out on this device"
-                    : "Sign out session"
-                }
-                variant="danger"
-                disabled={!isConnected || revokeSession.isPending}
-                loading={
-                  revokeSession.isPending &&
-                  revokeSession.variables?.id === session.id
-                }
-                onPress={() => confirmSessionRevocation(session)}
-              />
-            </View>
+              session={session}
+              expanded={expandedSession === session.id}
+              onToggle={() =>
+                setExpandedSession((open) =>
+                  open === session.id ? undefined : session.id,
+                )
+              }
+              formatDate={formatDate}
+              onSignOut={() => confirmSessionRevocation(session)}
+              signOutDisabled={!isConnected || revokeSession.isPending}
+              signingOut={
+                revokeSession.isPending &&
+                revokeSession.variables?.id === session.id
+              }
+            />
           ))
         )}
         <ActionButton

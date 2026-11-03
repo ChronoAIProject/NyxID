@@ -101,6 +101,7 @@ function setup(passwordAccount: boolean) {
       AccountAuthorizations: "AccountAuthorizations",
     },
     "./AccountOrganizations": { AccountOrganizations: "AccountOrganizations" },
+    "./SessionAccordion": { SessionAccordion: "SessionAccordion" },
   });
   const { AccountSecurityScreen } = harness.load(
     fileURLToPath(new URL("./AccountSecurityScreen.tsx", import.meta.url)),
