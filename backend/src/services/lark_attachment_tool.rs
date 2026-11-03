@@ -32,6 +32,8 @@ pub enum Projection {
     Stored(AttachmentInput),
     Managed(ManagedOperation),
     Refused,
+    Im(super::lark_im_tool::Kind),
+    ImRefused,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,8 +65,10 @@ pub(crate) fn refuse_reserved_path(path: &str) -> AppResult<()> {
 }
 
 pub fn is_attachment_operation(endpoint: &McpToolEndpoint) -> bool {
-    endpoint.attachment_input.is_some()
-        || endpoint.name == UPLOAD_OPERATION
+    matches!(
+        endpoint.attachment_input,
+        Some(Projection::Stored(_) | Projection::Managed(_) | Projection::Refused)
+    ) || endpoint.name == UPLOAD_OPERATION
         || endpoint.path == UPLOAD_PATH
         || endpoint.path == format!("/open-apis{UPLOAD_PATH}")
         || endpoint.name == COMPOSITE_OPERATION
@@ -75,10 +79,14 @@ pub fn is_attachment_operation(endpoint: &McpToolEndpoint) -> bool {
 /// Name/route matching only identifies operations that must refuse ordinary
 /// dispatch. It never grants a materializer or attachment access.
 pub fn untrusted(endpoint: &McpToolEndpoint) -> Option<Projection> {
-    is_attachment_operation(endpoint).then_some(Projection::Refused)
+    if super::lark_im_tool::image_candidate(endpoint) {
+        Some(Projection::ImRefused)
+    } else {
+        is_attachment_operation(endpoint).then_some(Projection::Refused)
+    }
 }
 
-fn inputs(endpoint: &McpToolEndpoint) -> Value {
+pub(super) fn inputs(endpoint: &McpToolEndpoint) -> Value {
     json!({
         "method":endpoint.method.to_ascii_uppercase(), "path":endpoint.path,
         "target":endpoint.target_id, "parameters":endpoint.parameters,
@@ -121,6 +129,9 @@ pub fn stored_projection(
     catalog: Option<&DownstreamService>,
     endpoint: &McpToolEndpoint,
 ) -> Option<Projection> {
+    if let Some(kind) = super::lark_im_tool::stored(catalog, endpoint) {
+        return Some(Projection::Im(kind));
+    }
     let candidate = untrusted(endpoint)?;
     let trusted = (|| {
         let service = catalog?;
@@ -271,6 +282,11 @@ pub async fn filter_discovery(
     chat: Option<&ChatAuthority>,
     services: &mut [McpToolService],
 ) -> AppResult<()> {
+    for service in services.iter_mut() {
+        service
+            .endpoints
+            .retain(|endpoint| !matches!(endpoint.attachment_input, Some(Projection::ImRefused)));
+    }
     if !services
         .iter()
         .flat_map(|service| &service.endpoints)
@@ -347,7 +363,7 @@ pub async fn validate_binding(
     Ok(())
 }
 
-async fn validate_contract(
+pub(super) async fn validate_contract(
     db: &Database,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
@@ -402,9 +418,11 @@ async fn validate_contract(
         .pop()
         .ok_or_else(refused)?;
     loaded.attachment_input = stored_projection(Some(&catalog), &loaded);
-    if !matches!(loaded.attachment_input, Some(Projection::Stored(_)))
-        || super::mcp_service::endpoint_contract_digest(&loaded)
-            != super::mcp_service::endpoint_contract_digest(endpoint)
+    if !matches!(
+        loaded.attachment_input,
+        Some(Projection::Stored(_) | Projection::Im(_))
+    ) || super::mcp_service::endpoint_contract_digest(&loaded)
+        != super::mcp_service::endpoint_contract_digest(endpoint)
     {
         return Err(refused());
     }
