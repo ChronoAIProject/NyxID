@@ -1,18 +1,15 @@
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
 import { useRef, useState, type PropsWithChildren } from "react";
 import {
+  Pressable,
   ScrollView,
   StyleSheet,
   View,
   type ScrollViewProps,
 } from "react-native";
+import { ChevronRight, Plus } from "lucide-react-native";
 import { useQuery } from "@tanstack/react-query";
-import {
-  ActionButton,
-  Card,
-  Label,
-  Notice,
-} from "../../components/workspace/WorkspaceUI";
+import { Label, Notice } from "../../components/workspace/WorkspaceUI";
 import { SectionBadge } from "../../components/SectionBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { agentsApi } from "../../lib/api/agentsApi";
@@ -134,7 +131,7 @@ export function NyxBotHome({
             {greetingFor(now)}
             {firstName ? `, ${firstName}` : ""}
           </Label>
-          <Label muted style={styles.body}>
+          <Label muted style={styles.lead}>
             NyxBot is your personal agent. Ask it anything below, or check in on
             your team.
           </Label>
@@ -148,26 +145,18 @@ export function NyxBotHome({
       !crews.isPending &&
       !agents.isError &&
       !crews.isError ? (
-        <Card>
-          <Label style={styles.sectionTitle}>Hi, I'm NyxBot.</Label>
-          <Label muted style={styles.body}>
+        <HomeGroup>
+          <Quiet title="Hi, I'm NyxBot.">
             I'm here to help you use NyxID, manage your NyxID services and
             automate them.
-          </Label>
-        </Card>
+          </Quiet>
+        </HomeGroup>
       ) : null}
-      <Section title="While you were away">
+      <HomeGroup title="While you were away">
         {agents.isError ? (
-          <Notice
-            tone="error"
-            message="Couldn’t refresh your agents. Saved updates may be out of date."
-          />
-        ) : null}
-        {agents.isError ? (
-          <ActionButton
-            label="Retry agents"
-            compact
-            variant="secondary"
+          <HomeAction
+            label="Couldn’t refresh your agents. Tap to retry."
+            danger
             disabled={!active}
             onPress={() => {
               if (available()) void agents.refetch();
@@ -175,23 +164,21 @@ export function NyxBotHome({
           />
         ) : null}
         {agents.isPending ? (
-          <Quiet>Loading your agents...</Quiet>
+          <Quiet>Loading your agents…</Quiet>
         ) : items.length ? (
-          <Card>
-            {items.slice(0, shown).map((item) => {
+          [
+            ...items.slice(0, shown).map((item) => {
               const name = chatAgentLabel(item.agent);
               const request =
                 item.kind === "request" ? item.request : undefined;
               const failed = item.agent.last_reply?.status === "failed";
               return (
-                <View
+                <HomeRow
                   key={item.key}
-                  style={[styles.listRow, { borderColor: colors.borderSoft }]}
-                >
-                  <View style={styles.rowTitle}>
-                    <AgentAvatar agent={item.agent} size="lg" />
-                    <Label style={styles.name}>{name}</Label>
-                    {request ? (
+                  leading={<AgentAvatar agent={item.agent} size="lg" />}
+                  title={name}
+                  badge={
+                    request ? (
                       <SectionBadge label="Needs a decision" tone="warning" />
                     ) : failed && item.agent.status !== "running" ? (
                       <StatusBadge label="Failed" variant="decisionDenied" />
@@ -206,49 +193,41 @@ export function NyxBotHome({
                           item.agent.status === "running" ? "info" : "success"
                         }
                       />
-                    )}
-                  </View>
-                  <Label muted numberOfLines={2} style={styles.body}>
-                    {item.kind === "request" ? item.request.summary : item.text}
-                  </Label>
-                  <View style={styles.actions}>
-                    {item.kind === "update" && item.at ? (
-                      <Label muted style={styles.metadata}>
-                        {formatRelativeTimeFromMs(Date.parse(item.at))}
-                      </Label>
-                    ) : null}
-                    <ActionButton
-                      label={request ? "Review" : "Open"}
-                      compact
-                      variant="secondary"
-                      accessibilityLabel={
-                        request
-                          ? `Review ${name}'s request: ${request.summary}`
-                          : `Open ${name}'s latest work`
-                      }
-                      disabled={!active || item.agent.can_use === false}
-                      onPress={() =>
-                        openAgent(
-                          item.agent.id,
-                          request?.conversation_id ??
-                            item.agent.home_conversation_id ??
-                            undefined,
-                          request?.request_id,
-                        )
-                      }
-                    />
-                  </View>
-                </View>
+                    )
+                  }
+                  detail={
+                    item.kind === "request" ? item.request.summary : item.text
+                  }
+                  meta={
+                    item.kind === "update" && item.at
+                      ? formatRelativeTimeFromMs(Date.parse(item.at))
+                      : undefined
+                  }
+                  accessibilityLabel={
+                    request
+                      ? `Review ${name}'s request: ${request.summary}`
+                      : `Open ${name}'s latest work`
+                  }
+                  disabled={!active || item.agent.can_use === false}
+                  onPress={() =>
+                    openAgent(
+                      item.agent.id,
+                      request?.conversation_id ??
+                        item.agent.home_conversation_id ??
+                        undefined,
+                      request?.request_id,
+                    )
+                  }
+                />
               );
-            })}
-            {items.length > AWAY_PREVIEW ? (
-              <ActionButton
-                compact
-                variant="secondary"
+            }),
+            items.length > AWAY_PREVIEW ? (
+              <HomeAction
+                key="more"
                 label={
                   shown < items.length
-                    ? `Show more (${items.length - shown})`
-                    : "Show less"
+                    ? `Show More (${items.length - shown})`
+                    : "Show Less"
                 }
                 onPress={() =>
                   setShown((value) =>
@@ -256,97 +235,95 @@ export function NyxBotHome({
                   )
                 }
               />
-            ) : null}
-          </Card>
+            ) : null,
+          ]
         ) : !agents.isError ? (
           <Quiet>
             All caught up. Replies and requests from your specialists show up
             here.
           </Quiet>
         ) : null}
-      </Section>
-      <Section
-        title="Your agents"
-        action={
-          <ActionButton
-            label="New agent"
-            compact
-            variant="secondary"
-            disabled={!active}
-            onPress={() => {
-              if (available()) onNewAgent();
-            }}
-          />
-        }
-      >
-        {agentOwnerSections(roster).map((section) => (
-          <View key={section.id} style={styles.section}>
-            <Label accessibilityRole="header" muted style={styles.owner}>
-              {section.label}
-            </Label>
-            {section.agents.map((agent) => (
-              <Card key={agent.id}>
-                <View style={styles.rowTitle}>
-                  <AgentAvatar agent={agent} size="lg" />
-                  <Label style={styles.name}>{chatAgentLabel(agent)}</Label>
-                  {agent.kind !== "nyxbot" ? (
-                    agent.pending_acknowledgements > 0 ? (
-                      <SectionBadge label="Needs you" tone="warning" />
-                    ) : (
-                      <StatusBadge
-                        label={agent.status === "running" ? "Running" : "Idle"}
-                        variant={
-                          agent.status === "running"
-                            ? "modeChip"
-                            : "decisionExpired"
-                        }
-                      />
-                    )
-                  ) : null}
-                </View>
-                <Label muted style={styles.metadata}>
-                  {agent.kind === "nyxbot"
-                    ? "Your personal agent"
-                    : `@${agent.name}`}
-                  {agent.can_use === false ? " · View only" : ""}
-                </Label>
-                <Label muted numberOfLines={2} style={styles.body}>
-                  {agent.description ||
-                    (agent.kind === "nyxbot"
-                      ? "Full access to your services and account. Delegates to your specialists."
-                      : "No role described yet.")}
-                </Label>
-                <View style={styles.actions}>
-                  <ActionButton
-                    label="Chat"
-                    accessibilityLabel={`Chat with ${chatAgentLabel(agent)}`}
-                    compact
-                    variant="secondary"
-                    disabled={!active || agent.can_use === false}
-                    onPress={() => openAgent(agent.id)}
-                  />
-                </View>
-              </Card>
-            ))}
-          </View>
-        ))}
-        {!roster.some((agent) => agent.status !== "destroyed") ? (
+      </HomeGroup>
+      {agentOwnerSections(roster).map((section, index) => (
+        <HomeGroup
+          key={section.id}
+          title={index === 0 ? "Your agents" : undefined}
+          subtitle={section.label}
+          action={
+            index === 0 ? (
+              <HeaderAction
+                label="New agent"
+                disabled={!active}
+                onPress={() => {
+                  if (available()) onNewAgent();
+                }}
+              />
+            ) : undefined
+          }
+        >
+          {section.agents.map((agent) => (
+            <HomeRow
+              key={agent.id}
+              leading={<AgentAvatar agent={agent} size="lg" />}
+              title={chatAgentLabel(agent)}
+              badge={
+                agent.kind !== "nyxbot" ? (
+                  agent.pending_acknowledgements > 0 ? (
+                    <SectionBadge label="Needs you" tone="warning" />
+                  ) : (
+                    <StatusBadge
+                      label={agent.status === "running" ? "Running" : "Idle"}
+                      variant={
+                        agent.status === "running"
+                          ? "modeChip"
+                          : "decisionExpired"
+                      }
+                    />
+                  )
+                ) : undefined
+              }
+              detail={`${
+                agent.kind === "nyxbot" ? "Your personal agent" : `@${agent.name}`
+              }${agent.can_use === false ? " · View only" : ""} · ${
+                agent.description ||
+                (agent.kind === "nyxbot"
+                  ? "Full access to your services and account. Delegates to your specialists."
+                  : "No role described yet.")
+              }`}
+              accessibilityLabel={`Chat with ${chatAgentLabel(agent)}`}
+              disabled={!active || agent.can_use === false}
+              onPress={() => openAgent(agent.id)}
+            />
+          ))}
+        </HomeGroup>
+      ))}
+      {!roster.some((agent) => agent.status !== "destroyed") ? (
+        <HomeGroup
+          title="Your agents"
+          action={
+            <HeaderAction
+              label="New agent"
+              disabled={!active}
+              onPress={() => {
+                if (available()) onNewAgent();
+              }}
+            />
+          }
+        >
           <Quiet>
             {agents.isPending
-              ? "Loading your agents..."
+              ? "Loading your agents…"
               : agents.isError
                 ? "Your agents are unavailable. Try again above."
                 : "No agents yet."}
           </Quiet>
-        ) : null}
-      </Section>
-      <Section
+        </HomeGroup>
+      ) : null}
+      <HomeGroup
         title="Crews"
         action={
-          <ActionButton
+          <HeaderAction
             label="New crew"
-            compact
-            variant="secondary"
             disabled={!active}
             onPress={() => {
               if (available()) onNewCrew();
@@ -355,16 +332,9 @@ export function NyxBotHome({
         }
       >
         {crews.isError ? (
-          <Notice
-            tone="error"
-            message="Couldn’t refresh your crews. Saved crews may be out of date."
-          />
-        ) : null}
-        {crews.isError ? (
-          <ActionButton
-            label="Retry crews"
-            compact
-            variant="secondary"
+          <HomeAction
+            label="Couldn’t refresh your crews. Tap to retry."
+            danger
             disabled={!active}
             onPress={() => {
               if (available()) void crews.refetch();
@@ -372,92 +342,275 @@ export function NyxBotHome({
           />
         ) : null}
         {groups.map((group) => (
-          <Card key={group.id}>
-            <View style={styles.rowTitle}>
-              <AgentAvatarStack agents={group.members} max={4} />
-              <Label style={styles.name}>{group.name}</Label>
-              {group.working_agent_ids.length ? (
+          <HomeRow
+            key={group.id}
+            leading={<AgentAvatarStack agents={group.members} max={3} />}
+            title={group.name}
+            badge={
+              group.working_agent_ids.length ? (
                 <SectionBadge
                   label={`${group.working_agent_ids.length} working`}
                   tone="info"
                 />
-              ) : null}
-            </View>
-            <Label muted numberOfLines={2} style={styles.body}>
-              {group.owner?.type === "org" ? `${group.owner.name} · ` : ""}
-              {group.members.map(chatAgentLabel).join(", ")}
-            </Label>
-            <View style={styles.actions}>
-              {group.last_message_at ? (
-                <Label muted style={styles.metadata}>
-                  {formatRelativeTimeFromMs(Date.parse(group.last_message_at))}
-                </Label>
-              ) : null}
-              <ActionButton
-                label="Open"
-                accessibilityLabel={`Open crew ${group.name}`}
-                compact
-                variant="secondary"
-                disabled={!active}
-                onPress={() => {
-                  if (
-                    available() &&
-                    latest.current.groups.some((row) => row.id === group.id)
-                  )
-                    onOpenCrew(group.id);
-                }}
-              />
-            </View>
-          </Card>
+              ) : undefined
+            }
+            detail={`${group.owner?.type === "org" ? `${group.owner.name} · ` : ""}${group.members.map(chatAgentLabel).join(", ")}`}
+            meta={
+              group.last_message_at
+                ? formatRelativeTimeFromMs(Date.parse(group.last_message_at))
+                : undefined
+            }
+            accessibilityLabel={`Open crew ${group.name}`}
+            disabled={!active}
+            onPress={() => {
+              if (
+                available() &&
+                latest.current.groups.some((row) => row.id === group.id)
+              )
+                onOpenCrew(group.id);
+            }}
+          />
         ))}
         {!groups.length ? (
           <Quiet>
             {crews.isPending
-              ? "Loading crews..."
+              ? "Loading crews…"
               : crews.isError
                 ? "Your crews are unavailable. Try again above."
                 : "Put several agents in one chat. Mention one with @ to ask it directly; NyxBot answers the rest."}
           </Quiet>
         ) : null}
-      </Section>
+      </HomeGroup>
     </ScrollView>
   );
 }
 
-function Section({
+/**
+ * An inset-grouped list on the home page: an optional section header with a
+ * tinted action, then rows in one filled card that stands apart from the page.
+ */
+function HomeGroup({
   title,
+  subtitle,
   action,
   children,
-}: PropsWithChildren<{ title: string; action?: React.ReactNode }>) {
+}: PropsWithChildren<{
+  title?: string;
+  subtitle?: string;
+  action?: React.ReactNode;
+}>) {
+  const { colors } = useTheme();
+  const rows = [children]
+    .flat(Infinity as 1)
+    .filter(
+      (child): child is React.ReactElement =>
+        !!child && typeof child === "object" && "props" in child,
+    );
   return (
-    <View style={styles.section}>
-      <View style={styles.rowTitle}>
-        <Label accessibilityRole="header" style={styles.sectionTitle}>
-          {title}
+    <View style={styles.group}>
+      {title || action ? (
+        <View style={styles.groupHeader}>
+          {title ? (
+            <Label accessibilityRole="header" style={styles.sectionTitle}>
+              {title}
+            </Label>
+          ) : (
+            <View style={{ flex: 1 }} />
+          )}
+          {action}
+        </View>
+      ) : null}
+      {subtitle ? (
+        <Label muted style={styles.owner}>
+          {subtitle}
         </Label>
-        {action}
+      ) : null}
+      <View style={[styles.card, { backgroundColor: colors.groupedFill }]}>
+        {rows.map((row, index) => (
+          <View key={row.key ?? index}>
+            {index > 0 ? (
+              <View
+                style={[styles.separator, { backgroundColor: colors.borderSoft }]}
+              />
+            ) : null}
+            {row}
+          </View>
+        ))}
       </View>
-      {children}
     </View>
   );
 }
-function Quiet({ children }: PropsWithChildren) {
+
+/** A home list row: the whole row opens its chat or crew. */
+function HomeRow({
+  leading,
+  title,
+  badge,
+  detail,
+  meta,
+  onPress,
+  disabled,
+  accessibilityLabel,
+}: {
+  leading: React.ReactNode;
+  title: string;
+  badge?: React.ReactNode;
+  detail?: string;
+  meta?: string;
+  onPress: () => void;
+  disabled?: boolean;
+  accessibilityLabel: string;
+}) {
+  const { colors } = useTheme();
   return (
-    <Card>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled: !!disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.row,
+        pressed && !disabled && { backgroundColor: colors.navActive },
+        disabled && { opacity: 0.55 },
+      ]}
+    >
+      <View style={styles.leading}>{leading}</View>
+      <View style={styles.rowBody}>
+        <View style={styles.rowTitle}>
+          <Label numberOfLines={1} style={styles.name}>
+            {title}
+          </Label>
+          {badge}
+        </View>
+        {detail ? (
+          <Label muted numberOfLines={2} style={styles.body}>
+            {detail}
+          </Label>
+        ) : null}
+      </View>
+      {meta ? (
+        <Label muted style={styles.metadata}>
+          {meta}
+        </Label>
+      ) : null}
+      <ChevronRight size={18} color={colors.textMuted} />
+    </Pressable>
+  );
+}
+
+/** A tinted action row inside a group (retry, show more). */
+function HomeAction({
+  label,
+  onPress,
+  disabled,
+  danger,
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  const { colors } = useTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.actionRow,
+        pressed && !disabled && { backgroundColor: colors.navActive },
+      ]}
+    >
+      <Label style={[styles.actionLabel, { color: danger ? colors.danger : colors.primary }]}>
+        {label}
+      </Label>
+    </Pressable>
+  );
+}
+
+/** Section header action in tinted text, as iOS lists do. */
+function HeaderAction({
+  label,
+  onPress,
+  disabled,
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  const { colors } = useTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: !!disabled }}
+      disabled={disabled}
+      hitSlop={10}
+      onPress={onPress}
+      style={styles.headerAction}
+    >
+      <Plus size={16} color={disabled ? colors.textMuted : colors.primary} />
+      <Label
+        style={[
+          styles.actionLabel,
+          { color: disabled ? colors.textMuted : colors.primary },
+        ]}
+      >
+        {label}
+      </Label>
+    </Pressable>
+  );
+}
+
+function Quiet({
+  title,
+  children,
+}: PropsWithChildren<{ title?: string }>) {
+  return (
+    <View style={styles.quiet}>
+      {title ? <Label style={styles.name}>{title}</Label> : null}
       <Label muted style={styles.body}>
         {children}
       </Label>
-    </Card>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  content: { paddingTop: 24, paddingBottom: 24, gap: 24 },
+  content: { paddingTop: 24, paddingBottom: 24, gap: 28 },
   greeting: { flexDirection: "row", alignItems: "center", gap: 12 },
   greetingText: { flex: 1, gap: 6 },
   title: { fontFamily: fonts.displaySemi, fontSize: 24, lineHeight: 30 },
-  section: { gap: 12 },
-  sectionTitle: { flex: 1, fontFamily: fonts.bodySemi, fontSize: 15 },
+  lead: { fontSize: 14, lineHeight: 20 },
+  group: { gap: 8 },
+  groupHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 4,
+  },
+  sectionTitle: { flex: 1, fontFamily: fonts.displaySemi, fontSize: 18, lineHeight: 24 },
+  owner: {
+    fontFamily: fonts.bodySemi,
+    fontSize: 11,
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    paddingHorizontal: 16,
+    paddingTop: 4,
+  },
+  card: { borderRadius: 14, overflow: "hidden" },
+  separator: { height: StyleSheet.hairlineWidth, marginLeft: 64 },
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    minHeight: 64,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  leading: { width: 36, alignItems: "center" },
+  rowBody: { flex: 1, minWidth: 0, gap: 3 },
   rowTitle: {
     flexDirection: "row",
     alignItems: "center",
@@ -465,24 +618,25 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   name: {
-    flexGrow: 1,
     flexShrink: 1,
     fontFamily: fonts.bodySemi,
-    fontSize: 13,
+    fontSize: 15,
+    lineHeight: 20,
   },
-  body: { fontSize: 12, lineHeight: 19 },
-  metadata: { flexShrink: 1, fontSize: 11, lineHeight: 17 },
-  owner: { fontFamily: fonts.bodySemi, fontSize: 11, letterSpacing: 1 },
-  listRow: {
-    gap: 8,
-    paddingBottom: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+  body: { fontSize: 13, lineHeight: 18 },
+  metadata: { fontSize: 12, lineHeight: 16 },
+  quiet: { paddingVertical: 14, paddingHorizontal: 16, gap: 4 },
+  actionRow: {
+    minHeight: 48,
+    justifyContent: "center",
+    paddingHorizontal: 16,
   },
-  actions: {
+  actionLabel: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 20 },
+  headerAction: {
     flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
     alignItems: "center",
-    justifyContent: "flex-end",
+    gap: 4,
+    minHeight: 44,
+    paddingHorizontal: 4,
   },
 });

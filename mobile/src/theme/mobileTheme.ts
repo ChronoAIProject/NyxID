@@ -37,6 +37,8 @@ export type ThemeColors = {
   dangerSoftBg: string;
   /** Solid destructive fill (Delete Account); white labels meet AA in both themes. */
   dangerSolid: string;
+  /** Inset-grouped list fill that stands apart from the page in both themes. */
+  groupedFill: string;
   dangerSolidPressed: string;
   primary: string;       // warm violet — identity + interaction only
   primaryDim: string;    // pressed states, hover deep
@@ -137,6 +139,7 @@ export const darkColors: ThemeColors = {
   dangerSoft: "#fca5a5",
   dangerSoftBg: "rgba(248, 113, 113, 0.10)",
   dangerSolid: DANGER_LIGHT,
+  groupedFill: "#222225",
   dangerSolidPressed: "#991B1B",
   // Brand
   primary: "#C6B3FC",
@@ -197,6 +200,7 @@ export const lightColors: ThemeColors = {
   dangerSoft: DANGER_LIGHT,
   dangerSoftBg: "rgba(220, 38, 38, 0.06)",
   dangerSolid: DANGER_LIGHT,
+  groupedFill: "#F2F2F4",
   dangerSolidPressed: "#991B1B",
   primary: "#7049C6",
   primaryDim: "#6240B0",
