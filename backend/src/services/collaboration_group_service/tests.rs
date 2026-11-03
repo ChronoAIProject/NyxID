@@ -1549,11 +1549,9 @@ async fn collaboration_runtime_handoff_keeps_requester_and_reads_published_reply
         .unwrap()
         .unwrap();
     assert!(prompt.text.contains("Neptune."));
-    assert!(
-        prompt
-            .text
-            .contains("Original request:\nCompare the planets")
-    );
+    let original = prompt.text.split_once("Original request:\n").unwrap().1;
+    assert!(original.starts_with("user "));
+    assert!(original.contains("\"Compare the planets\""));
     runtime::validate_key(&f.state.db, &runtime_key(&f, target_thread).await)
         .await
         .unwrap();
@@ -3352,3 +3350,9 @@ async fn collaboration_card_snapshot_batches_threads_without_per_agent_reads() {
 
 #[path = "participant_access_tests.rs"]
 mod participant_access;
+
+#[path = "people_tests.rs"]
+mod people_tests;
+
+#[path = "upload_tests.rs"]
+mod upload_tests;

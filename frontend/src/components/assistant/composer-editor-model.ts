@@ -7,7 +7,7 @@ export interface ComposerToken {
   id: string;
   handle: string;
   label: string;
-  kind: "agent" | "image" | "file" | "pasted-text";
+  kind: "agent" | "person" | "image" | "file" | "pasted-text";
 }
 export const MAX_COMPOSER_LENGTH = 32_768;
 const leafText = (node: ProseMirrorNode) =>
@@ -104,7 +104,7 @@ export function composerMention(getTokens: () => readonly ComposerToken[]) {
         contenteditable: "false",
         title: `@${String(node.attrs.handle)}`,
       },
-      `${node.attrs.kind === "agent" ? "@" : ""}${String(node.attrs.label)}`,
+      `${(node.attrs.kind === "agent" || node.attrs.kind === "person") ? "@" : ""}${String(node.attrs.label)}`,
     ],
     renderText: ({ node }) => `@${String(node.attrs.handle)}`,
     addKeyboardShortcuts() {
