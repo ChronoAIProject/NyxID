@@ -208,6 +208,7 @@ const contentParent = (name: string) =>
               ? "Plugins"
               : [
                     "AgentDetail",
+                    "AgentProfileEdit",
                     "AgentCreate",
                     "AgentMachines",
                     "AgentMachineEditor",

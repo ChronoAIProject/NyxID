@@ -7,6 +7,7 @@ import type {
   NativeStackNavigationProp,
   NativeStackScreenProps,
 } from "@react-navigation/native-stack";
+import type { AgentProfileField } from "../features/agents/AgentProfileEditScreen";
 import type { UsageCreditsRouteParams } from "../features/billing/UsageCreditsScreen";
 import type { MachineDesktopRouteParams } from "../features/machines/desktopEntry";
 
@@ -64,12 +65,14 @@ export type WorkspaceContentParamList = Omit<
   AssistantContext: AssistantParams | undefined;
   GroupChat: { groupId: string };
   AssistantDetails: { agentId?: string; conversationId?: string };
+  AssistantTitleEdit: { conversationId: string; agentId?: string };
   AssistantHistory: { agentId?: string } | undefined;
   AssistantWorkingContext: { conversationId: string };
   WorkspaceSearch: undefined;
   WorkspaceRecents: { agentId?: string } | undefined;
   AgentCreate: undefined;
   AgentDetail: { agentId: string };
+  AgentProfileEdit: { agentId: string; field: AgentProfileField };
   GroupEditor: { groupId?: string } | undefined;
   ServiceSetup: { connectionId?: string; catalogSlug?: string };
   AgentSkills: { agentId: string };
@@ -137,6 +140,7 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "AssistantContext",
   "GroupChat",
   "AssistantDetails",
+  "AssistantTitleEdit",
   "AssistantHistory",
   "AssistantWorkingContext",
   "Automations",
@@ -149,6 +153,7 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "WorkspaceRecents",
   "AgentCreate",
   "AgentDetail",
+  "AgentProfileEdit",
   "GroupEditor",
   "ServiceSetup",
   "AgentSkills",

@@ -25,8 +25,11 @@ import {
 } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import {
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import {
   ActionButton,
-  Card,
   Label,
   Notice,
 } from "../../components/workspace/WorkspaceUI";
@@ -88,7 +91,6 @@ type Props = {
 
 /** Editing is local to each presentation; dismissing never mutates grants. */
 export function AgentPermissionsField(props: Props) {
-  const { colors } = useTheme();
   const [editing, setEditing] = useState(false);
   const labels = new Map(props.options.map((row) => [row.value, row.label]));
   const count = props.value.services.length;
@@ -96,38 +98,43 @@ export function AgentPermissionsField(props: Props) {
     .slice(0, 2)
     .map((id) => labels.get(id) ?? id)
     .join(", ");
+  const blocked = props.disabled && !props.readOnly;
+  const open = () => {
+    if (blocked) return;
+    Keyboard.dismiss();
+    setEditing(true);
+  };
+  const hint = props.readOnly ? "Shows the granted permissions" : "Edits permissions";
   return (
-    <Card>
-      <Label>{props.title ?? "Service permissions"}</Label>
-      <View style={styles.summary}>
-        <Text style={[styles.count, { color: colors.textPrimary }]}>
-          {count} {count === 1 ? "service" : "services"} selected
-        </Text>
-        <Label muted numberOfLines={2}>
-          {count
-            ? `${preview}${count > 2 ? ` +${count - 2} more` : ""}`
-            : "No service access. Choose only what this agent needs."}
-        </Label>
+    <>
+      <SettingsGroup inset={false} title={props.title ?? "Service permissions"}>
+        <SettingsRow
+          label="Services"
+          value={`${count} ${count === 1 ? "service" : "services"} selected`}
+          detail={
+            count
+              ? `${preview}${count > 2 ? ` +${count - 2} more` : ""}`
+              : "No service access. Choose only what this agent needs."
+          }
+          accessibilityLabel={props.readOnly ? "View permissions" : "Edit permissions"}
+          accessibilityHint={hint}
+          disabled={blocked}
+          onPress={open}
+        />
         {(props.allowAccountRead ?? true) && (
-          <Label muted>
-            Account information · {props.value.account_read ? "Allowed" : "Off"}
-          </Label>
+          <SettingsRow
+            label="Account information"
+            value={props.value.account_read ? "Allowed" : "Off"}
+            accessibilityHint={hint}
+            disabled={blocked}
+            onPress={open}
+          />
         )}
-      </View>
-      <ActionButton
-        label={props.readOnly ? "View permissions" : "Edit permissions"}
-        variant="secondary"
-        disabled={props.disabled && !props.readOnly}
-        onPress={() => {
-          if (props.disabled && !props.readOnly) return;
-          Keyboard.dismiss();
-          setEditing(true);
-        }}
-      />
+      </SettingsGroup>
       {editing && (
         <AgentPermissionsSheet {...props} onClose={() => setEditing(false)} />
       )}
-    </Card>
+    </>
   );
 }
 
@@ -623,8 +630,6 @@ export function AgentPermissionsSheet({
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   flex: { flex: 1, minWidth: 0 },
-  summary: { gap: 4 },
-  count: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 22 },
   header: {
     flexDirection: "row",
     alignItems: "center",

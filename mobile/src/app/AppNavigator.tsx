@@ -2,8 +2,13 @@ import { WorkspacePageSurface } from "./WorkspacePageSurface";
 import { workspaceContentAnimation } from "../components/workspace/workspacePushState";
 import {
   AssistantDetailsScreen,
+  AssistantTitleEditScreen,
   AssistantWorkingContextScreen,
 } from "../features/assistant/AssistantDetailsScreen";
+import {
+  AgentProfileEditScreen,
+  agentProfileFieldTitle,
+} from "../features/agents/AgentProfileEditScreen";
 import {
   WorkspaceRecentsScreen,
   WorkspaceSearchScreen,
@@ -137,6 +142,9 @@ function AgentsRoute({ navigation, route }: WorkspaceScreenProps<"Agents">) {
       onCreateGroup={() => navigation.push("GroupEditor")}
       onOpenChat={openChat}
       onOpenSkills={(agentId) => navigation.push("AgentSkills", { agentId })}
+      onEditProfile={(agentId, field) =>
+        navigation.push("AgentProfileEdit", { agentId, field })
+      }
       onOpenMachines={(agentId) =>
         navigation.push("AgentMachines", { agentId })
       }
@@ -214,6 +222,9 @@ function AgentDetailRoute({
       onClose={() => navigation.goBack()}
       onOpenChat={openChat}
       onOpenSkills={(agentId) => navigation.push("AgentSkills", { agentId })}
+      onEditProfile={(agentId, field) =>
+        navigation.push("AgentProfileEdit", { agentId, field })
+      }
       onOpenMachines={(agentId) =>
         navigation.push("AgentMachines", { agentId })
       }
@@ -350,6 +361,11 @@ function WorkspaceNavigator() {
         options={{ title: "Chat details" }}
       />
       <ContentStack.Screen
+        name="AssistantTitleEdit"
+        component={AssistantTitleEditScreen}
+        options={{ title: "Title" }}
+      />
+      <ContentStack.Screen
         name="AssistantHistory"
         component={WorkspaceRecentsScreen}
         options={{ title: "Chat history" }}
@@ -415,6 +431,13 @@ function WorkspaceNavigator() {
         name="AgentDetail"
         component={AgentDetailRoute}
         options={{ title: "Agent" }}
+      />
+      <ContentStack.Screen
+        name="AgentProfileEdit"
+        component={AgentProfileEditScreen}
+        options={({ route }) => ({
+          title: agentProfileFieldTitle(route.params.field),
+        })}
       />
       <ContentStack.Screen
         name="GroupEditor"
