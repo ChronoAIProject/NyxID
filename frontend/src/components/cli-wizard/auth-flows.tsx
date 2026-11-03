@@ -1113,7 +1113,7 @@ export function OAuthFlow({
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
-          <h3 className="font-medium">
+          <h3 className="text-15 font-semibold text-foreground">
             {hasCopyOptions
               ? "OAuth app credentials"
               : "Paste your OAuth app credentials"}
@@ -1237,7 +1237,7 @@ export function OAuthFlow({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h3 className="font-medium">Complete sign-in on the provider</h3>
+        <h3 className="text-15 font-semibold text-foreground">Complete sign-in on the provider</h3>
         <p className="text-12 text-muted-foreground">
           We opened a new tab where you'll authorize NyxID. When it
           completes, come back — this page will finish automatically.
@@ -1695,7 +1695,7 @@ export function DeviceCodeFlow({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h3 className="font-medium">Authorize via device code</h3>
+        <h3 className="text-15 font-semibold text-foreground">Authorize via device code</h3>
         <p className="text-12 text-muted-foreground">
           Open the verification URL, enter the code, and complete
           sign-in on the provider. This page will finish automatically.

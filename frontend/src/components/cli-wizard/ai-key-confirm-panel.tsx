@@ -38,6 +38,7 @@ import {
   withRewindOnError,
 } from "@/pages/cli-pair/reserve-action";
 import { CatalogGrid } from "./catalog-grid";
+import { WizardHeading } from "./wizard-heading";
 
 /**
  * Catalog response shape we care about. Fields beyond these are
@@ -316,10 +317,9 @@ export function AiKeyConfirm({
           </div>
         </>
       ) : (
-        <div className="flex flex-col gap-1">
-          <h2 className="font-serif text-28 font-normal">{title}</h2>
-          <p className="text-12 text-muted-foreground">{subtitle}</p>
-        </div>
+        <WizardHeading title={title}>
+          {subtitle}
+        </WizardHeading>
       )}
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
@@ -484,8 +484,8 @@ function ManageScopesPanel({
   // provider, openai-codex, has fixed scopes — nothing to manage.)
   if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
+      <div className="flex flex-col gap-4">
+        <WizardHeading title="Manage permissions" />
         <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name} doesn't support managing scopes here — its permissions
           are fixed by the provider.
@@ -519,23 +519,17 @@ function ManageScopesPanel({
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
-        <p className="text-12 text-muted-foreground">
-          Adjust what {key.label} can do, then re-authorize at the provider.
-          Your CLI is waiting for you to finish here.
-        </p>
-      </div>
-
-      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
-        {entry.icon_url ? (
-          <img src={entry.icon_url} alt="" className="h-8 w-8 rounded" loading="lazy" />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          <h3 className="font-medium">{entry.name}</h3>
-          <p className="text-xs text-muted-foreground">{key.slug}</p>
-        </div>
+    <div className="flex flex-col gap-5">
+      <ConnectionIdentityHeading
+        serviceSlug={entry.slug}
+        serviceName={entry.name}
+        iconUrl={entry.icon_url}
+        title="Manage permissions"
+        subtitle={`Adjust what ${key.label} can do, then re-authorize at the provider. Your CLI is waiting for you to finish here.`}
+      />
+      <div className="space-y-1 border-y border-border py-4">
+        <ConnectLinkDetailRow label="Requested by" value="Your NyxID CLI" />
+        <ConnectLinkDetailRow label="Connection" value={key.label} />
       </div>
 
       <UpstreamScopePicker
@@ -549,8 +543,15 @@ function ManageScopesPanel({
         idPrefix="pair-manage-scope"
       />
 
-      <Button variant="primary" onClick={() => setAuthFlowActive(true)}>
-        Re-authorize with these permissions
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={() => setAuthFlowActive(true)}
+      >
+        Re-authorize with these permissions{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
       </Button>
     </div>
   );
@@ -1427,8 +1428,9 @@ function CatalogConfirmForm({
 
         {shape === "no-auth" ? (
           <p className="text-xs text-muted-foreground">
-            This service doesn't need a credential. Click Connect to
-            add it to your services.
+            {usePlatformKey
+              ? "NyxID's key is used, so there's nothing to paste. Click Connect to add it to your services."
+              : "This service doesn't need a credential. Click Connect to add it to your services."}
           </p>
         ) : null}
       </div>

@@ -1223,6 +1223,7 @@ describe("CLI wizard platform-key selection", () => {
     render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-xai" }} />, { wrapper: createWrapper() });
     expect(await screen.findByRole("radio", { name: /Use NyxID's key/ })).toBeChecked();
     expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+    expect(screen.getByText(/NyxID's key is used, so there's nothing to paste/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /Connect/ }));
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/keys", { service_slug: "llm-xai", label: "xAI", use_platform_key: true }));
   });

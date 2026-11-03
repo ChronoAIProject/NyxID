@@ -17,6 +17,7 @@ frontend/src/components/cli-wizard/shell.tsx
 frontend/src/components/cli-wizard/step-label.tsx
 frontend/src/components/cli-wizard/upstream-error-banner.tsx
 frontend/src/components/cli-wizard/wizard-footer.tsx
+frontend/src/components/cli-wizard/wizard-heading.tsx
 frontend/src/components/icons/empty-state/road-barrier.tsx
 frontend/src/components/platform-icon.tsx
 frontend/src/components/service-accounts/service-account-scope-picker.tsx
@@ -117,6 +118,7 @@ frontend/src/components/service-icons/llm-xai.tsx
 frontend/src/components/service-icons/ornn-api.tsx
 frontend/src/components/service-icons/talos.tsx
 frontend/src/components/shared/async-option-select.tsx
+frontend/src/components/shared/choice-card.tsx
 frontend/src/components/shared/connection-arc.tsx
 frontend/src/components/shared/connection-detail-row.tsx
 frontend/src/components/shared/connection-identity-heading.tsx
