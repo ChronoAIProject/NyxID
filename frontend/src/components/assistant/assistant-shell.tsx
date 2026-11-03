@@ -21,6 +21,7 @@ import { OfflineBanner } from "./offline-banner";
 import { ChatGripSlotContext } from "./chat-header-context";
 import { AssistantSearchButton, AssistantSearchDialog } from "./assistant-search";
 import { useAssistantSearchShortcut } from "@/hooks/use-assistant-search-shortcut";
+import { CmaSessionCards } from "./cma-session-card";
 
 export function AssistantShell({
   title,
@@ -186,7 +187,9 @@ export function AssistantShell({
             )}
             {/* The slab is glued to the window's right edge: no gap, and only
                 its sidebar-facing corners are rounded. */}
-            <div className="relative flex min-w-0 flex-1 md:mt-3 md:mb-2">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:flex-row">
+            <CmaSessionCards />
+            <div className="relative flex min-h-0 min-w-0 flex-1 md:mt-3 md:mb-2 lg:order-1">
             <main className="flex min-w-0 flex-1 overflow-hidden bg-background md:rounded-l-2xl md:shadow-sm">
               <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
                 {desktop && shellTitle ? <div className="shrink-0 px-6 pt-3 pb-2">{shellTitle}</div> : null}
@@ -223,6 +226,7 @@ export function AssistantShell({
               className="pointer-events-none absolute inset-y-0 left-0 right-0 lg:right-[var(--assistant-aside-width,0px)]"
               style={{ "--assistant-aside-width": aside ? asideWidth : "0px" } as CSSProperties}
             />
+            </div>
             </div>
           </div>
 
