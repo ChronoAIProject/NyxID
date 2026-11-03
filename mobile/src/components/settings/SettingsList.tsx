@@ -1,7 +1,8 @@
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode, Ref } from "react";
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -14,7 +15,12 @@ import {
   type AccessibilityState,
   type LayoutChangeEvent,
 } from "react-native";
-import { Check, ChevronRight, type LucideIcon } from "lucide-react-native";
+import {
+  Check,
+  ChevronRight,
+  ChevronsUpDown,
+  type LucideIcon,
+} from "lucide-react-native";
 import { DynamicTypeText as Text } from "../DynamicTypeText";
 import { ScreenContainer } from "../ScreenContainer";
 import { useTheme } from "../../theme/ThemeContext";
@@ -346,6 +352,138 @@ export function SettingsCheckRow({
 }
 
 /**
+ * A choice among a few options as one row: the label, the current value and a
+ * pop-up chevron. Tapping opens a small in-app menu over the row (like an iOS
+ * pop-up button) with a checkmark on the current option; tapping outside
+ * closes it. Use this instead of spreading options across several rows.
+ */
+export function SettingsMenuRow<Value extends string>({
+  icon,
+  label,
+  detail,
+  value,
+  options,
+  onChange,
+  disabled = false,
+}: {
+  icon?: LucideIcon;
+  label: string;
+  detail?: string;
+  value: Value;
+  options: readonly { value: Value; label: string; detail?: string }[];
+  onChange: (value: Value) => void;
+  disabled?: boolean;
+}) {
+  const { colors } = useTheme();
+  const { width: windowWidth, height } = useWindowDimensions();
+  const anchor = useRef<View>(null);
+  const [menu, setMenu] = useState<{ top: number; right: number } | null>(
+    null,
+  );
+  const current = options.find((option) => option.value === value);
+  const open = () => {
+    if (disabled) return;
+    if (!anchor.current?.measureInWindow) {
+      setMenu({ top: height / 3, right: 16 });
+      return;
+    }
+    anchor.current.measureInWindow((x, y, rowWidth, rowHeight) => {
+      // Open below the row, right-aligned with it; flip above near the bottom.
+      const below = y + rowHeight + 4;
+      const estimate = options.length * 48 + 8;
+      setMenu({
+        top:
+          below + estimate > height - 24
+            ? Math.max(24, y - estimate - 4)
+            : below,
+        right: Math.max(8, windowWidth - (x + rowWidth) + 8),
+      });
+    });
+  };
+  return (
+    <View ref={anchor} collapsable={false}>
+      <SettingsRow
+        icon={icon}
+        label={label}
+        detail={detail}
+        value={current?.label ?? value}
+        disabled={disabled}
+        accessibilityHint={`Opens a menu to choose ${label.toLowerCase()}`}
+        accessory={<ChevronsUpDown size={16} color={colors.textMuted} />}
+        onPress={open}
+      />
+      <Modal
+        transparent
+        visible={!!menu}
+        animationType="fade"
+        onRequestClose={() => setMenu(null)}
+      >
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Close menu"
+          style={styles.menuBackdrop}
+          onPress={() => setMenu(null)}
+        />
+        {menu ? (
+          <View
+            accessibilityRole="menu"
+            style={[
+              styles.menu,
+              {
+                top: menu.top,
+                right: menu.right,
+                backgroundColor: colors.card,
+                shadowColor: "#000",
+              },
+            ]}
+          >
+            {options.map((option, index) => {
+              const selected = option.value === value;
+              return (
+                <Pressable
+                  key={option.value}
+                  accessibilityRole="menuitem"
+                  accessibilityState={{ selected, checked: selected }}
+                  accessibilityLabel={option.label}
+                  onPress={() => {
+                    setMenu(null);
+                    if (!selected) onChange(option.value);
+                  }}
+                  style={({ pressed }) => [
+                    styles.menuItem,
+                    index > 0 && {
+                      borderTopWidth: StyleSheet.hairlineWidth,
+                      borderTopColor: colors.borderSoft,
+                    },
+                    pressed && { backgroundColor: colors.navActive },
+                  ]}
+                >
+                  <View style={styles.menuCheck}>
+                    {selected ? (
+                      <Check size={16} color={colors.textPrimary} strokeWidth={2.5} />
+                    ) : null}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.label, { color: colors.textPrimary }]}>
+                      {option.label}
+                    </Text>
+                    {option.detail ? (
+                      <Text style={[styles.detail, { color: colors.textMuted }]}>
+                        {option.detail}
+                      </Text>
+                    ) : null}
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+        ) : null}
+      </Modal>
+    </View>
+  );
+}
+
+/**
  * Edit pages put their commit action where iOS does: top right of the bar.
  * It replaces the sheet's close button while the page is shown.
  */
@@ -392,6 +530,27 @@ const styles = StyleSheet.create({
   page: { flex: 1 },
   field: { flex: 1, minHeight: 28, ...typeScale.label },
   headerAction: { minHeight: 44, justifyContent: "center", paddingHorizontal: 4 },
+  menuBackdrop: { ...StyleSheet.absoluteFillObject },
+  menu: {
+    position: "absolute",
+    minWidth: 220,
+    maxWidth: 300,
+    borderRadius: 14,
+    paddingVertical: 4,
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
+  },
+  menuItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  menuCheck: { width: 18, alignItems: "center" },
   headerActionLabel: { ...typeScale.label, fontFamily: fonts.bodySemi, fontWeight: "600" },
   pageContent: {
     paddingTop: spacing.sm,
