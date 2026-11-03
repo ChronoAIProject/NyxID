@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+/** Status stays open-ended so a new server state cannot break the whole group. */
+export const guestAccessRequestSchema = z.object({
+  id: z.string(),
+  status: z.string(),
+  expires_at: z.string(),
+  can_cancel: z.boolean().optional(),
+});
+export type GuestAccessRequest = z.infer<typeof guestAccessRequestSchema>;
+
 export const collaborationGroupSchema = z.object({
   version: z.literal(1),
   creator_user_id: z.string(),
@@ -15,6 +24,8 @@ export const collaborationGroupSchema = z.object({
       revision: z.number().int(),
       can_enable: z.boolean(),
       can_disable: z.boolean(),
+      can_request: z.boolean().optional(),
+      request: guestAccessRequestSchema.nullish(),
       lane: z.enum(["owner", "org_member", "shared", "guest"]).nullable(),
     }),
   ),

@@ -325,6 +325,26 @@ test("retained controls from another chat cannot affect the current call", async
   assert.equal(e.harness.flush().connected, true);
 });
 
+test("after an account change the same chat can still silence and end its open call", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  e.setEpoch(2);
+  const controls = e.harness.value();
+  controls.hold(true);
+  await controls.mute(false);
+  assert.deepEqual(client.holds, []);
+  assert.deepEqual(client.mutes, []);
+  await controls.mute(true);
+  controls.muteSpeaker(true);
+  assert.deepEqual(client.mutes, [true]);
+  assert.deepEqual(client.speaker, [true]);
+  await controls.end();
+  assert.equal(client.ends, 1);
+  assert.equal(e.harness.flush().connected, false);
+  assert.equal(e.counts().refreshCalls, 0);
+});
+
 test("a retained conflict action cannot end a call after switching chats", async (context) => {
   const e = setup(context);
   e.responses.start = async (client) => {

@@ -53,10 +53,17 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
       else await accountApi.revokeBrokerBinding(accountId, id, guard);
       if (!ticket.isCurrent()) return;
       // Reset rather than remove one local row: the server decides the resulting authority.
-      await client.resetQueries({ queryKey: key }, { throwOnError: true });
+      const listed = await client
+        .resetQueries({ queryKey: key }, { throwOnError: true })
+        .then(
+          () => true,
+          () => false,
+        );
       if (ticket.isCurrent())
         setFeedback({
-          message: "Access revoked. Lists refreshed from NyxID.",
+          message: listed
+            ? "Access revoked. Lists refreshed from NyxID."
+            : "Access revoked. Lists could not reload yet; retry to confirm.",
           tone: "success",
         });
     } catch (error) {

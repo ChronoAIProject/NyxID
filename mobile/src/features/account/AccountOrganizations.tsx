@@ -42,18 +42,23 @@ export function AccountOrganizations({
     message: string;
     tone: "info" | "success" | "error";
   } | null>(null);
+  const reloadOrganizations = () =>
+    client.resetQueries({ queryKey: key }, { throwOnError: true });
+  /** Reload after a membership change; reports whether the list reloaded. */
   const refresh = async () => {
     // Membership changes invalidate inherited resource permissions, not personal ownership.
-    await Promise.all([
-      client.resetQueries({ queryKey: key }, { throwOnError: true }),
+    const [listed] = await Promise.allSettled([
+      reloadOrganizations(),
       client.resetQueries({ queryKey: ["workspace", "services"] }),
       client.resetQueries({ queryKey: ["workspace", "agents"] }),
       client.resetQueries({ queryKey: ["workspace", "groups"] }),
     ]);
+    return listed.status === "fulfilled";
   };
   const current = useAccountSecurityRefresh(
     () => {
-      void refresh().catch(() => {});
+      // Viewing the screen changes no membership; keep workspace caches intact.
+      void reloadOrganizations().catch(() => {});
     },
     () => {
       setNonce("");
@@ -84,13 +89,16 @@ export function AccountOrganizations({
       setName("");
       setNonce("");
       setSelectedId(id);
-      await refresh();
+      const listed = await refresh();
       if (ticket.isCurrent())
         setMessage({
-          message:
-            kind === "create"
-              ? "Organization created. Membership reloaded from NyxID."
-              : "Invitation accepted. Membership reloaded from NyxID.",
+          message: `${
+            kind === "create" ? "Organization created." : "Invitation accepted."
+          } ${
+            listed
+              ? "Membership reloaded from NyxID."
+              : "Membership could not reload yet; pull to refresh."
+          }`,
           tone: "success",
         });
     } catch (error) {
@@ -115,12 +123,13 @@ export function AccountOrganizations({
       );
       // Closing the browser is only a return signal. Read live memberships again.
       if (current()) {
-        await refresh();
+        const listed = await refresh();
         if (current())
           setMessage({
-            message:
-              "Returned from the website. Membership refreshed; no browser action is assumed completed.",
-            tone: "info",
+            message: listed
+              ? "Returned from the website. Membership refreshed; no browser action is assumed completed."
+              : "Returned from the website. Membership could not reload; pull to refresh.",
+            tone: listed ? "info" : "error",
           });
       }
     } catch (error) {

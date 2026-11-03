@@ -207,6 +207,30 @@ export function unavailableGroupRecipients(
   );
 }
 
+/** Why a collaboration agent cannot reply for you; matches the web wording. */
+export function groupAgentUnavailableReason(member: {
+  readonly unavailable_reason?: string | null;
+  readonly owner_name?: string | null;
+}): string {
+  const owner = member.owner_name ?? "the agent owner";
+  switch (member.unavailable_reason) {
+    case "destroyed":
+      return "This agent was destroyed. Ask the creator to remove it.";
+    case "removed":
+      return "This agent is no longer available. Ask the creator to remove it.";
+    case "org_agent_not_guestable":
+      return "Organization agents cannot allow guests. Ask an organization administrator for access.";
+    case "owner_approval_pending":
+      return `Waiting for ${owner} to allow participants.`;
+    case "not_shared_with_you":
+      return `Not shared with you. Ask ${owner} to allow participants.`;
+    case "guest_access_off":
+      return `Participant access is off. Ask ${owner} to allow participants.`;
+    default:
+      return `This agent is unavailable to you. Ask ${owner} for access.`;
+  }
+}
+
 /** Newer rows replace overlapping sequence numbers, including server updates. */
 export function mergeGroupMessages(
   older: readonly GroupMessage[],

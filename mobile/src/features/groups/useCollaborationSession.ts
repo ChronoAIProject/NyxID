@@ -43,10 +43,11 @@ export function useCollaborationSession(
     retry: false,
     staleTime: 0,
   });
+  // A background refetch keeps the fresh read visible so open drafts survive;
+  // every write re-reads identity inside run() before dispatch.
   const readable =
     live.active &&
     !identity.isError &&
-    !identity.isFetching &&
     identity.dataUpdatedAt >= activation.current.at;
   const enabled =
     readable &&

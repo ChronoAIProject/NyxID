@@ -38,6 +38,8 @@ const agent = z.object({
 export const groupMemberSchema = agent.extend({
   shared: z.boolean().optional(),
   unavailable: z.boolean().optional(),
+  unavailable_reason: z.string().nullish(),
+  owner_name: z.string().nullish(),
   destroyed: z.boolean().default(false),
   working: z.boolean().default(false),
 });
@@ -207,9 +209,9 @@ export const groupPostRequestSchema = z
       .max(MAX_ASSISTANT_ATTACHMENTS)
       .refine(distinct)
       .optional(),
+    // [] is an explicit people-only message (collaboration groups only).
     recipient_agent_ids: z
       .array(groupReferenceSchema)
-      .min(1)
       .max(MAX_GROUP_MEMBERS)
       .refine(distinct)
       .optional(),
@@ -221,6 +223,13 @@ export const groupPostRequestSchema = z
         code: "custom",
         path: ["text"],
         message: "Enter a message or attach a file.",
+      });
+    if (value.recipient_agent_ids?.length === 0 && value.attachment_ids?.length)
+      context.addIssue({
+        code: "custom",
+        path: ["attachment_ids"],
+        message:
+          "Attachments need an agent recipient. Choose an agent or remove the attachments.",
       });
   });
 

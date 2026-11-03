@@ -48,6 +48,7 @@ function setup({
   const h = hookHarness<E>({
     "./CollaborationGroupControls": {
       CollaborationCards: "CollaborationCards",
+      GroupAgentAccessRequest: "GroupAgentAccessRequest",
     },
     "../../lib/accessibility/useReducedMotion": {
       useReducedMotion: () => false,
@@ -445,4 +446,73 @@ test("a definite refusal restores mention bindings after optimistic clear and a 
   await reopened.h.settle();
   assert.equal(reopened.posted.length, 0);
   reopened.h.unmount();
+});
+
+const collaboration = {
+  version: 1,
+  creator_user_id: "creator",
+  membership_revision: 1,
+  history_disclosure: "Full history",
+  can_manage: false,
+  your_request_ids: [],
+  transfer_to_user_id: null,
+  guest_access: [],
+  proposals: [],
+  invites: [],
+};
+
+test("a collaboration participant with no usable agent can still message people", async () => {
+  const { h, chat, posted, input, submit } = setup();
+  chat.data.group.collaboration = collaboration;
+  chat.data.group.default_recipient_ids = [];
+  for (const member of chat.data.group.members) {
+    member.unavailable = true;
+    member.unavailable_reason = "not_shared_with_you";
+    member.owner_name = "Ada";
+  }
+  h.render();
+  const text = () =>
+    nodes(h.value())
+      .filter((n) => n.type === "Label")
+      .map((n) => [n.props.children].flat().join(""))
+      .join(" | ");
+  assert.match(text(), /no agent reply/);
+  assert.doesNotMatch(text(), /read-only/);
+  assert.equal(input().props.editable, true);
+  input().props.onChangeText("hello everyone");
+  h.flush();
+  assert.equal(submit().props.disabled, false);
+  submit().props.onPress();
+  await h.settle();
+  assert.equal(posted.length, 1);
+  assert.deepEqual(Array.from(posted[0].recipient_agent_ids), []);
+  h.unmount();
+});
+
+test("removing every recipient in a collaboration group sends a people-only message", async () => {
+  const { h, chat, posted, input, submit } = setup();
+  chat.data.group.collaboration = collaboration;
+  h.render();
+  nodes(h.value())
+    .find((n) => n.props.accessibilityLabel === "Remove recipient NyxBot")!
+    .props.onPress();
+  h.flush();
+  input().props.onChangeText("just people");
+  h.flush();
+  submit().props.onPress();
+  await h.settle();
+  assert.deepEqual(Array.from(posted[0].recipient_agent_ids), []);
+  h.unmount();
+});
+
+test("a legacy crew still requires an agent recipient", () => {
+  const { h, input, submit } = setup();
+  nodes(h.value())
+    .find((n) => n.props.accessibilityLabel === "Remove recipient NyxBot")!
+    .props.onPress();
+  h.flush();
+  input().props.onChangeText("hello");
+  h.flush();
+  assert.equal(submit().props.disabled, true);
+  h.unmount();
 });

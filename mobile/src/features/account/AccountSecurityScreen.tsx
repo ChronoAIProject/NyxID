@@ -172,10 +172,10 @@ export function AccountSecurityScreen() {
       // Mask one-time output until foreground; discard it only on leaving
       // this screen or explicit acknowledgment. Clear reusable inputs now.
       if (state === "background") clearSensitiveInputs();
-      else if (state === "inactive") {
-        privateEpoch.current += 1;
-        setRevealCodes(false);
-      } else if (isFocused.current) {
+      // Inactive is transient (Face ID, password AutoFill, Control Center):
+      // mask codes but keep inputs and in-flight actions.
+      else if (state === "inactive") setRevealCodes(false);
+      else if (isFocused.current) {
         void profile.refetch();
         void sessions.refetch();
       }

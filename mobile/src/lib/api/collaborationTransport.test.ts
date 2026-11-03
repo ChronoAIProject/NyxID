@@ -177,6 +177,7 @@ test("invitations preview before disclosure-bearing accept without following pas
     inviteToken(`https://nyxid.ai/assistant#group-invite=${TOKEN}`),
     TOKEN,
   );
+  assert.equal(inviteToken(` ${TOKEN.toUpperCase()} `), TOKEN.toLowerCase());
   assert.equal(
     invitationLink("https://nyxid.ai/account", TOKEN),
     `https://nyxid.ai/assistant#group-invite=${TOKEN}`,

@@ -190,7 +190,7 @@ test("social account can disable MFA with a recovery code and no password field"
   env.harness.unmount();
 });
 
-test("MFA disable confirmation cannot revive after an inactive round trip", async () => {
+test("a transient inactive state (Face ID, Control Center) keeps the MFA disable confirmation", async () => {
   const env = setup(false);
   env
     .find("Authenticator or recovery code")
@@ -198,6 +198,22 @@ test("MFA disable confirmation cannot revive after an inactive round trip", asyn
   env.harness.flush();
   env.find("Turn off two-factor authentication").props.onPress();
   env.state("inactive");
+  env.state("active");
+  env.confirm();
+  await env.harness.settle();
+  assert.equal(env.calls.length, 1);
+  env.harness.unmount();
+});
+
+test("MFA disable confirmation cannot revive after a background round trip", async () => {
+  const env = setup(false);
+  env
+    .find("Authenticator or recovery code")
+    .props.onChangeText("recovery-code");
+  env.harness.flush();
+  env.find("Turn off two-factor authentication").props.onPress();
+  env.state("inactive");
+  env.state("background");
   env.state("active");
   env.confirm();
   await env.harness.settle();

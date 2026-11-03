@@ -70,7 +70,10 @@ import {
 } from "../assistant/AssistantBanner";
 import { sanitizeAssistantMessageContent } from "../assistant/assistantChatContent";
 import { GroupPendingCard } from "./GroupPendingCard";
-import { CollaborationCards } from "./CollaborationGroupControls";
+import {
+  CollaborationCards,
+  GroupAgentAccessRequest,
+} from "./CollaborationGroupControls";
 import { GroupMachineReceipts } from "./GroupMachineReceipts";
 import { AssistantMessageFooter } from "../assistant/AssistantMessageFooter";
 import { useAssistantUploads } from "../assistant/useAssistantUploads";
@@ -78,6 +81,7 @@ import { useTranscriptScrollFollow } from "../assistant/useTranscriptScrollFollo
 import {
   NO_RECIPIENT_EDITS,
   ambiguousGroupMentions,
+  groupAgentUnavailableReason,
   groupMentionBindings,
   unavailableGroupRecipients,
   groupCanDecide,
@@ -222,6 +226,14 @@ function GroupChat({
         liveMembers.find((member) => member.kind === "nyxbot")?.id ??
         liveMembers[0]?.id,
     ].filter((id): id is string => !!id);
+  // Collaboration participants may always talk to the people in the group;
+  // an empty recipient list is an explicit people-only message.
+  const collaboration = !!group?.collaboration;
+  const unavailableMembers = collaboration
+    ? (group?.members.filter(
+        (member) => member.destroyed || member.unavailable,
+      ) ?? [])
+    : [];
   const canParticipate =
     !!group &&
     (group.owner?.type !== "org" ||
@@ -388,8 +400,9 @@ function GroupChat({
     !unavailableRecipients.length &&
     !uploads.blocked &&
     !uploads.session.sending &&
-    !!recipients.ids.length &&
-    liveMembers.length > 0 &&
+    (collaboration
+      ? recipients.ids.length > 0 || !uploads.files.length
+      : !!recipients.ids.length && liveMembers.length > 0) &&
     (!!draft.trim() || uploads.files.length > 0) &&
     [...resolvedDraft].length <= 32768;
 
@@ -810,17 +823,30 @@ function GroupChat({
                 another recipient before sending.
               </Label>
             )}
-            {!recipients.ids.length && (
-              <Label style={[styles.small, { color: colors.danger }]}>
-                Choose at least one recipient.
-              </Label>
-            )}
-            {!liveMembers.length && (
-              <Label muted>
-                All agents have been removed or destroyed. This crew is
-                read-only.
-              </Label>
-            )}
+            {!recipients.ids.length &&
+              (collaboration ? (
+                <Label muted style={styles.small}>
+                  {uploads.files.length
+                    ? "Attachments need an agent recipient. Add an agent or remove the attachments."
+                    : "Everyone in the group · no agent reply"}
+                </Label>
+              ) : (
+                <Label style={[styles.small, { color: colors.danger }]}>
+                  Choose at least one recipient.
+                </Label>
+              ))}
+            {!liveMembers.length &&
+              (collaboration ? (
+                <Label muted>
+                  No agent here is available to you. You can still message the
+                  people in this group.
+                </Label>
+              ) : (
+                <Label muted>
+                  All agents have been removed or destroyed. This crew is
+                  read-only.
+                </Label>
+              ))}
             {!canParticipate && (
               <Label muted>
                 This crew is read-only for your current organization role.
@@ -889,9 +915,10 @@ function GroupChat({
                     <X size={12} color={colors.danger} />
                   </Pressable>
                 ))}
-                {liveMembers.some(
+                {(liveMembers.some(
                   (member) => !recipients.ids.includes(member.id),
-                ) && (
+                ) ||
+                  unavailableMembers.length > 0) && (
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel="Add recipient"
@@ -923,7 +950,7 @@ function GroupChat({
                   if (currentComposer.current === composerGeneration)
                     edit(value);
                 }}
-                editable={!blocked && !!liveMembers.length}
+                editable={!blocked && (collaboration || !!liveMembers.length)}
                 style={[styles.input, { color: colors.textPrimary }]}
                 renderActions={(mentionAction) => (
                   <ChatComposerRow>
@@ -1027,6 +1054,23 @@ function GroupChat({
                     </Label>
                     <Check size={18} color={colors.primaryOnTint} />
                   </Pressable>
+                ))}
+              {group &&
+                pickingRecipients !== "header" &&
+                unavailableMembers.map((member) => (
+                  <View
+                    key={`unavailable:${member.id}`}
+                    style={styles.unavailableMember}
+                  >
+                    <Label numberOfLines={1}>
+                      {title(member.id, member.display_name ?? member.name)}
+                      {member.owner_name ? ` · ${member.owner_name}` : ""}
+                    </Label>
+                    <Label muted style={styles.small}>
+                      {groupAgentUnavailableReason(member)}
+                    </Label>
+                    <GroupAgentAccessRequest group={group} member={member} />
+                  </View>
                 ))}
             </ScrollView>
           </View>
@@ -1284,4 +1328,5 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     minHeight: 52,
   },
+  unavailableMember: { gap: 4, paddingVertical: 10 },
 });

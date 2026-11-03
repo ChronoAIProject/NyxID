@@ -52,14 +52,20 @@ export function useNativeVoice(
 
   // Native gestures and async work can retain a handler from an earlier chat.
   // Check its scope before touching the shared client ref or making a request.
-  function sameScope() {
+  function sameChat() {
     return (
       mounted.current &&
       scope.current.thread === thread &&
-      scope.current.environment === environment &&
-      environment.epoch === getAuthEpoch()
+      scope.current.environment === environment
     );
   }
+  function sameScope() {
+    return sameChat() && environment.epoch === getAuthEpoch();
+  }
+  // Silencing local audio is always safe for this chat, even after the account
+  // changed underneath it; only actions that open audio or reach the server
+  // need the full scope.
+  const quieting = (open: boolean) => (open ? sameScope() : sameChat());
 
   function reportError(message?: string, nextRecovery?: VoiceStartRecovery) {
     setError(message);
@@ -257,7 +263,7 @@ export function useNativeVoice(
   }
 
   async function end() {
-    if (!sameScope()) return;
+    if (!sameChat()) return;
     stopLocal();
     refresh();
   }
@@ -343,16 +349,16 @@ export function useNativeVoice(
     end,
     endConflict,
     hold(pressed: boolean) {
-      if (!sameScope()) return;
+      if (!quieting(pressed)) return;
       setHolding(current.current?.hold(pressed) ?? false);
     },
     mute(muted: boolean) {
-      if (!sameScope()) return;
+      if (!quieting(!muted)) return;
       setHolding(false);
       return current.current?.mute(muted);
     },
     muteSpeaker(muted: boolean) {
-      if (!sameScope()) return;
+      if (!quieting(!muted)) return;
       current.current?.muteSpeaker(muted);
       setSpeakerMuted(muted);
     },

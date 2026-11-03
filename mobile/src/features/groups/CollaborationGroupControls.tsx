@@ -20,7 +20,7 @@ import {
 } from "../../lib/api/collaborationTransport";
 import { NYXID_FRONTEND_URL } from "../../lib/env";
 import { useCollaborationSession } from "./useCollaborationSession";
-import type { Group } from "./groupContracts";
+import type { Group, GroupMember } from "./groupContracts";
 import type {
   CollaborationChange,
   CollaborationDecision,
@@ -136,7 +136,9 @@ export function CollaborationGroupControls({
       {
         text: "Confirm",
         style:
-          change.action === "delete" || change.action === "remove"
+          change.action === "delete" ||
+          change.action === "remove" ||
+          change.action === "remove_agent"
             ? "destructive"
             : "default",
         onPress: () => apply(change),
@@ -402,7 +404,10 @@ export function CollaborationGroupControls({
                         label={`Remove agent ${agent.name}`}
                         disabled={disabled || current.members.length <= 1}
                         onPress={() =>
-                          apply({ action: "remove_agent", agent_id: agent.id })
+                          confirm(
+                            `${agent.name} leaves this group and its queued work here is cancelled. The agent itself is not deleted.`,
+                            { action: "remove_agent", agent_id: agent.id },
+                          )
                         }
                       />
                     </>
@@ -543,7 +548,6 @@ export function CollaborationEntry({
   const available =
     session.capability.data === true &&
     !session.capability.isError &&
-    !session.capability.isFetching &&
     session.capability.dataUpdatedAt >= session.activationAt;
   const disabled = !session.active || session.busy;
   return (
@@ -797,14 +801,94 @@ export function CollaborationCards({
           label="Stop my group request"
           disabled={session.busy || !session.active}
           onPress={() =>
-            void session.run(() =>
-              collaborationApi.cancel(group.id, id, {
-                authorityGuard: session.guard,
-              }),
+            Alert.alert(
+              "Stop your group request?",
+              "Queued and running work for this request is cancelled.",
+              [
+                { text: "Keep running", style: "cancel" },
+                {
+                  text: "Stop request",
+                  style: "destructive",
+                  onPress: () =>
+                    void session.run(() =>
+                      collaborationApi.cancel(group.id, id, {
+                        authorityGuard: session.guard,
+                      }),
+                    ),
+                },
+              ],
             )
           }
         />
       ))}
     </>
+  );
+}
+
+/** A participant or creator asks the agent's owner to allow participants. */
+export function GroupAgentAccessRequest({
+  group,
+  member,
+}: {
+  group: Group;
+  member: GroupMember;
+}) {
+  const session = useCollaborationSession();
+  const policy = group.collaboration?.guest_access.find(
+    (row) => row.agent_id === member.id,
+  );
+  if (!policy || !session.readable) return null;
+  const request = policy.request;
+  const disabled = session.busy || !session.active;
+  const owner = member.owner_name ?? "owner";
+  return (
+    <View style={{ gap: 6 }}>
+      {session.error && <Notice tone="error" message={session.error} />}
+      {request?.status === "pending" ? (
+        <>
+          <Label muted>
+            Owner approval pending · expires{" "}
+            {new Date(request.expires_at).toLocaleDateString()}
+          </Label>
+          {request.can_cancel && (
+            <ActionButton
+              compact
+              variant="secondary"
+              label={`Cancel access request for ${member.name}`}
+              disabled={disabled}
+              onPress={() =>
+                void session.run(() =>
+                  collaborationApi.cancelGuestRequest(
+                    group.id,
+                    member.id,
+                    request.id,
+                    { authorityGuard: session.guard },
+                  ),
+                )
+              }
+            />
+          )}
+        </>
+      ) : policy.can_request ? (
+        <>
+          {(request?.status === "expired" ||
+            request?.status === "cancelled") && (
+            <Label muted>Previous request {request.status}.</Label>
+          )}
+          <ActionButton
+            compact
+            label={`Ask ${owner} to allow participants`}
+            disabled={disabled}
+            onPress={() =>
+              void session.run(() =>
+                collaborationApi.askOwner(group.id, member.id, {
+                  authorityGuard: session.guard,
+                }),
+              )
+            }
+          />
+        </>
+      ) : null}
+    </View>
   );
 }

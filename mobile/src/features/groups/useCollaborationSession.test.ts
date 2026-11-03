@@ -6,7 +6,8 @@ import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 function setup() {
   let epoch = 1,
     active = true,
-    identityError = false;
+    identityError = false,
+    identityFetching = false;
   let features = ["assistant:shared-agents"];
   let capability = true;
   let pending:
@@ -27,7 +28,7 @@ function setup() {
                 enabled_features: ["assistant:shared-agents"],
               },
               isError: identityError,
-              isFetching: false,
+              isFetching: identityFetching,
               dataUpdatedAt: Number.MAX_SAFE_INTEGER,
             }
           : {
@@ -86,6 +87,10 @@ function setup() {
     setCapability: (value: boolean) => {
       capability = value;
     },
+    refetchIdentity: () => {
+      identityFetching = true;
+      harness.render();
+    },
     failIdentity: () => {
       identityError = true;
       harness.render();
@@ -126,6 +131,14 @@ test("failed identity refresh never treats retained feature data as current auth
   env.failIdentity();
   assert.equal(env.session.enabled, false);
   assert.equal(env.session.readable, false);
+});
+
+test("a background identity refetch keeps fresh authority readable so open drafts stay mounted", () => {
+  const env = setup();
+  assert.equal(env.session.readable, true);
+  env.refetchIdentity();
+  assert.equal(env.session.readable, true);
+  assert.equal(env.session.enabled, true);
 });
 
 test("revocation can explicitly drop admission gates while omitted feature keeps the default", async () => {

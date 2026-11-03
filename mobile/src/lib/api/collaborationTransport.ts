@@ -7,6 +7,7 @@ import {
 import {
   groupInviteSchema,
   groupInvitePreviewSchema,
+  guestAccessRequestSchema,
   type CollaborationChange,
 } from "../../features/groups/collaborationContracts";
 import {
@@ -116,6 +117,26 @@ export function createCollaborationApi(request: Request) {
             ? { approved: decision === "allow" }
             : { kind, decision },
       });
+    },
+    /** Ask the agent's owner to let group participants use it. */
+    async askOwner(group: string, agent: string, options?: MutationOptions) {
+      return guestAccessRequestSchema.parse(
+        await request(
+          `${groupPath(group)}/agents/${encodeURIComponent(agent)}/guest-requests`,
+          { ...options, method: "POST" },
+        ),
+      );
+    },
+    async cancelGuestRequest(
+      group: string,
+      agent: string,
+      id: string,
+      options?: MutationOptions,
+    ) {
+      await request(
+        `${groupPath(group)}/agents/${encodeURIComponent(agent)}/guest-requests/${encodeURIComponent(id)}`,
+        { ...options, method: "DELETE" },
+      );
     },
     async cancel(group: string, id: string, options?: MutationOptions) {
       await request(
@@ -236,7 +257,8 @@ export function inviteToken(input: string) {
     throw new Error(
       "Paste the full invitation link or a 64-character invitation code.",
     );
-  return parsed.data;
+  // NyxID issues lowercase codes and hashes them byte-for-byte.
+  return parsed.data.toLowerCase();
 }
 
 /** The frontend origin is build-configured; pasted invitations never select it. */

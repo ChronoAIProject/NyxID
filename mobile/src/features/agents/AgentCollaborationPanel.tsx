@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, Switch, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
@@ -65,7 +65,6 @@ export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
   const currentPolicy =
     session.enabled &&
     !sharing.isError &&
-    !sharing.isFetching &&
     sharing.dataUpdatedAt >= session.activationAt
       ? sharing.data
       : undefined;
@@ -587,7 +586,6 @@ export function SharedConsentCards({
         />
       )}
       {!query.isError &&
-        !query.isFetching &&
         query.dataUpdatedAt >= session.activationAt &&
         query.data?.consents.map((row) => (
           <View key={row.id} style={{ gap: 8 }}>
@@ -640,7 +638,6 @@ export function SharedConsentCards({
           </View>
         ))}
       {!query.isError &&
-        !query.isFetching &&
         query.dataUpdatedAt >= session.activationAt &&
         query.data?.consents.length === 0 && (
           <Label muted>No pending or active consent.</Label>
@@ -829,7 +826,6 @@ export function OperationList({
         />
       )}
       {!query.isError &&
-        !query.isFetching &&
         query.dataUpdatedAt >= session.activationAt &&
         query.data?.map((service) => (
           <OperationDraft
@@ -892,6 +888,13 @@ export function OperationDraft({
   });
   const [value, setValue] = useState(() => initial(service));
   const [search, setSearch] = useState("");
+  // Our own save advances the revision; adopt it instead of reporting a conflict.
+  const savedHere = useRef(false);
+  useEffect(() => {
+    if (!savedHere.current) return;
+    savedHere.current = false;
+    setValue(initial(service));
+  }, [service.revision]);
   const stale = value.expected_revision !== service.revision;
   const disabled = session.busy || !session.active;
   const payload = operationPayload(service, value);
@@ -1132,6 +1135,7 @@ export function OperationDraft({
                 payload,
                 { authorityGuard: session.guard },
               );
+              savedHere.current = true;
             },
             undefined,
             {
@@ -1166,9 +1170,7 @@ export function VisitorReadiness({
         : false,
   });
   const readiness =
-    !query.isError &&
-    !query.isFetching &&
-    query.dataUpdatedAt >= session.activationAt
+    !query.isError && query.dataUpdatedAt >= session.activationAt
       ? query.data
       : undefined;
   return (

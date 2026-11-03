@@ -55,6 +55,12 @@ test("account settings refresh only on focused foreground returns and reject cal
   assert.equal(inactiveTicket.isCurrent(), false);
   const firstActivation = harness.value().capture();
   assert.equal(firstActivation.isCurrent(), true);
+  // Face ID, password AutoFill and Control Center only make iOS inactive.
+  appState("inactive");
+  appState("active");
+  assert.equal(firstActivation.isCurrent(), true);
+  assert.equal(cleared, 0);
+  assert.equal(refreshed, 1);
   appState("background");
   assert.equal(harness.value()(), false);
   assert.equal(cleared, 1);

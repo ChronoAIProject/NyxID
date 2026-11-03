@@ -55,12 +55,15 @@ export function useAccountSecurityRefresh(
     const subscription = AppState.addEventListener("change", (state) => {
       // Focus cleanup below prevents background screens from becoming active.
       if (!focused.current) return;
+      // Inactive is transient on iOS (Face ID, password AutoFill, Control
+      // Center); only a real background ends this activation.
+      if (state === "inactive") return;
+      const resumed = !active.current;
       active.current = state === "active";
-      if (current()) latest.current.refresh();
-      else {
+      if (!current()) {
         activation.current += 1;
         latest.current.clear?.();
-      }
+      } else if (resumed) latest.current.refresh();
     });
     return () => {
       activation.current += 1;

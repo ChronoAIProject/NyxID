@@ -26,6 +26,8 @@ function setup(
   let stepUpRetry: (() => Promise<void>) | null = null;
   let stepUpError = false;
   let resets = 0;
+  let failListReload = false;
+  let focusRefresh: (() => void) | undefined;
   let confirm: (() => void) | undefined;
   const refetch = async () => {
     calls.push(["refetch"]);
@@ -77,8 +79,10 @@ function setup(
         invalidateQueries: async (filter: unknown) => {
           calls.push(["invalidate", filter]);
         },
-        resetQueries: async (filter: unknown) => {
+        resetQueries: async (filter: { queryKey: string[] }) => {
           calls.push(["reset", filter]);
+          if (failListReload && filter.queryKey[0] === "account")
+            throw new Error("offline");
         },
       }),
     },
@@ -108,7 +112,8 @@ function setup(
       }),
     },
     "./useAccountSecurityRefresh": {
-      useAccountSecurityRefresh: () =>
+      useAccountSecurityRefresh: (refresh: () => void) =>
+        (focusRefresh = refresh) &&
         Object.assign(() => allowed, {
           capture: () => {
             const expected = activation;
@@ -165,6 +170,13 @@ function setup(
       await stepUpRetry();
     },
     resets: () => resets,
+    refreshOnFocus: () => {
+      assert.ok(focusRefresh);
+      return focusRefresh;
+    },
+    failListReload: () => {
+      failListReload = true;
+    },
     values,
   };
 }
@@ -318,6 +330,43 @@ test("organizations expose native create/join and owner-specific browser actions
       (call) => call[0] === "joinOrganization" && call[2] === "nonce",
     ),
   );
+  env.harness.unmount();
+});
+
+test("a created organization is reported as created even when the list cannot reload", async () => {
+  const env = setup(
+    "AccountOrganizations",
+    { accountId: "owner", email: "person@example.test" },
+    { owner: [] },
+  );
+  env.failListReload();
+  env.find("New organization name").props.onChangeText("New Team");
+  env.harness.flush();
+  env.find("Create organization").props.onPress();
+  await env.harness.settle();
+  const notice = nodes(env.harness.value()).find(
+    (node) => node.type === "Notice",
+  );
+  assert.equal(notice?.props.tone, "success");
+  assert.match(
+    notice?.props.message,
+    /Organization created\..*pull to refresh/,
+  );
+  env.harness.unmount();
+});
+
+test("viewing organizations reloads only the organization list", () => {
+  const env = setup(
+    "AccountOrganizations",
+    { accountId: "owner", email: "person@example.test" },
+    { owner: [] },
+  );
+  const refreshOnFocus = env.refreshOnFocus();
+  refreshOnFocus();
+  const resets = env.calls
+    .filter((call) => call[0] === "reset")
+    .map((call) => (call[1] as { queryKey: string[] }).queryKey[0]);
+  assert.deepEqual(resets, ["account"]);
   env.harness.unmount();
 });
 

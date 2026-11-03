@@ -175,22 +175,24 @@ function setup(queryOverride: Record<string, unknown> = {}) {
   };
 }
 
-test("operation list hides retained data on failed query, background freshness gap or refresh", () => {
+test("operation list keeps drafts through refresh but hides failed or pre-activation data", () => {
   const env = setup();
   env.harness.mount(() =>
     env.module.OperationList({ session: env.session, agent, guests: false }),
   );
-  assert.equal(
+  const drafts = () =>
     elements(env.harness.flush()).filter(
       (row) =>
         typeof row.type === "function" && row.type.name === "OperationDraft",
-    ).length,
-    1,
-  );
+    ).length;
+  assert.equal(drafts(), 1);
+  // A background refetch (for example after saving another service) must not
+  // unmount open drafts and discard their unsaved edits.
+  env.setQuery({ dataUpdatedAt: 100, isFetching: true });
+  assert.equal(drafts(), 1);
   for (const state of [
-    { isError: true },
+    { isFetching: false, isError: true },
     { isError: false, dataUpdatedAt: 10 },
-    { dataUpdatedAt: 100, isFetching: true },
   ]) {
     env.setQuery(state);
     assert.equal(
@@ -441,7 +443,7 @@ test("flag-off consent inventory exposes only revocation, including pending card
   ]);
 });
 
-test("positive consent decisions retain feature admission and hide stale inventory", async () => {
+test("positive consent decisions retain feature admission and hide failed or stale inventory", async () => {
   const env = setup({
     data: { consents: [{ ...consent, decision: "pending" }] },
   });
@@ -460,8 +462,10 @@ test("positive consent decisions retain feature admission and hide stale invento
   );
   for (const button of buttons()) await button.props.onPress();
   assert.ok(env.admissions.every((authority) => authority === undefined));
+  // The five-second poll must not make the decision buttons blink out.
+  env.setQuery({ isFetching: true });
+  assert.equal(buttons().length, 3);
   for (const state of [
-    { isFetching: true },
     { isFetching: false, isError: true },
     { isError: false, dataUpdatedAt: 10 },
   ]) {

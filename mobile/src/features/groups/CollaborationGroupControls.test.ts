@@ -34,7 +34,13 @@ const group = groupSchema.parse({
   },
 });
 
-function setup(component: "CollaborationEntry" | "CollaborationGroupControls") {
+function setup(
+  component:
+    | "CollaborationEntry"
+    | "CollaborationGroupControls"
+    | "GroupAgentAccessRequest",
+  target: typeof group = group,
+) {
   const session: any = {
     key: ["collaboration", 1],
     epoch: 1,
@@ -71,6 +77,11 @@ function setup(component: "CollaborationEntry" | "CollaborationGroupControls") {
       harness.render();
     }
   };
+  const alerts: Array<{
+    title: string;
+    buttons: Array<{ text: string; onPress?: () => void }>;
+  }> = [];
+  const changes: unknown[] = [];
   session.clearError = () => {
     session.error = undefined;
   };
@@ -79,7 +90,16 @@ function setup(component: "CollaborationEntry" | "CollaborationGroupControls") {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
     },
-    "react-native": { Alert: {}, View: "View" },
+    "react-native": {
+      Alert: {
+        alert: (
+          title: string,
+          _message: string,
+          buttons: Array<{ text: string; onPress?: () => void }>,
+        ) => alerts.push({ title, buttons }),
+      },
+      View: "View",
+    },
     "expo-clipboard": { setStringAsync: async () => {} },
     "@tanstack/react-query": {
       useQuery: (options: any) => ({
@@ -109,10 +129,24 @@ function setup(component: "CollaborationEntry" | "CollaborationGroupControls") {
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/collaborationApi": {
       collaborationApi: {
-        change: async () => ({
-          group,
-          invite: { token: TOKEN, expires_at: "2099-11-03T01:00:00Z" },
-        }),
+        change: async (_id: string, _revision: number, change: unknown) => {
+          changes.push(change);
+          return {
+            group,
+            invite: { token: TOKEN, expires_at: "2099-11-03T01:00:00Z" },
+          };
+        },
+        askOwner: async (_group: string, agent: string) => {
+          changes.push({ ask: agent });
+          return { id: "req", status: "pending", expires_at: "2099-01-01" };
+        },
+        cancelGuestRequest: async (
+          _group: string,
+          agent: string,
+          request: string,
+        ) => {
+          changes.push({ cancel: agent, request });
+        },
         preview: async () => ({
           group_id: group.id,
           group_name: group.name,
@@ -130,7 +164,8 @@ function setup(component: "CollaborationEntry" | "CollaborationGroupControls") {
   ) as any;
   harness.mount(() =>
     module[component]({
-      group,
+      group: target,
+      member: target.members[0],
       onOpenGroup: () => {},
       onSaved: () => {},
       onRemoved: () => {},
@@ -147,6 +182,8 @@ function setup(component: "CollaborationEntry" | "CollaborationGroupControls") {
     harness,
     session,
     find,
+    alerts,
+    changes,
     setActive: (active: boolean) => {
       session.active = active;
       session.readable = active;
@@ -233,4 +270,67 @@ test("invalid invitation feedback is dismissed when cancelled, corrected or ente
   assert.equal(notices().length, 1);
   env.find("Field", "Invitation link or token").props.onChangeText(TOKEN);
   assert.equal(notices().length, 0);
+});
+
+test("removing an agent from a group waits for an explicit confirmation", async () => {
+  const env = setup("CollaborationGroupControls");
+  env.find("ActionButton", "Remove agent research").props.onPress();
+  await env.harness.settle();
+  assert.equal(env.changes.length, 0);
+  assert.equal(env.alerts.length, 1);
+  env.alerts[0]!.buttons.find((b) => b.text === "Confirm")!.onPress!();
+  await env.harness.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(env.changes)), [
+    { action: "remove_agent", agent_id: "agent-1" },
+  ]);
+});
+
+test("participants can ask an agent's owner for access and cancel a pending request", async () => {
+  const policy = {
+    agent_id: "agent-1",
+    enabled: false,
+    revision: 1,
+    can_enable: false,
+    can_disable: false,
+    can_request: true,
+    lane: null,
+  };
+  const asking = groupSchema.parse({
+    ...group,
+    members: [{ ...group.members[0], owner_name: "Ada", unavailable: true }],
+    collaboration: { ...group.collaboration, guest_access: [policy] },
+  });
+  const ask = setup("GroupAgentAccessRequest", asking);
+  ask.find("ActionButton", "Ask Ada to allow participants").props.onPress();
+  await ask.harness.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(ask.changes)), [
+    { ask: "agent-1" },
+  ]);
+
+  const pending = groupSchema.parse({
+    ...asking,
+    collaboration: {
+      ...asking.collaboration,
+      guest_access: [
+        {
+          ...policy,
+          can_request: false,
+          request: {
+            id: "req",
+            status: "pending",
+            expires_at: "2099-01-01T00:00:00Z",
+            can_cancel: true,
+          },
+        },
+      ],
+    },
+  });
+  const cancel = setup("GroupAgentAccessRequest", pending);
+  cancel
+    .find("ActionButton", "Cancel access request for research")
+    .props.onPress();
+  await cancel.harness.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(cancel.changes)), [
+    { cancel: "agent-1", request: "req" },
+  ]);
 });
