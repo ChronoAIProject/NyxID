@@ -41,7 +41,10 @@ import { agentsApi } from "../../lib/api/agentsApi";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useTheme } from "../../theme/ThemeContext";
-import { chatBubbleColors, userBubbleCorners } from "../../theme/chatAppearance";
+import {
+  chatBubbleColors,
+  userBubbleCorners,
+} from "../../theme/chatAppearance";
 import { fonts, radius } from "../../theme/designTokens";
 import { AssistantPendingUploads } from "../assistant/AssistantPendingUploads";
 import {
@@ -67,12 +70,16 @@ import {
 } from "../assistant/AssistantBanner";
 import { sanitizeAssistantMessageContent } from "../assistant/assistantChatContent";
 import { GroupPendingCard } from "./GroupPendingCard";
+import { CollaborationCards } from "./CollaborationGroupControls";
 import { GroupMachineReceipts } from "./GroupMachineReceipts";
 import { AssistantMessageFooter } from "../assistant/AssistantMessageFooter";
 import { useAssistantUploads } from "../assistant/useAssistantUploads";
 import { useTranscriptScrollFollow } from "../assistant/useTranscriptScrollFollow";
 import {
   NO_RECIPIENT_EDITS,
+  ambiguousGroupMentions,
+  groupMentionBindings,
+  unavailableGroupRecipients,
   groupCanDecide,
   groupPendingOwned,
   groupPendingReview,
@@ -82,6 +89,7 @@ import {
   withDraft,
   withRemoved,
   type RecipientSelection,
+  type RecipientMember,
 } from "./groupState";
 import type { Group, GroupMessage, GroupPendingAction } from "./groupContracts";
 import { submitGroupDraft } from "./groupComposerDraft";
@@ -138,6 +146,53 @@ function GroupChat({
   >(false);
   const [localError, setLocalError] = useState<string>();
   const group = chat.isError ? undefined : chat.data?.group;
+  const recipientRoster = useRef<Group["members"]>(
+    assistantDraftStore.get<Group["members"]>(`recipient-roster:${draftKey}`) ??
+      [],
+  );
+  const recipientMentions = useRef<RecipientMember[]>(
+    assistantDraftStore.get<RecipientMember[]>(
+      `recipient-mentions:${draftKey}`,
+    ) ??
+      groupMentionBindings(
+        draft,
+        [...recipientRoster.current, ...(group?.members ?? [])],
+        recipientRoster.current.filter((member) =>
+          selection.mentioned.includes(member.id),
+        ),
+      ),
+  );
+  // Missing identities stay unavailable; resolved handles are kept separately
+  // until that mention is edited away, including when the same ID is renamed.
+  const routingMembers = [
+    ...(group?.members ?? []),
+    ...recipientRoster.current
+      .filter(
+        (member) =>
+          !group?.members.some((row) => row.id === member.id) &&
+          [...selection.mentioned, ...selection.added].includes(member.id),
+      )
+      .map((member) => ({ ...member, unavailable: true })),
+  ];
+  const mentionBindings = recipientMentions.current.filter((member) =>
+    selection.mentioned.includes(member.id),
+  );
+  recipientRoster.current = routingMembers;
+  useEffect(() => {
+    const selected = [...selection.mentioned, ...selection.added];
+    if (selected.length)
+      assistantDraftStore.set(
+        `recipient-roster:${draftKey}`,
+        routingMembers.filter((member) => selected.includes(member.id)),
+      );
+    else assistantDraftStore.delete(`recipient-roster:${draftKey}`);
+    if (mentionBindings.length)
+      assistantDraftStore.set(
+        `recipient-mentions:${draftKey}`,
+        mentionBindings,
+      );
+    else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
+  }, [draftKey, routingMembers, selection]);
   const names = useQuery({
     queryKey: ["workspace", "agents", "group-labels", chat.epoch],
     queryFn: ({ signal }) => agentsApi.list(signal),
@@ -157,7 +212,9 @@ function GroupChat({
     return agent?.display_name ?? fallback;
   }
   const liveMembers =
-    group?.members.filter((member) => !member.destroyed) ?? [];
+    group?.members.filter(
+      (member) => !member.destroyed && !member.unavailable,
+    ) ?? [];
   const defaults =
     group?.default_recipient_ids ??
     [
@@ -199,7 +256,12 @@ function GroupChat({
       )
       .map((member) => ({
         id: `agent:${member.id}`,
-        handle: member.name,
+        handle:
+          routingMembers.filter(
+            (row) => row.name.toLowerCase() === member.name.toLowerCase(),
+          ).length === 1
+            ? member.name
+            : member.id,
         label: title(member.id, member.name),
         kind: "agent" as const,
         agent: member,
@@ -213,10 +275,24 @@ function GroupChat({
     })),
   ];
   const resolvedDraft = resolveAttachmentMentions(draft, attachmentMentions);
+  const ambiguous =
+    !selection.added.length &&
+    ambiguousGroupMentions(resolvedDraft, routingMembers, mentionBindings)
+      .length > 0;
+  const routingSelection = withDraft(
+    selection,
+    resolvedDraft,
+    routingMembers,
+    mentionBindings,
+  );
+  const unavailableRecipients = unavailableGroupRecipients(
+    routingSelection,
+    routingMembers,
+  );
   const recipients = resolveRecipients(
     // Route from the text that will reach the server. Recompute on roster
     // changes so an existing @file-1 cannot become a new agent's mention.
-    withDraft(selection, resolvedDraft, group?.members ?? []),
+    routingSelection,
     defaults,
     group?.members ?? [],
   );
@@ -255,7 +331,10 @@ function GroupChat({
             }
             members={group?.members ?? []}
             status={
-              chat.data?.pending_actions.length
+              chat.data?.pending_actions.length ||
+              chat.data?.collaboration_decisions?.some(
+                (card) => card.can_decide,
+              )
                 ? "Needs you"
                 : group?.working_agent_ids.length
                   ? "Running"
@@ -274,6 +353,7 @@ function GroupChat({
   }, [
     group,
     chat.data?.pending_actions.length,
+    chat.data?.collaboration_decisions,
     names.data,
     Boolean(group),
     chat.sending,
@@ -304,6 +384,8 @@ function GroupChat({
     chat.isError;
   const canSend =
     !blocked &&
+    !ambiguous &&
+    !unavailableRecipients.length &&
     !uploads.blocked &&
     !uploads.session.sending &&
     !!recipients.ids.length &&
@@ -316,11 +398,22 @@ function GroupChat({
     assistantDraftStore.set(`text:${draftKey}`, value);
     setDraft(value);
     setSelection((old) => {
-      const next = withDraft(
-        old,
-        resolveAttachmentMentions(value, attachmentMentions),
-        group?.members ?? [],
+      const previousBindings = recipientMentions.current.filter((member) =>
+        old.mentioned.includes(member.id),
       );
+      const text = resolveAttachmentMentions(value, attachmentMentions);
+      const next = withDraft(old, text, routingMembers, previousBindings);
+      recipientMentions.current = groupMentionBindings(
+        text,
+        routingMembers,
+        previousBindings,
+      );
+      if (recipientMentions.current.length)
+        assistantDraftStore.set(
+          `recipient-mentions:${draftKey}`,
+          recipientMentions.current,
+        );
+      else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
       assistantDraftStore.set(`recipients:${draftKey}`, next);
       return next;
     });
@@ -348,12 +441,39 @@ function GroupChat({
     sendLock.current = true;
     setLocalError(undefined);
     const target = recipients;
+    const submittedRoster = [...recipientRoster.current];
+    const submittedMentions = [...recipientMentions.current];
     transcriptScroll.follow();
     try {
       await submitGroupDraft({
         draft,
         selection,
         updateComposer: (text, nextSelection) => {
+          // A definite refusal restores the submitted handle bindings together
+          // with the text/selection, even if the optimistic clear lost its roster.
+          recipientRoster.current = submittedRoster;
+          recipientMentions.current = submittedMentions;
+          const restoredIds = [
+            ...nextSelection.mentioned,
+            ...nextSelection.added,
+          ];
+          if (restoredIds.length)
+            assistantDraftStore.set(
+              `recipient-roster:${draftKey}`,
+              submittedRoster.filter((member) =>
+                restoredIds.includes(member.id),
+              ),
+            );
+          else assistantDraftStore.delete(`recipient-roster:${draftKey}`);
+          const restoredMentions = submittedMentions.filter((member) =>
+            nextSelection.mentioned.includes(member.id),
+          );
+          if (restoredMentions.length)
+            assistantDraftStore.set(
+              `recipient-mentions:${draftKey}`,
+              restoredMentions,
+            );
+          else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
           revision.current += 1;
           // Discard native marked text and late IME events from the sent draft.
           currentComposer.current += 1;
@@ -376,9 +496,7 @@ function GroupChat({
                 : {}),
               // Freeze the visible recipients while resolving local file
               // aliases, including a member joining between edit and POST.
-              ...(target.edited || files?.attachmentIds.length
-                ? { recipient_agent_ids: target.ids }
-                : {}),
+              recipient_agent_ids: target.ids,
             }),
           ),
       });
@@ -613,57 +731,85 @@ function GroupChat({
         />
         <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.bg} />
       </View>
-      {!!group && !!chat.data?.pending_actions.length && (
+      {!!group?.collaboration && (
         <ScrollView
-          accessibilityLabel="Actions waiting for you"
           style={styles.pending}
           contentContainerStyle={{ gap: 8 }}
           keyboardShouldPersistTaps="handled"
+          accessibilityLabel="Collaboration decisions"
         >
-          {chat.data.pending_actions.map((action, index) => {
-            const member = group?.members.find(
-              (row) => row.id === action.agent_id,
-            );
-            return (
-              <GroupPendingCard
-                key={
-                  action.acknowledgement_id ??
-                  action.approval_request_id ??
-                  `${action.conversation_id}:${index}`
-                }
-                action={action}
-                name={member ? title(member.id, member.name) : "An agent"}
-                actorId={identity.data?.id}
-                organization={group?.owner?.type === "org"}
-                blocked={blocked}
-                onReview={
-                  onOpenConversation
-                    ? () => {
-                        if (blocked || !chat.available()) return;
-                        const review = groupPendingReview(
-                          action,
-                          identity.data?.id,
-                          group?.owner?.type === "org",
-                        );
-                        if (review)
-                          onOpenConversation({
-                            conversationId: review.conversationId,
-                            agentId: action.agent_id ?? undefined,
-                            acknowledgementId: review.acknowledgementId,
-                          });
-                      }
-                    : undefined
-                }
-                onDecision={(choice) => void decide(action, choice)}
-                onAnswer={(yes) => void answer(action, yes)}
-              />
-            );
-          })}
+          <CollaborationCards
+            key={`${chat.epoch}:${group.id}`}
+            group={group}
+            decisions={chat.data?.collaboration_decisions ?? []}
+          />
         </ScrollView>
       )}
+      {!!group &&
+        !group.collaboration &&
+        !!chat.data?.pending_actions.length && (
+          <ScrollView
+            accessibilityLabel="Actions waiting for you"
+            style={styles.pending}
+            contentContainerStyle={{ gap: 8 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            {chat.data.pending_actions.map((action, index) => {
+              const member = group?.members.find(
+                (row) => row.id === action.agent_id,
+              );
+              return (
+                <GroupPendingCard
+                  key={
+                    action.acknowledgement_id ??
+                    action.approval_request_id ??
+                    `${action.conversation_id}:${index}`
+                  }
+                  action={action}
+                  name={member ? title(member.id, member.name) : "An agent"}
+                  actorId={identity.data?.id}
+                  organization={group?.owner?.type === "org"}
+                  blocked={blocked}
+                  onReview={
+                    onOpenConversation
+                      ? () => {
+                          if (blocked || !chat.available()) return;
+                          const review = groupPendingReview(
+                            action,
+                            identity.data?.id,
+                            group?.owner?.type === "org",
+                          );
+                          if (review)
+                            onOpenConversation({
+                              conversationId: review.conversationId,
+                              agentId: action.agent_id ?? undefined,
+                              acknowledgementId: review.acknowledgementId,
+                            });
+                        }
+                      : undefined
+                  }
+                  onDecision={(choice) => void decide(action, choice)}
+                  onAnswer={(yes) => void answer(action, yes)}
+                />
+              );
+            })}
+          </ScrollView>
+        )}
       {group && (
         <View style={styles.composerInset}>
           <View style={[styles.composerArea, chatColumn]}>
+            {ambiguous && (
+              <Label style={[styles.small, { color: colors.danger }]}>
+                This handle names multiple agents. Choose an exact recipient or
+                use its UUID mention before sending.
+              </Label>
+            )}
+            {!!unavailableRecipients.length && (
+              <Label style={[styles.small, { color: colors.danger }]}>
+                A selected agent is no longer available. Remove it and choose
+                another recipient before sending.
+              </Label>
+            )}
             {!recipients.ids.length && (
               <Label style={[styles.small, { color: colors.danger }]}>
                 Choose at least one recipient.
@@ -721,6 +867,28 @@ function GroupChat({
                     </Pressable>
                   ) : null;
                 })}
+                {unavailableRecipients.map((id) => (
+                  <Pressable
+                    key={`unavailable:${id}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove unavailable recipient ${title(id, routingMembers.find((member) => member.id === id)?.name ?? id)}`}
+                    disabled={blocked}
+                    onPress={() =>
+                      editRecipients((old) => withRemoved(old, id))
+                    }
+                    style={[styles.recipient, { borderColor: colors.danger }]}
+                  >
+                    <Label style={[styles.small, { color: colors.danger }]}>
+                      {title(
+                        id,
+                        routingMembers.find((member) => member.id === id)
+                          ?.name ?? id,
+                      )}{" "}
+                      · Unavailable
+                    </Label>
+                    <X size={12} color={colors.danger} />
+                  </Pressable>
+                ))}
                 {liveMembers.some(
                   (member) => !recipients.ids.includes(member.id),
                 ) && (
@@ -921,7 +1089,10 @@ function GroupMessage({
           {message.agent ? (
             <AgentAvatar agent={message.agent} size="sm" />
           ) : null}
-          <Label muted style={[styles.small, user && { color: bubble.foreground }]}>
+          <Label
+            muted
+            style={[styles.small, user && { color: bubble.foreground }]}
+          >
             {user
               ? (message.author?.display_name ?? "You")
               : message.agent
@@ -930,6 +1101,17 @@ function GroupMessage({
           </Label>
         </View>
       </Pressable>
+      {message.requester_user_id && (
+        <Label muted>
+          For{" "}
+          {group?.participants?.find(
+            (person) => person.id === message.requester_user_id,
+          )?.display_name ?? "participant"}
+          {message.execution_mode === "guest"
+            ? " · Guest reply (agent owner pays)"
+            : " · Requester access and billing"}
+        </Label>
+      )}
       {user && !!message.recipient_agent_ids?.length && (
         <Label style={[styles.small, { color: bubble.foreground }]}>
           to{" "}
@@ -943,8 +1125,14 @@ function GroupMessage({
       )}
       {user ? (
         <>
-          <Label selectable style={{ color: bubble.foreground }}>{message.text}</Label>
-          <GroupMachineReceipts groupId={group?.id} message={message} foreground={bubble.foreground} />
+          <Label selectable style={{ color: bubble.foreground }}>
+            {message.text}
+          </Label>
+          <GroupMachineReceipts
+            groupId={group?.id}
+            message={message}
+            foreground={bubble.foreground}
+          />
         </>
       ) : (
         <AssistantReplyBody

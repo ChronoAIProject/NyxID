@@ -11,6 +11,7 @@ export interface RecipientMember {
   readonly id: string;
   readonly name: string;
   readonly destroyed?: boolean;
+  readonly unavailable?: boolean;
 }
 export interface RecipientSelection {
   readonly mentioned: readonly string[];
@@ -24,17 +25,92 @@ export const NO_RECIPIENT_EDITS: RecipientSelection = {
 };
 const unique = (ids: readonly string[]) => [...new Set(ids)];
 
+/** A draft's already resolved handle keeps its identity across roster edits. */
+function boundMentionNames(members: readonly RecipientMember[]) {
+  const ids = new Map<string, Set<string>>();
+  for (const member of members) {
+    const name = member.name.toLowerCase();
+    const values = ids.get(name) ?? new Set<string>();
+    values.add(member.id);
+    ids.set(name, values);
+  }
+  return new Map(
+    [...ids].flatMap(([name, values]) =>
+      values.size === 1 ? [[name, [...values][0]!] as const] : [],
+    ),
+  );
+}
+
+/** An unavailable namesake still makes a bare handle ambiguous. */
+export function ambiguousGroupMentions(
+  text: string,
+  members: readonly RecipientMember[],
+  bindings: readonly RecipientMember[] = [],
+): string[] {
+  const bound = boundMentionNames(bindings);
+  const names = new Map<string, number>();
+  for (const row of members)
+    names.set(
+      row.name.toLowerCase(),
+      (names.get(row.name.toLowerCase()) ?? 0) + 1,
+    );
+  return unique(
+    [...text.matchAll(/(?:^|[^\p{L}\p{N}_.-])@([A-Za-z0-9_-]+)/gu)].flatMap(
+      (match) =>
+        !bound.has(match[1]!.toLowerCase()) &&
+        (names.get(match[1]!.toLowerCase()) ?? 0) > 1
+          ? [match[1]!]
+          : [],
+    ),
+  );
+}
+
 /** Same word boundary and handle matching as the group router. */
 export function mentionedIds(
   text: string,
   members: readonly RecipientMember[],
+  includeUnavailable = false,
+  bindings: readonly RecipientMember[] = [],
 ): string[] {
+  return unique(
+    resolveMentionBindings(text, members, includeUnavailable, bindings).map(
+      (member) => member.id,
+    ),
+  );
+}
+
+/** Only handles still present in this edit retain a prior resolved identity. */
+export function groupMentionBindings(
+  text: string,
+  members: readonly RecipientMember[],
+  bindings: readonly RecipientMember[] = [],
+): RecipientMember[] {
+  return resolveMentionBindings(text, members, true, bindings);
+}
+
+function resolveMentionBindings(
+  text: string,
+  members: readonly RecipientMember[],
+  includeUnavailable: boolean,
+  bindings: readonly RecipientMember[],
+): RecipientMember[] {
   const names = new Map(
     members
-      .filter((member) => !member.destroyed)
+      .filter(
+        (member) =>
+          (includeUnavailable || (!member.destroyed && !member.unavailable)) &&
+          members.filter(
+            (row) => row.name.toLowerCase() === member.name.toLowerCase(),
+          ).length === 1,
+      )
       .map((member) => [member.name.toLowerCase(), member.id]),
   );
-  const found: string[] = [];
+  for (const [name, id] of boundMentionNames(bindings)) names.set(name, id);
+  for (const member of members.filter(
+    (row) => includeUnavailable || (!row.destroyed && !row.unavailable),
+  ))
+    names.set(member.id.toLowerCase(), member.id);
+  const found: RecipientMember[] = [];
   for (
     let index = text.indexOf("@");
     index >= 0;
@@ -43,8 +119,16 @@ export function mentionedIds(
     const before = index > 0 ? (text[index - 1] ?? "") : "";
     if (before && /[\p{L}\p{N}_.-]/u.test(before)) continue;
     const token = /^[A-Za-z0-9_-]+/.exec(text.slice(index + 1))?.[0];
-    const id = token ? names.get(token.toLowerCase()) : undefined;
-    if (id && !found.includes(id)) found.push(id);
+    const id = token
+      ? includeUnavailable &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          token,
+        )
+        ? token.toLowerCase()
+        : names.get(token.toLowerCase())
+      : undefined;
+    if (id && !found.some((row) => row.name === token!.toLowerCase()))
+      found.push({ id, name: token!.toLowerCase() });
   }
   return found;
 }
@@ -52,8 +136,16 @@ export function withDraft(
   selection: RecipientSelection,
   text: string,
   members: readonly RecipientMember[],
+  bindings: readonly RecipientMember[] = [],
 ): RecipientSelection {
-  const mentioned = mentionedIds(text, members);
+  // An explicit mention remains a selection when its share is revoked. Filtering
+  // it out here would make resolveRecipients silently choose the sticky default.
+  const mentioned = mentionedIds(
+    text,
+    members,
+    true,
+    bindings.filter((member) => selection.mentioned.includes(member.id)),
+  );
   const fresh = mentioned.filter((id) => !selection.mentioned.includes(id));
   return {
     ...selection,
@@ -87,7 +179,7 @@ export function resolveRecipients(
   members: readonly RecipientMember[],
 ): { ids: string[]; edited: boolean } {
   const liveIds = members
-    .filter((member) => !member.destroyed)
+    .filter((member) => !member.destroyed && !member.unavailable)
     .map((member) => member.id);
   const keep = (id: string) =>
     liveIds.includes(id) && !selection.removed.includes(id);
@@ -98,6 +190,21 @@ export function resolveRecipients(
       liveIds.includes(id),
     ),
   };
+}
+
+/** Missing/revoked explicit targets need a new human choice, never a default. */
+export function unavailableGroupRecipients(
+  selection: RecipientSelection,
+  members: readonly RecipientMember[],
+): string[] {
+  return unique([...selection.mentioned, ...selection.added]).filter(
+    (id) =>
+      !selection.removed.includes(id) &&
+      !members.some(
+        (member) =>
+          member.id === id && !member.destroyed && !member.unavailable,
+      ),
+  );
 }
 
 /** Newer rows replace overlapping sequence numbers, including server updates. */
@@ -136,6 +243,7 @@ export function mergeGroupPage(
 }
 
 export function canManageGroup(group: Group): boolean {
+  if (group.collaboration) return group.collaboration.can_manage;
   return (
     group.owner?.type !== "org" ||
     group.your_role === "creator" ||
@@ -143,6 +251,7 @@ export function canManageGroup(group: Group): boolean {
   );
 }
 export function canLeaveGroup(group: Group): boolean {
+  if (group.collaboration) return true;
   return group.owner?.type === "org" && group.your_role !== undefined;
 }
 export const groupCanManage = canManageGroup;
