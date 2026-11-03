@@ -740,6 +740,8 @@ export interface ApiErrorResponse {
   readonly request_id?: string;
   readonly approve_url?: string;
   readonly details?: unknown;
+  readonly current?: unknown;
+  readonly errors?: unknown;
 }
 
 export interface LoginCredentials {

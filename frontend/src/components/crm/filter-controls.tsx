@@ -20,7 +20,7 @@ import type {
   CrmField,
   CrmFilter,
   CrmFilterOperator,
-  CrmObject,
+  CrmObjectMetadata,
 } from "@/schemas/crm";
 
 function needsValue(operator: CrmFilterOperator) {
@@ -157,7 +157,7 @@ export function CrmFilterControls({
   ownerId,
   onChange,
 }: {
-  readonly object: CrmObject;
+  readonly object: CrmObjectMetadata;
   readonly filters: readonly CrmFilter[];
   readonly ownerId?: string;
   readonly onChange: (filters: CrmFilter[]) => void;

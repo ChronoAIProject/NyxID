@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/sheet";
 import {
   useCrmRecord,
+  useCrmObject,
   useCrmRelated,
   useSetCrmRecordArchived,
   useUpdateCrmRecord,
@@ -26,7 +27,12 @@ import {
   parseCrmFieldInput,
   renderCrmCell,
 } from "@/lib/crm/field-kinds";
-import type { CrmField, CrmObject, CrmRecord } from "@/schemas/crm";
+import type {
+  CrmField,
+  CrmObject,
+  CrmRecord,
+  CrmRelatedGroup,
+} from "@/schemas/crm";
 
 interface RecordFormValues {
   readonly values: Record<string, unknown>;
@@ -321,6 +327,44 @@ function CrmRecordEditor({
   );
 }
 
+function RelatedRecordsGroup({
+  group,
+  ownerId,
+  onSelectRecord,
+}: {
+  readonly group: CrmRelatedGroup;
+  readonly ownerId?: string;
+  readonly onSelectRecord?: (recordId: string) => void;
+}) {
+  const object = useCrmObject(group.object_key, ownerId);
+  const titleField = object.data?.fields.find(
+    (field) => field.type === "text" && field.required,
+  );
+  return (
+    <div className="space-y-1.5">
+      <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+        {object.data?.plural_label ?? group.object_key} · {group.field_key} (
+        {group.count})
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {group.records.map((record) => (
+          <Button
+            key={record.id}
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => onSelectRecord?.(record.id)}
+          >
+            {titleField
+              ? String(record.values[titleField.key] ?? "Untitled")
+              : record.id}
+          </Button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function CrmRecordSheet({
   recordId,
   ownerId,
@@ -335,10 +379,14 @@ export function CrmRecordSheet({
   readonly onSelectRecord?: (recordId: string) => void;
 }) {
   const detail = useCrmRecord(open ? recordId : undefined, ownerId);
+  const object = useCrmObject(detail.data?.object_key, ownerId, open);
   const related = useCrmRelated(open ? recordId : undefined, ownerId);
   const archive = useSetCrmRecordArchived(ownerId);
   const archiveActionKey = useRef<string | null>(null);
-  const data = detail.data;
+  const data =
+    detail.data && object.data
+      ? { record: detail.data, object: object.data }
+      : undefined;
   const titleField = data?.object.fields.find(
     (field) => field.type === "text" && field.required,
   );
@@ -358,12 +406,12 @@ export function CrmRecordSheet({
           </SheetDescription>
         </SheetHeader>
         <div className="mt-6 space-y-8 pb-8">
-          {detail.isPending ? (
+          {detail.isPending || object.isPending ? (
             <p role="status" className="text-12 text-text-tertiary">
               Loading record...
             </p>
           ) : null}
-          {detail.isError ? (
+          {detail.isError || object.isError ? (
             <p role="alert" className="text-12 text-destructive">
               Could not load this record.
             </p>
@@ -425,28 +473,12 @@ export function CrmRecordSheet({
                   </div>
                 ) : null}
                 {related.data?.groups.map((group) => (
-                  <div
+                  <RelatedRecordsGroup
                     key={`${group.object_key}:${group.field_key}`}
-                    className="space-y-1.5"
-                  >
-                    <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-                      {group.object_key} · {group.field_key} (
-                      {group.total_count})
-                    </p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {group.records.map((record) => (
-                        <Button
-                          key={record.id}
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => onSelectRecord?.(record.id)}
-                        >
-                          {record.label}
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
+                    group={group}
+                    ownerId={ownerId}
+                    onSelectRecord={onSelectRecord}
+                  />
                 ))}
               </section>
               <CrmActivityTimeline

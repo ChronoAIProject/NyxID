@@ -47,16 +47,12 @@ const object: CrmObject = {
 const created = {
   id: "company-1",
   owner_id: "user-1",
-  object_id: "company-object",
   object_key: "company",
   revision: 1,
   values: { name: "Northwind", domain: "northwind.test" },
   links: {},
   overrides: [],
   archived: false,
-  created_by: { kind: "human", user_id: "user-1" },
-  updated_by: { kind: "human", user_id: "user-1" },
-  archived_at: null,
   created_at: "2026-11-04T00:00:00Z",
   updated_at: "2026-11-04T00:00:00Z",
 } satisfies CrmRecord;

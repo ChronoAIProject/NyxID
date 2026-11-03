@@ -46,7 +46,9 @@ function defaults(fields: readonly CrmField[]) {
 function serverErrors(error: unknown): Readonly<Record<string, string>> {
   if (!(error instanceof ApiError) || error.errorCode !== 13401) return {};
   const parsed = crmValidationDetailsSchema.safeParse(
-    error.errorResponse.details,
+    error.errorResponse.errors !== undefined
+      ? { errors: error.errorResponse.errors }
+      : error.errorResponse.details,
   );
   if (!parsed.success) return {};
   return Object.fromEntries(

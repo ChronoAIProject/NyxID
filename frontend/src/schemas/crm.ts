@@ -107,7 +107,7 @@ export const crmPipelineSchema = z.object({
   closed_stages: z.array(crmOptionValueSchema),
 });
 
-export const crmObjectSchema = z.object({
+export const crmObjectMetadataSchema = z.object({
   id: crmIdSchema,
   owner_id: crmIdSchema,
   key: crmKeySchema,
@@ -118,9 +118,12 @@ export const crmObjectSchema = z.object({
   pipeline: crmPipelineSchema.nullable(),
   default_columns: z.array(crmKeySchema),
   seeded: z.boolean(),
-  access: crmAccessSchema,
   created_at: crmInstantSchema,
   updated_at: crmInstantSchema,
+});
+
+export const crmObjectSchema = crmObjectMetadataSchema.extend({
+  access: crmAccessSchema,
 });
 
 export const crmObjectsResponseSchema = z.object({
@@ -152,11 +155,7 @@ export const crmRecordRowSchema = z.object({
 
 export const crmRecordSchema = crmRecordRowSchema.extend({
   owner_id: crmIdSchema,
-  object_id: crmIdSchema,
   object_key: crmKeySchema,
-  created_by: crmActorSchema,
-  updated_by: crmActorSchema,
-  archived_at: crmInstantSchema.nullable(),
   created_at: crmInstantSchema,
   updated_at: crmInstantSchema,
 });
@@ -197,7 +196,7 @@ export const crmTableQuerySchema = z.object({
 });
 
 export const crmTableResultSchema = z.object({
-  object: crmObjectSchema,
+  object: crmObjectMetadataSchema,
   rows: z.array(crmRecordRowSchema),
   next_cursor: z.string().nullable(),
   total_count: z.number().int().nonnegative(),
@@ -236,10 +235,7 @@ export const crmAggregateResultSchema = z.object({
   truncated: z.boolean(),
 });
 
-export const crmRecordResponseSchema = z.object({
-  object: crmObjectSchema,
-  record: crmRecordSchema,
-});
+export const crmRecordResponseSchema = crmRecordSchema;
 
 export const crmCreateRecordRequestSchema = z.object({
   owner_id: crmIdSchema.optional(),
@@ -267,7 +263,6 @@ export const crmMoveRecordRequestSchema = crmRevisionRequestSchema.extend({
 
 export const crmActivitySchema = z.object({
   id: crmIdSchema,
-  owner_id: crmIdSchema,
   record_id: crmIdSchema,
   object_key: crmKeySchema,
   kind: z.enum(["created", "updated", "stage_changed", "note"]),
@@ -294,8 +289,8 @@ export const crmNoteRequestSchema = z.object({
 export const crmRelatedGroupSchema = z.object({
   object_key: crmKeySchema,
   field_key: crmKeySchema,
-  records: z.array(crmRecordLinkSchema).max(50),
-  total_count: z.number().int().nonnegative(),
+  records: z.array(crmRecordSchema).max(50),
+  count: z.number().int().nonnegative(),
 });
 
 export const crmRelatedResponseSchema = z.object({
@@ -309,6 +304,10 @@ export const crmValidationIssueSchema = z.object({
 
 export const crmRevisionConflictDetailsSchema = z.object({
   current: crmRecordSchema,
+});
+
+export const crmObjectRevisionConflictDetailsSchema = z.object({
+  current: crmObjectMetadataSchema,
 });
 
 export const crmValidationDetailsSchema = z.object({
@@ -435,6 +434,7 @@ export const crmViewValidationResponseSchema = z.object({
 });
 
 export type CrmField = z.infer<typeof crmFieldSchema>;
+export type CrmObjectMetadata = z.infer<typeof crmObjectMetadataSchema>;
 export type CrmObject = z.infer<typeof crmObjectSchema>;
 export type CrmRecordLink = z.infer<typeof crmRecordLinkSchema>;
 export type CrmRecordRow = z.infer<typeof crmRecordRowSchema>;
@@ -446,6 +446,7 @@ export type CrmTableResult = z.infer<typeof crmTableResultSchema>;
 export type CrmAggregateQuery = z.infer<typeof crmAggregateQuerySchema>;
 export type CrmAggregateResult = z.infer<typeof crmAggregateResultSchema>;
 export type CrmActivity = z.infer<typeof crmActivitySchema>;
+export type CrmRelatedGroup = z.infer<typeof crmRelatedGroupSchema>;
 export type CrmSavedViewEnvelope = z.infer<typeof crmSavedViewEnvelopeSchema>;
 
 export { crmCalendarDateSchema, crmInstantSchema, crmKeySchema };

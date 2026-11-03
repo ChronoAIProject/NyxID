@@ -9,6 +9,7 @@ import {
   crmActivitiesResponseSchema,
   crmAggregateQuerySchema,
   crmAggregateResultSchema,
+  crmFieldSchema,
   crmObjectsResponseSchema,
   crmObjectSchema,
   crmRecordResponseSchema,
@@ -277,9 +278,7 @@ export function useCreateCrmRecord(ownerId?: string) {
 }
 
 function crmRecordSchemaFromMutation(value: unknown): CrmRecord {
-  const direct = crmRecordResponseSchema.shape.record.safeParse(value);
-  if (direct.success) return direct.data;
-  return crmRecordResponseSchema.parse(value).record;
+  return crmRecordResponseSchema.parse(value);
 }
 
 export function useUpdateCrmRecord(ownerId?: string) {
@@ -433,7 +432,7 @@ export function useAddCrmField(ownerId?: string) {
             body: ownerBody(
               {
                 expected_schema_revision: expectedSchemaRevision,
-                field,
+                ...crmFieldSchema.parse(field),
               },
               context.owner,
               context.actor,

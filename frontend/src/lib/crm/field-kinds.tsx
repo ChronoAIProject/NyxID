@@ -290,7 +290,11 @@ const recordDefinition: CrmFieldKindDefinition = {
   renderCell: (_field, { links }) =>
     links?.length
       ? links
-          .map((link) => `${link.label}${link.archived ? " (archived)" : ""}`)
+          .map((link) =>
+            link.archived && !link.label.includes("(archived)")
+              ? `${link.label} (archived)`
+              : link.label,
+          )
           .join(", ")
       : plainCell(null),
 };

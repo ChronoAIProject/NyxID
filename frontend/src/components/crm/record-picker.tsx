@@ -72,7 +72,9 @@ export function CrmRecordPicker({
   const labels = new Map(
     selectedLinks.map((link) => [
       link.id,
-      `${link.label}${link.archived ? " (archived)" : ""}`,
+      link.archived && !link.label.includes("(archived)")
+        ? `${link.label} (archived)`
+        : link.label,
     ]),
   );
   for (const row of records.data?.rows ?? []) {
