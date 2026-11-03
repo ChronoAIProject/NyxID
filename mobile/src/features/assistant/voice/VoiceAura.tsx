@@ -23,12 +23,12 @@ type Props = {
 };
 
 /**
- * Soft layered violet light that shows what the call is doing. Decorative:
+ * A soft mint-and-blush blob that shows what the call is doing. Decorative:
  * the status line carries the state for VoiceOver, so this is hidden from it.
  * Only transforms and opacity animate; the SVG gradients never re-render.
  */
 export function VoiceAura({ phase, input, output, reducedMotion, size }: Props) {
-  const { colors, mode } = useTheme();
+  const { mode } = useTheme();
   const target = voiceAuraTargets(phase, reducedMotion);
   const breath = useSharedValue(0);
   const spin = useSharedValue(0);
@@ -91,46 +91,48 @@ export function VoiceAura({ phase, input, output, reducedMotion, size }: Props) 
   const values = { input, output, breath, spin, opacity, scale, gain, orbit, breathing, fromOutput };
   const glow = useAuraLayer(values, { swell: 1.1, breathe: 0.05, base: 1, glow: true });
   const first = useAuraLayer(values, { angle: 0, direction: 1, weight: 1 });
-  const second = useAuraLayer(values, { angle: 2.1, direction: -1, weight: 0.85 });
-  const third = useAuraLayer(values, { angle: 4.2, direction: 2, weight: 0.6 });
+  const second = useAuraLayer(values, { angle: 2.1, direction: -1, weight: 1 });
+  const third = useAuraLayer(values, { angle: 4.2, direction: 2, weight: 1.3 });
   const core = useAuraLayer(values, { swell: 0.6, breathe: 0.04, base: 0.94 });
 
   const dark = mode === "dark";
+  // An organic blob: a mint body with a blush-and-lilac core that drift off
+  // centre as they orbit, so the outline keeps changing shape.
   const layers = [
     {
       key: "glow",
       style: glow,
-      diameter: size * 1.3,
-      color: dark ? colors.gradientEnd : colors.primaryLight,
-      peak: dark ? 0.5 : 0.65,
+      diameter: size * 1.08,
+      color: "#D6F7EC",
+      peak: dark ? 0.25 : 0.45,
     },
     {
       key: "first",
       style: first,
-      diameter: size * 0.82,
-      color: colors.gradientStart,
-      peak: dark ? 0.9 : 0.75,
+      diameter: size * 0.92,
+      color: "#B4F0DC",
+      peak: dark ? 0.8 : 1,
     },
     {
       key: "second",
       style: second,
-      diameter: size * 0.72,
-      color: dark ? colors.primary : colors.gradientEnd,
-      peak: dark ? 0.7 : 0.5,
+      diameter: size * 0.66,
+      color: "#E3B9F4",
+      peak: dark ? 0.85 : 0.95,
     },
     {
       key: "third",
       style: third,
-      diameter: size * 0.62,
-      color: dark ? colors.primaryLight : colors.primary,
-      peak: 0.6,
+      diameter: size * 0.52,
+      color: "#F49FDA",
+      peak: dark ? 0.9 : 1,
     },
     {
       key: "core",
       style: core,
-      diameter: size * 0.5,
-      color: dark ? colors.primaryLight : "#FFFFFF",
-      peak: dark ? 0.85 : 0.9,
+      diameter: size * 0.42,
+      color: "#FFFFFF",
+      peak: dark ? 0.16 : 0.32,
     },
   ];
   return (
@@ -243,7 +245,8 @@ function AuraBlob({
       <Defs>
         <RadialGradient id={id} cx="50%" cy="50%" r="50%">
           <Stop offset="0" stopColor={color} stopOpacity={peak} />
-          <Stop offset="0.5" stopColor={color} stopOpacity={peak * 0.45} />
+          <Stop offset="0.7" stopColor={color} stopOpacity={peak * 0.92} />
+          <Stop offset="0.9" stopColor={color} stopOpacity={peak * 0.45} />
           <Stop offset="1" stopColor={color} stopOpacity={0} />
         </RadialGradient>
       </Defs>

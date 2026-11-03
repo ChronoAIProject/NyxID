@@ -235,10 +235,14 @@ function setup(
       useQuery: ({ queryKey }: { queryKey: unknown[] }) =>
         queryKey.includes("voice-options") ? query.options : query.settings,
     },
+    "expo-linear-gradient": { LinearGradient: "LinearGradient" },
     "lucide-react-native": Object.fromEntries(
       [
         "ChevronDown",
+        "ChevronLeft",
         "ChevronUp",
+        "MessageSquareText",
+        "X",
         "Mic",
         "MicOff",
         "PhoneOff",
@@ -773,5 +777,27 @@ test("the tasks tray shows the task that needs you and expands to all tasks", ()
 test("a call without tasks shows no tasks tray", () => {
   const f = setup({ active: true });
   assert.doesNotMatch(f.text(), /Agent tasks/);
+  f.harness.unmount();
+});
+
+test("the voice page is a pastel wash with the assistant pill and three round controls", () => {
+  const idle = setup();
+  assert.ok(idle.all().some((row) => row.type === "LinearGradient"));
+  assert.match(idle.text(), /我的助手/);
+  assert.match(idle.text(), /Hey, what can I do for you today\?/);
+  assert.equal(idle.button("Start voice").props.disabled, false);
+  idle.harness.unmount();
+  // Hands-free: chat on the left, the microphone in the middle, End on the right.
+  const f = setup({ active: true });
+  f.button("Show chat").props.onPress();
+  f.button("Mute microphone").props.onPress();
+  f.button("End voice and close").props.onPress();
+  assert.deepEqual(f.events, [
+    ["hold", false],
+    ["review", undefined],
+    ["mute", true],
+    ["end"],
+    ["close"],
+  ]);
   f.harness.unmount();
 });

@@ -82,12 +82,12 @@ export type VoiceAuraTargets = {
 };
 
 const TARGETS: Record<VoiceAuraPhase, VoiceAuraTargets> = {
-  resting: { opacity: 0.6, scale: 0.9, gain: 0, orbit: 4, source: "input", breathe: true },
-  connecting: { opacity: 0.5, scale: 0.86, gain: 0, orbit: 10, source: "input", breathe: true },
-  listening: { opacity: 0.9, scale: 0.96, gain: 0.22, orbit: 6, source: "input", breathe: true },
-  thinking: { opacity: 0.8, scale: 0.92, gain: 0, orbit: 18, source: "input", breathe: true },
-  speaking: { opacity: 1, scale: 1, gain: 0.26, orbit: 8, source: "output", breathe: true },
-  muted: { opacity: 0.32, scale: 0.86, gain: 0, orbit: 2, source: "input", breathe: false },
+  resting: { opacity: 0.95, scale: 0.92, gain: 0, orbit: 14, source: "input", breathe: true },
+  connecting: { opacity: 0.8, scale: 0.88, gain: 0, orbit: 18, source: "input", breathe: true },
+  listening: { opacity: 1, scale: 0.97, gain: 0.22, orbit: 12, source: "input", breathe: true },
+  thinking: { opacity: 0.95, scale: 0.93, gain: 0, orbit: 26, source: "input", breathe: true },
+  speaking: { opacity: 1, scale: 1, gain: 0.26, orbit: 14, source: "output", breathe: true },
+  muted: { opacity: 0.45, scale: 0.86, gain: 0, orbit: 6, source: "input", breathe: false },
 };
 
 export function voiceAuraTargets(
