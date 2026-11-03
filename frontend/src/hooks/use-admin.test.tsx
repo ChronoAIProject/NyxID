@@ -28,6 +28,7 @@ const { mockGet, mockPost, mockPut, mockPatch, mockDelete } = vi.hoisted(
 );
 
 vi.mock("@/lib/api-client", () => ({
+  apiClient: mockGet,
   api: {
     get: mockGet,
     post: mockPost,
@@ -162,6 +163,37 @@ describe("admin list / detail queries", () => {
     expect(mockGet).toHaveBeenCalledTimes(1);
   });
 
+  it("uses an older backend's total without requesting the new count route", async () => {
+    mockGet.mockResolvedValue({
+      entries: [{ id: "legacy-entry" }],
+      total: 75,
+      page: 2,
+      per_page: 25,
+    });
+    const { result } = renderHook(
+      () =>
+        useAdminAuditLog({
+          page: 2,
+          per_page: 25,
+          sort: "-created_at",
+          user_id: "exact-user",
+          search_filters: '[{"field":"event_type","values":["login"]}]',
+        }),
+      { wrapper: wrapperFactory() },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.total).toBe(75);
+    expect(result.current.data?.entries).toEqual([{ id: "legacy-entry" }]);
+    expect(result.current.totalError).toBeNull();
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    const query = new URL(`https://example.test${mockGet.mock.calls[0]![0]}`)
+      .searchParams;
+    expect(query.get("user_id")).toBe("exact-user");
+    expect(query.get("search_filters")).toBe(
+      '[{"field":"event_type","values":["login"]}]',
+    );
+  });
+
   it("shows rows before the total and reuses that total across pages", async () => {
     let resolveCount!: (value: { total: number }) => void;
     const count = new Promise<{ total: number }>((resolve) => {
@@ -227,6 +259,42 @@ describe("admin list / detail queries", () => {
     expect(result.current.isSuccess).toBe(true);
     expect(result.current.error).toBeNull();
     expect(result.current.data?.has_more).toBe(true);
+  });
+
+  it("keeps rows and refresh usable if an older replica lacks the count route", async () => {
+    let legacyResponse = false;
+    const missingRoute = Object.assign(new Error("Not Found"), { status: 404 });
+    mockGet.mockImplementation((path: string) => {
+      if (path.startsWith("/admin/audit-log/count?")) {
+        return Promise.reject(missingRoute);
+      }
+      return Promise.resolve({
+        entries: [{ id: "audit-1" }],
+        has_more: !legacyResponse,
+        ...(legacyResponse ? { total: 1 } : {}),
+      });
+    });
+    const { result } = renderHook(
+      () =>
+        useAdminAuditLog({
+          page: 1,
+          per_page: 25,
+          sort: "-created_at",
+          search: "proxy",
+        }),
+      { wrapper: wrapperFactory() },
+    );
+    await waitFor(() => expect(result.current.totalError).toBe(missingRoute));
+    expect(result.current.isSuccess).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data?.entries).toEqual([{ id: "audit-1" }]);
+    expect(result.current.data?.has_more).toBe(true);
+
+    legacyResponse = true;
+    await result.current.refetch();
+    await waitFor(() => expect(result.current.total).toBe(1));
+    expect(result.current.totalError).toBeNull();
+    expect(result.current.isSuccess).toBe(true);
   });
 
   it("cancels a superseded page request and an unmounted count request", async () => {

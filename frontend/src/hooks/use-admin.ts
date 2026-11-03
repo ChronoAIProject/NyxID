@@ -4,7 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, apiClient } from "@/lib/api-client";
 import type {
   AdminUser,
   AdminUserListResponse,
@@ -102,7 +102,7 @@ export function useAdminAuditLog(params: AdminAuditLogListParams) {
       auditLogFilterQuery(params).forEach((value, key) =>
         query.set(key, value),
       );
-      return api.get<AdminAuditLogListResponse>(
+      return apiClient<AdminAuditLogListResponse>(
         `/admin/audit-log?${query.toString()}`,
         { signal },
       );
@@ -117,7 +117,7 @@ export function useAdminAuditLog(params: AdminAuditLogListParams) {
   const count = useQuery({
     queryKey: ["admin", "audit-log", "count", filters],
     queryFn: ({ signal }) =>
-      api.get<{ readonly total: number }>(`/admin/audit-log/count?${filters}`, {
+      apiClient<{ readonly total: number }>(`/admin/audit-log/count?${filters}`, {
         signal,
       }),
     enabled: needsTotal,

@@ -193,7 +193,7 @@ export async function apiFetch(
 export const api = {
   get<T>(
     endpoint: string,
-    options?: Pick<RequestOptions, "authorityGuard" | "signal">,
+    options?: Pick<RequestOptions, "authorityGuard">,
   ): Promise<T> {
     return apiClient<T>(endpoint, options);
   },

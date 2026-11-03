@@ -34,7 +34,7 @@ describe("apiClient", () => {
   it("forwards an audit GET cancellation signal to fetch", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ entries: [] }));
     const controller = new AbortController();
-    await api.get("/admin/audit-log", { signal: controller.signal });
+    await apiClient("/admin/audit-log", { signal: controller.signal });
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/admin/audit-log",
       expect.objectContaining({ signal: controller.signal }),

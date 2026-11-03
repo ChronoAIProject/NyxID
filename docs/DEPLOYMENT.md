@@ -848,6 +848,14 @@ this endpoint returns `{ "total": 123 }` and requires the same admin/operator
 access. It performs no display-enrichment lookups. Omitting `include_total`
 preserves the existing listing response with its total.
 
+Frontend and backend can be upgraded independently. Existing clients keep their
+numeric `total` unless they explicitly opt into `include_total=false`; `has_more`
+is additive. The updated UI accepts older responses without `has_more` and uses
+their total without requesting the count endpoint. During a mixed-replica
+rollout, an unavailable count endpoint leaves the page usable with a retry for
+the total. Counts may be cached for 60 seconds; the current page's `has_more`
+controls forward pagination.
+
 For an indexed identity lookup, use the `user_id` or `api_key_id` query parameter,
 or select **User ID (exact)** / **API key ID (exact)** in the page's search field
 selector. Text searches retain substring matching and may scan many audit rows.
