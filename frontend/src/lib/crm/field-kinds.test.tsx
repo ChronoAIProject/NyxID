@@ -60,6 +60,20 @@ describe("CRM field-kind registry", () => {
     );
   });
 
+  it("uses minute precision only when a datetime is edited", () => {
+    const field: CrmField = { ...base, key: "meeting", type: "datetime" };
+    const editorValue = formatCrmFieldInput(
+      field,
+      "2026-11-04T12:34:56.789Z",
+    );
+    expect(editorValue).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+
+    const parsed = parseCrmFieldInput(field, editorValue);
+    expect(typeof parsed).toBe("string");
+    expect(new Date(String(parsed)).getSeconds()).toBe(0);
+    expect(new Date(String(parsed)).getMilliseconds()).toBe(0);
+  });
+
   it("exposes only the contract operators for each kind", () => {
     const text: CrmField = {
       ...base,

@@ -39,6 +39,12 @@ interface RecordFormValues {
   readonly protected: Record<string, boolean>;
 }
 
+interface RecordPatchDelta {
+  readonly values: Record<string, unknown>;
+  readonly protect: string[];
+  readonly unprotect: string[];
+}
+
 function editorValues(object: CrmObject, record?: CrmRecord): RecordFormValues {
   const values: Record<string, unknown> = {};
   const protectedFields: Record<string, boolean> = {};
@@ -227,42 +233,61 @@ function CrmRecordEditor({
   const update = useUpdateCrmRecord(ownerId);
   const [conflict, setConflict] = useState<CrmRecord | null>(null);
   const actionKey = useRef<string | null>(null);
+  const pendingPatch = useRef<RecordPatchDelta | null>(null);
   const form = useAppForm<RecordFormValues>({
     defaultValues: editorValues(object, record),
   });
   const editableFields = object.fields.filter((field) => !field.archived);
 
-  async function save(expectedRevision: number) {
+  async function save(
+    expectedRevision: number,
+    retainedPatch?: RecordPatchDelta,
+  ) {
     form.clearErrors();
-    const parsed = parseValues(editableFields, form.getValues("values"));
-    if (Object.keys(parsed.errors).length) {
-      setFieldErrors(form, parsed.errors);
-      return;
+    let patch = retainedPatch;
+    if (!patch) {
+      const changedValueFields = editableFields.filter((field) =>
+        form.getFieldState(`values.${field.key}`).isDirty,
+      );
+      const parsed = parseValues(
+        changedValueFields,
+        form.getValues("values"),
+      );
+      if (Object.keys(parsed.errors).length) {
+        setFieldErrors(form, parsed.errors);
+        return;
+      }
+      const protection = form.getValues("protected");
+      const changedProtectionFields = editableFields.filter((field) =>
+        form.getFieldState(`protected.${field.key}`).isDirty,
+      );
+      patch = {
+        values: parsed.data,
+        protect: changedProtectionFields
+          .filter(
+            (field) =>
+              protection[field.key] && !record.overrides.includes(field.key),
+          )
+          .map((field) => field.key),
+        unprotect: changedProtectionFields
+          .filter(
+            (field) =>
+              !protection[field.key] && record.overrides.includes(field.key),
+          )
+          .map((field) => field.key),
+      };
     }
-    const protection = form.getValues("protected");
-    const protect = editableFields
-      .filter(
-        (field) =>
-          protection[field.key] && !record.overrides.includes(field.key),
-      )
-      .map((field) => field.key);
-    const unprotect = editableFields
-      .filter(
-        (field) =>
-          !protection[field.key] && record.overrides.includes(field.key),
-      )
-      .map((field) => field.key);
+    pendingPatch.current = patch;
     try {
       actionKey.current ??= crypto.randomUUID();
       await update.mutateAsync({
         id: record.id,
         expectedRevision,
-        values: parsed.data,
-        protect,
-        unprotect,
+        ...patch,
         idempotencyKey: actionKey.current,
       });
       actionKey.current = null;
+      pendingPatch.current = null;
       setConflict(null);
       toast.success(`${object.label} saved`);
       onSaved();
@@ -294,7 +319,10 @@ function CrmRecordEditor({
             object={object}
             current={conflict}
             pending={update.isPending}
-            onRetry={() => void save(conflict.revision)}
+            onRetry={() => {
+              if (pendingPatch.current)
+                void save(conflict.revision, pendingPatch.current);
+            }}
           />
         ) : null}
         <RecordFields
@@ -304,6 +332,7 @@ function CrmRecordEditor({
           ownerId={ownerId}
           onAnyChange={() => {
             actionKey.current = null;
+            pendingPatch.current = null;
             setConflict(null);
           }}
         />
