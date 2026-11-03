@@ -104,6 +104,7 @@ function setup(
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
     "../../components/DynamicTypeText": { DynamicTypeText: "Text" },
     "../../components/AgentAvatar": { AgentAvatar: "AgentAvatar" },
+    "../../components/Skeleton": { SkeletonCards: "SkeletonCards" },
     "../../components/settings/SettingsList": {
       ...Object.fromEntries(
         [

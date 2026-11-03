@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { ActivityIndicator, AppState } from "react-native";
+import { AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { z } from "zod";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
-import { useTheme } from "../../theme/ThemeContext";
+import { SkeletonRows } from "../../components/Skeleton";
 
 export const AUTOMATIONS = ["workspace", "automations"] as const;
 export const AUTOMATION_SETTINGS = [...AUTOMATIONS, "settings"] as const;
@@ -31,28 +31,9 @@ export function useAutomationRuntime() {
   return { active: focused && foreground, online: isConnected };
 }
 
-/**
- * Pull to refresh shows its spinner only for the pull itself, so the
- * background polling of these pages never flashes it.
- */
-export function usePullRefresh(refetch: () => Promise<unknown>) {
-  const [refreshing, setRefreshing] = useState(false);
-  return {
-    refreshing,
-    onRefresh: () => {
-      setRefreshing(true);
-      void refetch().finally(() => setRefreshing(false));
-    },
-  };
-}
+export { usePullRefresh } from "../../hooks/usePullRefresh";
 
+/** First load of an automations page: rows in the shape they will take. */
 export function AutomationLoading() {
-  const { colors } = useTheme();
-  return (
-    <ActivityIndicator
-      accessibilityLabel="Loading automations"
-      color={colors.primary}
-      style={{ padding: 24 }}
-    />
-  );
+  return <SkeletonRows rows={3} accessibilityLabel="Loading automations" />;
 }

@@ -29,6 +29,7 @@ import {
 } from "../assistant/assistantDraftStore";
 import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { AgentAvatar } from "../../components/AgentAvatar";
+import { SkeletonCards } from "../../components/Skeleton";
 import {
   SettingsCheckRow,
   SettingsGroup,
@@ -274,7 +275,7 @@ export function AutomationsScreen({
       {!runtime.online && (
         <Notice message="You’re offline. Reconnect to refresh automations." />
       )}
-      {list.isPending && <AutomationLoading />}
+      {list.isPending && <SkeletonCards accessibilityLabel="Loading automations" />}
       {list.error && (
         <AutomationRetry
           error={list.error}

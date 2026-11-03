@@ -44,6 +44,8 @@ export type ThemeColors = {
   segmentSelected: string;
   /** Floating pop-up menus: a step above the grouped rows they open from. */
   menuFill: string;
+  /** Placeholder bars of skeleton loaders, on grouped fills in both themes. */
+  skeleton: string;
   dangerSolidPressed: string;
   primary: string;       // warm violet — identity + interaction only
   primaryDim: string;    // pressed states, hover deep
@@ -148,6 +150,7 @@ export const darkColors: ThemeColors = {
   segmentTrack: "rgba(118, 118, 128, 0.24)",
   segmentSelected: "#5A5A60",
   menuFill: "#303034",
+  skeleton: "rgba(255, 255, 255, 0.10)",
   dangerSolidPressed: "#991B1B",
   // Brand
   primary: "#C6B3FC",
@@ -212,6 +215,7 @@ export const lightColors: ThemeColors = {
   segmentTrack: "rgba(118, 118, 128, 0.12)",
   segmentSelected: "#FFFFFF",
   menuFill: "#FFFFFF",
+  skeleton: "rgba(118, 118, 128, 0.18)",
   dangerSolidPressed: "#991B1B",
   primary: "#7049C6",
   primaryDim: "#6240B0",
