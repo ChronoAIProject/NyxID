@@ -28,7 +28,7 @@ export function GroupedCell({
     <View
       style={[
         styles.cell,
-        { backgroundColor: colors.card },
+        { backgroundColor: colors.groupedFill },
         first && styles.first,
         last && styles.last,
       ]}

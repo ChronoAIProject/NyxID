@@ -21,6 +21,18 @@ function elements(root: Element): Element[] {
   if (typeof root.type === "function") return elements(root.type(root.props));
   // Settings rows carry brand icons and controls outside their children.
   const children = [root.props.children, root.props.leading, root.props.accessory];
+  if (root.type === "SectionList") {
+    children.push(root.props.ListHeaderComponent);
+    if (!root.props.sections.length) children.push(root.props.ListEmptyComponent);
+    for (const section of root.props.sections)
+      children.push(
+        root.props.renderSectionHeader({ section }),
+        section.data.map((item: unknown, index: number) =>
+          root.props.renderItem({ item, index, section }),
+        ),
+        root.props.renderSectionFooter({ section }),
+      );
+  }
   if (root.type === "FlatList") {
     children.push(
       root.props.ListHeaderComponent,
@@ -181,6 +193,7 @@ function setup({
         [
           "ActivityIndicator",
           "FlatList",
+          "SectionList",
           "Pressable",
           "ScrollView",
           "Text",
@@ -266,7 +279,16 @@ function setup({
     queries,
     all,
     back: () => back,
-    list: () => find((item) => item.type === "FlatList").props,
+    list: () => find((item) => item.type === "SectionList").props,
+    added: () =>
+      find((item) => item.type === "SectionList").props.sections.find(
+        (section: { key: string }) => section.key === "added",
+      ).data,
+    discover: () =>
+      find((item) => item.type === "SectionList").props.sections.find(
+        (section: { key: string }) => section.key === "discover",
+      ).data,
+    texts: () => all().map(text).join("\n"),
     control: (label: string) =>
       find(
         (item) =>
@@ -289,6 +311,9 @@ function setup({
   };
 }
 
+const names = (items: readonly { name: string }[]) =>
+  Array.from(items, (item) => item.name);
+
 test("automatic credentials cannot enter the mobile management picker or counts", () => {
   const env = setup({
     connections: [
@@ -298,48 +323,41 @@ test("automatic credentials cannot enter the mobile management picker or counts"
     ],
   });
   try {
-    assert.equal(env.list().data.length, 1);
-    env.control("Added connectors, 1");
-    assert.deepEqual(Array.from(env.list().data[0].manageKeyIds), [dnsPersonal.id]);
-    assert.equal(env.list().data[0].disabled, true);
+    assert.equal(env.added().length, 1);
+    assert.match(env.texts(), /ADDED · 1/);
+    assert.deepEqual(Array.from(env.added()[0].manageKeyIds), [dnsPersonal.id]);
+    assert.equal(env.added()[0].disabled, true);
     env.connector("service:api-cloudflare");
     assert.ok(env.control("Manage Personal Cloudflare"));
     assert.ok(!env.all().some((node) => node.props.accessibilityLabel === "Manage Work Cloudflare"));
     env.connector();
-    env.control("Discover connectors, 1").props.onPress();
-    assert.deepEqual(Array.from(env.list().data, (item: { name: string }) => item.name), ["Slack"]);
+    assert.deepEqual(names(env.discover()), ["Slack"]);
   } finally {
     env.unmount();
   }
 });
 
-test("Connectors defaults to Added and Discover displays only available services", () => {
+test("Connectors is one list: Added first, then Discover with only available services, and no nested selector", () => {
   const env = setup();
   try {
-    assert.equal(env.list().accessibilityLabel, "Added connectors");
+    assert.equal(env.list().accessibilityLabel, "Connectors");
     assert.deepEqual(
       env
         .all()
         .filter((node) => node.type === "ServiceIcon")
         .map((node) => node.props.slug),
-      ["api-github", "api-cloudflare"],
+      ["api-github", "api-cloudflare", "api-slack"],
     );
+    assert.deepEqual(names(env.added()), ["GitHub", "Cloudflare"]);
+    assert.deepEqual(names(env.discover()), ["Slack"]);
+    assert.match(env.texts(), /ADDED · 2[\s\S]*DISCOVER · 1/);
     assert.deepEqual(
-      Array.from(env.list().data, (item: { name: string }) => item.name),
-      ["GitHub", "Cloudflare"],
+      env
+        .all()
+        .filter((item) => item.props.accessibilityRole === "tab")
+        .map(text),
+      ["Connectors", "Skills"],
     );
-    env.control("Discover connectors, 1").props.onPress();
-    assert.equal(env.list().accessibilityLabel, "Discover connectors");
-    assert.equal(
-      env.all().find((node) => node.type === "ServiceIcon")?.props.slug,
-      "api-slack",
-    );
-    assert.deepEqual(
-      Array.from(env.list().data, (item: { name: string }) => item.name),
-      ["Slack"],
-    );
-    env.control("Added connectors, 2").props.onPress();
-    assert.equal(env.list().data.length, 2);
     assert.equal(
       env.calls.some((call) => call.method === "push"),
       false,
@@ -349,26 +367,20 @@ test("Connectors defaults to Added and Discover displays only available services
   }
 });
 
-test("Added and Discover search keep independent inputs and filter their own list", () => {
+test("one search filters both Added and Discover and explains an empty section", () => {
   const env = setup();
   try {
-    env.control("Search added connectors").props.onChangeText("DNS");
-    assert.deepEqual(
-      Array.from(env.list().data, (item: { name: string }) => item.name),
-      ["Cloudflare"],
-    );
-    env.control("Discover connectors, 1").props.onPress();
-    assert.equal(env.control("Search connector catalog").props.value, "");
-    env.control("Search connector catalog").props.onChangeText("no-match");
-    assert.equal(env.list().data.length, 0);
-    env.control("Added connectors, 2").props.onPress();
-    assert.equal(env.control("Search added connectors").props.value, "DNS");
-    assert.equal(env.list().data[0].name, "Cloudflare");
-    env.control("Discover connectors, 1").props.onPress();
-    assert.equal(
-      env.control("Search connector catalog").props.value,
-      "no-match",
-    );
+    env.control("Search connectors").props.onChangeText("DNS");
+    assert.deepEqual(names(env.added()), ["Cloudflare"]);
+    assert.deepEqual(names(env.discover()), []);
+    assert.match(env.texts(), /No available connectors match this search\./);
+    env.control("Search connectors").props.onChangeText("slack");
+    assert.deepEqual(names(env.added()), []);
+    assert.deepEqual(names(env.discover()), ["Slack"]);
+    assert.match(env.texts(), /No added connectors match this search\./);
+    env.control("Clear connector search").props.onPress();
+    assert.equal(env.control("Search connectors").props.value, "");
+    assert.equal(env.added().length, 2);
   } finally {
     env.unmount();
   }
@@ -402,8 +414,7 @@ test("single connections, grouped connections, and catalog services retain their
     env.connector();
     env.harness.flush();
     assert.equal(env.back().defaultRole, "menu");
-    env.control("Discover connectors, 1").props.onPress();
-    env.control("Connect Slack, Available to add").props.onPress();
+    env.control("Connect Slack, OAuth, available to add").props.onPress();
     const available = env.calls
       .filter((call) => call.method === "push")
       .at(-1)!;
@@ -417,13 +428,12 @@ test("single connections, grouped connections, and catalog services retain their
   }
 });
 
-test("an empty Added library offers discovery without automatically connecting a service", () => {
+test("an empty Added library points at Discover without automatically connecting a service", () => {
   const env = setup({ connections: [] });
   try {
-    assert.equal(env.list().data.length, 0);
-    env.control("Discover connectors").props.onPress();
-    assert.equal(env.list().accessibilityLabel, "Discover connectors");
-    assert.equal(env.list().data.length, 3);
+    assert.equal(env.added().length, 0);
+    assert.match(env.texts(), /No connectors added yet\. Add one from Discover below\./);
+    assert.equal(env.discover().length, 3);
     assert.equal(
       env.calls.some((call) => call.method === "push"),
       false,
@@ -443,18 +453,7 @@ test("a failed connections read fails closed with absent or stale cached connect
         error: new Error("Connections unavailable"),
       });
       env.harness.render();
-      const discover = env
-        .all()
-        .find(
-          (item) =>
-            item.props.accessibilityRole === "tab" &&
-            String(item.props.accessibilityLabel).startsWith(
-              "Discover connectors",
-            ),
-        );
-      assert.ok(discover);
-      discover.props.onPress();
-      assert.equal(env.list().data.length, 0);
+      assert.equal(env.discover().length, 0);
       assert.equal(
         env
           .all()
@@ -479,12 +478,11 @@ test("a failed connections read fails closed with absent or stale cached connect
 test("disabled services remain manageable in Added and never appear in Discover", () => {
   const env = setup({ connections: [{ ...personal, is_active: false }] });
   try {
-    assert.equal(env.list().data[0].status, "Disabled");
+    assert.equal(env.added()[0].status, "Disabled");
     env.control("Manage GitHub, Disabled").props.onPress();
     assert.equal(env.calls.filter((call) => call.method === "push").length, 1);
-    env.control("Discover connectors, 2").props.onPress();
     assert.equal(
-      env.list().data.some((item: { name: string }) => item.name === "GitHub"),
+      env.discover().some((item: { name: string }) => item.name === "GitHub"),
       false,
     );
   } finally {
@@ -502,11 +500,11 @@ test("Skills switches to the agent-scoped manager and connector queries pause wh
       true,
     );
     assert.equal(
-      env.all().some((item) => item.type === "FlatList"),
+      env.all().some((item) => item.type === "SectionList"),
       false,
     );
     env.tab("Connectors").props.onPress();
-    assert.equal(env.list().accessibilityLabel, "Added connectors");
+    assert.equal(env.list().accessibilityLabel, "Connectors");
     env.focused(false);
     assert.equal(env.queries.get("plugins")?.enabled, false);
     assert.equal(env.queries.get("catalog")?.enabled, false);
@@ -520,25 +518,26 @@ test("Skills switches to the agent-scoped manager and connector queries pause wh
   }
 });
 
-test("connector rows read as label/value rows: status for Added, auth method for Discover", () => {
+test("connector rows tag their state or sign-in method beside the name, never as a wrapping value", () => {
   const env = setup({
     connections: [personal, { ...dnsPersonal, status: "failed" }],
   });
   try {
     const rows = () => env.all().filter((node) => node.type === "SettingsRow");
     assert.deepEqual(
-      rows().map((row) => [row.props.label, row.props.value, row.props.valueTone]),
+      rows().map((row) => [
+        row.props.label,
+        row.props.badge,
+        row.props.badgeTone,
+        row.props.value,
+      ]),
       [
-        ["GitHub", "Enabled", "default"],
-        ["Cloudflare", "Needs attention", "danger"],
+        ["GitHub", "Enabled", "default", undefined],
+        ["Cloudflare", "Needs attention", "danger", undefined],
+        ["Slack", "OAuth", "default", undefined],
       ],
     );
     assert.equal(rows()[0]!.props.detailLines, 2);
-    env.control("Discover connectors, 1").props.onPress();
-    assert.deepEqual(
-      rows().map((row) => [row.props.label, row.props.value]),
-      [["Slack", "OAuth"]],
-    );
     assert.equal(env.calls.some((call) => call.method === "push"), false);
   } finally {
     env.unmount();

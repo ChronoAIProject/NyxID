@@ -343,11 +343,11 @@ function setup({
   };
 }
 
-test("manager defaults to Added, passes descriptions and exact pin state, and keeps catalog disabled", () => {
+test("manager shows Added and the catalog together, passes descriptions and exact pin state, and debounces search", () => {
   const env = setup();
   try {
     const library = env.library().props;
-    assert.equal(library.tab, "added");
+    assert.equal("tab" in library, false, "no nested Added/Discover selector");
     assert.equal(library.query, "");
     assert.equal(library.agentName, "Nyx Bot");
     assert.equal(library.added.items[0].id, "pin-original");
@@ -358,7 +358,7 @@ test("manager defaults to Added, passes descriptions and exact pin state, and ke
     assert.equal(library.added.items[0].version, "1.0.0");
     assert.equal(library.added.items[0].disabled, false);
     assert.equal(library.added.known, true);
-    assert.equal(env.queries.get("catalog")?.enabled, false);
+    assert.equal(env.queries.get("catalog")?.enabled, true);
     library.onQueryChange("DNS words");
     env.harness.flush();
     assert.equal(env.library().props.query, "DNS words");
@@ -374,33 +374,23 @@ test("manager defaults to Added, passes descriptions and exact pin state, and ke
   }
 });
 
-test("Added and Discover retain separate search inputs and clear only their own scope", (t) => {
+test("one search filters Added locally and drives the debounced catalog search", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const env = setup();
   try {
-    env.library().props.onQueryChange("local DNS");
-    env.harness.flush();
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
-    assert.equal(env.library().props.query, "");
-    assert.equal(env.queries.get("catalog")?.enabled, true);
     env.library().props.onQueryChange("weekly report");
     env.harness.flush();
-    t.mock.timers.tick(300);
-    env.harness.flush();
-    env.library().props.onTabChange("added");
-    env.harness.flush();
-    assert.equal(env.library().props.query, "local DNS");
-    assert.equal(env.queries.get("catalog")?.enabled, false);
-    env.library().props.onQueryChange("");
-    env.harness.flush();
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     assert.equal(env.library().props.query, "weekly report");
+    assert.equal(env.queries.get("catalog")?.enabled, false);
+    t.mock.timers.tick(300);
+    env.harness.flush();
+    assert.equal(env.queries.get("catalog")?.enabled, true);
+    assert.equal(env.queries.get("catalog")?.queryKey[4], "weekly report");
     env.library().props.onQueryChange("");
     env.harness.flush();
     t.mock.timers.tick(300);
     env.harness.flush();
+    assert.equal(env.library().props.query, "");
     assert.equal(env.queries.get("catalog")?.queryKey[4], "");
     assert.equal(env.queries.get("catalog")?.enabled, true);
   } finally {
@@ -412,8 +402,6 @@ test("Discover debounces by 300ms, hides stale results, resets paging and calls 
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const env = setup();
   try {
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     env.library().props.onPageChange(3);
     env.harness.flush();
     env.library().props.onQueryChange("  week  ");
@@ -448,11 +436,9 @@ test("Discover debounces by 300ms, hides stale results, resets paging and calls 
   }
 });
 
-test("pagination is part of the server query and catalog requests stop when unfocused or on Added", () => {
+test("pagination is part of the server query and catalog requests stop when unfocused", () => {
   const env = setup();
   try {
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     env.library().props.onPageChange(2);
     env.harness.flush();
     assert.equal(env.queries.get("catalog")?.queryKey[5], 2);
@@ -463,9 +449,6 @@ test("pagination is part of the server query and catalog requests stop when unfo
     assert.equal(env.queries.get(first.id)?.enabled, false);
     env.focused(true);
     assert.equal(env.queries.get("catalog")?.enabled, true);
-    env.library().props.onTabChange("added");
-    env.harness.flush();
-    assert.equal(env.queries.get("catalog")?.enabled, false);
   } finally {
     env.unmount();
   }
@@ -498,8 +481,6 @@ test("manager reports query failure and unknown data separately from an empty li
     assert.ok(env.library().props.added.error);
     assert.equal(env.library().props.added.items.length, 0);
     env.library().props.added.onRetry();
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     assert.equal(env.library().props.catalog.known, false);
     assert.ok(env.library().props.catalog.error);
     env.library().props.catalog.onRetry();
@@ -545,7 +526,6 @@ test("skills agent sheet applies a new keyed manager and Cancel preserves the cu
   try {
     assert.equal(explicit.library().props.agentName, "DNS helper");
     assert.equal(explicit.library().props.query, "");
-    assert.equal(explicit.library().props.tab, "added");
     assert.equal(explicit.library().props.added.items.length, 0);
     assert.equal(explicit.queries.get(second.id)?.enabled, true);
   } finally {
@@ -609,8 +589,6 @@ test("skills choices exclude unavailable agents and discard drafts when route, o
 test("catalog review opens original identity without mutating and exact attach retains revision plus sibling pins", async () => {
   const env = setup();
   try {
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     env
       .library()
       .props.onOpenSkill(

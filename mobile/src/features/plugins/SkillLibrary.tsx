@@ -7,7 +7,6 @@ import {
   View,
 } from "react-native";
 import { BookOpen, Search, X } from "lucide-react-native";
-import { SegmentControl } from "../../components/SegmentControl";
 import {
   SettingsGroup,
   SettingsRow,
@@ -17,7 +16,6 @@ import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import type { CatalogSkill } from "./pluginSkillsTypes";
 
-export type SkillLibraryTab = "added" | "discover";
 export type AddedSkillItem = CatalogSkill & {
   version: string;
   disabled: boolean;
@@ -47,8 +45,6 @@ function searchable(value: string) {
 
 export function SkillLibrary({
   agentName,
-  tab,
-  onTabChange,
   query,
   onQueryChange,
   added,
@@ -59,8 +55,6 @@ export function SkillLibrary({
   onOpenSkill,
 }: {
   agentName: string;
-  tab: SkillLibraryTab;
-  onTabChange: (tab: SkillLibraryTab) => void;
   query: string;
   onQueryChange: (query: string) => void;
   added: ListState<AddedSkillItem>;
@@ -75,37 +69,16 @@ export function SkillLibrary({
   const filtered = added.items.filter((skill) =>
     searchable(`${skill.name} ${skill.description}`).includes(needle),
   );
-  const list = tab === "added" ? added : catalog;
   const addedTitle = `Added to this agent${added.known ? ` · ${added.items.length} of 16` : ""}`;
+  // One page: the agent's skills, then the catalog. A single search filters
+  // the added list and searches the catalog, so there is no nested selector.
   return (
     <View style={styles.stack}>
-      <SegmentControl
-        segments={[
-          {
-            id: "added",
-            label: `Added${added.known ? ` · ${added.items.length}` : ""}`,
-            accessibilityLabel: "Added skills",
-          },
-          {
-            id: "discover",
-            label: "Discover",
-            accessibilityLabel: "Discover skills",
-          },
-        ]}
-        activeIndex={tab === "added" ? 0 : 1}
-        onPress={(index) => {
-          Keyboard.dismiss();
-          onTabChange(index === 0 ? "added" : "discover");
-        }}
-        style={styles.tabs}
-      />
-      <View style={[styles.search, { backgroundColor: colors.card }]}>
+      <View style={[styles.search, { backgroundColor: colors.segmentTrack }]}>
         <Search size={17} color={colors.textMuted} accessible={false} />
         <TextInput
-          accessibilityLabel={
-            tab === "added" ? "Search added skills" : "Search skill catalog"
-          }
-          placeholder={tab === "added" ? "Search added skills" : "Search catalog"}
+          accessibilityLabel="Search skills"
+          placeholder="Search skills"
           placeholderTextColor={colors.textMuted}
           selectionColor={colors.primary}
           value={query}
@@ -128,118 +101,119 @@ export function SkillLibrary({
           </Pressable>
         )}
       </View>
-      {list.error && (
+      {added.error && (
         <>
-          <Notice tone="error" message={list.error} />
+          <Notice tone="error" message={added.error} />
           <SettingsGroup inset={false}>
             <SettingsRow
-              label={tab === "added" ? "Reload skills" : "Retry skill catalog"}
+              label="Reload skills"
               tone="action"
-              onPress={list.onRetry}
+              onPress={added.onRetry}
             />
           </SettingsGroup>
         </>
       )}
-      {list.loading && (
+      {added.loading && (
         <ActivityIndicator
-          accessibilityLabel={
-            tab === "added" ? "Loading added skills" : "Searching skill catalog"
-          }
+          accessibilityLabel="Loading added skills"
           color={colors.primary}
         />
       )}
-      {tab === "added" ? (
-        filtered.length ? (
+      {filtered.length ? (
+        <SettingsGroup
+          title={addedTitle}
+          footer="Open a skill to view its instructions or manage its version."
+        >
+          {filtered.map((item) => (
+            <SkillListRow
+              key={item.id}
+              item={item}
+              onPress={() => onOpenSkill(item.id, item.name, item.description)}
+            />
+          ))}
+        </SettingsGroup>
+      ) : (
+        added.known &&
+        !added.loading &&
+        !added.error && (
           <SettingsGroup
             title={addedTitle}
-            footer="Open a skill to view its instructions or manage its version."
+            footer={
+              needle
+                ? "No added skill matches. Results from the catalog are below."
+                : "Add a skill from Discover below to teach this agent a workflow. Skills do not grant service access."
+            }
           >
-            {filtered.map((item) => (
-              <SkillListRow
-                key={item.id}
-                item={item}
-                onPress={() => onOpenSkill(item.id, item.name, item.description)}
-              />
-            ))}
+            <SettingsRow
+              icon={BookOpen}
+              label={needle ? "No matching added skills" : "No skills added yet"}
+            />
           </SettingsGroup>
-        ) : (
-          added.known &&
-          !added.loading &&
-          !added.error && (
-            <SettingsGroup
-              title={addedTitle}
-              footer={
-                needle
-                  ? "Try a different name or description, or search the catalog."
-                  : "Add a skill to teach this agent a workflow. Skills do not grant service access."
-              }
-            >
-              <SettingsRow
-                icon={BookOpen}
-                label={needle ? "No matching added skills" : "No skills added yet"}
-              />
-              <SettingsRow
-                label="Discover skills"
-                tone="action"
-                onPress={() => {
-                  Keyboard.dismiss();
-                  onTabChange("discover");
-                }}
-              />
-            </SettingsGroup>
-          )
         )
-      ) : (
+      )}
+      {catalog.error && (
         <>
-          {catalog.items.length ? (
-            <SettingsGroup
-              title="Skill catalog"
-              footer={`Find a skill for ${agentName}. Review its version before adding.`}
-            >
-              {catalog.items.map((item) => (
-                <SkillListRow
-                  key={item.id}
-                  item={item}
-                  attached={added.items.some((pin) => pin.id === item.id)}
-                  onPress={() =>
-                    onOpenSkill(item.id, item.name, item.description)
-                  }
-                />
-              ))}
-            </SettingsGroup>
-          ) : (
-            catalog.known &&
-            !catalog.loading &&
-            !catalog.error && (
-              <SettingsGroup
-                title="Skill catalog"
-                footer="Try another keyword. Only skills available through your Ornn access appear here."
-              >
-                <SettingsRow icon={Search} label="No skills found" />
-              </SettingsGroup>
-            )
-          )}
-          {catalog.known && totalPages > 1 && (
-            <SettingsGroup title={`Page ${page} / ${totalPages}`} inset={false}>
-              <SettingsRow
-                label="Previous"
-                tone="action"
-                accessibilityLabel="Previous"
-                accessibilityHint="Shows the previous page of results"
-                disabled={catalog.loading || page <= 1}
-                onPress={() => onPageChange(page - 1)}
-              />
-              <SettingsRow
-                label="Next"
-                tone="action"
-                accessibilityLabel="Next"
-                accessibilityHint="Shows the next page of results"
-                disabled={catalog.loading || page >= totalPages}
-                onPress={() => onPageChange(page + 1)}
-              />
-            </SettingsGroup>
-          )}
+          <Notice tone="error" message={catalog.error} />
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              label="Retry skill catalog"
+              tone="action"
+              onPress={catalog.onRetry}
+            />
+          </SettingsGroup>
         </>
+      )}
+      {catalog.items.length ? (
+        <SettingsGroup
+          title="Discover"
+          footer={`Find a skill for ${agentName}. Review its version before adding.`}
+        >
+          {catalog.items.map((item) => (
+            <SkillListRow
+              key={item.id}
+              item={item}
+              attached={added.items.some((pin) => pin.id === item.id)}
+              onPress={() => onOpenSkill(item.id, item.name, item.description)}
+            />
+          ))}
+        </SettingsGroup>
+      ) : (
+        catalog.known &&
+        !catalog.loading &&
+        !catalog.error && (
+          <SettingsGroup
+            title="Discover"
+            footer="Try another keyword. Only skills available through your Ornn access appear here."
+          >
+            <SettingsRow icon={Search} label="No skills found" />
+          </SettingsGroup>
+        )
+      )}
+      {catalog.loading && (
+        <ActivityIndicator
+          accessibilityLabel="Searching skill catalog"
+          color={colors.primary}
+        />
+      )}
+      {catalog.known && totalPages > 1 && (
+        <SettingsGroup title={`Page ${page} / ${totalPages}`} inset={false}>
+          <SettingsRow
+            label="Previous"
+            tone="action"
+            accessibilityLabel="Previous"
+            accessibilityHint="Shows the previous page of results"
+            disabled={catalog.loading || page <= 1}
+            onPress={() => onPageChange(page - 1)}
+          />
+          <SettingsRow
+            label="Next"
+            tone="action"
+            accessibilityLabel="Next"
+            accessibilityHint="Shows the next page of results"
+            disabled={catalog.loading || page >= totalPages}
+            onPress={() => onPageChange(page + 1)}
+          />
+        </SettingsGroup>
       )}
     </View>
   );
@@ -290,7 +264,6 @@ function SkillListRow({
 
 const styles = StyleSheet.create({
   stack: { gap: spacing.lg },
-  tabs: { marginBottom: 0 },
   search: {
     flexDirection: "row",
     alignItems: "center",

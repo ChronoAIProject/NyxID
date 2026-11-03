@@ -1,4 +1,17 @@
 import { useEffect, useState } from "react";
+import { Pressable, StyleSheet, TextInput, View } from "react-native";
+import {
+  Bell,
+  CalendarClock,
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  Repeat,
+  Search,
+  Sparkles,
+  Webhook,
+  X,
+} from "lucide-react-native";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type {
@@ -8,17 +21,21 @@ import type {
 import { useOpenWorkspaceChat } from "../../app/WorkspaceHeader";
 import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { AgentAvatar } from "../../components/AgentAvatar";
-import { SegmentControl } from "../../components/SegmentControl";
 import {
   SettingsCheckRow,
   SettingsGroup,
   SettingsPage,
   SettingsRow,
-  SettingsTextField,
+  usePopupMenu,
 } from "../../components/settings/SettingsList";
+import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { Notice } from "../../components/workspace/WorkspaceUI";
 import { agentsApi } from "../../lib/api/agentsApi";
 import { automationsApi } from "../../lib/api/automationsApi";
+import type { AssistantAgent } from "../agents/agentContracts";
+import { radius, spacing, typeScale, fonts } from "../../theme/designTokens";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
 import type {
   Automation,
   AutomationRun,
@@ -106,14 +123,27 @@ function AutomationRetry({
   );
 }
 
+const STATUS_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "active", label: "Active" },
+  { value: "disabled", label: "Paused" },
+] as const;
+
 export function AutomationsScreen({
   navigation,
   route,
 }: WorkspaceScreenProps<"Automations">) {
+  const { colors } = useTheme();
   const runtime = useAutomationRuntime();
+  const openChat = useOpenWorkspaceChat();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<(typeof STATUSES)[number]>("all");
   const [agentId, setAgentId] = useState(route.params?.agentId ?? "");
+  const statusMenu = usePopupMenu({
+    options: STATUS_OPTIONS,
+    value: status,
+    onChange: setStatus,
+  });
   const list = useQuery({
     queryKey: [...AUTOMATIONS, "list"],
     queryFn: ({ signal }) => automationsApi.list(signal),
@@ -143,34 +173,65 @@ export function AutomationsScreen({
     : agent
       ? agent.display_name || agent.name
       : "Selected agent";
+  const statusLabel =
+    STATUS_OPTIONS.find((option) => option.value === status)?.label ?? "All";
   return (
     <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
-      <SegmentControl
-        accessibilityLabel="Status"
-        segments={[{ label: "All" }, { label: "Active" }, { label: "Paused" }]}
-        activeIndex={STATUSES.indexOf(status)}
-        onPress={(index) => setStatus(STATUSES[index] ?? "all")}
+      <AskNyxBotCard
+        colors={colors}
+        onPress={() => openChat(newAssistantChatParams())}
       />
-      <SettingsGroup inset={false}>
-        <SettingsTextField
-          accessibilityLabel="Search automations"
-          placeholder="Search by name or agent"
-          value={search}
-          onChangeText={setSearch}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="search"
-        />
-        <SettingsRow
-          label="Agent"
-          value={agentLabel}
-          onPress={() =>
-            navigation.push("AutomationAgentFilter", {
-              agentId: agentId || undefined,
-            })
-          }
-        />
-      </SettingsGroup>
+      <View style={styles.filters}>
+        <View style={[styles.search, { backgroundColor: colors.segmentTrack }]}>
+          <Search size={17} color={colors.textMuted} accessible={false} />
+          <TextInput
+            accessibilityLabel="Search automations"
+            placeholder="Search by name or agent"
+            placeholderTextColor={colors.textMuted}
+            selectionColor={colors.primary}
+            value={search}
+            onChangeText={setSearch}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+            style={[styles.searchInput, { color: colors.textPrimary }]}
+          />
+          {search ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Clear search"
+              onPress={() => setSearch("")}
+              style={styles.clear}
+            >
+              <X size={16} color={colors.textMuted} />
+            </Pressable>
+          ) : null}
+        </View>
+        <View style={styles.chips}>
+          <View ref={statusMenu.anchor} collapsable={false}>
+            <FilterChip
+              colors={colors}
+              label={status === "all" ? "Status" : statusLabel}
+              accessibilityLabel={`Status, ${statusLabel}`}
+              active={status !== "all"}
+              menu
+              onPress={statusMenu.open}
+            />
+          </View>
+          <FilterChip
+            colors={colors}
+            label={agentLabel}
+            accessibilityLabel={`Agent, ${agentLabel}`}
+            active={!!agentId}
+            onPress={() =>
+              navigation.push("AutomationAgentFilter", {
+                agentId: agentId || undefined,
+              })
+            }
+          />
+        </View>
+        {statusMenu.popup}
+      </View>
       {!runtime.online && (
         <Notice message="You’re offline. Reconnect to refresh automations." />
       )}
@@ -183,49 +244,250 @@ export function AutomationsScreen({
         />
       )}
       {list.data && (
-        <SettingsGroup
-          inset={false}
-          footer={`Tasks that run for you on a schedule or when an event arrives. Times shown in ${zone}.`}
-        >
-          {rows.map((row) => {
-            const value = automationStatusLabel(row.status);
-            const detail = automationListDetail(
-              row,
-              automationTarget(row, agents.data?.agents),
-              zone,
-            );
-            return (
-              <SettingsRow
-                key={row.id}
-                label={row.label}
-                detail={detail}
-                value={value}
-                accessibilityLabel={`${row.label}, ${value}. ${detail}`}
-                accessibilityHint="Opens this automation"
-                onPress={() =>
-                  navigation.push("AutomationDetail", { id: row.id })
-                }
-              />
-            );
-          })}
-          {!rows.length && (
-            <SettingsRow
-              label={
-                list.data.triggers.length
-                  ? "No matching automations"
-                  : "No automations yet"
+        <View style={styles.cards}>
+          {rows.map((row) => (
+            <AutomationCard
+              key={row.id}
+              row={row}
+              colors={colors}
+              zone={zone}
+              agent={
+                row.delivery.type === "assistant"
+                  ? agents.data?.agents.find(
+                      (item) =>
+                        row.delivery.type === "assistant" &&
+                        item.id === row.delivery.agent_id,
+                    )
+                  : undefined
               }
-              detail={
-                list.data.triggers.length
-                  ? "Try another search, agent or status."
-                  : "Your configured automations will appear here."
-              }
+              target={automationTarget(row, agents.data?.agents)}
+              onPress={() => navigation.push("AutomationDetail", { id: row.id })}
             />
+          ))}
+          {!rows.length && (
+            <View style={[styles.card, { backgroundColor: colors.groupedFill }]}>
+              <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>
+                {list.data.triggers.length
+                  ? "No matching automations"
+                  : "No automations yet"}
+              </Text>
+              <Text style={[styles.cardMeta, { color: colors.textMuted }]}>
+                {list.data.triggers.length
+                  ? "Try another search, agent or status."
+                  : "Ask NyxBot to run something for you on a schedule or when an event arrives."}
+              </Text>
+            </View>
           )}
-        </SettingsGroup>
+          <Text style={[styles.footnote, { color: colors.textMuted }]}>
+            {`Times shown in ${zone}.`}
+          </Text>
+        </View>
       )}
-      <AutomationGuidance />
     </SettingsPage>
+  );
+}
+
+/** Creation happens in chat, so the way in sits first on the page. */
+function AskNyxBotCard({
+  colors,
+  onPress,
+}: {
+  colors: ThemeColors;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Ask NyxBot"
+      accessibilityHint="Opens a new NyxBot chat to create, run or change an automation"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.ask,
+        {
+          backgroundColor: colors.primaryTone.bg,
+          borderColor: colors.primaryTone.border,
+        },
+        pressed && { opacity: 0.7 },
+      ]}
+    >
+      <View style={[styles.askIcon, { backgroundColor: colors.primary }]}>
+        <Sparkles size={18} color={colors.onPrimary} />
+      </View>
+      <View style={styles.askText}>
+        <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>
+          Ask NyxBot
+        </Text>
+        <Text style={[styles.cardMeta, { color: colors.textSecondary }]}>
+          Describe what should run and when. NyxBot creates, runs or changes
+          automations for you.
+        </Text>
+      </View>
+      <ChevronRight size={18} color={colors.textMuted} />
+    </Pressable>
+  );
+}
+
+function FilterChip({
+  colors,
+  label,
+  accessibilityLabel,
+  active,
+  menu = false,
+  onPress,
+}: {
+  colors: ThemeColors;
+  label: string;
+  accessibilityLabel: string;
+  active: boolean;
+  menu?: boolean;
+  onPress: () => void;
+}) {
+  const Glyph = menu ? ChevronDown : ChevronRight;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityHint={menu ? "Opens a menu" : "Opens the agent list"}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.chip,
+        {
+          backgroundColor: active ? colors.primaryTone.bg : colors.segmentTrack,
+          borderColor: active ? colors.primaryTone.border : "transparent",
+        },
+        pressed && { opacity: 0.7 },
+      ]}
+    >
+      <Text
+        numberOfLines={1}
+        style={[
+          styles.chipLabel,
+          { color: active ? colors.primaryOnTint : colors.textPrimary },
+        ]}
+      >
+        {label}
+      </Text>
+      <Glyph
+        size={14}
+        color={active ? colors.primaryOnTint : colors.textSecondary}
+      />
+    </Pressable>
+  );
+}
+
+/** One automation as a card: who runs it, its state, when it runs next. */
+function AutomationCard({
+  row,
+  colors,
+  zone,
+  agent,
+  target,
+  onPress,
+}: {
+  row: Automation;
+  colors: ThemeColors;
+  zone: string;
+  agent?: AssistantAgent;
+  target: string;
+  onPress: () => void;
+}) {
+  const status = automationStatusLabel(row.status);
+  const active = row.status === "active";
+  // The page footnote names the zone once; cards drop the repeat.
+  const schedule = automationScheduleSummary(row).replace(` (${zone})`, "");
+  const next =
+    row.source === "schedule"
+      ? active
+        ? `Next ${formatAutomationTime(row.next_run_at, zone)}`
+        : "No new scheduled runs while paused"
+      : undefined;
+  const pause = automationPauseReason(row.pause_reason);
+  const detail = automationListDetail(row, target, zone);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${row.label}, ${status}. ${detail}`}
+      accessibilityHint="Opens this automation"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.card,
+        { backgroundColor: colors.groupedFill },
+        pressed && { backgroundColor: colors.navActive },
+      ]}
+    >
+      <View style={styles.cardHead}>
+        {agent ? (
+          <AgentAvatar agent={agent} size="sm" />
+        ) : (
+          <View style={[styles.cardIcon, { backgroundColor: colors.segmentTrack }]}>
+            {row.delivery.type === "notification" ? (
+              <Bell size={15} color={colors.textSecondary} />
+            ) : (
+              <Webhook size={15} color={colors.textSecondary} />
+            )}
+          </View>
+        )}
+        <View style={styles.cardHeadText}>
+          <Text
+            numberOfLines={2}
+            style={[styles.cardTitle, { color: colors.textPrimary }]}
+          >
+            {row.label}
+          </Text>
+          <Text
+            numberOfLines={1}
+            style={[styles.cardMeta, { color: colors.textMuted }]}
+          >
+            {`${target} · ${automationSourceLabel(row)}`}
+          </Text>
+        </View>
+        <View
+          style={[
+            styles.status,
+            { backgroundColor: active ? colors.successSoft : colors.segmentTrack },
+          ]}
+        >
+          <View
+            style={[
+              styles.statusDot,
+              { backgroundColor: active ? colors.success : colors.textMuted },
+            ]}
+          />
+          <Text
+            numberOfLines={1}
+            style={[
+              styles.statusLabel,
+              { color: active ? colors.success : colors.textSecondary },
+            ]}
+          >
+            {status}
+          </Text>
+        </View>
+      </View>
+      <View style={[styles.cardRule, { backgroundColor: colors.borderSoft }]} />
+      <View style={styles.cardLine}>
+        <Repeat size={15} color={colors.textMuted} />
+        <Text style={[styles.cardLineText, { color: colors.textSecondary }]}>
+          {schedule}
+        </Text>
+      </View>
+      {next ? (
+        <View style={styles.cardLine}>
+          <CalendarClock size={15} color={colors.textMuted} />
+          <Text style={[styles.cardLineText, { color: colors.textSecondary }]}>
+            {next}
+          </Text>
+        </View>
+      ) : null}
+      {pause ? (
+        <View style={styles.cardLine}>
+          <CircleAlert size={15} color={colors.warning} />
+          <Text style={[styles.cardLineText, { color: colors.warning }]}>
+            {pause}
+          </Text>
+        </View>
+      ) : null}
+    </Pressable>
   );
 }
 
@@ -417,12 +679,13 @@ export function AutomationDetailScreen({
 }
 
 /** Ask NyxBot: the one way to create, run or change an automation. */
+/** Details are read-only here; changes go through NyxBot. */
 function AutomationGuidance() {
   const openChat = useOpenWorkspaceChat();
   return (
     <SettingsGroup
       inset={false}
-      footer="To create, run or change automations, ask NyxBot."
+      footer="To run or change this automation, ask NyxBot."
     >
       <SettingsRow
         tone="action"
@@ -633,3 +896,91 @@ export function AutomationRunDetailScreen({
     </SettingsPage>
   );
 }
+
+const styles = StyleSheet.create({
+  filters: { gap: spacing.md },
+  search: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm - 2,
+    borderRadius: radius.md + 2,
+    paddingLeft: spacing.md,
+    paddingRight: spacing.xs,
+  },
+  searchInput: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 40,
+    paddingVertical: spacing.sm,
+    ...typeScale.label,
+  },
+  clear: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
+  chip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+    minHeight: 36,
+    maxWidth: 260,
+    paddingHorizontal: spacing.md + 2,
+    borderRadius: 18,
+    borderWidth: 1,
+  },
+  chipLabel: { ...typeScale.small, fontSize: 15, lineHeight: 20, flexShrink: 1 },
+  cards: { gap: spacing.md },
+  card: {
+    borderRadius: radius.lg,
+    padding: spacing.lg + 2,
+    gap: spacing.sm,
+  },
+  cardHead: { flexDirection: "row", alignItems: "center", gap: spacing.md },
+  cardIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cardHeadText: { flex: 1, minWidth: 0, gap: 2 },
+  cardTitle: {
+    ...typeScale.label,
+    fontFamily: fonts.bodySemi,
+    fontWeight: "600",
+  },
+  cardMeta: { ...typeScale.small },
+  cardRule: { height: StyleSheet.hairlineWidth, marginVertical: spacing.xs },
+  cardLine: { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm },
+  cardLineText: { ...typeScale.small, flex: 1, minWidth: 0 },
+  status: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderRadius: 10,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  statusDot: { width: 7, height: 7, borderRadius: 4 },
+  statusLabel: { ...typeScale.small, fontSize: 13, lineHeight: 17 },
+  footnote: { ...typeScale.small, paddingHorizontal: spacing.xxl },
+  ask: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    padding: spacing.lg + 2,
+  },
+  askIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  askText: { flex: 1, minWidth: 0, gap: 2 },
+});

@@ -26,7 +26,7 @@ test("delivery rows keep live push and Telegram switches and stack under large t
     [{ push_enabled: true }, { telegram_enabled: true }],
   );
   env.resize(402, 3.12);
-  const body = env.parent(env.parent(env.text("Push Notifications")));
+  const body = env.parent(env.parent(env.parent(env.text("Push Notifications"))));
   assert.equal(style(body).flexDirection, "column");
   assert.equal(style(body).alignItems, "flex-start");
   assert.equal(style(body).maxWidth, "100%");

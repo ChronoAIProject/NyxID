@@ -5,6 +5,7 @@ import { hookHarness } from "../assistant/assistantHookTestHarness";
 import * as presentation from "./automationPresentation";
 import * as time from "./automationTime";
 import { automationSchema } from "./automationContracts";
+import { lightColors } from "../../theme/mobileTheme";
 
 const id = "12345678-1234-4123-8123-123456789abc";
 const runId = "22345678-1234-4123-8123-123456789abc";
@@ -69,6 +70,7 @@ function setup(
   }: { zone?: string; params?: Record<string, unknown> } = {},
 ) {
   const routes: any[] = [];
+  const menus: any[] = [];
   const pops: any[] = [];
   const chats: any[] = [];
   const queries: any[] = [];
@@ -89,17 +91,30 @@ function setup(
       jsxs: (type: any, props: any) => ({ type, props }),
       Fragment: "Fragment",
     },
+    "react-native": {
+      Pressable: "Pressable",
+      StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
+      TextInput: "TextInput",
+      View: "View",
+    },
+    "lucide-react-native": new Proxy({}, { get: (_target, name) => name }),
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
+    "../../components/DynamicTypeText": { DynamicTypeText: "Text" },
     "../../components/AgentAvatar": { AgentAvatar: "AgentAvatar" },
-    "../../components/SegmentControl": { SegmentControl: "SegmentControl" },
-    "../../components/settings/SettingsList": Object.fromEntries(
-      [
-        "SettingsCheckRow",
-        "SettingsGroup",
-        "SettingsPage",
-        "SettingsRow",
-        "SettingsTextField",
-      ].map((name) => [name, name]),
-    ),
+    "../../components/settings/SettingsList": {
+      ...Object.fromEntries(
+        [
+          "SettingsCheckRow",
+          "SettingsGroup",
+          "SettingsPage",
+          "SettingsRow",
+        ].map((name) => [name, name]),
+      ),
+      usePopupMenu: (options: any) => {
+        menus.push(options);
+        return { anchor: { current: null }, open: () => {}, popup: null };
+      },
+    },
     "../../app/WorkspaceHeader": {
       useOpenWorkspaceChat: () => (params: any) => chats.push(params),
     },
@@ -201,6 +216,7 @@ function setup(
         item.props.value,
         item.props.message,
         item.props.footer,
+        ...(item.type === "Text" ? [item.props.children].flat(Infinity) : []),
       ])
       .filter((value) => typeof value === "string")
       .join("\n");
@@ -213,6 +229,7 @@ function setup(
     routes,
     pops,
     chats,
+    menus,
     queries,
     cursor,
     nextPages: () => nextPages,
@@ -220,31 +237,44 @@ function setup(
   };
 }
 
-test("the list is grouped rows with status filter, agent filter row and search, opening details read-only", () => {
+/** An automation card, found by the label it starts its spoken summary with. */
+function card(env: ReturnType<typeof setup>, label: string) {
+  return env
+    .all()
+    .find(
+      (item) =>
+        item.type === "Pressable" &&
+        String(item.props.accessibilityLabel ?? "").startsWith(`${label},`),
+    );
+}
+
+test("the list is cards with a status menu, an agent chip and search, opening details read-only", () => {
   const env = setup("AutomationsScreen", { params: {} });
   try {
-    const row = env.control("Morning release check");
-    assert.equal(row.type, "SettingsRow");
-    assert.equal(row.props.value, "Active");
-    assert.match(row.props.detail, /Researcher · Scheduled/);
+    const row = card(env, "Morning release check")!;
+    assert.ok(row);
+    assert.match(row.props.accessibilityLabel, /^Morning release check, Active\./);
+    assert.match(row.props.accessibilityLabel, /Researcher · Scheduled/);
     row.props.onPress();
     assert.deepEqual(env.routes[0], {
       name: "AutomationDetail",
       params: { id },
     });
-    const status = env.all().find((item) => item.type === "SegmentControl")!;
+    // Status is one chip opening the shared in-app menu, not a segmented bar.
+    assert.ok(env.all().every((item) => item.type !== "SegmentControl"));
+    const status = env.menus.at(-1);
     assert.deepEqual(
-      Array.from(status.props.segments, (segment: any) => segment.label),
+      Array.from(status.options, (option: any) => option.label),
       ["All", "Active", "Paused"],
     );
-    status.props.onPress(2);
+    status.onChange("disabled");
     env.harness.flush();
-    assert.equal(env.control("Webhook reminder").props.value, "Paused");
-    assert.throws(() => env.control("Morning release check"));
-    status.props.onPress(0);
+    assert.match(card(env, "Webhook reminder")!.props.accessibilityLabel, /Paused/);
+    assert.equal(card(env, "Morning release check"), undefined);
+    assert.equal(env.control("Status, Paused").props.active, true);
+    env.menus.at(-1).onChange("all");
     env.harness.flush();
-    const agent = env.control("Agent");
-    assert.equal(agent.props.value, "All agents");
+    const agent = env.control("Agent, All agents");
     agent.props.onPress();
     assert.deepEqual(env.routes[1], {
       name: "AutomationAgentFilter",
@@ -265,15 +295,15 @@ test("the list is grouped rows with status filter, agent filter row and search, 
   }
 });
 
-test("an agent passed in the route filters the list and names the filter row", () => {
+test("an agent passed in the route filters the list and names the agent chip", () => {
   const env = setup("AutomationsScreen", {
     params: { agentId: "researcher" },
   });
   try {
-    assert.equal(env.control("Agent").props.value, "Researcher");
-    assert.ok(env.control("Morning release check"));
-    assert.throws(() => env.control("Webhook reminder"));
-    env.control("Agent").props.onPress();
+    const agent = env.control("Agent, Researcher");
+    assert.ok(card(env, "Morning release check"));
+    assert.equal(card(env, "Webhook reminder"), undefined);
+    agent.props.onPress();
     assert.deepEqual(env.routes[0].params, { agentId: "researcher" });
   } finally {
     env.harness.unmount();
@@ -353,26 +383,19 @@ test("automation next, latest and history times use the owner timezone with one 
     assert.equal(text.split(`Times shown in ${zone}`).length - 1, 1, page);
     assert.ok(text.includes(time.formatAutomationTime(at, zone)), page);
     if (page === "AutomationsScreen")
-      assert.ok(text.includes(`Next: ${time.formatAutomationTime(at, zone)}`));
+      assert.ok(text.includes(`Next ${time.formatAutomationTime(at, zone)}`));
     if (page === "AutomationsScreen" || page === "AutomationDetailScreen")
       assert.match(text, /Weekdays at 8:00 AM \(UTC\)/);
     env.harness.unmount();
   }
 });
 
-test("NyxBot guidance starts an empty normal NyxBot chat with a fresh draft identity", () => {
+test("Ask NyxBot leads the list and starts an empty normal NyxBot chat with a fresh draft identity", () => {
   const env = setup("AutomationsScreen", { params: {} });
   try {
-    const guidance = env
-      .all()
-      .find((item) => item.type.name === "AutomationGuidance")!;
-    const group = guidance.type(guidance.props);
-    assert.equal(
-      group.props.footer,
-      "To create, run or change automations, ask NyxBot.",
-    );
     const ask = env.control("Ask NyxBot");
-    assert.equal(ask.props.tone, "action");
+    assert.equal(ask.type, "Pressable");
+    assert.match(ask.props.accessibilityHint, /create, run or change/);
     ask.props.onPress();
     ask.props.onPress();
     for (const chat of env.chats) {

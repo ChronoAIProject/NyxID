@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode, Ref } from "react";
 import {
   ActivityIndicator,
@@ -99,7 +99,7 @@ export function SettingsGroup({
           {title.toUpperCase()}
         </Text>
       ) : null}
-      <View style={[styles.card, { backgroundColor: colors.card }]}>
+      <View style={[styles.card, { backgroundColor: colors.groupedFill }]}>
         {rows.map((row, index) => (
           <View key={row.key ?? index}>
             {index > 0 ? (
@@ -138,6 +138,8 @@ export function SettingsRow({
   icon: Icon,
   leading,
   label,
+  badge,
+  badgeTone = "default",
   detail,
   detailLines,
   value,
@@ -160,6 +162,9 @@ export function SettingsRow({
   /** Custom leading content (e.g. a colour swatch) in the icon slot. */
   leading?: ReactNode;
   label: string;
+  /** A short tag beside the label (e.g. "OAuth"); it never wraps. */
+  badge?: string;
+  badgeTone?: "default" | "warning" | "danger";
   detail?: string;
   /** Clamp a long detail line (catalog descriptions) to this many lines. */
   detailLines?: number;
@@ -220,17 +225,53 @@ export function SettingsRow({
         ]}
       >
         <View style={styles.labels}>
-          <Text
-            selectable={selectable}
-            style={[
-              styles.label,
-              mono && { fontFamily: fonts.mono },
-              { color: disabled ? colors.textMuted : labelColor },
-              centered && styles.centeredLabel,
-            ]}
-          >
-            {label}
-          </Text>
+          <View style={styles.labelLine}>
+            <Text
+              selectable={selectable}
+              style={[
+                styles.label,
+                styles.labelText,
+                mono && { fontFamily: fonts.mono },
+                { color: disabled ? colors.textMuted : labelColor },
+                centered && styles.centeredLabel,
+              ]}
+            >
+              {label}
+            </Text>
+            {badge ? (
+              <View
+                style={[
+                  styles.badge,
+                  {
+                    backgroundColor:
+                      badgeTone === "danger"
+                        ? colors.dangerSoftBg
+                        : badgeTone === "warning"
+                          ? colors.warningSoft
+                          : colors.segmentTrack,
+                  },
+                ]}
+              >
+                <Text
+                  numberOfLines={1}
+                  maxFontSizeMultiplier={1.8}
+                  style={[
+                    styles.badgeText,
+                    {
+                      color:
+                        badgeTone === "danger"
+                          ? colors.danger
+                          : badgeTone === "warning"
+                            ? colors.warning
+                            : colors.textSecondary,
+                    },
+                  ]}
+                >
+                  {badge}
+                </Text>
+              </View>
+            ) : null}
+          </View>
           {detail ? (
             <Text
               numberOfLines={detailLines}
@@ -240,23 +281,31 @@ export function SettingsRow({
             </Text>
           ) : null}
         </View>
-        {value ? (
-          <View style={styles.valueWrap}>
-            <Text
-              style={[
-                styles.value,
-                {
-                  color:
-                    valueTone === "danger" ? colors.danger : colors.textSecondary,
-                  textAlign: stacked ? "left" : "right",
-                },
-              ]}
-            >
-              {value}
-            </Text>
+        {value || accessory ? (
+          // Value and control stay together at the trailing edge; a short
+          // value is never squeezed into wrapping by a long label.
+          <View
+            style={[styles.trailing, stacked && !centered && styles.trailingStacked]}
+          >
+            {value ? (
+              <Text
+                style={[
+                  styles.value,
+                  {
+                    color:
+                      valueTone === "danger"
+                        ? colors.danger
+                        : colors.textSecondary,
+                    textAlign: stacked ? "left" : "right",
+                  },
+                ]}
+              >
+                {value}
+              </Text>
+            ) : null}
+            {accessory}
           </View>
         ) : null}
-        {accessory}
       </View>
       {chevron ? <ChevronRight size={18} color={colors.textMuted} /> : null}
     </>
@@ -276,7 +325,8 @@ export function SettingsRow({
     <Pressable
       accessibilityRole={accessibilityRole ?? "button"}
       accessibilityLabel={
-        accessibilityLabel ?? (value ? `${label}, ${value}` : label)
+        accessibilityLabel ??
+        [label, badge, value].filter(Boolean).join(", ")
       }
       accessibilityHint={
         accessibilityHint ?? (chevron ? `Opens ${label}` : undefined)
@@ -357,11 +407,167 @@ export function SettingsCheckRow({
   );
 }
 
+export type MenuOption<Value extends string> = {
+  value: Value;
+  label: string;
+  detail?: string;
+};
+
+// Room kept clear of the status bar and home indicator.
+const MENU_MARGIN = 56;
+const MENU_MIN_WIDTH = 240;
+
 /**
- * A choice among a few options as one row: the label, the current value and a
- * pop-up chevron. Tapping opens a small in-app menu over the row (like an iOS
- * pop-up button) with a checkmark on the current option; tapping outside
- * closes it. Use this instead of spreading options across several rows.
+ * The in-app pop-up menu (an iOS pop-up button's menu): a small floating list
+ * anchored under its trigger, right-aligned with it, flipped above it near the
+ * bottom of the screen, scrolling when the options do not fit. The current
+ * option carries a checkmark; tapping outside closes it.
+ */
+export function usePopupMenu<Value extends string>({
+  options,
+  value,
+  onChange,
+  disabled = false,
+}: {
+  options: readonly MenuOption<Value>[];
+  value: Value;
+  onChange: (value: Value) => void;
+  disabled?: boolean;
+}) {
+  const { colors } = useTheme();
+  const { width: windowWidth, height } = useWindowDimensions();
+  const anchor = useRef<View>(null);
+  const [menu, setMenu] = useState<{
+    top: number;
+    left?: number;
+    right?: number;
+    maxHeight: number;
+  } | null>(null);
+  // A menu never outlives the authority to choose from it.
+  useEffect(() => {
+    if (disabled) setMenu(null);
+  }, [disabled]);
+  const open = () => {
+    if (disabled) return;
+    const estimate =
+      options.reduce((sum, option) => sum + (option.detail ? 68 : 48), 0) + 8;
+    // Align with the trigger's nearer edge so the menu stays on screen.
+    const place = (
+      y: number,
+      rowHeight: number,
+      side: { left: number } | { right: number },
+    ) => {
+      const below = y + rowHeight + 6;
+      const roomBelow = height - MENU_MARGIN - below;
+      const roomAbove = y - 6 - MENU_MARGIN;
+      const flip = estimate > roomBelow && roomAbove > roomBelow;
+      const maxHeight = Math.max(120, Math.min(estimate, flip ? roomAbove : roomBelow));
+      setMenu({ top: flip ? y - 6 - maxHeight : below, maxHeight, ...side });
+    };
+    if (!anchor.current?.measureInWindow) {
+      place(height / 3, 0, { right: 16 });
+      return;
+    }
+    anchor.current.measureInWindow((x, y, triggerWidth, triggerHeight) =>
+      place(
+        y,
+        triggerHeight,
+        x + triggerWidth / 2 < windowWidth / 2
+          ? { left: Math.max(8, Math.min(x, windowWidth - MENU_MIN_WIDTH - 8)) }
+          : { right: Math.max(8, windowWidth - (x + triggerWidth) + 8) },
+      ),
+    );
+  };
+  const close = () => setMenu(null);
+  const popup = (
+    <Modal transparent visible={!!menu} animationType="fade" onRequestClose={close}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Close menu"
+        style={styles.menuBackdrop}
+        onPress={close}
+      />
+      {menu ? (
+        <View
+          accessibilityRole="menu"
+          accessibilityViewIsModal
+          style={[
+            styles.menu,
+            {
+              top: menu.top,
+              left: menu.left,
+              right: menu.right,
+              maxHeight: menu.maxHeight,
+              backgroundColor: colors.menuFill,
+              borderColor: colors.borderSoft,
+              shadowColor: "#000",
+            },
+          ]}
+        >
+          <ScrollView
+            bounces={false}
+            showsVerticalScrollIndicator={false}
+            style={styles.menuClip}
+          >
+            {options.map((option, index) => {
+              const selected = option.value === value;
+              return (
+                <Pressable
+                  key={option.value}
+                  accessibilityRole="menuitem"
+                  accessibilityState={{ selected, checked: selected }}
+                  accessibilityLabel={
+                    option.detail ? `${option.label}. ${option.detail}` : option.label
+                  }
+                  onPress={() => {
+                    close();
+                    if (!disabled && !selected) onChange(option.value);
+                  }}
+                  style={({ pressed }) => [
+                    styles.menuItem,
+                    index > 0 && {
+                      borderTopWidth: StyleSheet.hairlineWidth,
+                      borderTopColor: colors.borderSoft,
+                    },
+                    pressed && { backgroundColor: colors.navActive },
+                  ]}
+                >
+                  <View style={styles.menuCheck}>
+                    {selected ? (
+                      <Check size={17} color={colors.textPrimary} strokeWidth={2.5} />
+                    ) : null}
+                  </View>
+                  <View style={styles.menuText}>
+                    <Text
+                      style={[
+                        styles.label,
+                        { color: colors.textPrimary },
+                        selected && styles.menuSelected,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                    {option.detail ? (
+                      <Text style={[styles.detail, { color: colors.textMuted }]}>
+                        {option.detail}
+                      </Text>
+                    ) : null}
+                  </View>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
+      ) : null}
+    </Modal>
+  );
+  return { anchor, open, popup, isOpen: !!menu };
+}
+
+/**
+ * A choice among a few options as one row: the label, then the current value
+ * with a pop-up chevron beside it at the trailing edge. Tapping opens the
+ * shared in-app menu. Use this instead of spreading options across rows.
  */
 export function SettingsMenuRow<Value extends string>({
   icon,
@@ -376,38 +582,15 @@ export function SettingsMenuRow<Value extends string>({
   label: string;
   detail?: string;
   value: Value;
-  options: readonly { value: Value; label: string; detail?: string }[];
+  options: readonly MenuOption<Value>[];
   onChange: (value: Value) => void;
   disabled?: boolean;
 }) {
   const { colors } = useTheme();
-  const { width: windowWidth, height } = useWindowDimensions();
-  const anchor = useRef<View>(null);
-  const [menu, setMenu] = useState<{ top: number; right: number } | null>(
-    null,
-  );
+  const menu = usePopupMenu({ options, value, onChange, disabled });
   const current = options.find((option) => option.value === value);
-  const open = () => {
-    if (disabled) return;
-    if (!anchor.current?.measureInWindow) {
-      setMenu({ top: height / 3, right: 16 });
-      return;
-    }
-    anchor.current.measureInWindow((x, y, rowWidth, rowHeight) => {
-      // Open below the row, right-aligned with it; flip above near the bottom.
-      const below = y + rowHeight + 4;
-      const estimate = options.length * 48 + 8;
-      setMenu({
-        top:
-          below + estimate > height - 24
-            ? Math.max(24, y - estimate - 4)
-            : below,
-        right: Math.max(8, windowWidth - (x + rowWidth) + 8),
-      });
-    });
-  };
   return (
-    <View ref={anchor} collapsable={false}>
+    <View ref={menu.anchor} collapsable={false}>
       <SettingsRow
         icon={icon}
         label={label}
@@ -415,76 +598,15 @@ export function SettingsMenuRow<Value extends string>({
         value={current?.label ?? value}
         disabled={disabled}
         accessibilityHint={`Opens a menu to choose ${label.toLowerCase()}`}
-        accessory={<ChevronsUpDown size={16} color={colors.textMuted} />}
-        onPress={open}
+        accessory={
+          <ChevronsUpDown
+            size={15}
+            color={disabled ? colors.textMuted : colors.textSecondary}
+          />
+        }
+        onPress={menu.open}
       />
-      <Modal
-        transparent
-        visible={!!menu}
-        animationType="fade"
-        onRequestClose={() => setMenu(null)}
-      >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Close menu"
-          style={styles.menuBackdrop}
-          onPress={() => setMenu(null)}
-        />
-        {menu ? (
-          <View
-            accessibilityRole="menu"
-            style={[
-              styles.menu,
-              {
-                top: menu.top,
-                right: menu.right,
-                backgroundColor: colors.card,
-                shadowColor: "#000",
-              },
-            ]}
-          >
-            {options.map((option, index) => {
-              const selected = option.value === value;
-              return (
-                <Pressable
-                  key={option.value}
-                  accessibilityRole="menuitem"
-                  accessibilityState={{ selected, checked: selected }}
-                  accessibilityLabel={option.label}
-                  onPress={() => {
-                    setMenu(null);
-                    if (!selected) onChange(option.value);
-                  }}
-                  style={({ pressed }) => [
-                    styles.menuItem,
-                    index > 0 && {
-                      borderTopWidth: StyleSheet.hairlineWidth,
-                      borderTopColor: colors.borderSoft,
-                    },
-                    pressed && { backgroundColor: colors.navActive },
-                  ]}
-                >
-                  <View style={styles.menuCheck}>
-                    {selected ? (
-                      <Check size={16} color={colors.textPrimary} strokeWidth={2.5} />
-                    ) : null}
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.label, { color: colors.textPrimary }]}>
-                      {option.label}
-                    </Text>
-                    {option.detail ? (
-                      <Text style={[styles.detail, { color: colors.textMuted }]}>
-                        {option.detail}
-                      </Text>
-                    ) : null}
-                  </View>
-                </Pressable>
-              );
-            })}
-          </View>
-        ) : null}
-      </Modal>
+      {menu.popup}
     </View>
   );
 }
@@ -539,10 +661,10 @@ const styles = StyleSheet.create({
   menuBackdrop: { ...StyleSheet.absoluteFillObject },
   menu: {
     position: "absolute",
-    minWidth: 220,
+    minWidth: MENU_MIN_WIDTH,
     maxWidth: 300,
     borderRadius: 14,
-    paddingVertical: 4,
+    borderWidth: StyleSheet.hairlineWidth,
     shadowOpacity: 0.18,
     shadowRadius: 24,
     shadowOffset: { width: 0, height: 8 },
@@ -551,12 +673,16 @@ const styles = StyleSheet.create({
   menuItem: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    minHeight: 44,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    gap: 10,
+    minHeight: 48,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
   },
+  // Clipping lives inside so the outer surface keeps its iOS shadow.
+  menuClip: { borderRadius: 14, overflow: "hidden" },
   menuCheck: { width: 18, alignItems: "center" },
+  menuText: { flex: 1, minWidth: 0, gap: 2 },
+  menuSelected: { fontFamily: fonts.bodySemi, fontWeight: "600" },
   headerActionLabel: { ...typeScale.label, fontFamily: fonts.bodySemi, fontWeight: "600" },
   pageContent: {
     paddingTop: spacing.sm,
@@ -605,9 +731,30 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   labels: { flexShrink: 1, minWidth: 0, maxWidth: "100%", gap: 2 },
+  labelLine: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    columnGap: spacing.sm,
+    rowGap: 2,
+  },
   label: { ...typeScale.label },
+  labelText: { flexShrink: 1 },
+  badge: {
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  badgeText: { ...typeScale.small, fontSize: 10, lineHeight: 13 },
   centeredLabel: { textAlign: "center" },
   detail: { ...typeScale.small },
-  valueWrap: { minWidth: 0, maxWidth: "100%", flexShrink: 1 },
-  value: { ...typeScale.description },
+  trailing: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs + 2,
+    flexShrink: 0,
+    maxWidth: "55%",
+  },
+  trailingStacked: { maxWidth: "100%" },
+  value: { ...typeScale.description, flexShrink: 1 },
 });

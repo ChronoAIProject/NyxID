@@ -233,7 +233,7 @@ export function setupSettingsScreen(
   /** The pressable or plain container of a settings row, found by its label. */
   const row = (label: string) => {
     let node: Element = text(label);
-    for (let depth = 0; depth < 4; depth += 1) {
+    for (let depth = 0; depth < 6; depth += 1) {
       node = parent(node);
       if (style(node).minHeight === 52) return node;
     }

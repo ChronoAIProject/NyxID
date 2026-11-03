@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
-  FlatList,
+  SectionList,
   Keyboard,
   Pressable,
   ScrollView,
@@ -35,7 +35,6 @@ import {
 import { PluginSkills } from "./PluginSkills";
 
 type Tab = "connectors" | "skills";
-type ConnectorTab = "added" | "discover";
 const ROOT = ["workspace", "services"] as const;
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : "Could not load plugins. Try again.";
@@ -52,9 +51,7 @@ export function PluginsScreen({
     AppState.currentState === "active",
   );
   const [tab, setTab] = useState<Tab>(initialTab);
-  const [connectorTab, setConnectorTab] = useState<ConnectorTab>("added");
-  const [queries, setQueries] = useState({ added: "", discover: "" });
-  const query = queries[connectorTab];
+  const [query, setQuery] = useState("");
   const manageId = connectorId;
   const connections = useQuery({
     queryKey: [...ROOT, "plugins"],
@@ -186,19 +183,35 @@ export function PluginsScreen({
       </WorkspacePage>
     );
 
-  const rows = connectorTab === "added" ? added : available;
-  const emptyMessage =
-    connectorTab === "added"
-      ? connections.isError
+  const searching = !!query.trim();
+  const addedCount = connections.data ? items.added.length : undefined;
+  const discoverCount =
+    catalogKnown && catalog.data ? items.available.length : undefined;
+  // One list: what you have added, then the catalog to add from. A single
+  // search filters both, so there is no second selector to switch between.
+  const sections = [
+    {
+      key: "added",
+      title: `Added${addedCount === undefined ? "" : ` · ${addedCount}`}`,
+      data: added,
+      empty: connections.isError
         ? "Your connections could not be loaded."
-        : query.trim()
+        : searching
           ? "No added connectors match this search."
-          : "No connectors added yet. Discover a service to connect."
-      : catalog.isError || !catalogKnown
-        ? "The available catalog could not be confirmed. Retry loading plugins."
-        : query.trim()
-          ? "No available connectors match this search."
-          : "All available connectors are already added.";
+          : "No connectors added yet. Add one from Discover below.",
+    },
+    {
+      key: "discover",
+      title: `Discover${discoverCount === undefined ? "" : ` · ${discoverCount}`}`,
+      data: available,
+      empty:
+        catalog.isError || !catalogKnown
+          ? "The available catalog could not be confirmed. Retry loading plugins."
+          : searching
+            ? "No available connectors match this search."
+            : "All available connectors are already added.",
+    },
+  ];
   return (
     <WorkspacePage title="Plugins" showHeading={false} scroll={false}>
       <SegmentControl
@@ -222,37 +235,8 @@ export function PluginsScreen({
         </ScrollView>
       ) : (
         <View style={styles.connectorBody}>
-          <SegmentControl
-            segments={(["added", "discover"] as const).map((value) => {
-              const count =
-                value === "added"
-                  ? connections.data && items.added.length
-                  : catalogKnown && catalog.data && items.available.length;
-              const label = value === "added" ? "Added" : "Discover";
-              return {
-                id: value,
-                label: `${label}${typeof count === "number" ? ` · ${count}` : ""}`,
-                accessibilityLabel: `${label} connectors${typeof count === "number" ? `, ${count}` : ""}`,
-              };
-            })}
-            activeIndex={connectorTab === "added" ? 0 : 1}
-            onPress={(index) => {
-              Keyboard.dismiss();
-              setConnectorTab(index === 0 ? "added" : "discover");
-            }}
-            style={styles.tabs}
-          />
           <View style={styles.searchRow}>
-            <PluginSearch
-              value={query}
-              discover={connectorTab === "discover"}
-              onChange={(value) =>
-                setQueries((previous) => ({
-                  ...previous,
-                  [connectorTab]: value,
-                }))
-              }
-            />
+            <PluginSearch value={query} onChange={setQuery} />
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Refresh plugins"
@@ -268,23 +252,36 @@ export function PluginsScreen({
               )}
             </Pressable>
           </View>
-          <FlatList
-            key={connectorTab}
+          <SectionList
             style={styles.body}
             contentContainerStyle={styles.listContent}
-            accessibilityLabel={
-              connectorTab === "added"
-                ? "Added connectors"
-                : "Discover connectors"
-            }
-            data={rows}
+            accessibilityLabel="Connectors"
+            sections={loading ? [] : sections}
             keyExtractor={(item) => item.id}
-            renderItem={({ item, index }) => (
+            stickySectionHeadersEnabled={false}
+            renderSectionHeader={({ section }) => (
+              <Text
+                accessibilityRole="header"
+                style={[styles.sectionTitle, { color: colors.textMuted }]}
+              >
+                {section.title.toUpperCase()}
+              </Text>
+            )}
+            renderSectionFooter={({ section }) =>
+              section.data.length ? (
+                <View style={styles.sectionGap} />
+              ) : (
+                <Text style={[styles.empty, { color: colors.textMuted }]}>
+                  {section.empty}
+                </Text>
+              )
+            }
+            renderItem={({ item, index, section }) => (
               <View
                 style={[
-                  { backgroundColor: colors.card },
+                  { backgroundColor: colors.groupedFill },
                   index === 0 && styles.firstRow,
-                  index === rows.length - 1 && styles.lastRow,
+                  index === section.data.length - 1 && styles.lastRow,
                 ]}
               >
                 <ConnectorRow item={item} onPress={() => openConnector(item)} />
@@ -293,7 +290,7 @@ export function PluginsScreen({
             ItemSeparatorComponent={RowSeparator}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
-            initialNumToRender={12}
+            initialNumToRender={14}
             refreshing={refreshing}
             onRefresh={refresh}
             ListHeaderComponent={
@@ -321,22 +318,7 @@ export function PluginsScreen({
                     accessibilityLabel="Loading plugins"
                   />
                 </View>
-              ) : connectorTab === "added" && !connections.isError ? (
-                <SettingsGroup inset={false} footer={emptyMessage}>
-                  <SettingsRow
-                    label="Discover connectors"
-                    tone="action"
-                    onPress={() => {
-                      Keyboard.dismiss();
-                      setConnectorTab("discover");
-                    }}
-                  />
-                </SettingsGroup>
-              ) : (
-                <Text style={[styles.empty, { color: colors.textMuted }]}>
-                  {emptyMessage}
-                </Text>
-              )
+              ) : null
             }
           />
         </View>
@@ -360,23 +342,19 @@ export function AgentSkillsScreen({ agentId }: { agentId: string }) {
 function PluginSearch({
   value,
   onChange,
-  discover,
 }: {
   value: string;
   onChange: (value: string) => void;
-  discover: boolean;
 }) {
   const { colors } = useTheme();
   return (
-    <View style={[styles.search, { backgroundColor: colors.card }]}>
+    <View style={[styles.search, { backgroundColor: colors.segmentTrack }]}>
       <Search size={17} color={colors.textMuted} accessible={false} />
       <TextInput
-        accessibilityLabel={
-          discover ? "Search connector catalog" : "Search added connectors"
-        }
+        accessibilityLabel="Search connectors"
         value={value}
         onChangeText={onChange}
-        placeholder={discover ? "Search catalog" : "Search added connectors"}
+        placeholder="Search connectors"
         placeholderTextColor={colors.textMuted}
         selectionColor={colors.primary}
         autoCapitalize="none"
@@ -403,7 +381,7 @@ function PluginSearch({
 function RowSeparator() {
   const { colors } = useTheme();
   return (
-    <View style={{ backgroundColor: colors.card }}>
+    <View style={{ backgroundColor: colors.groupedFill }}>
       <View
         style={[styles.separator, { backgroundColor: colors.borderSoft }]}
       />
@@ -414,7 +392,7 @@ function RowSeparator() {
 const sentence = (value: string) =>
   value.charAt(0).toUpperCase() + value.slice(1);
 
-// Discover rows show how the service authenticates, as the Web catalog does.
+// Discover rows tag how the service authenticates, beside its name.
 const authLabel = (meta: string) =>
   meta === "oauth" ? "OAuth" : meta === "api key" ? "API key" : sentence(meta);
 
@@ -440,9 +418,19 @@ function ConnectorRow({
       label={item.name}
       detail={item.added ? item.summary : item.description}
       detailLines={2}
-      value={item.added ? item.status : authLabel(item.meta)}
-      valueTone={item.added && item.statusTone === "error" ? "danger" : "default"}
-      accessibilityLabel={`${item.added ? "Manage" : "Connect"} ${item.name}, ${item.added ? item.status : "Available to add"}`}
+      // Added rows tag their state, catalog rows their sign-in method; both
+      // sit beside the name so neither squeezes the description.
+      badge={item.added ? item.status : authLabel(item.meta)}
+      badgeTone={
+        !item.added
+          ? "default"
+          : item.statusTone === "error"
+            ? "danger"
+            : item.statusTone === "warning"
+              ? "warning"
+              : "default"
+      }
+      accessibilityLabel={`${item.added ? "Manage" : "Connect"} ${item.name}, ${item.added ? item.status : `${authLabel(item.meta)}, available to add`}`}
       accessibilityHint={item.added ? item.summary : item.description}
       onPress={onPress}
     />
@@ -495,11 +483,18 @@ const styles = StyleSheet.create({
     marginLeft: spacing.xxl + 30 + spacing.lg,
   },
   listHeader: { gap: spacing.lg, paddingBottom: spacing.lg },
+  sectionTitle: {
+    ...typeScale.small,
+    letterSpacing: 0.6,
+    paddingHorizontal: spacing.xxl,
+    paddingBottom: spacing.sm,
+  },
+  sectionGap: { height: spacing.huge },
   loading: { padding: spacing.xxl },
   empty: {
     ...typeScale.small,
     paddingHorizontal: spacing.xxl,
-    paddingTop: spacing.sm,
+    paddingBottom: spacing.huge,
   },
   clearSearch: {
     minWidth: 44,

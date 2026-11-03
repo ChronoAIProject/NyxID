@@ -127,7 +127,8 @@ test("deep links to a Settings area open its sub-page above the menu", () => {
 
 test("menu rows and identity reflow under large text without suppressing scaling", () => {
   const env = setup();
-  const body = (label: string) => env.parent(env.parent(env.text(label)));
+  const body = (label: string) =>
+    env.parent(env.parent(env.parent(env.text(label))));
   assert.equal(style(body("Notifications")).flexDirection, "row");
   for (const [width, fontScale] of [
     [402, 3.12],

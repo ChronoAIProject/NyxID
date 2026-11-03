@@ -39,6 +39,11 @@ export type ThemeColors = {
   dangerSolid: string;
   /** Inset-grouped list fill that stands apart from the page in both themes. */
   groupedFill: string;
+  /** iOS segmented control: the track and the raised selected segment. */
+  segmentTrack: string;
+  segmentSelected: string;
+  /** Floating pop-up menus: a step above the grouped rows they open from. */
+  menuFill: string;
   dangerSolidPressed: string;
   primary: string;       // warm violet — identity + interaction only
   primaryDim: string;    // pressed states, hover deep
@@ -140,6 +145,9 @@ export const darkColors: ThemeColors = {
   dangerSoftBg: "rgba(248, 113, 113, 0.10)",
   dangerSolid: DANGER_LIGHT,
   groupedFill: "#222225",
+  segmentTrack: "rgba(118, 118, 128, 0.24)",
+  segmentSelected: "#5A5A60",
+  menuFill: "#303034",
   dangerSolidPressed: "#991B1B",
   // Brand
   primary: "#C6B3FC",
@@ -201,6 +209,9 @@ export const lightColors: ThemeColors = {
   dangerSoftBg: "rgba(220, 38, 38, 0.06)",
   dangerSolid: DANGER_LIGHT,
   groupedFill: "#F2F2F4",
+  segmentTrack: "rgba(118, 118, 128, 0.12)",
+  segmentSelected: "#FFFFFF",
+  menuFill: "#FFFFFF",
   dangerSolidPressed: "#991B1B",
   primary: "#7049C6",
   primaryDim: "#6240B0",
@@ -260,6 +271,8 @@ export const lightSheetColors: ThemeColors = {
   bg: "#F4F4F5",
   card: "#FFFFFF",
   cardSoft: "#FFFFFF",
+  // The drawer page is already grey, so its groups are the white cards.
+  groupedFill: "#FFFFFF",
 };
 
 /** @deprecated Use `useTheme()` from ThemeContext instead. */

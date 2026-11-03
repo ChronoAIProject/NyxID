@@ -36,7 +36,7 @@ import {
   useWorkspaceBack,
 } from "../../app/WorkspaceHeader";
 import { newAssistantChatParams } from "../../app/assistantChatParams";
-import { SkillLibrary, type SkillLibraryTab } from "./SkillLibrary";
+import { SkillLibrary } from "./SkillLibrary";
 import {
   assertSkillRevision,
   buildSkillSelection,
@@ -246,8 +246,6 @@ function AgentSkillsManager({
   const { colors } = useTheme();
   const client = useQueryClient();
   const focused = useIsFocused();
-  const [libraryTab, setLibraryTab] = useState<SkillLibraryTab>("added");
-  const [addedQuery, setAddedQuery] = useState("");
   const [catalogInput, setCatalogInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -287,7 +285,7 @@ function AgentSkillsManager({
   const catalog = useQuery({
     queryKey: [...ROOT, "catalog", searchQuery, page],
     queryFn: ({ signal }) => api.search(searchQuery, page, signal),
-    enabled: focused && libraryTab === "discover" && !waitingForQuery,
+    enabled: focused && !waitingForQuery,
     retry: false,
   });
   const versions = useQuery({
@@ -422,12 +420,8 @@ function AgentSkillsManager({
       {!skillPage && (
         <SkillLibrary
           agentName={titleOf(agent)}
-          tab={libraryTab}
-          onTabChange={setLibraryTab}
-          query={libraryTab === "added" ? addedQuery : catalogInput}
-          onQueryChange={
-            libraryTab === "added" ? setAddedQuery : setCatalogInput
-          }
+          query={catalogInput}
+          onQueryChange={setCatalogInput}
           added={{
             items: pins.map((item) => ({
               id: item.skill_id,

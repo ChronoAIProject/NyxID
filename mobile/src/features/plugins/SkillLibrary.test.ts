@@ -147,13 +147,11 @@ function setup(overrides: Record<string, unknown> = {}) {
     harness.mount(() =>
       source.SkillLibrary({
         agentName: "Research agent",
-        tab: "added",
         query: "",
         added: addedState,
         catalog: catalogState,
         page: 1,
         totalPages: 1,
-        onTabChange: record("tab"),
         onQueryChange: record("query"),
         onPageChange: record("page"),
         onOpenSkill: record("open"),
@@ -175,6 +173,19 @@ function setup(overrides: Record<string, unknown> = {}) {
       elements(tree).filter(
         (item) => item.props.accessibilityHint === "View skill details",
       ),
+    // Added pins speak their exact version; catalog rows never do.
+    addedRows: () =>
+      elements(tree).filter(
+        (item) =>
+          item.props.accessibilityHint === "View skill details" &&
+          String(item.props.accessibilityLabel).includes(", version "),
+      ),
+    catalogRows: () =>
+      elements(tree).filter(
+        (item) =>
+          item.props.accessibilityHint === "View skill details" &&
+          !String(item.props.accessibilityLabel).includes(", version "),
+      ),
     control: (label: string) =>
       find(
         (item) =>
@@ -186,25 +197,19 @@ function setup(overrides: Record<string, unknown> = {}) {
 
 test("Added gives readable names, descriptions and exact package versions with separate enabled state", () => {
   const env = setup();
-  assert.match(env.text(), /Added to this agent/);
-  assert.match(env.text(), /Added · 2/);
-  assert.match(env.text(), /2 of 16/);
+  assert.match(env.text(), /Added to this agent · 2 of 16/);
   assert.match(env.text(), /Cloudflare dns helper/);
   assert.match(env.text(), /Safely review and update DNS records/);
   assert.match(env.text(), /Weekly report/);
-  assert.equal(env.rows().length, 2);
+  assert.equal(env.addedRows().length, 2);
   assert.deepEqual(
-    env.rows().map((row) => row.props.value),
+    env.addedRows().map((row) => row.props.value),
     ["2026.10-exact", "1.0.3 · Disabled"],
   );
-  assert.equal(
-    env.control("Added skills").props.accessibilityState.selected,
-    true,
-  );
-  assert.equal(
-    env.control("Discover skills").props.accessibilityState.selected,
-    false,
-  );
+  // Added and Discover share one page; there is no nested selector.
+  assert.throws(() => env.control("Added skills"));
+  assert.throws(() => env.control("Discover skills"));
+  assert.match(env.text(), /Added to this agent[\s\S]*Discover/);
 });
 
 test("Added searches names, descriptions and slug words using spaces, case and repeated whitespace", () => {
@@ -215,66 +220,57 @@ test("Added searches names, descriptions and slug words using spaces, case and r
     "review and update dns",
   ]) {
     const env = setup({ query });
-    assert.equal(env.rows().length, 1, query);
+    assert.equal(env.addedRows().length, 1, query);
     assert.match(
-      env.rows()[0]!.props.accessibilityLabel,
+      env.addedRows()[0]!.props.accessibilityLabel,
       /^cloudflare-dns-helper,/,
     );
-    assert.match(env.text(), /Added · 2/);
     assert.match(env.text(), /2 of 16/);
   }
   assert.match(
-    setup({ query: "weekly report" }).rows()[0]!.props.accessibilityLabel,
+    setup({ query: "weekly report" }).addedRows()[0]!.props.accessibilityLabel,
     /^weekly_report,/,
   );
   assert.match(
-    setup({ query: "sales figures" }).rows()[0]!.props.accessibilityLabel,
+    setup({ query: "sales figures" }).addedRows()[0]!.props.accessibilityLabel,
     /^weekly_report,/,
   );
 });
 
-test("clear search and tabs expose their actual scope without attaching or changing any skill", () => {
-  const added = setup({ query: "DNS" });
-  added.control("Clear skill search").props.onPress();
-  added.control("Discover skills").props.onPress();
-  assert.deepEqual(added.calls, [
-    { kind: "query", args: [""] },
-    { kind: "keyboard", args: [] },
-    { kind: "tab", args: ["discover"] },
-  ]);
-  const discover = setup({ tab: "discover", query: "cloud" });
-  const input = discover.control("Search skill catalog");
+test("one search field filters Added and searches the catalog without attaching or changing any skill", () => {
+  const env = setup({ query: "cloud" });
+  const input = env.control("Search skills");
   assert.equal(input.props.value, "cloud");
   assert.equal(input.props.maxLength, 200);
   input.props.onChangeText("another");
-  discover.control("Added skills").props.onPress();
-  assert.deepEqual(discover.calls, [
+  env.control("Clear skill search").props.onPress();
+  assert.deepEqual(env.calls, [
     { kind: "query", args: ["another"] },
-    { kind: "keyboard", args: [] },
-    { kind: "tab", args: ["added"] },
+    { kind: "query", args: [""] },
   ]);
-  assert.throws(() => discover.control("Search added skills"));
+  assert.throws(() => env.control("Search added skills"));
+  assert.throws(() => env.control("Search skill catalog"));
 });
 
 test("catalog opens read-only review with the original opaque id and exact name, never the display label", () => {
-  const env = setup({ tab: "discover", query: "keyword" });
+  const env = setup({ query: "keyword" });
   assert.equal(
-    env.rows().length,
+    env.catalogRows().length,
     2,
     "catalog results are server-filtered, not filtered a second time by Added search",
   );
   assert.match(env.text(), /Find a skill for Research agent/);
   assert.match(
-    env.rows()[0]!.props.accessibilityLabel,
+    env.catalogRows()[0]!.props.accessibilityLabel,
     /^weekly_report, Added$/,
   );
   assert.match(
-    env.rows()[1]!.props.accessibilityLabel,
+    env.catalogRows()[1]!.props.accessibilityLabel,
     /^Document Expert, View versions$/,
   );
-  assert.match(textContent(env.rows()[0]!), /Weekly report/);
-  env.rows()[0]!.props.onPress();
-  env.rows()[1]!.props.onPress();
+  assert.match(textContent(env.catalogRows()[0]!), /Weekly report/);
+  env.catalogRows()[0]!.props.onPress();
+  env.catalogRows()[1]!.props.onPress();
   assert.deepEqual(env.calls, [
     {
       kind: "open",
@@ -326,7 +322,7 @@ test("initial loading and unknown state never claim no skills or show a false kn
   assert.equal(added.hasText("No skills added yet"), false);
   assert.equal(added.hasText("Added · 0"), false);
   assert.equal(added.hasText("0 of 16"), false);
-  const discover = setup({ tab: "discover", catalog: state });
+  const discover = setup({ catalog: state });
   discover.control("Searching skill catalog");
   assert.equal(discover.hasText("No skills found"), false);
 });
@@ -347,7 +343,6 @@ test("failed queries keep their own retry and never masquerade as successful emp
   assert.equal(added.hasText("No skills added yet"), false);
   added.control("Reload skills").props.onPress();
   const discover = setup({
-    tab: "discover",
     catalog: {
       items: [],
       known: true,
@@ -367,20 +362,12 @@ test("empty Added and local search no-match explain the next action independentl
   });
   assert.match(added.text(), /No skills added yet/);
   assert.match(added.text(), /Skills do not grant service access/);
-  const discover = elements(added.tree).find(
-    (item) =>
-      item.type === "SettingsRow" && item.props.label === "Discover skills",
-  )!;
-  discover.props.onPress();
-  assert.deepEqual(added.calls, [
-    { kind: "keyboard", args: [] },
-    { kind: "tab", args: ["discover"] },
-  ]);
+  assert.match(added.text(), /Add a skill from Discover below/);
+  assert.throws(() => added.control("Discover skills"));
   const noMatch = setup({ query: "no such workflow" });
   assert.match(noMatch.text(), /No matching added skills/);
   assert.equal(noMatch.hasText("No skills added yet"), false);
   const catalogEmpty = setup({
-    tab: "discover",
     catalog: { items: [], known: true, loading: false, onRetry: () => {} },
   });
   assert.match(catalogEmpty.text(), /No skills found/);
@@ -391,7 +378,7 @@ test("empty Added and local search no-match explain the next action independentl
 });
 
 test("catalog pagination has explicit boundaries, busy state and no Added pagination", () => {
-  const env = setup({ tab: "discover", page: 2, totalPages: 4 });
+  const env = setup({ page: 2, totalPages: 4 });
   assert.match(env.text(), /2 \/ 4/);
   env.control("Previous").props.onPress();
   env.control("Next").props.onPress();
@@ -400,17 +387,16 @@ test("catalog pagination has explicit boundaries, busy state and no Added pagina
     { kind: "page", args: [3] },
   ]);
   assert.equal(
-    setup({ tab: "discover", page: 1, totalPages: 4 }).control("Previous").props
+    setup({ page: 1, totalPages: 4 }).control("Previous").props
       .disabled,
     true,
   );
   assert.equal(
-    setup({ tab: "discover", page: 4, totalPages: 4 }).control("Next").props
+    setup({ page: 4, totalPages: 4 }).control("Next").props
       .disabled,
     true,
   );
   const busy = setup({
-    tab: "discover",
     page: 2,
     totalPages: 4,
     catalog: { items: catalog, known: true, loading: true, onRetry: () => {} },
@@ -418,16 +404,16 @@ test("catalog pagination has explicit boundaries, busy state and no Added pagina
   assert.equal(busy.control("Previous").props.disabled, true);
   assert.equal(busy.control("Next").props.disabled, true);
   assert.equal(
-    busy.rows().length,
+    busy.catalogRows().length,
     2,
     "cached results remain readable during refresh",
   );
-  assert.throws(() => setup({ totalPages: 4 }).control("Next"));
+  // Paging belongs to the catalog section only; Added is never paged.
+  assert.match(setup({ totalPages: 4 }).text(), /Page 1 \/ 4/);
 });
 
 test("blank descriptions offer review guidance rather than another opaque slug", () => {
   const env = setup({
-    tab: "discover",
     catalog: {
       items: [{ id: "blank", name: "empty-description", description: "   " }],
       known: true,
