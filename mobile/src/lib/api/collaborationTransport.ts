@@ -227,11 +227,16 @@ export function inviteToken(input: string) {
         "group-invite",
       )
     : value;
-  return z
+  const parsed = z
     .string()
     .length(64)
     .regex(/^[a-fA-F0-9]+$/)
-    .parse(token);
+    .safeParse(token);
+  if (!parsed.success)
+    throw new Error(
+      "Paste the full invitation link or a 64-character invitation code.",
+    );
+  return parsed.data;
 }
 
 /** The frontend origin is build-configured; pasted invitations never select it. */

@@ -172,7 +172,7 @@ test("group membership sends both revisions and checks returned identity", async
   await assert.rejects(api.change(ID, 0, { action: "invite" }));
 });
 
-test("invitations preview before disclosure-bearing accept and reject invalid tokens locally", async () => {
+test("invitations preview before disclosure-bearing accept without following pasted URLs", async () => {
   assert.equal(
     inviteToken(`https://nyxid.ai/assistant#group-invite=${TOKEN}`),
     TOKEN,
@@ -182,8 +182,6 @@ test("invitations preview before disclosure-bearing accept and reject invalid to
     `https://nyxid.ai/assistant#group-invite=${TOKEN}`,
   );
   assert.equal(invitationLink("javascript:alert(1)", TOKEN), undefined);
-  assert.throws(() => inviteToken("https://untrusted.invalid/path"));
-  assert.throws(() => inviteToken("too-short"));
   const preview = setup({
     group_id: ID,
     group_name: "Group",
@@ -192,12 +190,46 @@ test("invitations preview before disclosure-bearing accept and reject invalid to
   });
   await preview.api.preview(TOKEN);
   assert.deepEqual(preview.calls[0]?.options?.body, { token: TOKEN });
+  await preview.api.preview(
+    `https://untrusted.invalid/assistant#group-invite=${TOKEN}`,
+  );
+  assert.deepEqual(preview.calls[1], {
+    path: "/assistant/nyxagent/group-invites/preview",
+    options: { method: "POST", body: { token: TOKEN }, signal: undefined },
+  });
   const accept = setup(group);
   await accept.api.accept(TOKEN);
   assert.deepEqual(accept.calls[0]?.options?.body, {
     token: TOKEN,
     history_disclosed: true,
   });
+});
+
+test("invalid invitation formats show a human hint and preview/accept never dispatch", async () => {
+  const { api, calls } = setup();
+  const error = {
+    name: "Error",
+    message:
+      "Paste the full invitation link or a 64-character invitation code.",
+  };
+  for (const input of [
+    "",
+    "   ",
+    "not-an-invitation",
+    "a".repeat(63),
+    "a".repeat(65),
+    "g".repeat(64),
+    "https://untrusted.invalid/path",
+    `https://nyxid.ai/assistant?group-invite=${TOKEN}`,
+    "https://nyxid.ai/assistant#other=value",
+    "https://nyxid.ai/assistant#group-invite=",
+    `https://nyxid.ai/assistant#group-invite=${"g".repeat(64)}`,
+  ]) {
+    assert.throws(() => inviteToken(input), error);
+    await assert.rejects(api.preview(input), error);
+    await assert.rejects(api.accept(input), error);
+    assert.equal(calls.length, 0);
+  }
 });
 
 test("consent decisions cannot be mistaken for legacy allow/deny or owner approvals", async () => {

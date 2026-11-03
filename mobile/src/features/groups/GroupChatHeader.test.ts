@@ -2,12 +2,15 @@ import { createAssistantDraftStore } from "../assistant/assistantDraftStore";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
-import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 type E = { type: any; props: Record<string, any> };
 const nodes = (n: any): E[] =>
   n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
 
-test("crew header shows member identity and narrows recipients through its picker without losing draft", () => {
+function setup({
+  draftStore = createAssistantDraftStore(() => 1),
+  missingResearch = false,
+} = {}) {
   let options: any;
   const members = [
     { id: "bot", name: "nyxbot", display_name: "NyxBot", kind: "nyxbot" },
@@ -18,16 +21,21 @@ test("crew header shows member identity and narrows recipients through its picke
       kind: "specialist",
     },
   ];
-  const chat = {
+  const posted: any[] = [];
+  const chat: any = {
     active: true,
     epoch: 1,
     online: true,
     sending: false,
     available: () => true,
+    post: async (body: any) => {
+      posted.push(body);
+      return true;
+    },
     data: {
       group: {
         name: "Launch crew",
-        members,
+        members: missingResearch ? [members[0]] : members,
         lead_agent_id: "bot",
         default_recipient_ids: ["bot"],
         working_agent_ids: [] as string[],
@@ -45,7 +53,7 @@ test("crew header shows member identity and narrows recipients through its picke
       useReducedMotion: () => false,
     },
     "../assistant/assistantDraftStore": {
-      assistantDraftStore: createAssistantDraftStore(() => 1),
+      assistantDraftStore: draftStore,
     },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
@@ -139,7 +147,13 @@ test("crew header shows member identity and narrows recipients through its picke
     },
     "../assistant/assistantSelectableMarkdown": {},
     "../assistant/useAssistantUploads": {
-      useAssistantUploads: () => ({ files: [], session: { sending: false } }),
+      useAssistantUploads: () => ({
+        files: [],
+        session: {
+          sending: false,
+          submit: (send: (files?: unknown) => Promise<boolean>) => send(),
+        },
+      }),
     },
     "../assistant/useComposerDictation": {
       useComposerDictation: () => ({ active: false }),
@@ -149,7 +163,7 @@ test("crew header shows member identity and narrows recipients through its picke
       ComposerDictationReview: "DictationReview",
     },
     "../assistant/useTranscriptScrollFollow": {
-      useTranscriptScrollFollow: () => ({ listProps: {} }),
+      useTranscriptScrollFollow: () => ({ listProps: {}, follow: () => {} }),
     },
     "./useGroupRuntime": {
       useGroupAvailability: () => ({ epoch: 1 }),
@@ -168,6 +182,18 @@ test("crew header shows member identity and narrows recipients through its picke
     });
     return outer.type(outer.props);
   });
+  const identity = () =>
+    nodes(options.headerTitle()).find((n) => n.type === "ChatIdentity")!;
+  const input = () => nodes(h.value()).find((n) => n.type === "Input")!;
+  const submit = () =>
+    nodes(input().props.renderActions()).find(
+      (n) => n.type === "ComposerSubmitButton",
+    )!;
+  return { h, chat, posted, identity, input, submit };
+}
+
+test("crew header shows member identity and narrows recipients through its picker without losing draft", () => {
+  const { h, chat, identity, input } = setup();
   const page = h.value();
   const list = nodes(page).find((n) => n.type === "FlatList")!;
   const viewport = nodes(page).find((n) =>
@@ -185,12 +211,9 @@ test("crew header shows member identity and narrows recipients through its picke
   assert.equal(content.maxWidth, 782);
   assert.equal(content.alignSelf, "center");
   assert.equal(list.props.scrollIndicatorInsets, undefined);
-  const identity = () =>
-    nodes(options.headerTitle()).find((n) => n.type === "ChatIdentity")!;
   assert.equal(identity().props.name, "Launch crew");
   assert.equal(identity().props.detail, "NyxBot, Researcher");
   assert.equal(identity().props.members.length, 2);
-  const input = () => nodes(h.value()).find((n) => n.type === "Input")!;
   input().props.onChangeText("Keep this crew draft");
   h.flush();
   identity().props.onPress();
@@ -247,4 +270,179 @@ test("crew header shows member identity and narrows recipients through its picke
     null,
   );
   h.unmount();
+});
+
+test("revoking or removing a mentioned shared agent blocks dispatch until an explicit replacement", async () => {
+  for (const removed of [false, true]) {
+    const { h, chat, posted, input, submit, identity } = setup();
+    input().props.onChangeText("@researcher confidential question");
+    h.flush();
+    assert.equal(submit().props.disabled, false);
+    if (removed) chat.data.group.members = [chat.data.group.members[0]];
+    else chat.data.group.members[1].unavailable = true;
+    h.render();
+    assert.equal(submit().props.disabled, true);
+    input().props.onChangeText(
+      "@researcher confidential question with more detail",
+    );
+    h.flush();
+    assert.equal(submit().props.disabled, true);
+    submit().props.onPress();
+    await h.settle();
+    assert.equal(posted.length, 0);
+    assert.equal(
+      input().props.value,
+      "@researcher confidential question with more detail",
+    );
+    assert.ok(
+      nodes(h.value()).some((n) =>
+        n.props.accessibilityLabel?.startsWith("Remove unavailable recipient "),
+      ),
+    );
+    nodes(h.value())
+      .find((n) =>
+        n.props.accessibilityLabel?.startsWith("Remove unavailable recipient "),
+      )!
+      .props.onPress();
+    h.flush();
+    identity().props.onPress();
+    h.flush();
+    nodes(h.value())
+      .find((n) => n.props.accessibilityLabel === "Message NyxBot")!
+      .props.onPress();
+    h.flush();
+    assert.equal(submit().props.disabled, false);
+    submit().props.onPress();
+    await h.settle();
+    assert.equal(posted.length, 1);
+    assert.deepEqual(Array.from(posted[0].recipient_agent_ids), ["bot"]);
+    h.unmount();
+  }
+});
+
+test("UUID mentions and default recipients are sent as exact IDs, including a roster change at dispatch", async () => {
+  for (const explicitMention of [false, true]) {
+    const { h, chat, posted, input, submit } = setup();
+    const id = "1785c70a-9a5b-41f8-b73e-6ff523cdd98e";
+    chat.data.group.members[1].id = id;
+    h.render();
+    input().props.onChangeText(explicitMention ? `@${id} hello` : "hello");
+    h.flush();
+    submit().props.onPress();
+    chat.data.group.default_recipient_ids = [id];
+    await h.settle();
+    assert.equal(posted.length, 1);
+    assert.deepEqual(Array.from(posted[0].recipient_agent_ids), [
+      explicitMention ? id : "bot",
+    ]);
+    h.unmount();
+  }
+});
+
+test("reopening a retained draft keeps a removed agent's old handle unavailable", async () => {
+  const draftStore = createAssistantDraftStore(() => 1);
+  const original = setup({ draftStore });
+  original.input().props.onChangeText("@researcher confidential question");
+  original.h.flush();
+  original.h.unmount();
+  const reopened = setup({ draftStore, missingResearch: true });
+  assert.equal(reopened.submit().props.disabled, true);
+  reopened
+    .input()
+    .props.onChangeText("@researcher confidential question with more detail");
+  reopened.h.flush();
+  assert.equal(reopened.submit().props.disabled, true);
+  reopened.submit().props.onPress();
+  await reopened.h.settle();
+  assert.equal(reopened.posted.length, 0);
+  reopened.input().props.onChangeText("New question without the old mention");
+  reopened.h.flush();
+  assert.equal(reopened.submit().props.disabled, false);
+  reopened.h.unmount();
+});
+
+test("renaming a mentioned agent and reusing its old handle never changes the draft target", async () => {
+  for (const unavailable of [false, true]) {
+    const { h, chat, posted, input, submit } = setup();
+    input().props.onChangeText("@researcher confidential question");
+    h.flush();
+    chat.data.group.members = [
+      chat.data.group.members[0],
+      { ...chat.data.group.members[1], name: "analyst", unavailable },
+      { id: "replacement", name: "researcher", kind: "specialist" },
+    ];
+    h.render();
+    input().props.onChangeText(
+      "@researcher confidential question with more detail",
+    );
+    h.flush();
+    assert.equal(submit().props.disabled, unavailable);
+    submit().props.onPress();
+    await h.settle();
+    assert.equal(posted.length, unavailable ? 0 : 1);
+    if (!unavailable)
+      assert.deepEqual(Array.from(posted[0].recipient_agent_ids), ["research"]);
+    h.unmount();
+  }
+});
+
+test("editing away an old handle releases its binding even while another mention keeps the same agent", async () => {
+  const { h, chat, posted, input, submit } = setup();
+  input().props.onChangeText("@researcher confidential question");
+  h.flush();
+  chat.data.group.members = [
+    chat.data.group.members[0],
+    { ...chat.data.group.members[1], name: "analyst" },
+    { id: "replacement", name: "researcher", kind: "specialist" },
+  ];
+  h.render();
+  input().props.onChangeText("@analyst different question");
+  h.flush();
+  input().props.onChangeText("@analyst and @researcher new question");
+  h.flush();
+  assert.equal(submit().props.disabled, false);
+  submit().props.onPress();
+  await h.settle();
+  assert.deepEqual(Array.from(posted[0].recipient_agent_ids), [
+    "research",
+    "replacement",
+  ]);
+  h.unmount();
+});
+
+test("a definite refusal restores mention bindings after optimistic clear and a missing recipient", async () => {
+  const draftStore = createAssistantDraftStore(() => 1);
+  const { h, chat, posted, input, submit } = setup({ draftStore });
+  const refusal = deferred<boolean>();
+  chat.post = async (body: any) => {
+    posted.push(body);
+    return refusal.promise;
+  };
+  input().props.onChangeText("@researcher confidential question");
+  h.flush();
+  submit().props.onPress();
+  h.flush();
+  assert.equal(input().props.value, "");
+  assert.equal(posted.length, 1);
+  assert.deepEqual(Array.from(posted[0].recipient_agent_ids), ["research"]);
+  chat.data.group.members = [chat.data.group.members[0]];
+  h.render();
+  refusal.resolve(false);
+  await h.settle();
+  assert.equal(input().props.value, "@researcher confidential question");
+  assert.equal(submit().props.disabled, true);
+  input().props.onChangeText(
+    "@researcher confidential question with more detail",
+  );
+  h.flush();
+  submit().props.onPress();
+  await h.settle();
+  assert.equal(posted.length, 1);
+  h.unmount();
+  const reopened = setup({ draftStore, missingResearch: true });
+  assert.equal(reopened.submit().props.disabled, true);
+  reopened.submit().props.onPress();
+  await reopened.h.settle();
+  assert.equal(reopened.posted.length, 0);
+  reopened.h.unmount();
 });

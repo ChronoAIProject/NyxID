@@ -128,6 +128,66 @@ test("failed identity refresh never treats retained feature data as current auth
   assert.equal(env.session.readable, false);
 });
 
+test("revocation can explicitly drop admission gates while omitted feature keeps the default", async () => {
+  const env = setup();
+  env.setFeatures([]);
+  env.setCapability(false);
+  let writes = 0;
+  await env.session.run(
+    async () => {
+      writes++;
+    },
+    undefined,
+    { feature: null, capability: false },
+  );
+  assert.equal(writes, 1);
+  assert.deepEqual(env.calls, ["identity"]);
+  for (const authority of [
+    undefined,
+    { feature: undefined, capability: false },
+  ]) {
+    await env.session.run(
+      async () => {
+        writes++;
+      },
+      undefined,
+      authority,
+    );
+    assert.equal(writes, 1);
+    assert.match(env.session.error, /no longer enabled/);
+  }
+  // Dropping the feature gate does not implicitly drop a required capability.
+  await env.session.run(
+    async () => {
+      writes++;
+    },
+    undefined,
+    { feature: null },
+  );
+  assert.equal(writes, 1);
+  assert.match(env.session.error, /rollout/);
+});
+
+test("revocation override never bypasses account or foreground authority", async () => {
+  for (const boundary of ["account", "background"] as const) {
+    const env = setup();
+    const pending = env.delayIdentity();
+    let writes = 0;
+    const result = env.session.run(
+      async () => {
+        writes++;
+      },
+      undefined,
+      { feature: null, capability: false },
+    );
+    if (boundary === "account") env.setEpoch(2);
+    else env.setActive(false);
+    pending.resolve({ id: "actor", enabled_features: [] });
+    await result;
+    assert.equal(writes, 0);
+  }
+});
+
 test("account switch or background during asynchronous admission prevents any write or success callback", async () => {
   for (const boundary of ["account", "background"] as const) {
     const env = setup();
@@ -163,4 +223,63 @@ test("a queued transport guard remains invalid after background and foreground, 
   env.setActive(true);
   assert.throws(guard, /inactive|account changed/);
   env.session.guard();
+});
+
+test("action errors clear across foreground and account contexts without reviving on return", async () => {
+  const env = setup();
+  const fail = () =>
+    env.session.run(async () => {
+      throw new Error("Invitation is invalid");
+    });
+  await fail();
+  assert.ok(env.session.error);
+  env.setActive(false);
+  assert.equal(env.session.error, undefined);
+  env.setActive(true);
+  assert.equal(env.session.error, undefined);
+  await fail();
+  assert.ok(env.session.error);
+  env.setEpoch(2);
+  assert.equal(env.session.error, undefined);
+  env.setEpoch(1);
+  assert.equal(env.session.error, undefined);
+});
+
+test("clearError only dismisses feedback and does not release an in-flight lock or weaken admission", async () => {
+  const env = setup();
+  env.setFeatures([]);
+  let writes = 0;
+  await env.session.run(async () => {
+    writes++;
+  });
+  assert.match(env.session.error, /no longer enabled/);
+  env.session.clearError();
+  assert.equal(env.session.error, undefined);
+  await env.session.run(async () => {
+    writes++;
+  });
+  assert.equal(writes, 0);
+  assert.match(env.session.error, /no longer enabled/);
+  const pending = env.delayIdentity();
+  const operation = env.session.run(async () => {
+    writes++;
+  });
+  assert.equal(env.session.busy, true);
+  env.session.clearError();
+  assert.equal(env.session.busy, true);
+  await env.session.run(async () => {
+    writes++;
+  });
+  assert.equal(writes, 0);
+  // The pending operation also remains fenced if this context is abandoned.
+  env.setActive(false);
+  env.setActive(true);
+  pending.resolve({
+    id: "actor",
+    enabled_features: ["assistant:shared-agents"],
+  });
+  await operation;
+  assert.equal(writes, 0);
+  assert.equal(env.session.error, undefined);
+  assert.equal(env.session.busy, false);
 });

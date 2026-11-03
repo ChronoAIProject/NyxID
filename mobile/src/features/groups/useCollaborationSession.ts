@@ -15,7 +15,10 @@ export function useCollaborationSession(
   const mounted = useRef(true);
   const lock = useRef(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [failure, setFailure] = useState<{
+    generation: number;
+    message: string;
+  }>();
   const activation = useRef({
     active: live.active,
     epoch: live.epoch,
@@ -64,7 +67,11 @@ export function useCollaborationSession(
       mounted.current = false;
     };
   }, [live.active, live.epoch, client]);
+  useEffect(() => {
+    setFailure(undefined);
+  }, [live.active, live.epoch]);
   const generation = activation.current.generation;
+  const clearError = () => setFailure(undefined);
   const valid = () =>
     mounted.current &&
     activation.current.generation === generation &&
@@ -79,17 +86,20 @@ export function useCollaborationSession(
   async function run<T>(
     action: () => Promise<T>,
     onSuccess?: (result: T) => void,
-    authority?: { feature?: string; capability?: boolean },
+    authority?: { feature?: string | null; capability?: boolean },
   ) {
     if (lock.current || !valid()) return;
     lock.current = true;
     setBusy(true);
-    setError(undefined);
+    clearError();
     try {
       const actor = await groupsApi.identity();
       if (!valid())
         throw new Error("Keep this view open and connected to continue.");
-      const feature = authority?.feature ?? requiredFeature;
+      // null explicitly drops only the feature admission gate for revocation.
+      // Omitted/undefined keeps the caller's default gate in place.
+      const feature =
+        authority?.feature === undefined ? requiredFeature : authority.feature;
       if (feature && !actor.enabled_features.includes(feature))
         throw new Error(
           "This feature is no longer enabled for your account. Reload to review availability.",
@@ -113,11 +123,13 @@ export function useCollaborationSession(
       return result;
     } catch (cause) {
       if (valid())
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "Could not save. Reload and try again.",
-        );
+        setFailure({
+          generation,
+          message:
+            cause instanceof Error
+              ? cause.message
+              : "Could not save. Reload and try again.",
+        });
       if (valid()) void client.invalidateQueries({ queryKey: key });
       return undefined;
     } finally {
@@ -137,7 +149,8 @@ export function useCollaborationSession(
     valid,
     guard,
     busy,
-    error,
+    error: failure?.generation === generation ? failure.message : undefined,
+    clearError,
     run,
   };
 }

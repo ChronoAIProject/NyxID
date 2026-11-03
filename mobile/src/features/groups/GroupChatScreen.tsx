@@ -78,6 +78,8 @@ import { useTranscriptScrollFollow } from "../assistant/useTranscriptScrollFollo
 import {
   NO_RECIPIENT_EDITS,
   ambiguousGroupMentions,
+  groupMentionBindings,
+  unavailableGroupRecipients,
   groupCanDecide,
   groupPendingOwned,
   groupPendingReview,
@@ -87,6 +89,7 @@ import {
   withDraft,
   withRemoved,
   type RecipientSelection,
+  type RecipientMember,
 } from "./groupState";
 import type { Group, GroupMessage, GroupPendingAction } from "./groupContracts";
 import { submitGroupDraft } from "./groupComposerDraft";
@@ -143,6 +146,53 @@ function GroupChat({
   >(false);
   const [localError, setLocalError] = useState<string>();
   const group = chat.isError ? undefined : chat.data?.group;
+  const recipientRoster = useRef<Group["members"]>(
+    assistantDraftStore.get<Group["members"]>(`recipient-roster:${draftKey}`) ??
+      [],
+  );
+  const recipientMentions = useRef<RecipientMember[]>(
+    assistantDraftStore.get<RecipientMember[]>(
+      `recipient-mentions:${draftKey}`,
+    ) ??
+      groupMentionBindings(
+        draft,
+        [...recipientRoster.current, ...(group?.members ?? [])],
+        recipientRoster.current.filter((member) =>
+          selection.mentioned.includes(member.id),
+        ),
+      ),
+  );
+  // Missing identities stay unavailable; resolved handles are kept separately
+  // until that mention is edited away, including when the same ID is renamed.
+  const routingMembers = [
+    ...(group?.members ?? []),
+    ...recipientRoster.current
+      .filter(
+        (member) =>
+          !group?.members.some((row) => row.id === member.id) &&
+          [...selection.mentioned, ...selection.added].includes(member.id),
+      )
+      .map((member) => ({ ...member, unavailable: true })),
+  ];
+  const mentionBindings = recipientMentions.current.filter((member) =>
+    selection.mentioned.includes(member.id),
+  );
+  recipientRoster.current = routingMembers;
+  useEffect(() => {
+    const selected = [...selection.mentioned, ...selection.added];
+    if (selected.length)
+      assistantDraftStore.set(
+        `recipient-roster:${draftKey}`,
+        routingMembers.filter((member) => selected.includes(member.id)),
+      );
+    else assistantDraftStore.delete(`recipient-roster:${draftKey}`);
+    if (mentionBindings.length)
+      assistantDraftStore.set(
+        `recipient-mentions:${draftKey}`,
+        mentionBindings,
+      );
+    else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
+  }, [draftKey, routingMembers, selection]);
   const names = useQuery({
     queryKey: ["workspace", "agents", "group-labels", chat.epoch],
     queryFn: ({ signal }) => agentsApi.list(signal),
@@ -207,7 +257,7 @@ function GroupChat({
       .map((member) => ({
         id: `agent:${member.id}`,
         handle:
-          group?.members.filter(
+          routingMembers.filter(
             (row) => row.name.toLowerCase() === member.name.toLowerCase(),
           ).length === 1
             ? member.name
@@ -227,11 +277,22 @@ function GroupChat({
   const resolvedDraft = resolveAttachmentMentions(draft, attachmentMentions);
   const ambiguous =
     !selection.added.length &&
-    ambiguousGroupMentions(resolvedDraft, group?.members ?? []).length > 0;
+    ambiguousGroupMentions(resolvedDraft, routingMembers, mentionBindings)
+      .length > 0;
+  const routingSelection = withDraft(
+    selection,
+    resolvedDraft,
+    routingMembers,
+    mentionBindings,
+  );
+  const unavailableRecipients = unavailableGroupRecipients(
+    routingSelection,
+    routingMembers,
+  );
   const recipients = resolveRecipients(
     // Route from the text that will reach the server. Recompute on roster
     // changes so an existing @file-1 cannot become a new agent's mention.
-    withDraft(selection, resolvedDraft, group?.members ?? []),
+    routingSelection,
     defaults,
     group?.members ?? [],
   );
@@ -324,6 +385,7 @@ function GroupChat({
   const canSend =
     !blocked &&
     !ambiguous &&
+    !unavailableRecipients.length &&
     !uploads.blocked &&
     !uploads.session.sending &&
     !!recipients.ids.length &&
@@ -336,11 +398,22 @@ function GroupChat({
     assistantDraftStore.set(`text:${draftKey}`, value);
     setDraft(value);
     setSelection((old) => {
-      const next = withDraft(
-        old,
-        resolveAttachmentMentions(value, attachmentMentions),
-        group?.members ?? [],
+      const previousBindings = recipientMentions.current.filter((member) =>
+        old.mentioned.includes(member.id),
       );
+      const text = resolveAttachmentMentions(value, attachmentMentions);
+      const next = withDraft(old, text, routingMembers, previousBindings);
+      recipientMentions.current = groupMentionBindings(
+        text,
+        routingMembers,
+        previousBindings,
+      );
+      if (recipientMentions.current.length)
+        assistantDraftStore.set(
+          `recipient-mentions:${draftKey}`,
+          recipientMentions.current,
+        );
+      else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
       assistantDraftStore.set(`recipients:${draftKey}`, next);
       return next;
     });
@@ -368,12 +441,39 @@ function GroupChat({
     sendLock.current = true;
     setLocalError(undefined);
     const target = recipients;
+    const submittedRoster = [...recipientRoster.current];
+    const submittedMentions = [...recipientMentions.current];
     transcriptScroll.follow();
     try {
       await submitGroupDraft({
         draft,
         selection,
         updateComposer: (text, nextSelection) => {
+          // A definite refusal restores the submitted handle bindings together
+          // with the text/selection, even if the optimistic clear lost its roster.
+          recipientRoster.current = submittedRoster;
+          recipientMentions.current = submittedMentions;
+          const restoredIds = [
+            ...nextSelection.mentioned,
+            ...nextSelection.added,
+          ];
+          if (restoredIds.length)
+            assistantDraftStore.set(
+              `recipient-roster:${draftKey}`,
+              submittedRoster.filter((member) =>
+                restoredIds.includes(member.id),
+              ),
+            );
+          else assistantDraftStore.delete(`recipient-roster:${draftKey}`);
+          const restoredMentions = submittedMentions.filter((member) =>
+            nextSelection.mentioned.includes(member.id),
+          );
+          if (restoredMentions.length)
+            assistantDraftStore.set(
+              `recipient-mentions:${draftKey}`,
+              restoredMentions,
+            );
+          else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
           revision.current += 1;
           // Discard native marked text and late IME events from the sent draft.
           currentComposer.current += 1;
@@ -396,9 +496,7 @@ function GroupChat({
                 : {}),
               // Freeze the visible recipients while resolving local file
               // aliases, including a member joining between edit and POST.
-              ...(target.edited || files?.attachmentIds.length
-                ? { recipient_agent_ids: target.ids }
-                : {}),
+              recipient_agent_ids: target.ids,
             }),
           ),
       });
@@ -706,6 +804,12 @@ function GroupChat({
                 use its UUID mention before sending.
               </Label>
             )}
+            {!!unavailableRecipients.length && (
+              <Label style={[styles.small, { color: colors.danger }]}>
+                A selected agent is no longer available. Remove it and choose
+                another recipient before sending.
+              </Label>
+            )}
             {!recipients.ids.length && (
               <Label style={[styles.small, { color: colors.danger }]}>
                 Choose at least one recipient.
@@ -763,6 +867,28 @@ function GroupChat({
                     </Pressable>
                   ) : null;
                 })}
+                {unavailableRecipients.map((id) => (
+                  <Pressable
+                    key={`unavailable:${id}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove unavailable recipient ${title(id, routingMembers.find((member) => member.id === id)?.name ?? id)}`}
+                    disabled={blocked}
+                    onPress={() =>
+                      editRecipients((old) => withRemoved(old, id))
+                    }
+                    style={[styles.recipient, { borderColor: colors.danger }]}
+                  >
+                    <Label style={[styles.small, { color: colors.danger }]}>
+                      {title(
+                        id,
+                        routingMembers.find((member) => member.id === id)
+                          ?.name ?? id,
+                      )}{" "}
+                      · Unavailable
+                    </Label>
+                    <X size={12} color={colors.danger} />
+                  </Pressable>
+                ))}
                 {liveMembers.some(
                   (member) => !recipients.ids.includes(member.id),
                 ) && (

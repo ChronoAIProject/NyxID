@@ -561,13 +561,21 @@ export function CollaborationEntry({
           <ActionButton
             label="Create multi-person group"
             disabled={disabled || !available}
-            onPress={() => setMode("create")}
+            onPress={() => {
+              if (disabled) return;
+              session.clearError();
+              setMode("create");
+            }}
           />
           <ActionButton
             label="Join with invitation"
             variant="secondary"
             disabled={disabled || !available}
-            onPress={() => setMode("join")}
+            onPress={() => {
+              if (disabled) return;
+              session.clearError();
+              setMode("join");
+            }}
           />
         </>
       ) : mode === "create" ? (
@@ -632,6 +640,7 @@ export function CollaborationEntry({
             label="Invitation link or token"
             value={token}
             onChangeText={(value) => {
+              session.clearError();
               setToken(value);
               setPreview(undefined);
               setDisclosed(false);
@@ -700,6 +709,8 @@ export function CollaborationEntry({
           variant="secondary"
           disabled={session.busy}
           onPress={() => {
+            if (session.busy) return;
+            session.clearError();
             setMode(undefined);
             setPreview(undefined);
             setToken("");

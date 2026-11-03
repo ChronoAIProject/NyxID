@@ -14,6 +14,8 @@ import {
   resolveRecipients,
   mentionedIds,
   ambiguousGroupMentions,
+  groupMentionBindings,
+  unavailableGroupRecipients,
   mergeGroupMessages,
   mergeGroupPage,
   groupCanManage,
@@ -71,6 +73,80 @@ test("shared namesakes never resolve by bare handle and unavailable selections c
   assert.deepEqual(mentionedIds(`@${OTHER}`, roster), []);
   const selection = withAdded(NO_RECIPIENT_EDITS, OTHER);
   assert.deepEqual(resolveRecipients(selection, ["third"], roster).ids, []);
+});
+
+test("revoked or destroyed mentioned agents retain their exact target and block fallback", () => {
+  for (const status of [{ unavailable: true }, { destroyed: true }]) {
+    for (const mention of ["research", USER]) {
+      const live = [
+        { id: USER, name: "research" },
+        { id: OTHER, name: "default" },
+      ];
+      const text = `@${mention} confidential question`;
+      const draft = withDraft(NO_RECIPIENT_EDITS, text, live);
+      const changed = [{ ...live[0]!, ...status }, live[1]!];
+      const retained = withDraft(draft, text, changed);
+      assert.deepEqual(retained.mentioned, [USER]);
+      assert.deepEqual(resolveRecipients(retained, [OTHER], changed).ids, []);
+      assert.deepEqual(unavailableGroupRecipients(retained, changed), [USER]);
+      const replacement = withAdded(withRemoved(retained, USER), OTHER);
+      assert.deepEqual(unavailableGroupRecipients(replacement, changed), []);
+      assert.deepEqual(resolveRecipients(replacement, [OTHER], changed).ids, [
+        OTHER,
+      ]);
+    }
+  }
+});
+
+test("an exact UUID absent from the current roster cannot fall back to a default", () => {
+  const roster = [{ id: OTHER, name: "default" }];
+  const selection = withDraft(NO_RECIPIENT_EDITS, `@${USER} question`, roster);
+  assert.deepEqual(resolveRecipients(selection, [OTHER], roster).ids, []);
+  assert.deepEqual(unavailableGroupRecipients(selection, roster), [USER]);
+});
+
+test("resolved handles retain exact identity across rename and handle reuse until edited away", () => {
+  const original = [{ id: USER, name: "research" }];
+  const text = "@research confidential question";
+  const selection = withDraft(NO_RECIPIENT_EDITS, text, original);
+  const bindings = groupMentionBindings(text, original);
+  const changed = [
+    { id: USER, name: "analyst" },
+    { id: OTHER, name: "research" },
+  ];
+  const retained = withDraft(selection, text, changed, bindings);
+  assert.deepEqual(retained.mentioned, [USER]);
+  assert.deepEqual(resolveRecipients(retained, [OTHER], changed).ids, [USER]);
+  const removed = changed.slice(1);
+  assert.deepEqual(unavailableGroupRecipients(retained, removed), [USER]);
+  assert.deepEqual(resolveRecipients(retained, [OTHER], removed).ids, []);
+  const cleared = withDraft(selection, "A new question", changed, bindings);
+  const clearedBindings = groupMentionBindings(
+    "A new question",
+    changed,
+    bindings,
+  );
+  assert.deepEqual(clearedBindings, []);
+  assert.deepEqual(
+    withDraft(cleared, text, changed, clearedBindings).mentioned,
+    [OTHER],
+  );
+});
+
+test("unknown handles remain ordinary text and bound names cannot override an exact UUID", () => {
+  const roster = [{ id: OTHER, name: "default" }];
+  const unknown = withDraft(
+    NO_RECIPIENT_EDITS,
+    "Ask @outside about this",
+    roster,
+  );
+  assert.deepEqual(unknown.mentioned, []);
+  assert.deepEqual(unavailableGroupRecipients(unknown, roster), []);
+  assert.deepEqual(resolveRecipients(unknown, [OTHER], roster).ids, [OTHER]);
+  assert.deepEqual(
+    groupMentionBindings(`@${USER}`, roster, [{ id: OTHER, name: USER }]),
+    [{ id: USER, name: USER }],
+  );
 });
 
 test("collaboration management is decided by the explicit policy, never personal legacy ownership", () => {

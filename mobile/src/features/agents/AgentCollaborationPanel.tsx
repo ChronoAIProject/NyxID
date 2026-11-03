@@ -39,14 +39,13 @@ const personalOwner = (agent: AssistantAgent) =>
 export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
   const session = useCollaborationSession("assistant:shared-agents");
   const eligible =
-    session.enabled &&
     agent.kind === "specialist" &&
     agent.owner_kind !== "org" &&
     agent.status !== "destroyed";
   const sharing = useQuery({
     queryKey: [...session.key, agent.id, "sharing"],
     queryFn: ({ signal }) => collaborationApi.sharing(agent.id, signal),
-    enabled: session.active && eligible,
+    enabled: session.active && eligible && session.enabled,
     retry: false,
   });
   if (session.active && session.identity.isError)
@@ -64,6 +63,7 @@ export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
     );
   if (!eligible || !session.readable) return null;
   const currentPolicy =
+    session.enabled &&
     !sharing.isError &&
     !sharing.isFetching &&
     sharing.dataUpdatedAt >= session.activationAt
@@ -72,7 +72,7 @@ export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
   return (
     <>
       {session.error && <Notice tone="error" message={session.error} />}
-      {sharing.isError && (
+      {session.enabled && sharing.isError && (
         <Card>
           <Notice
             tone="error"
@@ -85,7 +85,8 @@ export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
           />
         </Card>
       )}
-      {personalOwner(agent) &&
+      {session.enabled &&
+        personalOwner(agent) &&
         !sharing.isError &&
         sharing.dataUpdatedAt >= session.activationAt &&
         sharing.data?.role === "owner" && (
@@ -126,9 +127,9 @@ export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
               currentPolicy.role === "owner" || currentPolicy.role === "manager"
             }
           />
-          <SharedConsentCards session={session} id={agent.id} />
         </>
       )}
+      <SharedConsentCards session={session} id={agent.id} />
     </>
   );
 }
@@ -556,7 +557,13 @@ function NotesDraft({
   );
 }
 
-function SharedConsentCards({ session, id }: { session: Session; id: string }) {
+export function SharedConsentCards({
+  session,
+  id,
+}: {
+  session: Session;
+  id: string;
+}) {
   const query = useQuery({
     queryKey: [...session.key, id, "consents"],
     queryFn: ({ signal }) => collaborationApi.consents(id, signal),
@@ -567,6 +574,12 @@ function SharedConsentCards({ session, id }: { session: Session; id: string }) {
   return (
     <Card>
       <Label>Your connection consent</Label>
+      {!session.enabled && (
+        <Label muted>
+          Agent sharing is disabled. You can still review and revoke your
+          existing connection consent.
+        </Label>
+      )}
       {query.isError && (
         <Notice
           tone="error"
@@ -574,6 +587,7 @@ function SharedConsentCards({ session, id }: { session: Session; id: string }) {
         />
       )}
       {!query.isError &&
+        !query.isFetching &&
         query.dataUpdatedAt >= session.activationAt &&
         query.data?.consents.map((row) => (
           <View key={row.id} style={{ gap: 8 }}>
@@ -589,7 +603,7 @@ function SharedConsentCards({ session, id }: { session: Session; id: string }) {
                 Expires {new Date(row.expires_at).toLocaleString()}
               </Label>
             )}
-            {(row.decision === "pending"
+            {(session.enabled && row.decision === "pending"
               ? ([
                   ["once", "Allow once"],
                   ["always", "Always"],
@@ -605,22 +619,32 @@ function SharedConsentCards({ session, id }: { session: Session; id: string }) {
                   session.busy ||
                   !session.active ||
                   query.isError ||
-                  (!!row.expires_at && Date.parse(row.expires_at) <= Date.now())
+                  (decision !== "revoked" &&
+                    !!row.expires_at &&
+                    Date.parse(row.expires_at) <= Date.now())
                 }
                 onPress={() =>
-                  void session.run(() =>
-                    collaborationApi.decideConsent(row.id, decision, {
-                      authorityGuard: session.guard,
-                    }),
+                  void session.run(
+                    () =>
+                      collaborationApi.decideConsent(row.id, decision, {
+                        authorityGuard: session.guard,
+                      }),
+                    undefined,
+                    decision === "revoked"
+                      ? { feature: null, capability: false }
+                      : undefined,
                   )
                 }
               />
             ))}
           </View>
         ))}
-      {query.data?.consents.length === 0 && (
-        <Label muted>No pending or active consent.</Label>
-      )}
+      {!query.isError &&
+        !query.isFetching &&
+        query.dataUpdatedAt >= session.activationAt &&
+        query.data?.consents.length === 0 && (
+          <Label muted>No pending or active consent.</Label>
+        )}
       <ActionButton
         compact
         variant="secondary"
@@ -826,7 +850,30 @@ export function OperationList({
   );
 }
 
-function OperationDraft({
+const stableJson = (value: unknown) =>
+  JSON.stringify(value, (_key, entry: unknown) =>
+    entry && typeof entry === "object" && !Array.isArray(entry)
+      ? Object.fromEntries(
+          Object.entries(entry).sort(([a], [b]) => a.localeCompare(b)),
+        )
+      : entry,
+  );
+
+/** Endpoint IDs and explicit rules are sets; object key order is not a change. */
+function operationSelectionContent(selection: OperationSelection) {
+  return stableJson(
+    selection.all_operations
+      ? { all_operations: true }
+      : {
+          all_operations: false,
+          endpoint_ids: [...new Set(selection.endpoint_ids)].sort(),
+          rules: [...new Set(selection.rules.map(stableJson))].sort(),
+          inputs: selection.inputs ?? {},
+        },
+  );
+}
+
+export function OperationDraft({
   session,
   agent,
   service,
@@ -847,6 +894,15 @@ function OperationDraft({
   const [search, setSearch] = useState("");
   const stale = value.expected_revision !== service.revision;
   const disabled = session.busy || !session.active;
+  const payload = operationPayload(service, value);
+  const dirty =
+    operationSelectionContent(payload) !==
+    operationSelectionContent(operationPayload(service, initial(service)));
+  const canSave =
+    !disabled &&
+    !stale &&
+    dirty &&
+    operationSelectionSchema.safeParse(value).success;
   return (
     <View style={{ gap: 10 }}>
       <Label>
@@ -1054,12 +1110,9 @@ function OperationDraft({
       />
       <ActionButton
         label={guests ? "Save guest operations" : "Save operations"}
-        disabled={
-          disabled ||
-          stale ||
-          !operationSelectionSchema.safeParse(value).success
-        }
-        onPress={() =>
+        disabled={!canSave}
+        onPress={() => {
+          if (!canSave) return;
           void session.run(
             async () => {
               const fresh = (await agentsApi.detail(agent.id)).agent;
@@ -1076,7 +1129,7 @@ function OperationDraft({
                 agent.id,
                 guests,
                 service.service_id,
-                operationPayload(service, value),
+                payload,
                 { authorityGuard: session.guard },
               );
             },
@@ -1086,8 +1139,8 @@ function OperationDraft({
                 ? "assistant:guest-operation-scopes"
                 : "assistant:operation-scopes",
             },
-          )
-        }
+          );
+        }}
       />
     </View>
   );

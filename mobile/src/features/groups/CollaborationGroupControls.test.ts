@@ -56,9 +56,23 @@ function setup(component: "CollaborationEntry" | "CollaborationGroupControls") {
     action: () => Promise<unknown>,
     success?: (result: unknown) => void,
   ) => {
-    const result = await action();
-    success?.(result);
-    return result;
+    session.busy = true;
+    session.error = undefined;
+    harness.render();
+    try {
+      const result = await action();
+      success?.(result);
+      return result;
+    } catch (cause) {
+      session.error = cause instanceof Error ? cause.message : "Could not save";
+      return undefined;
+    } finally {
+      session.busy = false;
+      harness.render();
+    }
+  };
+  session.clearError = () => {
+    session.error = undefined;
   };
   const harness = hookHarness<Element>({
     "react/jsx-runtime": {
@@ -192,4 +206,31 @@ test("freshly issued invitation is hidden and cleared when the app backgrounds",
     ),
     false,
   );
+});
+
+test("invalid invitation feedback is dismissed when cancelled, corrected or entering another mode", async () => {
+  const env = setup("CollaborationEntry");
+  const notices = () =>
+    elements(env.harness.flush()).filter((row) => row.type === "Notice");
+  env.find("ActionButton", "Join with invitation").props.onPress();
+  env.find("Field", "Invitation link or token").props.onChangeText("invalid");
+  env.find("ActionButton", "Preview invitation").props.onPress();
+  await env.harness.settle();
+  assert.equal(notices().length, 1);
+  env.find("ActionButton", "Cancel").props.onPress();
+  assert.equal(notices().length, 0);
+  env.find("ActionButton", "Create multi-person group").props.onPress();
+  assert.equal(notices().length, 0);
+  assert.equal(env.find("ActionButton", "Create group").props.disabled, true);
+  env.find("ActionButton", "Cancel").props.onPress();
+  // Entry handlers also discard feedback from the prior mode/context.
+  env.session.error = "Old create error";
+  env.find("ActionButton", "Join with invitation").props.onPress();
+  assert.equal(notices().length, 0);
+  env.find("Field", "Invitation link or token").props.onChangeText("invalid");
+  env.find("ActionButton", "Preview invitation").props.onPress();
+  await env.harness.settle();
+  assert.equal(notices().length, 1);
+  env.find("Field", "Invitation link or token").props.onChangeText(TOKEN);
+  assert.equal(notices().length, 0);
 });
