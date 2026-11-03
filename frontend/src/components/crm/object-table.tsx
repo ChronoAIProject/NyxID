@@ -16,11 +16,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useCrmTableQuery } from "@/hooks/use-crm";
+import { useCrmObject, useCrmTableQuery } from "@/hooks/use-crm";
+import { executableCrmFilters } from "@/lib/crm/filter-drafts";
 import { isCrmSortableField, renderCrmCell } from "@/lib/crm/field-kinds";
 import type {
   CrmField,
   CrmFilter,
+  CrmObjectMetadata,
   CrmRecordRow,
   CrmTableQuery,
 } from "@/schemas/crm";
@@ -55,6 +57,54 @@ function RecordCells({
   ));
 }
 
+function TableControls({
+  object,
+  filters,
+  ownerId,
+  showFilters,
+  totalCount,
+  onToggle,
+  onChange,
+}: {
+  readonly object: CrmObjectMetadata;
+  readonly filters: readonly CrmFilter[];
+  readonly ownerId?: string;
+  readonly showFilters: boolean;
+  readonly totalCount?: number;
+  readonly onToggle: () => void;
+  readonly onChange: (filters: CrmFilter[]) => void;
+}) {
+  return (
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant={filters.length ? "secondary" : "outline"}
+          aria-expanded={showFilters}
+          onClick={onToggle}
+        >
+          <ListFilter />
+          Filters{filters.length ? ` (${filters.length})` : ""}
+        </Button>
+        {totalCount !== undefined ? (
+          <span className="text-11 tabular-nums text-text-tertiary">
+            {totalCount.toLocaleString()} total
+          </span>
+        ) : null}
+      </div>
+      {showFilters ? (
+        <CrmFilterControls
+          object={object}
+          filters={filters}
+          ownerId={ownerId}
+          onChange={onChange}
+        />
+      ) : null}
+    </>
+  );
+}
+
 function CrmObjectTableState({
   query,
   columns,
@@ -68,16 +118,28 @@ function CrmObjectTableState({
   ]);
   const [showFilters, setShowFilters] = useState(query.filters.length > 0);
   const cursor = cursors.at(-1);
-  const pageQuery: CrmTableQuery = { ...query, filters, sort, cursor };
-  const result = useCrmTableQuery(pageQuery, ownerId);
+  const metadata = useCrmObject(query.object, ownerId);
+  const object = metadata.data;
+  const activeFilters = useMemo(
+    () => (object ? executableCrmFilters(object, filters) : []),
+    [filters, object],
+  );
+  const pageQuery: CrmTableQuery = {
+    ...query,
+    filters: activeFilters,
+    sort,
+    cursor,
+  };
+  const result = useCrmTableQuery(pageQuery, ownerId, {
+    enabled: Boolean(object),
+  });
   const fields = useMemo(() => {
-    const object = result.data?.object;
     if (!object) return [];
     const selected = columns ?? query.select ?? object.default_columns;
     return selected
       .map((key) => object.fields.find((field) => field.key === key))
       .filter((field): field is CrmField => Boolean(field));
-  }, [columns, query.select, result.data?.object]);
+  }, [columns, object, query.select]);
 
   function resetPage(nextFilters: CrmFilter[]) {
     setFilters(nextFilters);
@@ -95,22 +157,24 @@ function CrmObjectTableState({
     setCursors([undefined]);
   }
 
-  if (result.isPending && !result.data) {
+  if (metadata.isPending && !object) {
     return (
       <p role="status" className="text-12 text-text-tertiary">
-        Loading records...
+        Loading record fields...
       </p>
     );
   }
-  if (result.isError || !result.data) {
+  if (metadata.isError || !object) {
     return (
       <div className="space-y-2" role="alert">
-        <p className="text-12 text-destructive">Could not load records.</p>
+        <p className="text-12 text-destructive">
+          Could not load record fields.
+        </p>
         <Button
           type="button"
           size="sm"
           variant="outline"
-          onClick={() => void result.refetch()}
+          onClick={() => void metadata.refetch()}
         >
           Retry
         </Button>
@@ -118,7 +182,46 @@ function CrmObjectTableState({
     );
   }
 
-  const object = result.data.object;
+  const controls = (
+    <TableControls
+      object={object}
+      filters={filters}
+      ownerId={ownerId}
+      showFilters={showFilters}
+      totalCount={result.data?.total_count}
+      onToggle={() => setShowFilters((current) => !current)}
+      onChange={resetPage}
+    />
+  );
+  if (result.isPending && !result.data) {
+    return (
+      <div className="space-y-3">
+        {controls}
+        <p role="status" className="text-12 text-text-tertiary">
+          Loading records...
+        </p>
+      </div>
+    );
+  }
+  if (result.isError || !result.data) {
+    return (
+      <div className="space-y-3">
+        {controls}
+        <div className="space-y-2" role="alert">
+          <p className="text-12 text-destructive">Could not load records.</p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void result.refetch()}
+          >
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   const pageSize = query.page_size ?? 50;
   const first = result.data.rows.length
     ? (cursors.length - 1) * pageSize + 1
@@ -126,29 +229,7 @@ function CrmObjectTableState({
   const last = first ? first + result.data.rows.length - 1 : 0;
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <Button
-          type="button"
-          size="sm"
-          variant={filters.length ? "secondary" : "outline"}
-          aria-expanded={showFilters}
-          onClick={() => setShowFilters((current) => !current)}
-        >
-          <ListFilter />
-          Filters{filters.length ? ` (${filters.length})` : ""}
-        </Button>
-        <span className="text-11 tabular-nums text-text-tertiary">
-          {result.data.total_count.toLocaleString()} total
-        </span>
-      </div>
-      {showFilters ? (
-        <CrmFilterControls
-          object={object}
-          filters={filters}
-          ownerId={ownerId}
-          onChange={resetPage}
-        />
-      ) : null}
+      {controls}
 
       {result.data.rows.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-12 text-text-tertiary">

@@ -38,7 +38,9 @@ function CrmWorkspace() {
   const query: CrmTableQuery | undefined = object
     ? {
         object: object.key,
-        select: object.default_columns,
+        select: object.default_columns.filter((key) =>
+          object.fields.some((field) => field.key === key && !field.archived),
+        ),
         filters: [],
         page_size: 50,
         include_archived: false,

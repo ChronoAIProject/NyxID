@@ -30,6 +30,10 @@ import {
   applyOptimisticPipelineRows,
   type CrmOptimisticPipelineMove,
 } from "@/lib/crm/pipeline-optimistic";
+import {
+  crmPipelineCountQuery,
+  crmPipelineLaneQuery,
+} from "@/lib/crm/pipeline-query";
 import type { CrmField, CrmRecordRow, CrmTableQuery } from "@/schemas/crm";
 
 export interface CrmPipelineBoardProps {
@@ -150,21 +154,11 @@ function PipelineLane({
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: stage.value });
   const lane = useCrmTableQuery(
-    {
-      ...query,
-      cursor: undefined,
-      page_size: Math.min(query.page_size ?? 50, 50),
-      filters: [
-        ...query.filters.filter((filter) => filter.field !== stageField.key),
-        stageValues && stageValues.length > 1
-          ? { field: stageField.key, op: "in", value: stageValues }
-          : {
-              field: stageField.key,
-              op: "eq",
-              value: stageValues?.[0] ?? stage.value,
-            },
-      ],
-    },
+    crmPipelineLaneQuery(
+      query,
+      stageField.key,
+      stageValues?.length ? stageValues : [stage.value],
+    ),
     ownerId,
   );
   const titleField = lane.data?.object.fields.find(
@@ -247,17 +241,7 @@ export function CrmPipelineBoard({
     : undefined;
   const stageField = field?.type === "select" ? field : undefined;
   const counts = useCrmAggregate(
-    stageField
-      ? {
-          object: query.object,
-          filters: query.filters.filter(
-            (filter) => filter.field !== stageField.key,
-          ),
-          group_by: stageField.key,
-          measure: { op: "count" },
-          order: "option_order",
-        }
-      : undefined,
+    stageField ? crmPipelineCountQuery(query, stageField.key) : undefined,
     ownerId,
     Boolean(stageField),
   );
