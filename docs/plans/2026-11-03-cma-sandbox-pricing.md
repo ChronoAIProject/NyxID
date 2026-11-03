@@ -128,6 +128,15 @@ The integration PR is a separate implementation scope; this draft does not
 promise that prepaid controls already exist. Billing stays disabled until the
 selected path is verified.
 
+The selected implementation scope is the NyxID-ledger/prepaid path. It must
+follow NyxID's existing pricing implementation: extend the existing service
+price components for the three allocation units, with the existing exact
+decimal validation, admin authoring, Lago synchronization and rate cache.
+Do not add a parallel price engine, price administration screen, wallet or
+manual database insertion. Lifecycle code supplies trusted allocation quantities
+and uses the existing reservation/settlement machinery. Prices in this document
+remain proposals and are not seeded or enabled by the implementation PR.
+
 ## Activation boundary and history
 
 Price approval must include an effective UTC timestamp. CMA has already retained
