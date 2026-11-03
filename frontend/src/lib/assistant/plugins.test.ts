@@ -35,6 +35,10 @@ function makeEntry(overrides: Partial<CatalogEntry>): CatalogEntry {
 }
 
 describe("deriveConnectorItems", () => {
+  it("uses a proxy description when the catalog and connection descriptions are empty", () => {
+    const { added } = deriveConnectorItems([makeKey({ description: " " })], [makeEntry({ description: "" })]);
+    expect(added[0]?.description).toContain("Connected through the NyxID proxy");
+  });
   it("joins on catalog_service_slug, never the user-facing proxy slug", () => {
     const { added, available } = deriveConnectorItems(
       [
@@ -200,13 +204,13 @@ describe("deriveConnectorItems", () => {
       ],
     );
     expect(available.map((i) => i.meta)).toEqual([
-      "oauth",
-      "device code",
-      "no credential",
-      "token exchange",
-      "self-hosted",
-      "ssh",
-      "api key",
+      "OAuth",
+      "Device code",
+      "No credential required",
+      "Token exchange",
+      "Self-hosted",
+      "SSH",
+      "API key",
     ]);
     expect(available.map((i) => i.category)).toContain("Connector · SSH");
     // SSH cannot use a hosted link: it links to Studio with its slug instead.

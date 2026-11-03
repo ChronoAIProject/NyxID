@@ -3,7 +3,7 @@
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
 }
 .assistant-plugin-card {
-  height: 13.5rem;
+  height: 10.5rem;
 }
 .assistant-plugin-card > p {
   min-height: 3.25em;
@@ -70,6 +70,9 @@
   > div:nth-child(2)
   > div
   > span:first-child {
+  display: none;
+}
+.assistant-workspace-approval > section > div:nth-child(2) > div > span:nth-child(2) {
   display: none;
 }
 .assistant-workspace-approval > section > div:nth-child(2) > div {

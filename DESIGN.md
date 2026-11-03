@@ -285,14 +285,16 @@ wrapping action slots share one scale. Approvals use Pending/History segments an
 local-day history groups; the workspace wrapper adapts the existing approval
 block without changing its decision handling or transcript presentation.
 
-Plugin catalog cards share `PluginCard` and a `13.5rem` height in every section,
+Plugin catalog cards share `PluginCard` and a `10.5rem` height in every section,
 including skill search results. Rem sizing follows the assistant text setting.
 Names and status lines truncate with native titles, descriptions reserve two
 lines, and the footer stays at the bottom. The primary native button/link covers
 the card; secondary controls are siblings inside the footer. Neutral overlay
 hover and an outer focus ring keep the full card actionable without nested
 buttons. Attached skills remain inset grouped rows. Platform-bound and automatic
-connections stay hidden; personal model setup is explicit in Models.
+connections stay hidden; personal model setup is one Add a model connection card opening the provider picker.
+Workspace segments are capped at `max-w-80`; search and approval content share
+`max-w-2xl`, while catalog grids use the available page width.
 
 ### Sheet (slide-over panel)
 - Used for inline detail/edit on list pages where a full route is overkill (e.g. `admin-invite-codes` row detail). `sm:max-w-lg`, otherwise inherits Dialog tokens. Prefer Sheet over Dialog when the panel contains substantial reading content alongside actions.

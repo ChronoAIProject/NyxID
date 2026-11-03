@@ -72,6 +72,7 @@ function PluginCard({
   href,
   skillAgentId,
   secondary,
+  add = false,
   disabled = false,
 }: {
   readonly item: PluginCardShape;
@@ -81,6 +82,7 @@ function PluginCard({
   readonly href?: { slug?: string };
   readonly skillAgentId?: string;
   readonly secondary?: ReactNode;
+  readonly add?: boolean;
   readonly disabled?: boolean;
 }) {
   const controlClass =
@@ -108,14 +110,14 @@ function PluginCard({
         <button
           type="button"
           className={controlClass}
-          aria-label={`${actionLabel} ${item.name}`}
+          aria-label={add ? item.name : `${actionLabel} ${item.name}`}
           disabled={disabled}
           onClick={onActivate}
         />
       ) : null}
       <div className="pointer-events-none flex items-center gap-3">
         <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-13 font-semibold text-muted-foreground">
-          {item.iconSlug || item.iconUrl ? (
+          {add ? <Plus aria-hidden className="size-[1.5em]" /> : item.iconSlug || item.iconUrl ? (
             <ServiceIcon
               slug={item.iconSlug}
               iconUrl={item.iconUrl}
@@ -197,13 +199,11 @@ function ConnectorCard({
   item,
   onManage,
   onConnect,
-  personal = false,
   busy,
 }: {
   readonly item: ConnectorCardItem;
   readonly onManage: (id: string) => void;
   readonly onConnect: (slug: string, personal: boolean) => void;
-  readonly personal?: boolean;
   readonly busy: boolean;
 }) {
   const count = item.manageKeyIds?.length ?? 0;
@@ -213,9 +213,7 @@ function ConnectorCard({
       status={
         item.added
           ? `${item.disabled ? "Disabled" : "Connected"} · ${count} ${count === 1 ? "connection" : "connections"}`
-          : personal
-            ? "Your own model connection"
-            : item.meta
+          : item.meta
       }
       actionLabel={
         item.added
@@ -232,7 +230,7 @@ function ConnectorCard({
         item.added
           ? () => onManage(item.id)
           : item.connectSlug
-            ? () => onConnect(item.connectSlug!, personal)
+            ? () => onConnect(item.connectSlug!, false)
             : undefined
       }
       secondary={
@@ -293,29 +291,23 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   const available = items.available.filter((item) =>
     matchesPluginQuery(item, query),
   );
-  const models = items.models.filter((item) => matchesPluginQuery(item, query));
-  const customModel: PluginCardShape = {
-    id: "custom-model",
-    name: "Custom OpenAI-compatible endpoint",
-    initial: "AI",
+  const addModel: PluginCardShape = {
+    id: "add-model",
+    name: "Add a model connection",
+    initial: "+",
     description:
-      "Connect your own model server using its OpenAI-compatible API endpoint.",
-    meta: "Custom endpoint",
+      "Use your own provider account or a custom OpenAI-compatible endpoint.",
+    meta: "Model providers",
     added: false,
   };
-  const showCustom =
-    !searching ||
-    `${customModel.name} ${customModel.description}`
-      .toLowerCase()
-      .includes(query.trim().toLowerCase());
-  function cards(rows: readonly ConnectorCardItem[], personal = false) {
+  const showModels = !searching || matchesPluginQuery({ ...addModel, category: "Models" }, query) || items.models.some((item) => matchesPluginQuery(item, query));
+  function cards(rows: readonly ConnectorCardItem[]) {
     return rows.map((item) => (
       <ConnectorCard
         key={item.id}
         item={item}
         onManage={setManageCardId}
         onConnect={openConnect}
-        personal={personal}
         busy={createConnect.isPending}
       />
     ));
@@ -352,32 +344,17 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           )}
         </section>
       )}
-      {(models.length > 0 || showCustom || !searching) && (
+      {showModels && (
         <section aria-label="Models">
-          <SectionHeading
-            actions={
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setModelPicker(true)}
-              >
-                <Plus />
-                Add a model connection
-              </Button>
-            }
-          >
-            Models
-          </SectionHeading>
+          <SectionHeading>Models</SectionHeading>
           <CardGrid>
-            {cards(models, true)}
-            {showCustom ? (
-              <PluginCard
-                item={customModel}
-                status="Custom endpoint"
-                actionLabel="Set up"
-                href={{}}
-              />
-            ) : null}
+            <PluginCard
+              item={addModel}
+              status="Model providers"
+              actionLabel="Choose provider"
+              add
+              onActivate={() => setModelPicker(true)}
+            />
           </CardGrid>
         </section>
       )}
@@ -390,8 +367,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
       {searching &&
       !added.length &&
       !available.length &&
-      !models.length &&
-      !showCustom ? (
+      !showModels ? (
         <p className="py-12 text-center text-12 text-text-tertiary">
           No plugins match this search.
         </p>
@@ -446,6 +422,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                 to="/keys"
                 search={{ tab: "services", action: "add-service" }}
               >
+                <ServiceIcon slug="custom" size="sm" />
                 Custom OpenAI-compatible endpoint
                 <ArrowRight
                   aria-hidden
@@ -670,7 +647,7 @@ export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
         onValueChange={setTab}
         className="space-y-6"
       >
-        <SegmentedControlList aria-label="Plugin type">
+        <SegmentedControlList aria-label="Plugin type" className="max-w-80">
           <SegmentedControlTrigger value="connector">
             Connectors
           </SegmentedControlTrigger>
@@ -678,7 +655,7 @@ export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
             Skills
           </SegmentedControlTrigger>
         </SegmentedControlList>
-        <GroupedList className="max-w-xl">
+        <GroupedList className="max-w-2xl">
           <GroupedRow leading={<Search aria-hidden />}>
             <Search
               aria-hidden

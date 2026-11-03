@@ -126,6 +126,11 @@ describe("ApprovalsView", () => {
     expect(screen.getAllByText("Denied")).toHaveLength(1);
     expect(screen.getAllByText("Expired")).toHaveLength(1);
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    const rows = screen.getByRole("tabpanel").querySelectorAll('[data-grouped-row]');
+    expect(rows).toHaveLength(3);
+    for (const row of rows) expect(row.querySelector("svg")).not.toBeNull();
+    expect(screen.getByText("Approved")).toHaveClass("workspace-status-success");
+    expect(screen.getByText("Denied")).toHaveClass("workspace-status-destructive");
     // NyxID "push" decisions surface as the mobile channel.
     expect(screen.getByText(/Mobile/)).toBeInTheDocument();
     // The pending request stays in the Waiting section only.

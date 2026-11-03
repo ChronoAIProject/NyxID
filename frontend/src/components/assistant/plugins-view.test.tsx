@@ -192,7 +192,7 @@ describe("PluginsView", () => {
     expect(screen.getByText("GitHub")).toBeInTheDocument();
     expect(screen.getByText("Stripe")).toBeInTheDocument();
     // Auth-kind meta derived from the catalog entry shape.
-    expect(screen.getByText("oauth")).toBeInTheDocument();
+    expect(screen.getByText("OAuth")).toBeInTheDocument();
   });
 
   it("connects straight from the card, with no intermediate detail step", async () => {
@@ -240,6 +240,20 @@ describe("PluginsView", () => {
     await userEvent.setup().click(own);
     expect(mocks.useKey).not.toHaveBeenCalled();
     expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "openai", personal: true });
+  });
+
+  it("offers one model card, keeps owned model connections, and lists providers only in the picker", async () => {
+    const inference = { wire_protocol: "openai_completions", model_list: true, binding: "user" } as const;
+    mockLoaded({ catalogRows: [...catalog.map(entry => entry.slug === "openai" ? { ...entry, inference } : entry), { ...catalog[1]!, slug: "deepseek", name: "DeepSeek", inference }] });
+    render(<PluginsView />);
+    expect(screen.getByRole("button", { name: "Manage OpenAI" })).toBeVisible();
+    const models = screen.getByRole("region", { name: "Models" });
+    expect(models.querySelectorAll('[data-plugin-card]')).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Connect DeepSeek" })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Add a model connection" }));
+    const picker = screen.getByRole("dialog");
+    expect(within(picker).getByRole("button", { name: "DeepSeek" })).toBeVisible();
+    expect(within(picker).getByRole("link", { name: "Custom OpenAI-compatible endpoint" }).querySelector("svg")).not.toBeNull();
   });
 
   it("connects from the keyboard", async () => {

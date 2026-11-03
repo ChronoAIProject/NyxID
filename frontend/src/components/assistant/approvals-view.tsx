@@ -105,16 +105,15 @@ function HistorySection({
                     size="sm"
                   />
                 }
-              >
-                <div className="min-w-0 flex-1">
+                title={<>
                   <p className="text-12 font-medium">{entry.serviceName}</p>
                   <p
-                    className="mt-1 line-clamp-2 break-words text-12 text-muted-foreground"
+                    className="mt-1 line-clamp-2 break-words text-12 font-normal text-muted-foreground"
                     title={entry.block.body}
                   >
                     {entry.block.body}
                   </p>
-                  <p className="mt-1 text-11 text-text-tertiary">
+                  <p className="mt-1 text-11 font-normal text-text-tertiary">
                     <span
                       className={
                         decision === "approved"
@@ -143,8 +142,8 @@ function HistorySection({
                         <span key={i}> · {part}</span>
                       ))}
                   </p>
-                </div>
-              </GroupedRow>
+                </>}
+              />
             );
           })}
         </GroupedList>
@@ -201,9 +200,9 @@ export function ApprovalsView() {
       <SegmentedControl
         value={tab}
         onValueChange={setTab}
-        className="space-y-6"
+        className="max-w-2xl space-y-6"
       >
-        <SegmentedControlList aria-label="Approval status">
+        <SegmentedControlList aria-label="Approval status" className="max-w-80">
           <SegmentedControlTrigger value="pending">
             Pending ({pending.length})
           </SegmentedControlTrigger>
@@ -235,7 +234,7 @@ export function ApprovalsView() {
           <>
             <SegmentedControlContent
               value="pending"
-              className="max-w-3xl space-y-6"
+              className="space-y-6"
             >
               {pending.length ? (
                 pending.map((entry) => (
@@ -261,7 +260,7 @@ export function ApprovalsView() {
                 <EmptyState />
               )}
             </SegmentedControlContent>
-            <SegmentedControlContent value="history" className="max-w-3xl">
+            <SegmentedControlContent value="history">
               <HistorySection entries={decided} />
             </SegmentedControlContent>
           </>

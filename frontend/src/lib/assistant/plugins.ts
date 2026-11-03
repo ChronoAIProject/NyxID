@@ -64,22 +64,22 @@ export function connectorInitial(name: string): string {
   return `${first}${second}`.toUpperCase();
 }
 
-/** Lowercase auth-kind meta for a catalog entry, mirroring the connect flow
+/** Human auth-kind label for a catalog entry, mirroring the connect flow
  *  the entry drives (same shape detection as the CLI wizard catalog grid). */
 function catalogMeta(entry: CatalogEntry): string {
-  if (entry.service_type === "ssh") return "ssh";
+  if (entry.service_type === "ssh") return "SSH";
   const providerType = (entry.provider_type ?? "").toLowerCase();
-  if (providerType === "oauth2") return "oauth";
-  if (providerType === "device_code") return "device code";
-  if (!entry.requires_credential) return "no credential";
+  if (providerType === "oauth2") return "OAuth";
+  if (providerType === "device_code") return "Device code";
+  if (!entry.requires_credential) return "No credential required";
   if (
     entry.token_exchange_credential_fields &&
     entry.token_exchange_credential_fields.length > 0
   ) {
-    return "token exchange";
+    return "Token exchange";
   }
-  if (entry.requires_gateway_url) return "self-hosted";
-  return "api key";
+  if (entry.requires_gateway_url) return "Self-hosted";
+  return "API key";
 }
 
 function categoryOf(serviceType: string): string {
@@ -133,8 +133,8 @@ function addedServiceItem(
       null,
     category: categoryOf(first.service_type),
     description:
-      catalogEntry?.description ??
-      first.description ??
+      catalogEntry?.description?.trim() ||
+      first.description?.trim() ||
       endpointDescription,
     meta:
       group.length > 1
@@ -165,7 +165,7 @@ function addedCustomItem(key: KeyInfo): ConnectorCardItem {
     iconUrl: key.icon_url ?? null,
     category: categoryOf(key.service_type),
     description:
-      key.description ??
+      key.description?.trim() ||
       endpointDescription,
     meta: key.credential_type.replaceAll("_", " "),
     added: true,
@@ -182,7 +182,7 @@ function availableItem(entry: CatalogEntry): ConnectorCardItem {
     iconSlug: entry.slug,
     iconUrl: entry.icon_url,
     category: categoryOf(entry.service_type),
-    description: entry.description ?? `Proxy requests to ${entry.base_url}.`,
+    description: entry.description?.trim() || `Proxy requests to ${entry.base_url}.`,
     meta: catalogMeta(entry),
     added: false,
     connectSlug: entry.service_type === "ssh" ? undefined : entry.slug,
