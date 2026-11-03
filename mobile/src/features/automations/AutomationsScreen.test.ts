@@ -7,9 +7,10 @@ import * as time from "./automationTime";
 import { automationSchema } from "./automationContracts";
 
 const id = "12345678-1234-4123-8123-123456789abc";
+const runId = "22345678-1234-4123-8123-123456789abc";
 const at = "2026-10-27T01:00:00Z";
 const run = {
-  id,
+  id: runId,
   scheduled_at: at,
   started_at: at,
   finished_at: at,
@@ -43,24 +44,44 @@ const trigger = automationSchema.parse({
   updated_at: at,
 });
 type Element = { type: any; props: Record<string, any> };
+/** Walk the tree, rendering the screen's own hook-free helper components. */
 function elements(root: Element): Element[] {
   if (!root || typeof root !== "object" || !root.props) return [];
-  return [root, ...[root.props.children].flat(Infinity).flatMap(elements)];
+  const rendered =
+    typeof root.type === "function" ? elements(root.type(root.props)) : [];
+  return [
+    root,
+    ...rendered,
+    ...[root.props.children].flat(Infinity).flatMap(elements),
+  ];
 }
+type Page =
+  | "AutomationsScreen"
+  | "AutomationAgentFilterScreen"
+  | "AutomationDetailScreen"
+  | "AutomationRunsScreen"
+  | "AutomationRunDetailScreen";
 function setup(
-  page: "AutomationsScreen" | "AutomationDetailScreen" | "AutomationRunsScreen",
-  zone = "UTC",
+  page: Page,
+  {
+    zone = "UTC",
+    params = { id, runId } as Record<string, unknown>,
+  }: { zone?: string; params?: Record<string, unknown> } = {},
 ) {
   const routes: any[] = [];
+  const pops: any[] = [];
   const chats: any[] = [];
   const queries: any[] = [];
   let nextPages = 0;
+  let refetches = 0;
   const cursor = { before: at, before_id: id };
   const response = (data: unknown) => ({
     data,
     isPending: false,
     isError: false,
-    refetch: async () => {},
+    refetch: async () => {
+      refetches++;
+    },
   });
   const harness = hookHarness<Element>({
     "react/jsx-runtime": {
@@ -68,18 +89,21 @@ function setup(
       jsxs: (type: any, props: any) => ({ type, props }),
       Fragment: "Fragment",
     },
-    "react-native": { Pressable: "Pressable", View: "View" },
     "../../components/AgentAvatar": { AgentAvatar: "AgentAvatar" },
-    "lucide-react-native": { ChevronRight: "ChevronRight", Clock3: "Clock3" },
-    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "../../components/SegmentControl": { SegmentControl: "SegmentControl" },
+    "../../components/settings/SettingsList": Object.fromEntries(
+      [
+        "SettingsCheckRow",
+        "SettingsGroup",
+        "SettingsPage",
+        "SettingsRow",
+        "SettingsTextField",
+      ].map((name) => [name, name]),
+    ),
     "../../app/WorkspaceHeader": {
       useOpenWorkspaceChat: () => (params: any) => chats.push(params),
     },
-    "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice", "WorkspacePage"].map(
-        (name) => [name, name],
-      ),
-    ),
+    "../../components/workspace/WorkspaceUI": { Notice: "Notice" },
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/automationsApi": { automationsApi: {} },
     "./automationPresentation": presentation,
@@ -88,11 +112,12 @@ function setup(
       AUTOMATIONS: ["workspace", "automations"],
       AUTOMATION_SETTINGS: ["workspace", "automations", "settings"],
       AutomationLoading: "AutomationLoading",
-      AutomationStatus: "AutomationStatus",
-      ChoiceField: "ChoiceField",
       automationError: (error: any) => String(error),
-      automationStyles: {},
       useAutomationRuntime: () => ({ active: true, online: true }),
+      usePullRefresh: (refetch: () => Promise<unknown>) => ({
+        refreshing: false,
+        onRefresh: () => void refetch(),
+      }),
     },
     "@tanstack/react-query": {
       useQuery: (options: any) => {
@@ -106,6 +131,7 @@ function setup(
                     name: "researcher",
                     display_name: "Researcher",
                   },
+                  { id: "gone", name: "gone", status: "destroyed" },
                 ],
               }
             : options.queryKey.includes("list")
@@ -144,13 +170,21 @@ function setup(
   );
   harness.mount(() =>
     (source[page] as any)({
-      route: { params: { id } },
+      route: { params },
       navigation: {
-        push: (name: any, params: any) => routes.push({ name, params }),
+        // Copy into this realm so deepEqual compares values, not prototypes.
+        push: (name: any, params: any) =>
+          routes.push({ name, params: { ...params } }),
+        popTo: (name: any, params: any, options: any) =>
+          pops.push([name, { ...params }, { ...options }]),
       },
     }),
   );
   const all = () => elements(harness.value());
+  const rows = () =>
+    all().filter((item) =>
+      ["SettingsRow", "SettingsCheckRow"].includes(item.type),
+    );
   const control = (label: string) => {
     const item = all().find(
       (item) =>
@@ -161,36 +195,61 @@ function setup(
   };
   const text = () =>
     all()
-      .filter((item) => item.type === "Label")
-      .map((item) => [item.props.children].flat().join(""))
+      .flatMap((item) => [
+        item.props.label,
+        item.props.detail,
+        item.props.value,
+        item.props.message,
+        item.props.footer,
+      ])
+      .filter((value) => typeof value === "string")
       .join("\n");
   return {
     harness,
-    source,
     all,
+    rows,
     control,
     text,
     routes,
+    pops,
     chats,
     queries,
     cursor,
     nextPages: () => nextPages,
+    refetches: () => refetches,
   };
 }
 
-test("read-only list keeps agent/status/search filters and opens details with no authoring controls", () => {
-  const env = setup("AutomationsScreen");
+test("the list is grouped rows with status filter, agent filter row and search, opening details read-only", () => {
+  const env = setup("AutomationsScreen", { params: {} });
   try {
-    env.control("Open Morning release check").props.onPress();
-    assert.equal(env.routes[0].name, "AutomationDetail");
-    env.control("Status").props.onChange("disabled");
+    const row = env.control("Morning release check");
+    assert.equal(row.type, "SettingsRow");
+    assert.equal(row.props.value, "Active");
+    assert.match(row.props.detail, /Researcher · Scheduled/);
+    row.props.onPress();
+    assert.deepEqual(env.routes[0], {
+      name: "AutomationDetail",
+      params: { id },
+    });
+    const status = env.all().find((item) => item.type === "SegmentControl")!;
+    assert.deepEqual(
+      Array.from(status.props.segments, (segment: any) => segment.label),
+      ["All", "Active", "Paused"],
+    );
+    status.props.onPress(2);
     env.harness.flush();
-    assert.ok(env.control("Open Webhook reminder"));
-    assert.throws(() => env.control("Open Morning release check"));
-    env.control("Status").props.onChange("all");
-    env.control("Agent").props.onChange("researcher");
+    assert.equal(env.control("Webhook reminder").props.value, "Paused");
+    assert.throws(() => env.control("Morning release check"));
+    status.props.onPress(0);
     env.harness.flush();
-    assert.throws(() => env.control("Open Webhook reminder"));
+    const agent = env.control("Agent");
+    assert.equal(agent.props.value, "All agents");
+    agent.props.onPress();
+    assert.deepEqual(env.routes[1], {
+      name: "AutomationAgentFilter",
+      params: { agentId: undefined },
+    });
     env.control("Search automations").props.onChangeText("not found");
     env.harness.flush();
     assert.match(env.text(), /No matching automations/);
@@ -200,28 +259,74 @@ test("read-only list keeps agent/status/search filters and opens details with no
       "Run now",
     ])
       assert.throws(() => env.control(label));
+    assert.ok(env.all().every((item) => item.type !== "Card"));
   } finally {
     env.harness.unmount();
   }
 });
 
-test("read-only details show task, target and confirmation policy and retain history navigation", () => {
+test("an agent passed in the route filters the list and names the filter row", () => {
+  const env = setup("AutomationsScreen", {
+    params: { agentId: "researcher" },
+  });
+  try {
+    assert.equal(env.control("Agent").props.value, "Researcher");
+    assert.ok(env.control("Morning release check"));
+    assert.throws(() => env.control("Webhook reminder"));
+    env.control("Agent").props.onPress();
+    assert.deepEqual(env.routes[0].params, { agentId: "researcher" });
+  } finally {
+    env.harness.unmount();
+  }
+});
+
+test("the agent filter is a checkmark list that returns its choice to the list", () => {
+  const env = setup("AutomationAgentFilterScreen", {
+    params: { agentId: "researcher" },
+  });
+  try {
+    const choices = env.rows();
+    assert.deepEqual(
+      choices.map((row) => [row.props.label, !!row.props.selected]),
+      [
+        ["All agents", false],
+        ["Researcher", true],
+      ],
+    );
+    choices[1]!.props.onPress();
+    choices[0]!.props.onPress();
+    assert.deepEqual(env.pops, [
+      ["Automations", { agentId: "researcher" }, { merge: true }],
+      ["Automations", { agentId: undefined }, { merge: true }],
+    ]);
+  } finally {
+    env.harness.unmount();
+  }
+});
+
+test("details are label/value groups with the task, target and confirmation policy, and navigation rows", () => {
   const env = setup("AutomationDetailScreen");
   try {
-    const card = env
-      .all()
-      .find((item) => item.type.name === "AutomationDeliveryCard")!;
-    const rendered = elements(card.type(card.props));
-    const text = rendered
-      .filter((item) => item.type === "Label")
-      .map((item) => [item.props.children].flat().join(""))
-      .join("\n");
-    assert.match(text, /Review the release checklist/);
-    assert.match(text, /Researcher/);
-    assert.match(text, /Thread: dedicated/);
-    assert.match(text, /Confirmation: Destructive actions/);
-    env.control("View run history").props.onPress();
-    assert.equal(env.routes[0].name, "AutomationRuns");
+    assert.equal(env.control("Status").props.value, "Active");
+    assert.equal(env.control("Runs for").props.value, "Researcher");
+    assert.equal(env.control("Thread").props.value, "dedicated");
+    assert.equal(
+      env.control("Confirmation").props.value,
+      "Destructive actions",
+    );
+    assert.equal(
+      env.control("Review the release checklist.").props.selectable,
+      true,
+    );
+    assert.equal(env.control("Calendar expression").props.value, "0 8 * * 1-5");
+    assert.equal(env.control("Latest run").props.value, "Completed");
+    env.control("Run history").props.onPress();
+    assert.deepEqual(env.routes[0], { name: "AutomationRuns", params: { id } });
+    env.control("Agent permissions").props.onPress();
+    assert.deepEqual(env.routes[1], {
+      name: "AgentDetail",
+      params: { agentId: "researcher" },
+    });
     for (const label of [
       "Edit automation",
       "Automation actions",
@@ -241,33 +346,33 @@ test("automation next, latest and history times use the owner timezone with one 
     "AutomationsScreen",
     "AutomationDetailScreen",
     "AutomationRunsScreen",
+    "AutomationRunDetailScreen",
   ] as const) {
-    const env = setup(page, zone);
+    const env = setup(page, { zone });
     const text = env.text();
-    assert.equal(text.split(`Times shown in ${zone}`).length - 1, 1);
-    assert.ok(text.includes(time.formatAutomationTime(at, zone)));
-    if (page === "AutomationsScreen") assert.ok(text.includes(`Next: ${time.formatAutomationTime(at, zone)}`));
-    if (page !== "AutomationRunsScreen")
+    assert.equal(text.split(`Times shown in ${zone}`).length - 1, 1, page);
+    assert.ok(text.includes(time.formatAutomationTime(at, zone)), page);
+    if (page === "AutomationsScreen")
+      assert.ok(text.includes(`Next: ${time.formatAutomationTime(at, zone)}`));
+    if (page === "AutomationsScreen" || page === "AutomationDetailScreen")
       assert.match(text, /Weekdays at 8:00 AM \(UTC\)/);
     env.harness.unmount();
   }
 });
 
 test("NyxBot guidance starts an empty normal NyxBot chat with a fresh draft identity", () => {
-  const env = setup("AutomationsScreen");
+  const env = setup("AutomationsScreen", { params: {} });
   try {
     const guidance = env
       .all()
       .find((item) => item.type.name === "AutomationGuidance")!;
-    const rows = elements(guidance.type(guidance.props));
-    assert.ok(
-      rows.some(
-        (item) =>
-          item.props.children ===
-          "To create, run or change automations, ask NyxBot.",
-      ),
+    const group = guidance.type(guidance.props);
+    assert.equal(
+      group.props.footer,
+      "To create, run or change automations, ask NyxBot.",
     );
-    const ask = rows.find((item) => item.props.label === "Ask NyxBot")!;
+    const ask = env.control("Ask NyxBot");
+    assert.equal(ask.props.tone, "action");
     ask.props.onPress();
     ask.props.onPress();
     for (const chat of env.chats) {
@@ -284,20 +389,67 @@ test("NyxBot guidance starts an empty normal NyxBot chat with a fresh draft iden
   }
 });
 
-test("run history preserves cursor paging, status/time and exact thread navigation", () => {
+test("run history rows preserve cursor paging and open the exact run", () => {
   const env = setup("AutomationRunsScreen");
   try {
-    assert.match(env.text(), /Scheduled:/);
-    assert.match(env.text(), /0.5 seconds/);
-    env.control("Open thread").props.onPress();
-    assert.equal(env.chats[0].conversationId, "nyxa-thread");
+    const row = env
+      .rows()
+      .find(
+        (item) => item.props.label === time.formatAutomationTime(at, "UTC"),
+      )!;
+    assert.equal(row.props.value, "Completed");
+    assert.match(row.props.detail, /0.5 seconds/);
+    row.props.onPress();
+    assert.deepEqual(env.routes[0], {
+      name: "AutomationRunDetail",
+      params: { id, runId },
+    });
     const query = env.queries.find((item) => item.getNextPageParam);
     assert.deepEqual(
       query.getNextPageParam({ next_cursor: env.cursor }),
       env.cursor,
     );
-    env.control("Load older runs").props.onPress();
+    const older = env.control("Load older runs");
+    assert.equal(older.props.tone, "action");
+    older.props.onPress();
     assert.equal(env.nextPages(), 1);
+  } finally {
+    env.harness.unmount();
+  }
+});
+
+test("run detail shares the history cache and opens its exact thread", () => {
+  const env = setup("AutomationRunDetailScreen");
+  try {
+    const query = env.queries.find((item) => item.getNextPageParam);
+    assert.deepEqual(
+      [...query.queryKey],
+      ["workspace", "automations", id, "runs"],
+    );
+    assert.equal(env.control("Outcome").props.value, "Completed");
+    assert.equal(env.control("Duration").props.value, "0.5 seconds");
+    env.control("Open Thread").props.onPress();
+    assert.equal(env.chats[0].conversationId, "nyxa-thread");
+  } finally {
+    env.harness.unmount();
+  }
+  const missing = setup("AutomationRunDetailScreen", {
+    params: { id, runId: "unknown" },
+  });
+  try {
+    assert.match(missing.text(), /no longer in the recent run history/);
+    assert.throws(() => missing.control("Open Thread"));
+  } finally {
+    missing.harness.unmount();
+  }
+});
+
+test("pull to refresh refetches the visible page", () => {
+  const env = setup("AutomationsScreen", { params: {} });
+  try {
+    const page = env.all().find((item) => item.type === "SettingsPage")!;
+    page.props.onRefresh();
+    assert.equal(env.refetches(), 1);
   } finally {
     env.harness.unmount();
   }

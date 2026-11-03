@@ -69,6 +69,8 @@ import {
   AutomationsScreen,
   AutomationDetailScreen,
   AutomationRunsScreen,
+  AutomationRunDetailScreen,
+  AutomationAgentFilterScreen,
 } from "../features/automations/AutomationsScreen";
 import {
   PluginsScreen,
@@ -510,6 +512,16 @@ function WorkspaceNavigator() {
         name="AutomationRuns"
         component={AutomationRunsScreen}
         options={{ title: "Run history" }}
+      />
+      <ContentStack.Screen
+        name="AutomationRunDetail"
+        component={AutomationRunDetailScreen}
+        options={{ title: "Run" }}
+      />
+      <ContentStack.Screen
+        name="AutomationAgentFilter"
+        component={AutomationAgentFilterScreen}
+        options={{ title: "Agent" }}
       />
       <ContentStack.Screen
         name="ActivityDetail"

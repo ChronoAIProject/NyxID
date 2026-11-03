@@ -41,6 +41,8 @@ export const contentNames = [
   "MachineActivity",
   "AutomationDetail",
   "AutomationRuns",
+  "AutomationRunDetail",
+  "AutomationAgentFilter",
   "ActivityDetail",
 ];
 export const settingsNames = [

@@ -1,5 +1,10 @@
 import type { AssistantAgent } from "../agents/agentContracts";
-import type { Automation, AutomationRunsPage } from "./automationContracts";
+import type {
+  Automation,
+  AutomationRun,
+  AutomationRunsPage,
+} from "./automationContracts";
+import { formatAutomationTime } from "./automationTime";
 
 export function automationTarget(
   row: Automation,
@@ -78,4 +83,56 @@ function cronSummary(expression: string) {
   if (/^[0-7]$/.test(weekday!))
     return `${["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"][Number(weekday) % 7]} at ${at}`;
   return "Custom calendar schedule";
+}
+
+/** Status and run outcomes read as Title Case values ("Paused" for disabled). */
+export function automationStatusLabel(value: string) {
+  const text = value === "disabled" ? "Paused" : value.replaceAll("_", " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export function automationSourceLabel(row: Automation) {
+  return (row.source ?? "webhook") === "schedule" ? "Scheduled" : "Webhook";
+}
+
+/** Server reason codes read as words ("confirmation_required" -> "confirmation required"). */
+export function automationReason(reason: string | null | undefined) {
+  return reason ? reason.replaceAll("_", " ") : undefined;
+}
+
+/** The detail line of an automation's list row: target, timing and any pause. */
+export function automationListDetail(
+  row: Automation,
+  target: string,
+  zone: string,
+) {
+  return [
+    `${target} · ${automationSourceLabel(row)}`,
+    automationScheduleSummary(row),
+    row.source === "schedule"
+      ? row.status === "disabled"
+        ? "Paused · no new scheduled runs"
+        : `Next: ${formatAutomationTime(row.next_run_at, zone)}`
+      : undefined,
+    automationPauseReason(row.pause_reason),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function automationRunDuration(run: AutomationRun) {
+  return run.duration_ms == null
+    ? undefined
+    : `${(run.duration_ms / 1000).toFixed(1)} seconds`;
+}
+
+/** The detail line of a run's history row. */
+export function automationRunDetail(run: AutomationRun) {
+  return [
+    automationReason(run.reason),
+    run.missed ? `Missed ${run.missed.count} occurrences` : undefined,
+    automationRunDuration(run),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
