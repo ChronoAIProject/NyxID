@@ -1627,6 +1627,11 @@ flowchart TD
 | `POST` | `/api/v1/channel-bots/{id}/verify` | Re-verify bot token and webhook |
 
 The list returns active (not deleted) bots, newest first, as `{ "bots": [...], "total": N }`.
+For Discord, list/detail responses include optional `gateway_state` from the stored
+relay Gateway diagnostics. The Channel Bots **Ingestion** column and cards show
+`Gateway connected`, `Gateway <state>`, or `Gateway` when no state is available
+(#2155); `webhook_registered` continues to describe only webhook registration.
+Other platforms retain their webhook registration or polling labels.
 Each bot's `user_id` identifies its personal or organization owner. `scope=all`
 requires the same admin access as individual organization listings: member-only,
 viewer-only and revoked memberships do not contribute bots. Memberships pointing
