@@ -67,7 +67,7 @@ export function AssistantMessageNotices({
         />
       ) : null}
       {error && billingCodes.includes(message.error_code ?? "") ? (
-        <QuietButton label="Billing & Usage" onPress={onOpenBilling} />
+        <QuietButton label="Usage & credits" onPress={onOpenBilling} />
       ) : null}
       {error && detail ? (
         <>
