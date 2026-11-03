@@ -181,7 +181,7 @@ function setup(
   };
 }
 
-test("password/policy controls submit live API data, request confirmation for weaker policy, and ignore stale screen actions", async () => {
+test("approved sign-in policy requests confirmation for the weaker setting and ignores stale screen actions", async () => {
   const env = setup(
     "AccountSecurityControls",
     {
@@ -194,19 +194,13 @@ test("password/policy controls submit live API data, request confirmation for we
     },
     {},
   );
-  for (const [field, value] of [
-    ["Current password for password change", "old"],
-    ["New password", "new password"],
-    ["Confirm new password", "new password"],
-  ] as const) {
-    env.find(field).props.onChangeText(value);
-    env.harness.flush();
-  }
-  env.find("Change password").props.onPress();
-  await env.harness.settle();
-  assert.equal(env.calls[0]?.[0], "changePassword");
-  assert.equal(env.calls[0]?.[1], "owner");
-  assert.equal(env.find("New password").props.value, "");
+  // Password changes are not offered in the app.
+  assert.equal(
+    nodes(env.harness.value()).some((node) =>
+      /password/i.test(String(node.props.label ?? "")),
+    ),
+    false,
+  );
   const toggle = nodes(env.harness.value()).find(
     (node) => node.type === "Switch",
   )!;
@@ -376,63 +370,6 @@ const securityProfile = {
   mfa_enabled: true,
   profile_config: { security: { skip_mfa_for_approved_sign_ins: false } },
 };
-function fillPassword(env: ReturnType<typeof setup>) {
-  for (const [field, value] of [
-    ["Current password for password change", "old password"],
-    ["New password", "new password"],
-    ["Confirm new password", "new password"],
-  ] as const) {
-    env.find(field).props.onChangeText(value);
-    env.harness.flush();
-  }
-}
-
-test("queued password changes cannot dispatch after leaving and returning", async () => {
-  const env = setup(
-    "AccountSecurityControls",
-    { profile: securityProfile },
-    {},
-  );
-  const queued = deferred<void>();
-  env.queueDispatch(queued.promise);
-  fillPassword(env);
-  env.find("Change password").props.onPress();
-  env.setAllowed(false);
-  env.setAllowed(true);
-  queued.resolve();
-  await env.harness.settle();
-  assert.equal(env.calls.length, 0);
-  assert.equal(env.find("Change password").props.loading, false);
-  env.harness.unmount();
-});
-
-test("late password responses never display success in a new activation", async () => {
-  const env = setup(
-    "AccountSecurityControls",
-    { profile: securityProfile },
-    {},
-  );
-  const response = deferred<void>();
-  env.holdResponse(response.promise);
-  fillPassword(env);
-  env.find("Change password").props.onPress();
-  assert.equal(env.calls.length, 1);
-  env.setAllowed(false);
-  env.setAllowed(true);
-  response.resolve();
-  await env.harness.settle();
-  assert.equal(
-    env.calls.length,
-    1,
-    "old response must not invalidate fresh profile data",
-  );
-  assert.equal(
-    nodes(env.harness.value()).some((node) => node.props.tone === "success"),
-    false,
-  );
-  env.harness.unmount();
-});
-
 test("old policy confirmation and step-up retries cannot become new writes after returning", async () => {
   const env = setup(
     "AccountSecurityControls",
