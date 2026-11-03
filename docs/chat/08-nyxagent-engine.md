@@ -224,8 +224,13 @@ Conversation deletion revokes its current key (including a rotated successor),
 revokes child credentials through the key service, and removes credential,
 acknowledgement, transcript and conversation rows in the same transaction.
 Account disable removes all encrypted assistant credentials; account deletion
-cascades all four assistant collections. Model discovery uses the most recently
-used valid credential belonging to the caller, or the uncached fallback.
+cascades all four assistant collections. Model discovery uses an existing valid
+credential from the caller's ordinary private threads: prefer their NyxBot home,
+then the most recently used thread. Hidden collaboration/group, shared/org-agent,
+guest, automation and other execution-only lanes are excluded, as are destroyed
+agents. It never provisions a key. Missing credentials or an unavailable upstream
+return the default model list. Successes and failures are cached per owner for
+60 seconds, with at most 64 entries per replica.
 
 Assistant keys are hidden by default on the API keys page behind **Show assistant
 chat keys**. Key metadata includes only `assistant_conversation_id`; the detail
@@ -907,12 +912,14 @@ scalars of the trimmed initial message. Rename rejects an active turn with HTTP 
 `turn_active`; Delete stops/cancels the active turn before removing the thread (the
 numeric code is indexed in CLAUDE.md).
 
-Models use authenticated `GET /v1/models` through the admin proxy, a 60-second
-server cache of successful upstream lists and an uncached fallback
-`[nyxagent/chat]`. Failures and missing credentials never populate the cache.
+Models use authenticated `GET /v1/models?include_capabilities=true` through the admin proxy, with a
+60-second per-owner cache of both successful upstream lists and failed loads.
+Failures and missing eligible ordinary credentials return `[nyxagent/chat]`.
+Optional per-model `input_modalities` are omitted when unknown. Image planning
+uses the same cache; see [per-model image support](10-uploads.md#per-model-image-support).
 Discovery does not provision a key: users without one initially see the default
-profile. The browser refreshes profiles after a send, so provisioning makes the
-upstream list available immediately. No new NyxID environment variable is introduced.
+profile. The browser refreshes profiles after a send; a cached fallback can
+remain until its minute expires. No new NyxID environment variable is introduced.
 
 ## Steering a running web turn (0.68.0)
 
@@ -925,7 +932,10 @@ NyxAgent's `nyxagent-steer-v1` contract (`origin/main` at `fe97457`,
 `{"steer":{"max_chars":32000,"max_per_turn":20}}`, or `{"steer":null}`.
 The authenticated upstream capability lookup shares a bounded 60-second cache
 with image capability discovery, keyed by database, catalog service and base URL.
-Only metadata is cached; every operation still checks live owner/key authority.
+Only successful deployment metadata is cached; every operation still checks live
+owner/key authority. A failed lookup affects only that turn, keeps its explicit
+image fallback notice, and never disables images or steering for other owners.
+Lookups run outside the cache lock and log only failure class/status metadata.
 No additional upstream lookup runs on ordinary text turns. Missing/unknown
 steering capability preserves the existing blocked composer and `turn_active`
 response. Existing image protocol fields are unchanged.

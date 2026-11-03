@@ -105,6 +105,7 @@ function images(
       label: attachment.label,
       origin: attachment.origin || undefined,
       ...(attachment.image_input ? { imageInput: attachment.image_input } : {}),
+      ...(attachment.image_input_reason ? { imageInputReason: attachment.image_input_reason } : {}),
     })),
   };
 }

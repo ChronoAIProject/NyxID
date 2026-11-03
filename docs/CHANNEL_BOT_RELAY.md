@@ -760,7 +760,8 @@ from ordinary bot guild and DM chat.
 
 The **Interactions Endpoint URL** under Developer Portal > General Information
 and the **Webhooks / Event Webhooks** page are different features. Paste NyxID's
-callback URL only into **Interactions Endpoint URL**. Its signed `type:1` PING
+callback URL only into **Interactions Endpoint URL** when using slash commands
+or components; this setting is optional for ordinary chat. Its signed `type:1` PING
 receives the existing `type:1` PONG, and commands/components keep their existing
 behavior. NyxID does not register slash commands. Event Webhooks carry application
 events and Social SDK lobby/game messages, not ordinary bot guild/DM messages. NyxID deliberately **refuses** an
@@ -769,10 +770,18 @@ Ed25519-authenticated Event Webhooks `type:0` PING with HTTP 400 and
 the correct field. It does not return the 204 that would validate the wrong
 setup. Unauthenticated PINGs cannot change bot diagnostics.
 
-Ordinary chat uses a separate, default-off **`channel:discord-gateway`** feature
-flag, resolved for the bot owner (global/user cohorts, including org-owned bot
-IDs). `nyxbot:gateway-discord` selects the Agent Event Gateway transport;
+Bots linked to NyxBot or a specialist use NyxBot's Discord gateway when
+**`nyxbot:gateway-discord`** is enabled for the linking person and the Agent Event
+Gateway accepts the bot. That path does not require `channel:discord-gateway`.
+Other relay bots (including a bot whose gateway enrollment is refused) need the
+separate, default-off **`channel:discord-gateway`** flag, resolved for the bot
+owner (global/user cohorts, including org-owned bot IDs).
 NyxID opens a Discord socket **only for relay-transport bots**. No additional
+webhook is required for ordinary chat: the first authenticated Gateway message
+promotes a `pending_webhook` bot to `active`, fenced by the current bot identity,
+credentials, owner and ingress lease. Authenticated native Discord provider
+admission also activates a pending bot under its current source/key/binding.
+Neither path claims an Interactions webhook was registered. No additional
 environment variable is needed. Deploy with ingress off. Activation uses the
 existing security rollout readiness roster and drain assertion: all serving
 replicas must advertise `channel:discord-gateway`, since old transport writers

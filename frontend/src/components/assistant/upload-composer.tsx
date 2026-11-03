@@ -63,6 +63,7 @@ type Pending = {
 type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
   readonly attachmentMenuItems?: ReactNode;
+  readonly imageWarning?: string;
   readonly onVoiceSettings?: () => void;
   readonly onVoicePrepare?: () => boolean;
   readonly onVoice?: (conversationId: string, preparation?: PreparedMicrophone) => Promise<void>;
@@ -70,7 +71,7 @@ type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, imageWarning, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
@@ -398,6 +399,9 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
       }
       attachments={
         <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
+          {imageWarning && files.some((file) => file.kind === "image" && !file.error) && (
+            <p role="status" className="text-12 text-muted-foreground">{imageWarning}</p>
+          )}
           {files.length > 0 && (
             <div className="relative min-w-0">
               <ul

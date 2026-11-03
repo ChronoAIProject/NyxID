@@ -2919,6 +2919,7 @@ async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
             label: "Generated image".into(),
             chat_delivery: Some(delivery),
             image_input: None,
+            image_input_reason: None,
             image_inspection: Some(false),
             pages: None,
         });

@@ -265,3 +265,21 @@ it("disables Thinking when NyxAgent does not offer research", async () => {
   await user.click(toggle);
   expect(select).not.toHaveBeenCalled();
 });
+
+
+it("marks known text-only models in both model pickers without marking unknown models", async () => {
+  client.setQueryData(["assistant", "nyxagent", "owner", "models"], [
+    { id: "nyxagent/chat", label: "Text model", available: true, input_modalities: ["text"] },
+    { id: "nyxagent/research", label: "Unknown model", available: true },
+  ]);
+  const user = renderWith(<ThreadModelSelect conversationId={thread} model="nyxagent/chat" />);
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  expect(screen.getByRole("option", { name: "Text model Can’t view images" })).toBeVisible();
+  expect(screen.getByRole("option", { name: "Unknown model" })).toBeVisible();
+  cleanup();
+  renderWith(<ComposerSettings model="nyxagent/chat" onDraftModelChange={() => {}} />);
+  await user.click(await screen.findByRole("button", { name: /Model and permissions: Text model/ }));
+  await user.click(screen.getByRole("menuitem", { name: /^Model / }));
+  expect(screen.getByRole("menuitemradio", { name: "Text model Can’t view images" })).toBeVisible();
+  expect(screen.getByRole("menuitemradio", { name: "Unknown model" })).toBeVisible();
+});

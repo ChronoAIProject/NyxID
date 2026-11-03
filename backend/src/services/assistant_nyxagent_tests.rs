@@ -824,6 +824,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
             chat_delivery: None,
             image_input: None,
+            image_input_reason: None,
             image_inspection: None,
             origin: "tool".into(),
             pages: None,
@@ -889,6 +890,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
             chat_delivery: None,
             image_input: None,
+            image_input_reason: None,
             image_inspection: None,
             origin: "tool".into(),
             pages: None,
@@ -4733,6 +4735,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
                     pages: Some(1),
                     origin: "user_upload".into(),
                     image_input: None,
+                    image_input_reason: None,
                     image_inspection: None,
                 });
             db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
@@ -7584,5 +7587,27 @@ fn channel_model_first_output_excludes_keepalives_and_reports_once() {
         observer.event(None, data);
         assert!(observer.take_first_output());
         assert!(!observer.take_first_output());
+    }
+}
+
+#[test]
+fn response_notices_accept_only_the_bounded_known_image_code() {
+    for (code, expected) in [
+        (json!("image_input_unsupported"), true),
+        (json!("unknown_notice"), false),
+        (json!("IMAGE_INPUT_UNSUPPORTED"), false),
+        (json!("image_input_unsupported\n"), false),
+        (json!("a".repeat(65)), false),
+        (json!("private prose"), false),
+        (json!(null), false),
+        (json!(17), false),
+    ] {
+        let mut event = terminal("response.completed", 0, "Answer");
+        event["response"]["nyxagent_notices"] =
+            json!([{"code":code,"message":"private notice prose"}]);
+        let mut decoder = ResponseStream::default();
+        decoder.push(&frame(event)).unwrap();
+        assert_eq!(decoder.image_input_unsupported, expected);
+        assert_eq!(decoder.text, "Answer");
     }
 }

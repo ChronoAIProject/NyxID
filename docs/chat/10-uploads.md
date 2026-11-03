@@ -361,6 +361,35 @@ saved draft never keeps a handle: pasted text returns inline (bounded like the
 textbox) and other files become their description. File names never add an
 `@mention`. Images show above the text of the message they belong to.
 
+### Per-model image support
+
+Model discovery requests `GET /v1/models?include_capabilities=true`. NyxID returns
+optional `input_modalities` with each model, retaining the bounded 60-second
+per-owner success/failure cache and ordinary-private credential selection. A
+missing or malformed field is unknown and preserves existing image behavior.
+The model picker labels known text-only models, and the composer warns when an
+image is attached without blocking Send.
+
+For owner image turns, the existing account-metadata adapter reads that same
+cache, with at most a five-second lookup on a miss. Text-only turns make no
+additional metadata request. Failure or an unknown model leaves the deployment
+capability check and ordinary image plan unchanged. All owner transports reuse the same cached metadata. Transports without account
+model discovery retain unknown support on a miss. Known text-only models omit image URLs
+and receive a fixed notice in the turn context; the owner sees the matching
+transcript notice, without a machine-save suggestion. Tool-image continuations
+also honor known text-only support and preserve the completed answer.
+
+Delivery keeps the existing `image_input: sent|unavailable` values. The optional
+`image_input_reason` distinguishes `model_text_only`, `agent_unsupported`, and
+NyxAgent's `image_input_unsupported` notice. Only the recognized bounded
+machine code is consumed from response `nyxagent_notices`; unknown codes and
+all notice prose are ignored. The parser accepts only `[a-z0-9_]{1,64}`, inspects
+at most 32 notices, and stores no provider text. A recognized unsupported-image
+notice marks the delivered images unavailable and prevents further image
+URLs in that turn. The existing `image_input_unavailable` stream event
+refreshes the transcript. Old readers can ignore the additive reason and keep
+displaying the ordinary fallback.
+
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,
 delete/purge, paging, prompt listing, upstream capability fallback, Codex image

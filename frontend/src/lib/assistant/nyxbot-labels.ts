@@ -392,6 +392,11 @@ export function confirmationReason(confirmation: NyxAgentActionConfirmation): st
     : "Your access mode asks.";
 }
 
+/** Missing deployment metadata is unknown, never a reason to omit an image. */
+export function modelCannotViewImages(model: Pick<NyxAgentModel, "input_modalities"> | undefined): boolean {
+  return model?.input_modalities != null && !model.input_modalities.includes("image");
+}
+
 /** Prefer the upstream name; older servers supply only the routing alias. */
 export function modelDisplayName(model: Pick<NyxAgentModel, "id" | "label">): string {
   const alias = model.id.replace(/^nyxagent\//, "");

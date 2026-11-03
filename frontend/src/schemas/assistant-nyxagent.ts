@@ -33,6 +33,7 @@ export const nyxAgentAttachmentSchema = z.object({
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
   image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
+  image_input_reason: z.enum(["agent_unsupported", "model_text_only", "image_input_unsupported"]).nullish().catch(undefined),
   size: z.number().int().nonnegative(),
   label: z.string(),
 });
@@ -218,6 +219,7 @@ export const nyxAgentModelSchema = z.object({
   label: z.string(),
   available: z.boolean(),
   description: z.string().nullish(),
+  input_modalities: z.array(z.string()).nullish().catch(undefined),
 });
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
