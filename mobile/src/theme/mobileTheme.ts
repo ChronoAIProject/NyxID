@@ -35,8 +35,6 @@ export type ThemeColors = {
   danger: string;        // expired, failed, denied
   dangerSoft: string;
   dangerSoftBg: string;
-  /** Solid fill for irreversible actions such as Delete Account; white label. */
-  dangerSolid: string;
   primary: string;       // warm violet — identity + interaction only
   primaryDim: string;    // pressed states, hover deep
   primaryLight: string;  // logo wordmark tones, light text on accent
@@ -135,7 +133,6 @@ export const darkColors: ThemeColors = {
   danger: "#FCA5A5",
   dangerSoft: "#fca5a5",
   dangerSoftBg: "rgba(248, 113, 113, 0.10)",
-  dangerSolid: "#DC2626",
   // Brand
   primary: "#C6B3FC",
   primaryDim: PRIMARY_DEEP,
@@ -194,7 +191,6 @@ export const lightColors: ThemeColors = {
   danger: DANGER_LIGHT,
   dangerSoft: DANGER_LIGHT,
   dangerSoftBg: "rgba(220, 38, 38, 0.06)",
-  dangerSolid: "#B91C1C",
   primary: "#7049C6",
   primaryDim: "#6240B0",
   primaryLight: PRIMARY_LIGHT,

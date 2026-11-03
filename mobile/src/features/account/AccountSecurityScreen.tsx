@@ -6,10 +6,10 @@ import * as Clipboard from "expo-clipboard";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import {
   ActionButton,
-  Card,
   Field,
   Label,
   Notice,
+  Section,
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
@@ -29,6 +29,7 @@ import { createMfaRecoveryLifecycle } from "./mfaRecoveryLifecycle";
 import { AccountSecurityControls } from "./AccountSecurityControls";
 import { AccountAuthorizations } from "./AccountAuthorizations";
 import { AccountOrganizations } from "./AccountOrganizations";
+import { SessionAccordion } from "./SessionAccordion";
 import { disableMfaSchema } from "../../lib/api/accountSecurityTransport";
 
 type PrivateAction = "setup" | "confirm" | "disable" | "copy" | "share";
@@ -60,6 +61,8 @@ export function AccountSecurityScreen() {
     queryKey: ["account", "sessions"],
     queryFn: ({ signal }) => accountApi.listSessions(signal),
   });
+  // One session is open at a time; all start collapsed.
+  const [expandedSession, setExpandedSession] = useState<string>();
   const [displayName, setDisplayName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
   const profileInitialized = useRef(false);
@@ -430,14 +433,12 @@ export function AccountSecurityScreen() {
 
   return (
     <WorkspacePage showHeading={false} title="Account & security">
-      <Label muted>Manage your identity and protect access to NyxID.</Label>
       {!isConnected ? (
         <Notice message="You're offline. Connect to update account settings." />
       ) : null}
       {feedback ? <Notice {...feedback} /> : null}
 
-      <Card>
-        <Label accessibilityRole="header">Profile</Label>
+      <Section title="Profile">
         {profile.isPending ? (
           <Label muted>Loading your account…</Label>
         ) : profile.isError || !profile.data ? (
@@ -453,12 +454,22 @@ export function AccountSecurityScreen() {
           </>
         ) : (
           <>
-            <Label muted>{profile.data.email}</Label>
-            <Label muted>
-              {profile.data.email_verified
-                ? "Email verified"
-                : "Email not verified"}
-            </Label>
+            <View
+              style={{
+                flexDirection: "row",
+                flexWrap: "wrap",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <Label muted>Email</Label>
+              <View style={{ alignItems: "flex-end", flexShrink: 1 }}>
+                <Label selectable>{profile.data.email}</Label>
+                <Label muted style={{ fontSize: 12 }}>
+                  {profile.data.email_verified ? "Verified" : "Not verified"}
+                </Label>
+              </View>
+            </View>
             <Field
               label="Display name"
               value={displayName}
@@ -494,10 +505,9 @@ export function AccountSecurityScreen() {
             ) : null}
           </>
         )}
-      </Card>
+      </Section>
 
-      <Card>
-        <Label accessibilityRole="header">Two-factor authentication</Label>
+      <Section title="Two-factor authentication">
         {profile.isPending ? (
           <Label muted>Loading security settings…</Label>
         ) : !profile.data || !ownsPrivateState ? (
@@ -703,7 +713,7 @@ export function AccountSecurityScreen() {
             )}
           </>
         )}
-      </Card>
+      </Section>
 
       {profile.data && ownsPrivateState ? (
         <>
@@ -722,12 +732,7 @@ export function AccountSecurityScreen() {
           />
         </>
       ) : null}
-      <Card>
-        <Label accessibilityRole="header">Active sessions</Label>
-        <Label muted>
-          Review where your account is signed in. Network details come from
-          NyxID's session records.
-        </Label>
+      <Section title="Active sessions" footer="Review where your account is signed in. Network details come from NyxID's session records.">
         {sessions.isPending ? (
           <Label muted>Loading sessions…</Label>
         ) : sessions.isError ? (
@@ -744,42 +749,25 @@ export function AccountSecurityScreen() {
         ) : sessions.data?.length === 0 ? (
           <Label muted>No active sessions found.</Label>
         ) : (
-          sessions.data?.map((session) => (
-            <View
+          sessions.data?.map((session, index) => (
+            <SessionAccordion
               key={session.id}
-              style={{
-                gap: 8,
-                paddingVertical: 12,
-                borderTopWidth: 1,
-                borderTopColor: colors.border,
-              }}
-            >
-              <Label>
-                {session.is_current ? "This session" : "Signed-in session"}
-              </Label>
-              <Label muted selectable>
-                {session.user_agent || "Device details unavailable"}
-              </Label>
-              <Label muted>
-                Network: {session.ip_address || "Unavailable"}
-              </Label>
-              <Label muted>Signed in {formatDate(session.created_at)}</Label>
-              <Label muted>Expires {formatDate(session.expires_at)}</Label>
-              <ActionButton
-                label={
-                  session.is_current
-                    ? "Sign out on this device"
-                    : "Sign out session"
-                }
-                variant="danger"
-                disabled={!isConnected || revokeSession.isPending}
-                loading={
-                  revokeSession.isPending &&
-                  revokeSession.variables?.id === session.id
-                }
-                onPress={() => confirmSessionRevocation(session)}
-              />
-            </View>
+              first={index === 0}
+              session={session}
+              expanded={expandedSession === session.id}
+              onToggle={() =>
+                setExpandedSession((open) =>
+                  open === session.id ? undefined : session.id,
+                )
+              }
+              formatDate={formatDate}
+              onSignOut={() => confirmSessionRevocation(session)}
+              signOutDisabled={!isConnected || revokeSession.isPending}
+              signingOut={
+                revokeSession.isPending &&
+                revokeSession.variables?.id === session.id
+              }
+            />
           ))
         )}
         <ActionButton
@@ -792,7 +780,7 @@ export function AccountSecurityScreen() {
             void sessions.refetch();
           }}
         />
-      </Card>
+      </Section>
     </WorkspacePage>
   );
 }

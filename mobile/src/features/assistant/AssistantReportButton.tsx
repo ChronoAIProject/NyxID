@@ -13,9 +13,12 @@ import {
 export function AssistantReportButton({
   target,
   reported: initiallyReported = false,
+  beforeDate = false,
 }: {
   target: ReplyReportTarget;
   reported?: boolean;
+  /** Sits between Copy and the date, so its expansion stops at half the gap. */
+  beforeDate?: boolean;
 }) {
   const { colors } = useTheme();
   const [reported, setReported] = useState(initiallyReported);
@@ -75,7 +78,7 @@ export function AssistantReportButton({
       accessibilityHint="Flag this response as offensive, harmful or inaccurate"
       accessibilityState={{ disabled: sending }}
       disabled={sending}
-      hitSlop={{ top: 10, bottom: 10, left: 4, right: 16 }}
+      hitSlop={{ top: 10, bottom: 10, left: 4, right: beforeDate ? 4 : 16 }}
       onPress={choose}
       style={({ pressed }) => [
         styles.button,

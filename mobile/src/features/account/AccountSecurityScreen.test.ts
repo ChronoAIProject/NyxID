@@ -59,9 +59,15 @@ function setup(passwordAccount: boolean) {
     "expo-clipboard": {},
     "../../app/WorkspaceHeader": { useWorkspaceBack() {} },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice", "WorkspacePage"].map(
-        (name) => [name, name],
-      ),
+      [
+        "ActionButton",
+        "Card",
+        "Field",
+        "Label",
+        "Notice",
+        "Section",
+        "WorkspacePage",
+      ].map((name) => [name, name]),
     ),
     "@tanstack/react-query": {
       useQueryClient: () => ({
@@ -101,6 +107,7 @@ function setup(passwordAccount: boolean) {
       AccountAuthorizations: "AccountAuthorizations",
     },
     "./AccountOrganizations": { AccountOrganizations: "AccountOrganizations" },
+    "./SessionAccordion": { SessionAccordion: "SessionAccordion" },
   });
   const { AccountSecurityScreen } = harness.load(
     fileURLToPath(new URL("./AccountSecurityScreen.tsx", import.meta.url)),

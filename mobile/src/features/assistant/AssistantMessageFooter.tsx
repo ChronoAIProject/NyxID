@@ -48,7 +48,7 @@ export function AssistantMessageTime({
   );
 }
 
-/** Native replies offer Copy, date and Report (no reply voting). */
+/** Native replies offer Copy, Report and date (no reply voting); people get date and Copy. */
 export function AssistantMessageFooter({
   text,
   timestamp,
@@ -65,13 +65,25 @@ export function AssistantMessageFooter({
 }) {
   const copy = <AssistantCopyButton text={text} afterDate={user} foreground={foreground} />;
   const time = <AssistantMessageTime value={timestamp} beforeCopy={user} foreground={foreground} />;
+  const row = [styles.row, user && styles.userRow];
+  if (user)
+    return (
+      <View style={row}>
+        {time}
+        {copy}
+      </View>
+    );
   return (
-    <View style={[styles.row, user && styles.userRow]}>
-      {user ? time : copy}
-      {user ? copy : time}
-      {!user && report ? (
-        <AssistantReportButton target={report} reported={report.reported} />
+    <View style={row}>
+      {copy}
+      {report ? (
+        <AssistantReportButton
+          target={report}
+          reported={report.reported}
+          beforeDate={!!messageTime(timestamp)}
+        />
       ) : null}
+      {time}
     </View>
   );
 }

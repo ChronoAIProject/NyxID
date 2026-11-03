@@ -11,7 +11,10 @@ import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
 import { ChatBubbleSettings } from "./ChatBubbleSettings";
 
-export function ChatDisplaySettings() {
+/** `embedded` drops the card and heading so a Settings group can title it. */
+export function ChatDisplaySettings({
+  embedded = false,
+}: { embedded?: boolean } = {}) {
   const { colors } = useTheme();
   const { width, fontScale } = useWindowDimensions();
   const stacked = width / fontScale < 340;
@@ -79,17 +82,23 @@ export function ChatDisplaySettings() {
   }
   return (
     <View
-      style={[
-        styles.card,
-        { backgroundColor: colors.card, borderColor: colors.border },
-      ]}
+      style={
+        embedded
+          ? styles.embedded
+          : [
+              styles.card,
+              { backgroundColor: colors.card, borderColor: colors.border },
+            ]
+      }
     >
-      <Text
-        accessibilityRole="header"
-        style={[styles.title, { color: colors.textPrimary }]}
-      >
-        Display
-      </Text>
+      {embedded ? null : (
+        <Text
+          accessibilityRole="header"
+          style={[styles.title, { color: colors.textPrimary }]}
+        >
+          Display
+        </Text>
+      )}
       <Text style={{ color: colors.textSecondary }}>
         Chat layout is saved on this device and applies to every conversation.
       </Text>
@@ -114,6 +123,7 @@ export function ChatDisplaySettings() {
 }
 const styles = StyleSheet.create({
   card: { borderWidth: 1, borderRadius: 16, padding: 20, gap: 16 },
+  embedded: { padding: 16, gap: 16 },
   title: { fontFamily: fonts.bodySemi, fontSize: 16 },
   setting: {
     flexDirection: "row",

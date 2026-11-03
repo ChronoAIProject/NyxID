@@ -182,11 +182,6 @@ test("selected, interactive, error and disabled labels keep AA on zinc surfaces"
   }
 });
 
-test("solid destructive buttons keep a white label at AA in both themes", () => {
-  for (const colors of [darkColors, lightColors])
-    assert.ok(ratio(rgb(colors.onPrimary), rgb(colors.dangerSolid)) >= 4.5);
-});
-
 test("white CTA labels meet AA throughout normal and pressed native gradients", () => {
   for (const colors of [darkColors, lightColors]) {
     for (const [start, end] of [

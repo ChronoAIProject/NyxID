@@ -100,7 +100,8 @@ test("personal balance alone is visible, without headings, account selectors or 
   assert.equal(screen.find("BillingWalletCard").props.grants.length, 1);
   assert.equal(screen.find("BillingWalletCard").props.allowances.length, 1);
   assert.equal(screen.find("BillingHistoryRow").props.expanded, false);
-  assert.match(screen.text(), /To add credits, use NyxID on the web\./);
+  // App Review 3.1.1/3.1.3: no purchase call to action outside In-App Purchase, not even text.
+  assert.doesNotMatch(screen.text(), /add credits|on the web|top.?up|buy|purchase/i);
   assert.doesNotMatch(screen.text(), /Personal usage|Credit grants|account selection|Personal account/);
   assert.equal(screen.all().some((item) => item.type === "SegmentControl" || item.type === "BillingServiceCard"), false);
   assert.equal(screen.all().some((item) => item.props.accessibilityRole === "link" || item.props.href || item.props.url), false);

@@ -275,3 +275,121 @@ test("server recovery is checked before retry; concurrent taps cannot replay it"
   assert.equal(sends, 1);
   h.unmount();
 });
+
+test("an allowed card resumes the chat as a continuation bound to that card", async () => {
+  const card = "d9428888-122b-41e1-b85c-61cd3cbb3210";
+  const sent: any[] = [];
+  const page = history(A);
+  const allowed = {
+    id: card,
+    conversation_id: A,
+    kind: "action",
+    status: "allowed",
+    summary: "Create a scheduled automation",
+    decider: "user",
+    service_slug: null,
+    service_name: null,
+    tool_name: "nyxid__create_schedule",
+    created_at: "2026-11-03T00:00:00Z",
+    expires_at: "2099-01-01T00:00:00Z",
+  };
+  const h = hookHarness<ReturnType<typeof useAssistant>>({
+    "./useAssistantLiveRefresh": { useAssistantLiveRefresh: () => {} },
+    "react-native": {
+      AppState: {
+        currentState: "active",
+        addEventListener: () => ({ remove() {} }),
+      },
+    },
+    "@react-navigation/native": { useIsFocused: () => true },
+    "@react-native-community/netinfo": { addEventListener: () => () => {} },
+    "@tanstack/react-query": {
+      useQuery: () => ({
+        data: {
+          agents: [
+            { id: "nyxbot", kind: "nyxbot", status: "idle", can_use: true },
+          ],
+        },
+      }),
+    },
+    "../../lib/api/agentsApi": { agentsApi: {} },
+    "../../lib/api/assistantApi": {
+      assistantApi: {
+        history: async () => page,
+        list: async () => ({ conversations: [], next_cursor: null }),
+        models: async () => [],
+        decide: async () => allowed,
+      },
+      streamAssistantTurn: async (input: any) => {
+        sent.push(input);
+      },
+    },
+  });
+  const hook = h.load(
+    fileURLToPath(new URL("./useAssistant.ts", import.meta.url)),
+  ).useAssistant as typeof useAssistant;
+  h.mount(() => hook(A));
+  await h.settle();
+  await h.value().decide(card, "allow");
+  await h.settle();
+  await h.settle();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].conversationId, A);
+  assert.equal(sent[0].acknowledgementId, card);
+  assert.match(sent[0].text, /^Confirmed: Create a scheduled automation/);
+  assert.match(sent[0].text, /what you did and the result\.$/);
+  h.unmount();
+});
+
+test("returning home from another page while a chat was selected does not leave the home loading", async () => {
+  let focused = true;
+  let route: string | undefined = A;
+  const h = hookHarness<ReturnType<typeof useAssistant>>({
+    "./useAssistantLiveRefresh": { useAssistantLiveRefresh: () => {} },
+    "react-native": {
+      AppState: {
+        currentState: "active",
+        addEventListener: () => ({ remove() {} }),
+      },
+    },
+    "@react-navigation/native": { useIsFocused: () => focused },
+    "@react-native-community/netinfo": { addEventListener: () => () => {} },
+    "@tanstack/react-query": {
+      useQuery: () => ({
+        data: {
+          agents: [
+            { id: "nyxbot", kind: "nyxbot", status: "idle", can_use: true },
+          ],
+        },
+      }),
+    },
+    "../../lib/api/agentsApi": { agentsApi: {} },
+    "../../lib/api/assistantApi": {
+      assistantApi: {
+        history: async (id: string) => history(id),
+        list: async () => ({ conversations: [], next_cursor: null }),
+        models: async () => [],
+      },
+      streamAssistantTurn: async () => {},
+    },
+  });
+  const hook = h.load(
+    fileURLToPath(new URL("./useAssistant.ts", import.meta.url)),
+  ).useAssistant as typeof useAssistant;
+  h.mount(() => hook(route));
+  await h.settle();
+  assert.equal(h.value().loading, false);
+  // Another workspace page covers the chat.
+  focused = false;
+  h.render();
+  await h.settle();
+  // The drawer's Chat button refocuses the same screen as NyxBot home.
+  focused = true;
+  route = undefined;
+  h.render();
+  await h.settle();
+  await h.settle();
+  assert.equal(h.value().conversationId, undefined);
+  assert.equal(h.value().loading, false);
+  h.unmount();
+});

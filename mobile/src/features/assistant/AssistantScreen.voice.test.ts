@@ -431,7 +431,11 @@ function setup(
     "../plugins/NativeAuthoredSkillReview": {
       NativeAuthoredSkillReview: "NativeAuthoredSkillReview",
     },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://nyx.example" },
+    "../../lib/env": {
+      NYXID_FRONTEND_URL: "https://nyx.example",
+      NYXID_TRUSTED_FRONTEND_URLS: ["https://nyx.example"],
+      firstPartyFrontendUrls: () => ["https://nyx.example"],
+    },
     "./voice/AssistantVoiceConversation": {
       AssistantVoiceConversation: "AssistantVoiceConversation",
     },

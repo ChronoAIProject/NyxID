@@ -93,7 +93,6 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
     </> : <>
       {!isConnected && <Notice message="Offline. Showing your saved balance." />}
       <BillingWalletCard {...loaded} now={Date.now()} />
-      <Label muted style={{ fontSize: 12, lineHeight: 16 }}>To add credits, use NyxID on the web.</Label>
       <BillingHistoryRow expanded={expanded} onPress={toggleHistory} />
       {expanded && <>
         <SegmentControl segments={[{ label: "24 hours" }, { label: "7 days" }, { label: "30 days" }]} activeIndex={periods.indexOf(period)} onPress={(index) => setPeriod(periods[index] ?? "30d")} />

@@ -34,6 +34,9 @@ import { DeviceLoginScreen } from "../features/auth/DeviceLoginScreen";
 import { AgentKeyLoginScreen } from "../features/auth/AgentKeyLoginScreen";
 import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
+import { DisplaySettingsScreen } from "../features/account/DisplaySettingsScreen";
+import { NotificationSettingsScreen } from "../features/account/NotificationSettingsScreen";
+import { PrivacySettingsScreen } from "../features/account/PrivacySettingsScreen";
 import { AccountSecurityScreen } from "../features/account/AccountSecurityScreen";
 import { MachinePolicyScreen } from "../features/machines/MachinePolicyScreen";
 import { MachineActivityScreen } from "../features/machines/MachineActivityScreen";
@@ -646,6 +649,21 @@ function SettingsSheetRoute({
             name="AccountSecurity"
             component={AccountSecurityScreen}
             options={{ title: "Account & security" }}
+          />
+          <SheetStack.Screen
+            name="NotificationSettings"
+            component={NotificationSettingsScreen}
+            options={{ title: "Notifications" }}
+          />
+          <SheetStack.Screen
+            name="DisplaySettings"
+            component={DisplaySettingsScreen}
+            options={{ title: "Display" }}
+          />
+          <SheetStack.Screen
+            name="PrivacySettings"
+            component={PrivacySettingsScreen}
+            options={{ title: "Privacy" }}
           />
           <SheetStack.Screen
             name="TermsOfService"

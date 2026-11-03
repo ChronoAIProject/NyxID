@@ -139,6 +139,27 @@ test("private and crew reply footers contain only compact Copy and date, 8pt apa
     x.h.unmount();
   }
 });
+test("reported agent replies put the flag beside Copy, before the date", () => {
+  const x = setup({
+    text: "Reply",
+    timestamp: "2026-10-27T01:00:00Z",
+    report: { kind: "conversation", id: "c", messageId: "m" },
+  });
+  const children = x.h.value().props.children;
+  assert.equal(children[0].props.accessibilityLabel, "Copy message");
+  assert.equal(children[1].type, "ReportButton");
+  assert.equal(children[1].props.beforeDate, true);
+  assert.equal(children[2].props.accessibilityRole, "text");
+  x.h.unmount();
+  const undated = setup({
+    text: "Reply",
+    report: { kind: "conversation", id: "c", messageId: "m" },
+  });
+  const last = undated.h.value().props.children.filter(Boolean).at(-1);
+  assert.equal(last.type, "ReportButton");
+  assert.equal(last.props.beforeDate, false);
+  undated.h.unmount();
+});
 test("human footer keeps time-before-Copy order with the same compact spacing", () => {
   const x = setup({
     user: true,
@@ -203,7 +224,7 @@ test("message-time parity: local calendar day/month/year, locale and full daylig
     assert.equal(messageTime(invalid), undefined);
 });
 
-test("completed agent replies add a Report control after the date; people never get one", () => {
+test("completed agent replies add a Report control beside Copy; people never get one", () => {
   const target = {
     kind: "conversation",
     id: "nyxa-x",
@@ -218,7 +239,7 @@ test("completed agent replies add a Report control after the date; people never 
   const children = [agent.h.value().props.children]
     .flat(Infinity)
     .filter(Boolean);
-  const report = children.at(-1);
+  const report = children[1];
   assert.equal(report.type, "ReportButton");
   assert.deepEqual(JSON.parse(JSON.stringify(report.props.target)), target);
   assert.equal(report.props.reported, true);

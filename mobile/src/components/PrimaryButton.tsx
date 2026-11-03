@@ -18,9 +18,8 @@ type PrimaryButtonProps = {
    * - `primary`: `nyx-gradient-vivid` gradient — the dominant CTA per DESIGN.md.
    * - `ghost`: bordered ghost button for secondary actions.
    * - `danger`: destructive action (soft red fill + red border).
-   * - `destructive`: irreversible action (solid red fill, white label).
    */
-  kind?: "primary" | "ghost" | "danger" | "destructive";
+  kind?: "primary" | "ghost" | "danger";
   disabled?: boolean;
   refreshLabelOnFontScaleChange?: boolean;
 };
@@ -75,7 +74,6 @@ export function PrimaryButton({
         styles.base,
         kind === "ghost" && styles.ghost,
         kind === "danger" && styles.danger,
-        kind === "destructive" && styles.destructive,
         pressed && !disabled && styles.softPressed,
         disabled && styles.disabled,
       ]}
@@ -85,8 +83,7 @@ export function PrimaryButton({
           styles.label,
           kind === "ghost" && styles.ghostLabel,
           kind === "danger" && styles.dangerLabel,
-          kind === "destructive" && styles.destructiveLabel,
-          disabled && kind !== "destructive" && styles.labelDisabled,
+          disabled && styles.labelDisabled,
         ]}
       >
         {label}
@@ -149,13 +146,6 @@ const createStyles = (c: ThemeColors) =>
     },
     dangerLabel: {
       color: c.danger,
-    },
-    destructive: {
-      backgroundColor: c.dangerSolid,
-      borderColor: c.dangerSolid,
-    },
-    destructiveLabel: {
-      color: c.onPrimary,
     },
     labelDisabled: {
       color: c.textMuted,

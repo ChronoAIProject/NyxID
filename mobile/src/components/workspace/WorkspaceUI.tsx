@@ -1,4 +1,4 @@
-import type { PropsWithChildren } from "react";
+import type { PropsWithChildren, ReactNode } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -143,6 +143,36 @@ export function Card({
   );
 }
 
+/**
+ * iOS-style grouped section: the title sits above the card and an optional
+ * note below it, so the card holds only the section's content and controls.
+ */
+export function Section({
+  title,
+  footer,
+  children,
+}: PropsWithChildren<{ title?: string; footer?: string }>) {
+  const { colors } = useTheme();
+  return (
+    <View style={styles.section}>
+      {title ? (
+        <Text
+          accessibilityRole="header"
+          style={[styles.sectionTitle, { color: colors.textMuted }]}
+        >
+          {title.toUpperCase()}
+        </Text>
+      ) : null}
+      <Card>{children}</Card>
+      {footer ? (
+        <Text style={[styles.sectionFooter, { color: colors.textMuted }]}>
+          {footer}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 export function Label({
   children,
   muted,
@@ -208,6 +238,7 @@ export function ActionButton({
   loading,
   compact = false,
   variant = "primary",
+  trailingIcon,
 }: {
   label: string;
   accessibilityLabel?: string;
@@ -218,6 +249,8 @@ export function ActionButton({
   loading?: boolean;
   compact?: boolean;
   variant?: "primary" | "secondary" | "danger";
+  /** Decorative icon after the label, such as the web's arrowed primary action. */
+  trailingIcon?: (color: string) => ReactNode;
 }) {
   const { colors } = useTheme();
   const blocked = disabled || loading;
@@ -241,6 +274,14 @@ export function ActionButton({
       >
         {label}
       </Text>
+      {trailingIcon && !loading ? (
+        <View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {trailingIcon(color)}
+        </View>
+      ) : null}
     </View>
   );
   return (
@@ -381,4 +422,17 @@ const styles = StyleSheet.create({
   },
   buttonLabel: { fontFamily: fonts.bodySemi, fontSize: 13, lineHeight: 20 },
   notice: { padding: 12, borderWidth: 1, borderRadius: radius.md },
+  section: { gap: 8 },
+  sectionTitle: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    letterSpacing: 0.6,
+    paddingHorizontal: 16,
+  },
+  sectionFooter: {
+    fontFamily: fonts.bodyRegular,
+    fontSize: 12,
+    lineHeight: 17,
+    paddingHorizontal: 16,
+  },
 });

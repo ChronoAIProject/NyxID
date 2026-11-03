@@ -1,7 +1,13 @@
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
-import { Check, ChevronDown, ChevronRight, X } from "lucide-react-native";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ShieldCheck,
+  X,
+} from "lucide-react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius, TOUCH_TARGET } from "../../theme/designTokens";
@@ -32,6 +38,7 @@ export function AssistantActivityDisclosure({
   turnLabel,
   metadata,
   decisions = [],
+  confirmationActivityIds,
 }: {
   activities: Activity[];
   onToggle: () => void;
@@ -39,6 +46,8 @@ export function AssistantActivityDisclosure({
   turnLabel?: string;
   metadata?: AssistantMessage["turn_metadata"];
   decisions?: AssistantAcknowledgement[];
+  /** Calls that raised a confirmation card, including cards still pending. */
+  confirmationActivityIds?: ReadonlySet<string>;
 }) {
   const { colors } = useTheme();
   const [open, setOpen] = useState(false);
@@ -54,8 +63,19 @@ export function AssistantActivityDisclosure({
     (metadata?.capacity_wait_ms ?? 0) > 0 || (metadata?.attempts ?? 0) > 1;
   if (!activities.length && !waited && !delivery && !decisions.length)
     return null;
+  // A call refused only to ask for a confirmation card paused; it did not fail.
+  const gated = new Set(
+    activities
+      .filter(
+        (activity) =>
+          activity.status === "error" &&
+          (confirmationActivityIds?.has(activity.id) ||
+            decisions.some((row) => row.activity_id === activity.id)),
+      )
+      .map((activity) => activity.id),
+  );
   const failed = activities.filter(
-    (activity) => activity.status === "error",
+    (activity) => activity.status === "error" && !gated.has(activity.id),
   ).length;
   const status = activities.some((activity) => activity.status === "running")
     ? "running"
@@ -117,10 +137,13 @@ export function AssistantActivityDisclosure({
       {open ? (
         <View style={[styles.details, { borderColor: colors.border }]}>
           {activities.map((activity) => {
-            const description = describeToolActivity(
-              activity.label,
-              activity.status === "completed" ? "done" : activity.status,
-            );
+            const confirmation = gated.has(activity.id);
+            const description = confirmation
+              ? "Asked for your confirmation"
+              : describeToolActivity(
+                  activity.label,
+                  activity.status === "completed" ? "done" : activity.status,
+                );
             const elapsed = elapsedLabel(
               activity.started_at,
               activity.status === "running"
@@ -133,7 +156,7 @@ export function AssistantActivityDisclosure({
                 key={activity.id}
                 accessible
                 accessibilityRole="text"
-                accessibilityLabel={`${description}, ${activity.label}, ${activity.status === "error" ? "Failed" : activity.status === "completed" ? "Succeeded" : "Running"}${elapsed ? `, ${elapsed}` : ""}`}
+                accessibilityLabel={`${description}, ${activity.label}, ${confirmation ? "Confirmation requested" : activity.status === "error" ? "Failed" : activity.status === "completed" ? "Succeeded" : "Running"}${elapsed ? `, ${elapsed}` : ""}`}
                 style={styles.activity}
               >
                 <ServiceIcon
@@ -145,13 +168,16 @@ export function AssistantActivityDisclosure({
                   }
                   size="xs"
                 />
-                <ActivityStatusIcon status={activity.status} />
+                <ActivityStatusIcon
+                  status={confirmation ? "confirmation" : activity.status}
+                />
                 <View style={styles.activityText}>
                   <Label
                     muted
                     style={[
                       styles.description,
-                      activity.status === "error" && { color: colors.danger },
+                      activity.status === "error" &&
+                        !confirmation && { color: colors.danger },
                     ]}
                   >
                     {description}
@@ -172,7 +198,7 @@ export function AssistantActivityDisclosure({
                         {decisionTitle(row)}
                       </Label>
                     ))}
-                  {activity.status === "error" ? (
+                  {activity.status === "error" && !confirmation ? (
                     <Label
                       style={[styles.description, { color: colors.danger }]}
                     >
@@ -217,7 +243,11 @@ export function AssistantActivityDisclosure({
   );
 }
 
-function ActivityStatusIcon({ status }: { status: Activity["status"] }) {
+function ActivityStatusIcon({
+  status,
+}: {
+  status: Activity["status"] | "confirmation";
+}) {
   const { colors } = useTheme();
   return (
     <View
@@ -227,6 +257,8 @@ function ActivityStatusIcon({ status }: { status: Activity["status"] }) {
     >
       {status === "running" ? (
         <ActivityIndicator size="small" color={colors.primary} />
+      ) : status === "confirmation" ? (
+        <ShieldCheck size={14} color={colors.textSecondary} />
       ) : status === "error" ? (
         <X size={14} color={colors.danger} />
       ) : (

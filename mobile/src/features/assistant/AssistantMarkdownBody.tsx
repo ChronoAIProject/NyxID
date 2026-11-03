@@ -19,7 +19,8 @@ import { fonts, radius } from "../../theme/designTokens";
 import { assistantSelectableMarkdown } from "./assistantSelectableMarkdown";
 import { AssistantLinkContext } from "./AssistantLinkContext";
 import { assistantLinkTarget, assistantLinkLabel } from "./assistantLinkTarget";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { AssistantConnectButton } from "./AssistantConnectButton";
+import { firstPartyFrontendUrls } from "../../lib/env";
 import {
   assistantMarkdownOptions,
   configureAssistantMarkdown,
@@ -29,6 +30,36 @@ import {
 const markdown = configureAssistantMarkdown(
   MarkdownIt(assistantMarkdownOptions),
 );
+type MarkdownNode = {
+  type?: string;
+  content?: string;
+  attributes?: Record<string, string>;
+  children?: MarkdownNode[];
+};
+
+function nodeText(node: MarkdownNode): string {
+  return (node.children ?? [])
+    .map((child) => child.content ?? nodeText(child))
+    .join("");
+}
+
+/** Connector links (hosted connect and add-service) inside one block, in reading order. */
+function connectLinks(
+  node: MarkdownNode | undefined,
+  found: { href: string; label: string }[] = [],
+) {
+  if (!node) return found;
+  if (node.type === "link") {
+    const href = node.attributes?.href ?? "";
+    const target = assistantLinkTarget(href, firstPartyFrontendUrls());
+    if (target?.kind === "connect" || target?.kind === "service")
+      found.push({ href, label: assistantLinkLabel(target, nodeText(node)) });
+    return found;
+  }
+  for (const child of node.children ?? []) connectLinks(child, found);
+  return found;
+}
+
 function openLink(url: string) {
   const safe = safeAssistantLinkUrl(url);
   if (safe) void WebBrowser.openBrowserAsync(safe).catch(() => undefined);
@@ -154,57 +185,69 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
   const rules: RenderRules = useMemo(
     () => ({
       ...assistantSelectableMarkdown,
-      body: (node, children, _parents, styles) => (
-        <View key={node.key} style={styles._VIEW_SAFE_body}>
-          {children.map((child, index) => {
-            const type = node.children[index]?.type ?? "";
-            const previous = node.children[index - 1]?.type ?? "";
-            const gap =
-              index === 0
-                ? 0
-                : type === "heading1"
-                  ? 20
-                  : type.startsWith("heading")
-                    ? 16
-                    : previous.startsWith("heading")
-                      ? 8
-                      : 12;
-            return (
-              <View
-                key={node.children[index]?.key ?? index}
-                style={{ marginTop: gap }}
-              >
-                {child}
-              </View>
-            );
-          })}
-        </View>
-      ),
+      body: (node, children, _parents, styles) => {
+        // Each connector link gets one button under the block that names it.
+        const shown = new Set<string>();
+        return (
+          <View key={node.key} style={styles._VIEW_SAFE_body}>
+            {children.map((child, index) => {
+              const type = node.children[index]?.type ?? "";
+              const previous = node.children[index - 1]?.type ?? "";
+              const gap =
+                index === 0
+                  ? 0
+                  : type === "heading1"
+                    ? 20
+                    : type.startsWith("heading")
+                      ? 16
+                      : previous.startsWith("heading")
+                        ? 8
+                        : 12;
+              const connect = [];
+              for (const link of connectLinks(node.children[index])) {
+                if (shown.has(link.href)) continue;
+                shown.add(link.href);
+                connect.push(link);
+              }
+              return (
+                <View
+                  key={node.children[index]?.key ?? index}
+                  style={{ marginTop: gap }}
+                >
+                  {child}
+                  {connect.map(({ href, label }) => (
+                    <AssistantConnectButton
+                      key={href}
+                      label={label}
+                      onPress={(trigger) => openHref(href, trigger)}
+                    />
+                  ))}
+                </View>
+              );
+            })}
+          </View>
+        );
+      },
       link: (node, children) => {
         const target = assistantLinkTarget(
           node.attributes.href,
-          NYXID_FRONTEND_URL,
+          firstPartyFrontendUrls(),
         );
         const label = node.children
           .map((child) => child.content ?? "")
           .join("");
+        // The body renders connector actions as buttons; the sentence keeps its words.
+        if (target?.kind === "connect" || target?.kind === "service")
+          return (
+            <Text key={node.key} style={{ fontFamily: fonts.bodySemi }}>
+              {assistantLinkLabel(target, label)}
+            </Text>
+          );
         return (
           <Text
             key={node.key}
-            accessibilityRole={target?.kind === "connect" ? "button" : "link"}
-            style={
-              target?.kind === "connect"
-                ? [
-                    markdownStyle.link,
-                    {
-                      backgroundColor: colors.primaryTone.bg,
-                      paddingHorizontal: 8,
-                      paddingVertical: 6,
-                      borderRadius: 6,
-                    },
-                  ]
-                : markdownStyle.link
-            }
+            accessibilityRole="link"
+            style={markdownStyle.link}
             onPress={(event) => {
               const handle = Number(event?.nativeEvent?.target);
               openHref(
@@ -213,7 +256,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
               );
             }}
           >
-            {target?.kind === "connect" || target?.kind === "channel"
+            {target?.kind === "channel"
               ? assistantLinkLabel(target, label)
               : children}
           </Text>
