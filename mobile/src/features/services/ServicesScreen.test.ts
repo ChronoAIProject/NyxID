@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
+import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import * as connectionPresentation from "./connectionPresentation";
 import * as serviceContracts from "./serviceContracts";
@@ -8,6 +9,13 @@ import type { CatalogEntry, ServiceConnection } from "./serviceContracts";
 
 type Element = { type: unknown; props: Record<string, any> };
 type ApiCall = { method: string; args: unknown[] };
+
+const renderElement = (type: unknown, props: unknown) =>
+  type === renderSegmentControl
+    ? renderSegmentControl(
+        props as Parameters<typeof renderSegmentControl>[0],
+      )
+    : { type, props };
 
 function elements(root: Element): Element[] {
   return [
@@ -95,8 +103,11 @@ function setup({
     };
   const harness = hookHarness<Element>({
     "react/jsx-runtime": {
-      jsx: (type: unknown, props: unknown) => ({ type, props }),
-      jsxs: (type: unknown, props: unknown) => ({ type, props }),
+      jsx: renderElement,
+      jsxs: renderElement,
+    },
+    "../../components/SegmentControl": {
+      SegmentControl: renderSegmentControl,
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
     "react-native": {

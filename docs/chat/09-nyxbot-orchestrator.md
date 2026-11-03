@@ -26,7 +26,7 @@ unchanged.
 
 ## 2. Requirements as stated
 
-1. Full access never asks; Auto confirms sensitive/destructive actions; Ask every time confirms changes. The owner chooses the workspace mode and agent overrides.
+1. Full access still asks for covered organization connections without trusted instruction; Auto confirms sensitive/destructive actions; Ask every time confirms changes. The owner chooses the workspace mode and agent overrides.
 2. NyxBot is the chief of staff; it creates specialists and can destroy them.
 3. A specialist working for NyxBot asks NyxBot for permission; NyxBot grants or
    refuses based on what the user asked. A specialist the user talks to
@@ -1486,11 +1486,12 @@ Specialist threads are sandboxed. Only the owner, and the owner's NyxBot for wor
 
 NyxBot approval behavior is controlled by the owner-level `access_mode` setting:
 **Auto** (`nyxmode`, default) confirms sensitive and destructive actions, **Ask every time** (`ask_every_time`)
-confirms every changing action, and **Full access** (`autopilot`) never asks.
-Auto and Ask every time also confirm organization connection use, including
-reads and model inference. All three modes enforce saved personal-first
+confirms every changing action, and **Full access** (`autopilot`) bypasses ordinary
+confirmations. Covered organization connections require trusted owner instruction
+or an exact card in every mode. NyxBot's own model route retains its existing
+transport behavior. All three modes enforce saved personal-first
 connection order and exact owner selection; see [service execution](../NYXBOT_SERVICE_EXECUTION.md).
-Full access bypasses every confirmation, including webhook automation, machine and
+Full access retains the org-instruction exception and otherwise bypasses webhook automation, machine and
 saved-login policies, pairing/updates, authored publication and service approvals.
 Each successful bypass leaves a non-consumable automatic receipt
 (`decided_by: access_mode`, reason `access_mode`, `webhook`, `policy` or `approval`),
@@ -1526,7 +1527,7 @@ Only opted-in channel turns run the timer; other turns add no polling reads.
 
 ### Access modes
 
-NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses them with receipts. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
+NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses ordinary resource policies with receipts; covered org connections still require trusted instruction or an exact card. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
 
 Per-service `approval_mode`, per-machine `machine_confirm`, saved-login
 `confirm_each_sign_in`, webhook `confirmation_policy`, machine-update cards and
@@ -1682,6 +1683,16 @@ and limited to one per 24 hours; metadata receipts expire after 48 hours. No
 model wake-up is needed, no visitor content is included, and no group receives
 the owner's diagnostic. See the engine's guest model route section for the
 closed reasons, runtime fixtures and model-routes.json maintenance contract.
+
+## Protected org connections and hosted personal setup
+
+After readiness activation of `assistant:org-instruction-v1`, NyxBot and personal specialists need trusted owner selection of the exact org connection this turn or an approved exact single-use card in every access mode, including Full access. Org-owned specialists are excluded by actual owner UserType; model bootstrap/compaction and auto-connected/platform services retain their contract. Positive provenance comes only from first-party owner UI or verified private owner-channel ingress, bound to actor/key/conversation/live turn/expiry. Legacy selectors, API/delegated/automation/group/guest/model text and `_nyxid_via` are insufficient. Independent sensitive/destructive policies remain.
+
+Org cards persist reason `org_connection`, retain controls in Full and survive an Auto-to-Full mode switch. Admission precedes credential refresh/token exchange and is carried through final send revalidation. Machine declarations are checked per exact connection; new job/watch receipts cover only their bounded lifecycle. Legacy org jobs require a reviewed replacement command; unproven watches pause for an exact continuation card.
+
+“My account” requires the owner's personal connection; never describe org data as their personal data. Use `nyx__connect_service` with visible catalog UUID/slug and present the hosted link. Named `settings_link add_service` gives structured connect guidance; unnamed opens Plugins. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Specialist keys remain denied and direct the owner to NyxBot/Plugins, followed by a separate specialist grant. The server org acknowledgement carries Connect your own independently of model prose. Connection facts report self/shared-person/org ownership and unknown provider account identity.
+
+`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Upgrade readers/UI first, drain all old writers/completers, then activate; old binaries must not rejoin. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
 
 ### Automatic visitor model setup
 

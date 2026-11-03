@@ -76,8 +76,27 @@ async fn signed_call(
 #[tokio::test]
 async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_platform_and_org_contracts()
  {
-    for kind in ["personal", "platform", "org"] {
+    for (kind, protected) in [
+        ("personal", false),
+        ("platform", false),
+        ("org", false),
+        ("personal", true),
+        ("platform", true),
+        ("org", true),
+    ] {
         let f = orchestrator_fixture("job_service_policy_journey").await;
+        if protected {
+            let flags = crate::services::feature_flag_service::FlagTarget::User(f.owner.clone());
+            crate::services::feature_flag_service::set_platform_override(
+                &f.state.db,
+                crate::services::feature_flag_service::ORG_INSTRUCTION_FLAG_KEY,
+                &flags,
+                true,
+                &f.owner,
+            )
+            .await
+            .unwrap();
+        }
         let n = node(&f, &f.owner).await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -152,7 +171,7 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
             .unwrap();
         set_mode(
             &f,
-            if kind == "org" {
+            if kind == "org" && !protected {
                 AccessMode::Nyxmode
             } else {
                 AccessMode::Autopilot
@@ -191,6 +210,23 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
                     .unwrap()
                     .contains("organization connection")
             );
+            if protected {
+                assert_eq!(
+                    card.get_document("confirmation").unwrap().get_str("reason"),
+                    Ok("org_connection")
+                );
+                assert_eq!(result["connection_id"], id);
+                assert_eq!(result["connection"]["relation"], "organization");
+                assert_eq!(
+                    result["organization_connections"].as_array().unwrap().len(),
+                    1
+                );
+                assert_eq!(result["connect_own"]["reason"], "custom_connection");
+                assert_eq!(
+                    card.get_document("connect_own").unwrap().get_str("reason"),
+                    Ok("custom_connection")
+                );
+            }
             acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
                 .await
                 .unwrap();
@@ -207,6 +243,34 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
         assert_eq!(result["status"], "running", "{kind}: {result}");
         let issued = requests.recv().await.unwrap();
         let job = issued.parameters["job_id"].as_str().unwrap().to_owned();
+        if kind == "org" && protected {
+            let replay = Box::pin(crate::handlers::machine_tools::call(
+                &f.state,
+                &chat,
+                "nyx__machine_exec",
+                arguments.clone(),
+            ))
+            .await;
+            if let Ok(replay) = replay {
+                assert_eq!(replay["error"], "acknowledgement_required");
+            }
+            assert!(requests.try_recv().is_err());
+            let stored = f
+                .state
+                .db
+                .collection::<Document>(JOBS)
+                .find_one(doc! {"_id":&job})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored
+                    .get_document("service_use")
+                    .unwrap()
+                    .get_i32("instruction_receipt_version"),
+                Ok(1)
+            );
+        }
         if kind != "org" {
             Box::pin(crate::handlers::machine_tools::call(
                 &f.state,
@@ -233,6 +297,28 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
         )
         .await
         .unwrap();
+        if kind == "org" && protected {
+            f.state
+                .db
+                .collection::<Document>(JOBS)
+                .update_one(
+                    doc! {"_id":&job},
+                    doc! {"$unset":{"service_use.instruction_receipt_version":""}},
+                )
+                .await
+                .unwrap();
+            assert!(signed_call(&f, &n, &job, &slug).await.is_err());
+            assert!(server.received_requests().await.unwrap().is_empty());
+            f.state
+                .db
+                .collection::<Document>(JOBS)
+                .update_one(
+                    doc! {"_id":&job},
+                    doc! {"$set":{"service_use.instruction_receipt_version":1}},
+                )
+                .await
+                .unwrap();
+        }
         let response = signed_call(&f, &n, &job, &slug).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         axum::body::to_bytes(response.into_body(), 4096)

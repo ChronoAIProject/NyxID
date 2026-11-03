@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requestJson } from "./http";
+import type { RequestOptions } from "./authenticatedTransport";
 import {
   agentCreateSchema,
   agentDetailSchema,
@@ -51,8 +52,12 @@ export const agentsApi = {
         }),
       );
   },
-  async update(id: string, body: AgentPatch) {
-    await requestJson(agentPath(id), { method: "PATCH", body });
+  async update(
+    id: string,
+    body: AgentPatch,
+    options?: Pick<RequestOptions, "authorityGuard">,
+  ) {
+    await requestJson(agentPath(id), { ...options, method: "PATCH", body });
   },
   async grants(
     id: string,

@@ -950,7 +950,8 @@ pub(crate) async fn proxy_request_inner(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
             )
-            .with_assistant_access(auth_user.org_agent_access.as_deref()),
+            .with_assistant_access(auth_user.org_agent_access.as_deref())
+            .with_assistant_chat(auth_user.assistant_chat.as_deref()),
         ))
         .await?
         {
@@ -2263,7 +2264,8 @@ async fn proxy_request_by_selected_member(
                     Some(&state.connection_expiry_notifier),
                     state.platform_user_rate_limit,
                 )
-                .with_assistant_access(auth_user.org_agent_access.as_deref()),
+                .with_assistant_access(auth_user.org_agent_access.as_deref())
+                .with_assistant_chat(auth_user.assistant_chat.as_deref()),
             )
         })
         .await?
@@ -2608,7 +2610,8 @@ pub(crate) async fn proxy_request_by_slug_inner(
             proxy_service::ProxyExecutionContext::new(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
-            ),
+            )
+            .with_assistant_chat(auth_user.assistant_chat.as_deref()),
         )
     })
     .await?
@@ -3530,7 +3533,8 @@ async fn resolve_proxy_execution_inner(
         }
         // Per-agent credential override: if this request is via an API key and
         // the user has bound a different credential for this service, swap it in.
-        if !permission_bound
+        if !pre.target.credential_deferred
+            && !permission_bound
             && pool_authority.is_none()
             && auth_user
                 .assistant_agent_owner_id
@@ -3552,7 +3556,7 @@ async fn resolve_proxy_execution_inner(
             agent_override_applied = true;
         }
 
-        if pool_authority.is_some()
+        if (pool_authority.is_some() || pre.target.credential_deferred)
             && let (Some(key), Some(service)) = (&auth_user.api_key_id, &pre.user_service_id)
         {
             agent_override_applied = proxy_service::read_agent_credential_override_identity(
@@ -4648,13 +4652,28 @@ async fn execute_resolved_proxy_inner<'a>(
         },
     );
     let assistant_decision = assistant_decision_slot
-        .as_ref()
+        .as_mut()
         .expect("service decision was just installed");
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
         request_audit.denied(axum::http::StatusCode::CONFLICT.as_u16());
         return Ok(ProxyExecutionPhase::Complete(
             (axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response(),
         ));
+    }
+    if pool_authority.is_none() {
+        if let Some(admission) = assistant_decision.admission.as_mut() {
+            admission
+                .materialize_http(
+                    &state.db,
+                    &state.encryption_keys,
+                    &mut target,
+                    &method_str,
+                    path,
+                    &assistant_projection,
+                )
+                .await?;
+        }
+        target.require_credential_materialized()?;
     }
     if let (Some(chat), Some(id)) = (
         auth_user.assistant_chat.as_deref(),
@@ -4882,6 +4901,11 @@ async fn execute_resolved_proxy_inner<'a>(
                 "Pool member authority changed during admission".into(),
             ));
         }
+        if let Some(admission) = assistant_decision.admission.as_ref() {
+            admission
+                .revalidate(&state.db, service, Some(&target))
+                .await?;
+        }
         let resolved = box_proxy_future(|| {
             proxy_service::resolve_proxy_target_by_user_service_id(
                 &state.db,
@@ -4916,7 +4940,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 "Pool member authority changed during credential resolution".into(),
             ));
         }
+        resolved.target.require_credential_materialized()?;
         target.credential = resolved.target.credential;
+        target.credential_deferred = false;
         if auth_user
             .assistant_agent_owner_id
             .as_deref()
@@ -4968,7 +4994,11 @@ async fn execute_resolved_proxy_inner<'a>(
                 "Pool member authority changed during credential resolution".into(),
             ));
         }
+        if let Some(admission) = assistant_decision.admission.as_mut() {
+            admission.bind_materialized_http(&state.db, &target).await?;
+        }
     }
+    target.require_credential_materialized()?;
 
     let body = if body_bytes.is_empty() {
         None
@@ -9984,6 +10014,7 @@ mod tests {
 
     pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.to_string(),

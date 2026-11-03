@@ -41,8 +41,12 @@ export interface ConnectorCardItem {
    * connection when what they wanted was to re-enable the one they have.
    */
   readonly disabled?: boolean;
-  /** Available items only: catalog slug for the `/keys?slug=` connect deep link. */
+  /** Available items only: catalog slug for the hosted connect link. */
   readonly connectSlug?: string;
+  /** Added org-only items: catalog slug for a personal "Connect your own" link. */
+  readonly connectOwnSlug?: string;
+  /** Available items the hosted page cannot set up (SSH): Studio catalog slug. */
+  readonly advancedSetupSlug?: string;
 }
 
 export interface ConnectorItems {
@@ -138,6 +142,13 @@ function addedServiceItem(
     added: true,
     disabled: group.every((key) => key.is_active === false),
     manageKeyIds: group.map((key) => key.id),
+    connectOwnSlug:
+      catalogEntry &&
+      catalogEntry.service_type !== "ssh" &&
+      catalogEntry.requires_credential &&
+      group.every((key) => key.credential_source?.type === "org")
+        ? slug
+        : undefined,
   };
 }
 
@@ -173,7 +184,8 @@ function availableItem(entry: CatalogEntry): ConnectorCardItem {
     description: entry.description ?? `Proxy requests to ${entry.base_url}.`,
     meta: catalogMeta(entry),
     added: false,
-    connectSlug: entry.slug,
+    connectSlug: entry.service_type === "ssh" ? undefined : entry.slug,
+    advancedSetupSlug: entry.service_type === "ssh" ? entry.slug : undefined,
   };
 }
 

@@ -773,6 +773,7 @@ mod tests {
     fn machine_git_structured_uploads_remain_buffered_for_override_inspection() {
         use axum::http::{HeaderMap, HeaderValue, header::CONTENT_TYPE};
         let target = super::super::proxy_service::ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: "https://git.example".into(),

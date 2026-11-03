@@ -413,6 +413,7 @@ pub fn base_prompt(
             ),
         ),
     };
+    prompt.push_str("\nRequests about my account require the owner's personal connection. Never present an organization's account or data as the owner's. If only an organization connection exists, offer nyx__connect_service for their own account first. Never send /keys for connecting; use a hosted connect link or Plugins. Specialists cannot create connect links: direct the owner to NyxBot or Plugins, then request a separate specialist grant.");
     prompt.push_str(TASK_COMPLETION_PROMPT);
     if row.role == AgentRole::Orchestrator && !row.guest_turn {
         prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot.");
@@ -670,8 +671,15 @@ pub struct TurnRequest {
 
 /// One turn to claim: a user message, an orchestrator instruction to a
 /// subagent, a batch of NyxID events, or a channel message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerInstructionSource {
+    FirstPartyOwner,
+    VerifiedPrivateChannel,
+}
+
 #[derive(Clone)]
 pub struct TurnStart {
+    pub owner_instruction_source: Option<OwnerInstructionSource>,
     pub media_event_ids: Vec<String>,
     pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
     pub invocation_id: Option<String>,
@@ -857,6 +865,7 @@ impl From<&TurnRequest> for TurnStart {
             conversation_id: request.conversation_id.clone(),
             text: request.text.clone(),
             model: request.model.clone(),
+            owner_instruction_source: None,
             origin: TurnOrigin::User,
             channel: None,
             title: None,

@@ -61,7 +61,9 @@ export function NyxBotHome({
     queryKey: ["workspace", "agents", "list"],
     queryFn: ({ signal }) => agentsApi.list(signal),
     enabled: active,
-    refetchInterval: livePollInterval(active ? 5000 : false, live),
+    // Re-enabling a stale roster syncs immediately; polling only fills gaps.
+    staleTime: 0,
+    refetchInterval: active ? 30_000 : false,
     retry: false,
   });
   const crews = useQuery({

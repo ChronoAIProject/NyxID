@@ -4229,6 +4229,71 @@ async fn readiness_2092_settings_read_is_human_owner_and_conversation_scoped() {
 }
 
 #[tokio::test]
+async fn add_service_settings_link_resolves_authorized_catalog_and_returns_hosted_connect_guidance()
+{
+    let (state, _, server) = setup("settings_hosted_connect").await;
+    let (_, chat) = orchestrator(&state).await;
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = Uuid::new_v4().to_string();
+    catalog.slug = "github-personal".into();
+    catalog.visibility = "public".into();
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    for reference in [&catalog.slug, &catalog.id] {
+        let (value, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__settings_link",
+            &json!({"area":"add_service","service":reference}),
+        )
+        .await;
+        assert!(!error, "{value}");
+        assert_eq!(value["action"], "connect_service");
+        assert_eq!(value["catalog_service_id"], catalog.id);
+        assert_eq!(value["service_slug"], catalog.slug);
+        assert!(value.get("url").is_none());
+    }
+    let (plugins, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__settings_link",
+        &json!({"area":"add_service"}),
+    )
+    .await;
+    assert!(!error);
+    assert!(
+        plugins["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/assistant/plugins")
+    );
+    state
+        .db
+        .collection::<bson::Document>(SERVICES)
+        .update_one(
+            doc! {"_id":&catalog.id},
+            doc! {"$set":{"visibility":"private","owner_user_id":"other","created_by":"other"}},
+        )
+        .await
+        .unwrap();
+    let (hidden, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__settings_link",
+        &json!({"area":"add_service","service":catalog.slug}),
+    )
+    .await;
+    assert!(error);
+    assert!(hidden.get("catalog_service_id").is_none());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn private_posts_2124_tool_refuses_guests_and_specialists_and_keeps_confirmation() {
     let f =
         crate::services::assistant_authority_tests::orchestrator_fixture("posts2124_tool").await;

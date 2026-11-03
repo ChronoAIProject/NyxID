@@ -16,6 +16,8 @@ export const connectMethodSchema = z.enum([
 
 export const connectLinkPreviewSchema = z.object({
   use_platform_key: z.boolean().nullish(),
+  /** Assistant links with a fixed credential intent; absent on older servers. */
+  assistant_intent_locked: z.boolean().default(false),
   scopes: z.array(z.string()).default([]),
   service_name: z.string().min(1),
   service_slug: z.string().min(1),

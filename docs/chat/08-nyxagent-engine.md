@@ -251,20 +251,22 @@ selected in NyxBot settings and is visible in the composer toolbars; an agent ma
 thread. The server resolves the effective mode from that persisted policy, so a
 client cannot widen access by submitting a different mode. The three modes are:
 
-- **Full access** (`autopilot`) never asks. It bypasses mode, webhook,
+- **Full access** (`autopilot`) bypasses ordinary mode, webhook,
   machine/saved-login, service approval, pairing/update and skill-publication
-  confirmations. Successful bypassed actions leave automatic allowance receipts.
+  confirmations. Covered organization connections still need trusted owner
+  instruction this turn or an exact owner card after org-instruction activation.
+  Successful bypassed actions leave automatic allowance receipts.
 - **Auto** (`nyxmode`) proceeds automatically for ordinary actions and asks before
-  sensitive or destructive actions, and before any organization connection use (including reads).
+  sensitive or destructive actions, and before organization connection use (including reads) without trusted owner instruction.
 - **Ask every time** (`ask_every_time`) asks before every action that changes something; reads do
-  not prompt unless they use an organization connection.
+  not prompt unless they use an organization connection without trusted owner instruction.
 
 Confirmation cards identify the action and requested scope, the risk class
 (`change`, `sensitive`, or `destructive`), the effective mode, and why the card
 was required. Webhook `confirmation_policy`, per-machine `machine_confirm`,
 saved-login `confirm_each_sign_in`, per-service `approval_mode`, machine-update
 cards and skill-publication review apply in Auto and Ask every time. Full access
-bypasses all of them. Explicit deny rules, grants, guest restrictions, live
+bypasses these ordinary policies. Covered org connections retain their separate instruction requirement. Explicit deny rules, grants, guest restrictions, live
 turn/key fences and publication leases remain enforced. Guests cannot confirm
 or widen authority.
 Specialist requests and grants are still owner/orchestrator-authorized;
@@ -533,8 +535,8 @@ is retained, `automation: {trigger_id, run_id, label}` from two owner-scoped,
 projected reads only when the page holds such a message. Full-access
 authored publication uses the same leased publication-and-pin core, under the
 chat owner's signed identity, and links the persisted proposal for inspection or discard.
-Switching to Full access retires pending owner confirmations, respecting agent
-overrides. Policy writes and an idempotent startup sweep visit only pending owner
+Switching to Full access retires ordinary pending owner confirmations, respecting agent
+overrides; org_connection and shared delegation cards remain pending. Policy writes and an idempotent startup sweep visit only pending owner
 action rows and chat-key approvals in bounded batches, resolving each user/agent's
 mode once. History, group and voice reads do not retire asks or re-read mode policy
 for retirement. Approval expiry uses the approval service's pending status guard,
@@ -549,8 +551,8 @@ did and the result in plain words; after denial it reports what it skipped. Skil
 attachment reports name, version and target agent. Asking channel modes retain
 the “yes NNNN” owner protocol.
 
-Full access never requests permission to proceed, including when an authored
-skill declares reduced scope. The encrypted declaration remains bound to the
+Full access publishes authored skills without a permission request, including
+when a skill declares reduced scope. The encrypted declaration remains bound to the
 proposal, and the automatic publication receipt records only the omission count
 and that separate consent was bypassed. Its proposal link shows decrypted
 omissions to the owner; omission text stays out of plaintext receipts, audit and
@@ -1699,7 +1701,7 @@ waits for its next UTC budget window, all capped at the initial grace deadline.
 Machine tools in scheduled turns retain the same live machine/login grants,
 owner-control lockout and `machine_confirm` rules as owner-initiated turns.
 Webhook turns add their per-run confirmation policy. One exact-argument,
-one-use owner action card satisfies both policies in Auto and Ask every time. Full access bypasses both with an automatic receipt.
+one-use owner action card satisfies both policies in Auto and Ask every time. Full access bypasses these ordinary policies with an automatic receipt; covered org declarations still need trusted instruction or the exact command card.
 Exec, file writes/attachment saves, job cancellation and changing computer
 input are destructive because they can overwrite data or interrupt arbitrary
 work. Saved-login filling and requesting owner control are changing, but not
@@ -1894,7 +1896,7 @@ Chat-key discovery rows carry dense authorized `preference_rank` and follow the
 owner's saved same-catalog connection order by refilling only that group's occupied slots within equal relevance buckets; search also reports `executable`.
 NyxBot enforces eligible personal-first order at the concrete execution boundary,
 including raw model callbacks. Exact names stay exact; one-turn owner selection
-chooses a target and does not waive org consent. See
+chooses a target; only newly proved first-party/private-owner provenance also satisfies the protected org requirement. See
 [service execution](../NYXBOT_SERVICE_EXECUTION.md) for raw model turn grants,
 pool pins, native execution and machine job grants. Guest connected search/list includes only granted
 UserManaged and Platform connections and drops Internal catalog entries before
@@ -2288,6 +2290,15 @@ confirmed assistant records without execution evidence have separate excluded
 costs. See [Billing analytics](../BILLING_ANALYTICS.md#nyxbot-model-usage) for the
 precise population, ranking, and coverage contract.
 
+## Protected org connections and hosted personal setup
+
+After readiness activation of `assistant:org-instruction-v1`, NyxBot and personal specialists need trusted owner selection of the exact org connection this turn or an approved exact single-use card in every access mode, including Full access. Org-owned specialists are excluded by actual owner UserType; model bootstrap/compaction and auto-connected/platform services retain their contract. Positive provenance comes only from first-party owner UI or verified private owner-channel ingress, bound to actor/key/conversation/live turn/expiry. Legacy selectors, API/delegated/automation/group/guest/model text and `_nyxid_via` are insufficient. Independent sensitive/destructive policies remain.
+
+Org cards persist reason `org_connection`, retain controls in Full and survive an Auto-to-Full mode switch. Admission precedes credential refresh/token exchange and is carried through final send revalidation. Machine declarations are checked per exact connection; new job/watch receipts cover only their bounded lifecycle. Legacy org jobs require a reviewed replacement command; unproven watches pause for an exact continuation card.
+
+“My account” requires the owner's personal connection; never describe org data as their personal data. Use `nyx__connect_service` with visible catalog UUID/slug and present the hosted link. Named `settings_link add_service` gives structured connect guidance; unnamed opens Plugins. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Specialist keys remain denied and direct the owner to NyxBot/Plugins, followed by a separate specialist grant. The server org acknowledgement carries Connect your own independently of model prose. Connection facts report self/shared-person/org ownership and unknown provider account identity.
+
+`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Upgrade readers/UI first, drain all old writers/completers, then activate; old binaries must not rejoin. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
 
 ### Shared-agent transport continuations
 

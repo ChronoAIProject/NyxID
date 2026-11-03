@@ -29,6 +29,8 @@ export function DecisionReceipt({
         {
           webhook: "automation confirmation",
           policy: "policy confirmation",
+          org_connection: "organization instruction",
+          delegation: "delegation confirmation",
           approval: "service approval",
           access_mode: "",
         } as const

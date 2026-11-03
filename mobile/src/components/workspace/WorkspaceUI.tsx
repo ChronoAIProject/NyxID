@@ -201,7 +201,9 @@ export function Field({
 export function ActionButton({
   label,
   accessibilityLabel,
+  accessibilityHint,
   onPress,
+  onLongPress,
   disabled,
   loading,
   compact = false,
@@ -209,7 +211,9 @@ export function ActionButton({
 }: {
   label: string;
   accessibilityLabel?: string;
+  accessibilityHint?: string;
   onPress: () => void;
+  onLongPress?: () => void;
   disabled?: boolean;
   loading?: boolean;
   compact?: boolean;
@@ -243,8 +247,10 @@ export function ActionButton({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityHint={accessibilityHint}
       accessibilityState={{ disabled: !!blocked, busy: !!loading }}
       onPress={onPress}
+      onLongPress={onLongPress}
       disabled={blocked}
       style={({ pressed }) => [
         styles.button,
@@ -341,7 +347,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   multiline: { minHeight: 96, textAlignVertical: "top" },
-  button: { borderRadius: radius.md, overflow: "hidden" },
+  button: { minWidth: TOUCH_TARGET, borderRadius: radius.md, overflow: "hidden" },
   compactButton: {
     alignSelf: "flex-start",
     maxWidth: "100%",

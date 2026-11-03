@@ -9,6 +9,14 @@ export const accessModeSchema = z.enum([
 ]);
 const guestAccessSchema = z.enum(["read", "use", "all"]);
 export const agentSchema = z.object({
+  share_role: z.enum(["manager", "user"]).nullish(),
+  guest_readiness: z
+    .object({
+      status: z.enum(["ready", "setting_up", "not_ready"]),
+      reason: z.string().nullish(),
+      fix: z.string().nullish(),
+    })
+    .nullish(),
   id: z.string(),
   kind: z.enum(["nyxbot", "specialist"]),
   name: z.string(),

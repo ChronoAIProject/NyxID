@@ -641,29 +641,46 @@ pub async fn llm_proxy_request(
         &billing_request_id,
         credential_class,
     );
-    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
-        &state,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        owner_for_approval.as_deref(),
-        &target,
-        &request_method_str,
-        &dispatch_path,
-        query.as_deref(),
-        &dispatch_body,
-        headers
-            .get(crate::services::assistant_service_execution::ACK_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        None,
-        &headers,
-        &projection,
-    )
-    .await
-    .inspect_err(|error| request_audit.admission_error(error))?;
+    let mut assistant_decision =
+        crate::services::assistant_service_execution::check_http_projected(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            owner_for_approval.as_deref(),
+            &target,
+            &request_method_str,
+            &dispatch_path,
+            query.as_deref(),
+            &dispatch_body,
+            headers
+                .get(crate::services::assistant_service_execution::ACK_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            None,
+            &headers,
+            &projection,
+        )
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
         request_audit.denied(409);
         return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
     }
+    if let Some(admission) = assistant_decision.admission.as_mut() {
+        admission
+            .materialize_http(
+                &state.db,
+                &state.encryption_keys,
+                &mut target,
+                &request_method_str,
+                &dispatch_path,
+                &projection,
+            )
+            .await
+            .inspect_err(|error| request_audit.admission_error(error))?;
+    }
+    target
+        .require_credential_materialized()
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     let billing_owner = state
         .billing
@@ -1419,29 +1436,46 @@ async fn gateway_provider_request(
         &billing_request_id,
         credential_class,
     );
-    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
-        &state,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        effective_owner_for_approval.as_deref(),
-        &target,
-        "POST",
-        &final_path,
-        query.as_deref(),
-        final_body_bytes.as_deref().unwrap_or_default(),
-        headers
-            .get(crate::services::assistant_service_execution::ACK_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        None,
-        &headers,
-        &projection,
-    )
-    .await
-    .inspect_err(|error| request_audit.admission_error(error))?;
+    let mut assistant_decision =
+        crate::services::assistant_service_execution::check_http_projected(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            effective_owner_for_approval.as_deref(),
+            &target,
+            "POST",
+            &final_path,
+            query.as_deref(),
+            final_body_bytes.as_deref().unwrap_or_default(),
+            headers
+                .get(crate::services::assistant_service_execution::ACK_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            None,
+            &headers,
+            &projection,
+        )
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
         request_audit.denied(409);
         return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
     }
+    if let Some(admission) = assistant_decision.admission.as_mut() {
+        admission
+            .materialize_http(
+                &state.db,
+                &state.encryption_keys,
+                &mut target,
+                "POST",
+                &final_path,
+                &projection,
+            )
+            .await
+            .inspect_err(|error| request_audit.admission_error(error))?;
+    }
+    target
+        .require_credential_materialized()
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     let billing_owner = state
         .billing
@@ -3104,6 +3138,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: service.base_url.clone(),

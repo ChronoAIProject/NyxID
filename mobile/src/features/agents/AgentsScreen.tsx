@@ -35,6 +35,11 @@ import {
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
 import { agentsApi } from "../../lib/api/agentsApi";
+import {
+  AgentCollaborationPanel,
+  AgentOperationControls,
+} from "./AgentCollaborationPanel";
+import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { servicesApi } from "../../lib/api/servicesApi";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { fonts } from "../../theme/designTokens";
@@ -152,6 +157,7 @@ export function AgentsScreen({
     list.data.agents.filter(
       (agent) =>
         agent.owner_kind !== "org" &&
+        !agent.share_role &&
         agent.kind === "specialist" &&
         agent.status !== "destroyed",
     ).length >= list.data.limits.max_live_subagents;
@@ -335,9 +341,11 @@ export function AgentsScreen({
       <WorkspacePage
         title={agent?.display_name || agent?.name || "Agent"}
         subtitle={
-          agent?.owner_kind === "org"
-            ? `${agent.owner_name ?? "Organization"} · ${agent.org_role ?? "member"}`
-            : "Personal agent"
+          agent?.share_role
+            ? `${agent.owner_name ?? "Shared agent"} · shared ${agent.share_role}`
+            : agent?.owner_kind === "org"
+              ? `${agent.owner_name ?? "Organization"} · ${agent.org_role ?? "member"}`
+              : "Personal agent"
         }
       >
         {notice && <Notice message={notice} tone="success" />}
@@ -393,7 +401,7 @@ export function AgentsScreen({
                   }
                 />
               )}
-              {alive && maintain && onOpenSkills && (
+              {alive && maintain && !agent.share_role && onOpenSkills && (
                 <ActionButton
                   label="Agent skills"
                   variant="secondary"
@@ -401,7 +409,7 @@ export function AgentsScreen({
                   disabled={busy}
                 />
               )}
-              {alive && maintain && onOpenMachines && (
+              {alive && maintain && !agent.share_role && onOpenMachines && (
                 <ActionButton
                   label="Agent machine access"
                   variant="secondary"
@@ -409,50 +417,68 @@ export function AgentsScreen({
                   disabled={busy}
                 />
               )}
-              {alive && agent.owner_kind !== "org" && onOpenAutomations && (
-                <ActionButton
-                  label="Agent automations"
-                  variant="secondary"
-                  onPress={() => onOpenAutomations(agent.id)}
-                  disabled={busy}
-                />
-              )}
+              {alive &&
+                !agent.share_role &&
+                agent.owner_kind !== "org" &&
+                onOpenAutomations && (
+                  <ActionButton
+                    label="Agent automations"
+                    variant="secondary"
+                    onPress={() => onOpenAutomations(agent.id)}
+                    disabled={busy}
+                  />
+                )}
             </Card>
-            {!maintain && (
+            {agent.share_role && (
+              <Notice
+                message={
+                  agent.share_role === "manager"
+                    ? "Shared Manager access can edit this agent's profile and published team memory. Its owner controls permissions and lifecycle."
+                    : "Shared User access can use this agent. Its owner controls permissions and lifecycle."
+                }
+              />
+            )}
+            {!maintain && !agent.share_role && (
               <Notice message="Your current role can view this agent. A maintainer can change its profile and permissions." />
             )}
             {!alive && (
               <Notice message="This agent is destroyed. Its threads are read only until you delete it permanently." />
             )}
-            <AgentProfileForm
-              key={`profile:${agent.id}:${editorVersion}:${profileVersion}`}
+            <AgentCollaborationPanel
+              key={`${getAuthEpoch()}:${agent.id}:sharing:${editorVersion}`}
               agent={agent}
-              busy={busy}
-              onSave={(baseline, values) =>
-                void run(
-                  async () => {
-                    const patch = buildAgentPatch(baseline, values);
-                    if (!Object.keys(patch).length) return;
-                    const latest = (await agentsApi.detail(agent.id)).agent;
-                    if (
-                      latest.can_maintain !== true ||
-                      latest.status === "destroyed"
-                    )
-                      throw new Error(
-                        "This agent can no longer be changed. Reload to review its current state.",
-                      );
-                    if (profileHasConflict(baseline, latest, patch))
-                      throw new Error(
-                        "This profile changed elsewhere. Reload the agent and review those changes before saving.",
-                      );
-                    await agentsApi.update(agent.id, patch);
-                  },
-                  "Profile saved.",
-                  "profile",
-                )
-              }
             />
-            {agent.kind === "specialist" && (
+            {!agent.share_role && (
+              <AgentProfileForm
+                key={`profile:${agent.id}:${editorVersion}:${profileVersion}`}
+                agent={agent}
+                busy={busy}
+                onSave={(baseline, values) =>
+                  void run(
+                    async () => {
+                      const patch = buildAgentPatch(baseline, values);
+                      if (!Object.keys(patch).length) return;
+                      const latest = (await agentsApi.detail(agent.id)).agent;
+                      if (
+                        latest.can_maintain !== true ||
+                        latest.status === "destroyed"
+                      )
+                        throw new Error(
+                          "This agent can no longer be changed. Reload to review its current state.",
+                        );
+                      if (profileHasConflict(baseline, latest, patch))
+                        throw new Error(
+                          "This profile changed elsewhere. Reload the agent and review those changes before saving.",
+                        );
+                      await agentsApi.update(agent.id, patch);
+                    },
+                    "Profile saved.",
+                    "profile",
+                  )
+                }
+              />
+            )}
+            {agent.kind === "specialist" && !agent.share_role && (
               <AgentGrantsForm
                 key={`grants:${agent.id}:${editorVersion}:${grantsVersion}`}
                 agent={agent}
@@ -487,38 +513,49 @@ export function AgentsScreen({
                 }
               />
             )}
-            <Card>
-              <Label>Memory</Label>
-              <Label muted>
-                Notes this agent remembers across conversations.
-              </Label>
-              {detail.data?.memory.map((note) => (
-                <MemoryNote
-                  key={note.id}
-                  text={note.text}
-                  busy={busy}
-                  editable={maintain && Boolean(alive)}
-                  onForget={() =>
-                    void run(async () => {
-                      await agentsApi.forget(agent.id, note.id);
-                    }, "Memory forgotten.")
-                  }
-                />
-              ))}
-              {!detail.data?.memory.length && (
-                <Label muted>No memories yet.</Label>
-              )}
-              {maintain && alive && (
-                <RememberForm
-                  busy={busy}
-                  onRemember={(text) =>
-                    run(async () => {
-                      await agentsApi.remember(agent.id, text);
-                    }, "Memory saved.")
-                  }
-                />
-              )}
-            </Card>
+            <AgentOperationControls
+              key={`${getAuthEpoch()}:${agent.id}:operations:${editorVersion}`}
+              agent={agent}
+              onOpenChat={
+                onOpenChat
+                  ? () => onOpenChat({ agentId: agent.id, openLatest: true })
+                  : undefined
+              }
+            />
+            {!agent.share_role && (
+              <Card>
+                <Label>Memory</Label>
+                <Label muted>
+                  Notes this agent remembers across conversations.
+                </Label>
+                {detail.data?.memory.map((note) => (
+                  <MemoryNote
+                    key={note.id}
+                    text={note.text}
+                    busy={busy}
+                    editable={maintain && Boolean(alive)}
+                    onForget={() =>
+                      void run(async () => {
+                        await agentsApi.forget(agent.id, note.id);
+                      }, "Memory forgotten.")
+                    }
+                  />
+                ))}
+                {!detail.data?.memory.length && (
+                  <Label muted>No memories yet.</Label>
+                )}
+                {maintain && alive && (
+                  <RememberForm
+                    busy={busy}
+                    onRemember={(text) =>
+                      run(async () => {
+                        await agentsApi.remember(agent.id, text);
+                      }, "Memory saved.")
+                    }
+                  />
+                )}
+              </Card>
+            )}
             {!!agent.channels.length && (
               <Card>
                 <Label>Connected channels</Label>
@@ -559,7 +596,7 @@ export function AgentsScreen({
                 </Pressable>
               ))}
             </Card>
-            {maintain && agent.kind === "specialist" && (
+            {maintain && !agent.share_role && agent.kind === "specialist" && (
               <Card>
                 <Label>
                   {alive ? "Destroy agent" : "Permanently delete agent"}
@@ -645,6 +682,7 @@ export function AgentsScreen({
     list.data?.agents.filter(
       (agent) =>
         agent.owner_kind !== "org" &&
+        !agent.share_role &&
         agent.kind === "specialist" &&
         agent.status !== "destroyed",
     ).length ?? 0;
@@ -925,11 +963,11 @@ function CreateAgentForm({
     onDirtyChange(
       Boolean(
         value.name ||
-        value.display_name ||
-        value.description ||
-        value.persona ||
-        value.services.length ||
-        value.account_read,
+          value.display_name ||
+          value.description ||
+          value.persona ||
+          value.services.length ||
+          value.account_read,
       ),
     );
   }, [value, onDirtyChange]);
