@@ -3322,6 +3322,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::auth_agent_key::approve),
         )
         .route("/auth/agent-key/deny", post(handlers::auth_agent_key::deny))
+        .nest("/assistant/crm", handlers::crm::router())
         .nest("/assistant", assistant_routes)
         .nest("/auth", auth_routes)
         .route(

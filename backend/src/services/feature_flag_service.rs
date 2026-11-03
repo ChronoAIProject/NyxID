@@ -187,6 +187,13 @@ const ASSISTANT_WORKSPACE_PREVIEW_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_CRM_FLAG_KEY: &str = "assistant:crm";
+const ASSISTANT_CRM_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_CRM_FLAG_KEY,
+    description: "Enables owner-scoped CRM records, queries, and saved views for the acting person.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
@@ -374,6 +381,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
+    ASSISTANT_CRM_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
@@ -421,6 +429,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
+    ASSISTANT_CRM_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
@@ -2959,6 +2968,7 @@ mod tests {
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
                 "assistant:workspace-preview",
+                "assistant:crm",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
                 "nyxbot:relay-response-recovery",
