@@ -949,9 +949,14 @@ impl ApiClient {
             }
             if let Some(ref b) = body_vec {
                 if !has_content_type {
-                    // Default to application/octet-stream for raw bytes;
-                    // callers sending JSON should pass -H 'Content-Type: application/json'.
-                    req = req.header("content-type", "application/octet-stream");
+                    // A JSON body defaults to application/json (APIs such as
+                    // Notion ignore octet-stream bodies); other bytes stay raw.
+                    let content_type = if serde_json::from_slice::<serde_json::Value>(b).is_ok() {
+                        "application/json"
+                    } else {
+                        "application/octet-stream"
+                    };
+                    req = req.header("content-type", content_type);
                 }
                 req = req.body(b.clone());
             }
