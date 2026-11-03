@@ -1,3 +1,5 @@
+> Ordinary Agent Key support is opt-in and uses a separate connection bound to each Bot. See [Agent Key voice](12-agent-key-voice.md) for the authorization and deployment contract. Browser voice and dictation retain their existing identity rules.
+
 # Realtime voice for NyxBot and specialists
 
 Status: **Phase 3 merged (PR #1751, v0.54.0); Phase 4 Grok private beta in implementation, flags off**. Initially researched 2026-10-03
@@ -102,10 +104,11 @@ every browser turn.
 
 ### Admission and identity
 
-Every new route uses `login_client_context::require_first_party_human`, the
-human-only assistant router, its OAuth-client rejection layer and the effective
-NyxAgent/voice flags. API keys (including assistant keys), service accounts,
-delegated tokens, relay tokens and guests cannot start or attach to voice.
+Browser voice uses first-party human authentication and the effective
+NyxAgent/voice flags. Opt-in ordinary Agent Key voice uses a separately authorized
+connection bound to each selected personal Bot; see [Agent Key voice](12-agent-key-voice.md).
+Internal assistant keys, service accounts, OAuth-client tokens, delegated tokens,
+relay tokens and guests cannot start or attach through these voice routes.
 Ownership is checked before rate admission, credential resolution or provider
 creation. No body accepts an acting user, authority owner, upstream URL, provider
 session ID, secret, instructions, generic tool or billing principal.
@@ -661,13 +664,13 @@ cascades; legally retained billing rows contain metadata only. Live voice is
 closed before deleting its thread. An active backend turn retains the existing
 409 deletion rule until stopped/settled.
 
-Paths below are relative to `/api/v1/assistant/nyxagent`. All are human-only,
-actor-scoped, flag-gated on creation and reauthorized on use. Enforcement,
+Paths below are relative to `/api/v1/assistant/nyxagent`. Browser and opt-in
+ordinary Agent Key voice routes are actor-scoped, flag-gated on creation and reauthorized on use. Enforcement,
 cleanup and Stop continue when the feature flag is disabled.
 
 | Route | Closed request / safe result |
 | --- | --- |
-| `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Omit `conversation_id` for account settings before a draft exists; own connections are then personal only. Both forms require a first-party human and the voice feature. Metadata only, no credential provisioning side effects; start reauthorizes against the actual thread. |
+| `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Omit `conversation_id` for first-party human account settings before a draft exists; own connections are then personal only. An ordinary Agent Key must name a conversation belonging to its authorized Bot voice connection. Metadata only, no credential provisioning side effects; start reauthorizes against the actual thread. |
 | Existing `POST /drafts` | Create a normal private thread for selected agent before the first call if necessary. |
 | `POST /conversations/{id}/voice-sessions` | `{client_request_id,preferences:{service_id,connection_id?,key_source,model,voice,input_mode,language?,notify_on_completion},sdp_offer}`. OpenAI SDP required, xAI forbidden. Returns `{session,sdp_answer}`; the safe session DTO carries state, timing and revision, and options disclose limits. It does not change the thread's NyxAgent profile. |
 | `GET /conversations/{id}/voice-sessions/{sid}` | Authoritative safe state and task IDs for reconnect. No provider IDs, SDP, key IDs or transcript dump. |

@@ -124,6 +124,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             doc! {"_id":"personal-resource","user_id":&owner,"conversation_id":"private-chat"},
         ),
         (
+            "assistant_voice_announcements",
+            doc! {"_id":"private-notice","user_id":&owner,"conversation_id":"private-chat","text":"Private notification"},
+        ),
+        (
             "assistant_agent_learning_members",
             doc! {"_id":"other-member-on-personal-agent","agent_id":"agent-personal","member_user_id":&other},
         ),
@@ -213,6 +217,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         (
             "assistant_resources",
             doc! {"_id":"org-resource","user_id":&other,"created_by":&owner},
+        ),
+        (
+            "assistant_voice_announcements",
+            doc! {"_id":"other-notice","user_id":&other,"conversation_id":"other-chat","text":"Other notification"},
         ),
         (
             "channel_conversations",

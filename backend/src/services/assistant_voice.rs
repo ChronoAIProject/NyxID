@@ -131,6 +131,7 @@ pub async fn enqueue(
         return Err(AppError::ValidationError("Invalid voice request".into()));
     }
     let request = VoiceRequest {
+        client_key: None,
         started_at: None,
         terminal_error_code: None,
         async_operation_pending: false,
@@ -489,6 +490,13 @@ pub(crate) async fn claim(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Voice conversation unavailable".into()))?;
+    Box::pin(super::voice::client_key::fence_request(
+        db,
+        &request.user_id,
+        &request.id,
+        session,
+    ))
+    .await?;
     private_thread(&visible)?;
     if row.id != visible.id
         && (request.task_conversation_id.as_deref() != Some(&row.id)
@@ -801,6 +809,12 @@ pub(crate) async fn ensure_task_conversation(
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     request: &VoiceRequest,
 ) -> AppResult<VoiceRequest> {
+    Box::pin(super::voice::client_key::request(
+        db,
+        &request.user_id,
+        &request.id,
+    ))
+    .await?;
     if request.task_conversation_id.is_some() {
         return Ok(request.clone());
     }
@@ -1101,6 +1115,13 @@ pub(crate) async fn continuation(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Voice request unavailable".into()))?;
+    Box::pin(super::voice::client_key::fence_request(
+        db,
+        &parent.user_id,
+        &parent.id,
+        session,
+    ))
+    .await?;
     if parent.state == RequestState::Cancelled {
         return Err(AppError::Conflict("Voice task was stopped".into()));
     }
@@ -1124,6 +1145,7 @@ pub(crate) async fn continuation(
     let request = enqueue_in_session(
         db,
         VoiceRequest {
+            client_key: parent.client_key.clone(),
             started_at: None,
             terminal_error_code: None,
             async_operation_pending: false,

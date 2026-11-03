@@ -2253,6 +2253,35 @@ settles those checkpoints without reopening capture; conversational attach and
 control paths reject dictation sessions. No audio recording is stored. See the
 [voice architecture and transport contract](chat/11-voice.md).
 
+## Agent Key voice and remote notifications
+
+The optional `assistant:voice-agent-key` feature reuses ordinary Key service
+scopes, published catalog operations and service approval policy. A human owner
+publishes a `nyxbot_voice` source connection bound to one personal Bot through
+`services/voice/binding.rs`; names and slugs never select authority. The fixed
+connection and endpoint cannot be retargeted by service editing. Creating a
+connection does not grant any device access.
+
+`services/voice/client_key.rs` revalidates the parent Key, exact login child,
+Bot and connection throughout admission, control, provider runtime and deferred
+tasks. Additive optional `client_key` identities on VoiceSession and VoiceRequest
+retain legacy browser rows. Transaction fences serialize execution against
+revocation; async-watch cleanup can cancel revoked work without permitting new
+status/result execution. Voice continues through the existing provider, Bot
+tool authority, confirmation and billing paths.
+
+`assistant_voice_announcements` stores bounded, per-call remote notification
+text and processing states. An index supports call/queue lookup, and a TTL index
+expires records at the call deadline plus 24 hours. Unsent entries expire after
+30 seconds; each call allows four queued and 128 total. Dispatch is persisted
+before provider I/O, so an uncertain send is not replayed after a crash. Provider
+commentary acknowledges acceptance independently of audio playback. Snapshots
+expose the latest eight IDs and stages without text. Notifications never become
+user utterances or action approvals, and no provider credentials or audio are
+stored in the collection. Conversation deletion, settled call purging and the
+personal-erasure inventory remove the corresponding notification text. See
+[Agent Key voice](chat/12-agent-key-voice.md).
+
 ## Native channel mention admission
 
 `channel_native_mentions` interprets bounded, authenticated Telegram and

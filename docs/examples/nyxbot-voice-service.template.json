@@ -1,0 +1,62 @@
+{
+  "name": "NyxBot Voice",
+  "slug": "nyxbot-voice",
+  "description": "Realtime voice for a specific personal Bot. The owner explicitly creates a separate voice connection for each Bot in Agent details, then grants that UserService to an Agent Key. A generic catalog connection authorizes no Bot. Each Bot retains its existing grants, confirmations, private conversation history and billing. Keys with all-services access include published connections under the existing policy.",
+  "service_type": "http",
+  "service_category": "connection",
+  "visibility": "public",
+  "base_url": "https://nyx-api.chrono-ai.fun/api/v1/assistant/nyxagent",
+  "auth_method": "none",
+  "forward_access_token": true,
+  "capabilities": {
+    "supports_proxy_read": true,
+    "supports_proxy_write": true,
+    "supports_websocket": true
+  },
+  "auth_notes": "Requires an ordinary NyxID Agent Key with proxy scope and access to the server-bound voice connection of the selected Bot. Forward the original caller Agent Key as Authorization: Bearer. Creating a connection grants no Key explicitly. A catalog ID or an unbound generic connection is insufficient. No owner session, separate device voice token or provider credential is distributed.",
+  "known_limitations": "Personal owned Bots only. Per-Bot connections are explicitly created through Agent details; connecting this catalog template directly does not bind a Bot. Operation-scoped Keys cannot open voice WebSockets under existing B1 policy. Existing service approval policy must already allow each operation. Provider availability, account voice settings, balances and confirmations still apply.",
+  "proxy_operation_policy": {
+    "rules": [
+      {
+        "method": "GET",
+        "path_template": "/voice/agents"
+      },
+      {
+        "method": "GET",
+        "path_template": "/voice/options"
+      },
+      {
+        "method": "POST",
+        "path_template": "/voice/sessions"
+      },
+      {
+        "method": "GET",
+        "path_template": "/voice/sessions/{sid}"
+      },
+      {
+        "method": "GET",
+        "path_template": "/voice/sessions/{sid}/stream"
+      },
+      {
+        "method": "POST",
+        "path_template": "/voice/sessions/{sid}/control"
+      },
+      {
+        "method": "GET",
+        "path_template": "/conversations/{id}/voice-sessions/active"
+      },
+      {
+        "method": "GET",
+        "path_template": "/conversations/{id}/voice-requests/{rid}"
+      },
+      {
+        "method": "POST",
+        "path_template": "/conversations/{id}/voice-requests/{rid}/cancel"
+      },
+      {
+        "method": "POST",
+        "path_template": "/voice/sessions/{sid}/announcements"
+      }
+    ]
+  }
+}

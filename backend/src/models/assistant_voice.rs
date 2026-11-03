@@ -57,6 +57,8 @@ pub enum RequestState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key: Option<super::assistant_voice_session::VoiceClientKey>,
     /// Already written by claim; legacy requests may not have a start time.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub started_at: Option<DateTime<Utc>>,

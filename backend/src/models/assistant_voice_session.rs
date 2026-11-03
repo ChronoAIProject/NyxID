@@ -17,8 +17,21 @@ pub enum SessionState {
     Failed,
 }
 
+/// Credential identity only. Live Key, child, Bot and service grants authorize use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceClientKey {
+    pub key_id: String,
+    pub credential_id: Option<String>,
+    pub key_version: i64,
+    pub agent_id: String,
+    pub service_id: String,
+    pub service_version: i64,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key: Option<VoiceClientKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(rename = "_id")]

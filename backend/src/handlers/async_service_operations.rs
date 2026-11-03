@@ -25,17 +25,45 @@ async fn call(
     if credential.api_key_id != watch.api_key_id {
         return Err(denied());
     }
+    let cleanup = Some(name) == watch.contract.cancel_operation.as_deref()
+        || (watch.state == "cancelling" && name == watch.contract.status_operation);
+    if !cleanup && let Some(request) = &watch.delivery.voice_request_id {
+        if crate::services::voice::client_key::request(&state.db, &watch.user_id, request)
+            .await
+            .is_err()
+        {
+            if let Some(request) = state
+                .db
+                .collection::<crate::models::assistant_voice::VoiceRequest>(
+                    crate::models::assistant_voice::REQUESTS,
+                )
+                .find_one(doc! {"_id":request,"user_id":&watch.user_id})
+                .await?
+            {
+                crate::services::assistant_voice::cancel(
+                    &state.db,
+                    &watch.user_id,
+                    &request.conversation_id,
+                    &request.id,
+                )
+                .await?;
+            }
+            return Err(denied());
+        }
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-api-key",
         credential.raw_key.as_str().parse().map_err(|_| denied())?,
     );
-    let mut auth = if watch.shared_execution.is_some() {
+    let mut auth = if watch.shared_execution.is_some() || watch.delivery.voice_request_id.is_some()
+    {
         let key =
             crate::services::key_service::get_api_key(&state.db, &watch.user_id, &watch.api_key_id)
                 .await?;
-        let auth = crate::mw::auth::api_key_auth_user_for_watch(&state.db, &key, watch).await?;
-        McpAuthContext::from_watch_auth(auth)
+        McpAuthContext::from_watch_auth(
+            crate::mw::auth::api_key_auth_user_for_watch(&state.db, &key, watch).await?,
+        )
     } else {
         authenticate_mcp(state, &headers, false)
             .await

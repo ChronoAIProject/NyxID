@@ -563,6 +563,52 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
     if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
         return false;
     }
+    // Voice is execution of an explicitly granted service, like proxy calls.
+    // Exempt only implemented POST operations; Bot management stays human-only.
+    if *method == Method::POST
+        && api_v1_path_segments(path).is_some_and(|parts| {
+            matches!(
+                parts.as_slice(),
+                ["assistant", "nyxagent", "voice", "sessions"]
+                    | ["assistant", "nyxagent", "voice", "sessions", _, "control"]
+                    | [
+                        "assistant",
+                        "nyxagent",
+                        "voice",
+                        "sessions",
+                        _,
+                        "announcements"
+                    ]
+                    | [
+                        "assistant",
+                        "nyxagent",
+                        "conversations",
+                        _,
+                        "voice-sessions"
+                    ]
+                    | [
+                        "assistant",
+                        "nyxagent",
+                        "conversations",
+                        _,
+                        "voice-sessions",
+                        _,
+                        "control"
+                    ]
+                    | [
+                        "assistant",
+                        "nyxagent",
+                        "conversations",
+                        _,
+                        "voice-requests",
+                        _,
+                        "cancel"
+                    ]
+            )
+        })
+    {
+        return false;
+    }
     if !matches!(
         *method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
@@ -858,7 +904,7 @@ pub(crate) async fn api_key_auth_user(
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) -> Result<AuthUser, AppError> {
-    api_key_auth_user_inner(db, key, credential_id, ip_address, user_agent, false).await
+    api_key_auth_user_inner(db, key, credential_id, ip_address, user_agent, false, false).await
 }
 
 /// Server-only authentication for one leased watch. Never reachable from a
@@ -868,6 +914,12 @@ pub(crate) async fn api_key_auth_user_for_watch(
     key: &crate::models::api_key::ApiKey,
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
 ) -> Result<AuthUser, AppError> {
+    if key.id != watch.api_key_id
+        || key.user_id != watch.user_id
+        || !crate::services::async_service_operation::owns_lease(db, watch).await?
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     let shared_resume = if let Some(binding) = &watch.shared_execution {
         if binding.actor != watch.user_id
             || binding.agent != watch.agent_id
@@ -886,7 +938,7 @@ pub(crate) async fn api_key_auth_user_for_watch(
     } else {
         false
     };
-    api_key_auth_user_inner(db, key, None, None, None, shared_resume).await
+    api_key_auth_user_inner(db, key, None, None, None, shared_resume, true).await
 }
 
 /// Only voice's exact private-thread loader can use an idle key. This never
@@ -904,8 +956,16 @@ pub(crate) async fn api_key_auth_user_for_voice(
         &thread.credential_api_key_id,
     )
     .await?;
-    let auth =
-        api_key_auth_user_inner(db, &key, None, None, None, thread.shared_agent_thread).await?;
+    let auth = api_key_auth_user_inner(
+        db,
+        &key,
+        None,
+        None,
+        None,
+        thread.shared_agent_thread,
+        false,
+    )
+    .await?;
     if auth.assistant_chat.as_ref().is_none_or(|chat| {
         chat.conversation_id != thread.id || chat.user_id != thread.user_id || chat.guest
     }) {
@@ -921,6 +981,7 @@ async fn api_key_auth_user_inner(
     ip_address: Option<String>,
     user_agent: Option<String>,
     shared_resume: bool,
+    watch: bool,
 ) -> Result<AuthUser, AppError> {
     crate::services::key_service::require_ordinary_purpose(key.purpose)?;
     if !key.is_active || key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
@@ -947,11 +1008,12 @@ async fn api_key_auth_user_inner(
     // them from real per-thread conversation credentials. The ordinary-key
     // path does not read this collection.
     let assistant_chat = if is_assistant_conversation_key_candidate(key) {
-        crate::services::assistant_acknowledgement_service::for_key_with_access(
+        crate::services::assistant_acknowledgement_service::for_key_with_access_for_watch(
             db,
             &key.user_id,
             Some(&key.id),
             org_agent_access.as_ref(),
+            watch,
         )
         .await
         .map_err(|_| AppError::Unauthorized("Invalid authentication credentials".to_string()))?

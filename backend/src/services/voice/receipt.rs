@@ -172,6 +172,7 @@ mod tests {
 
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
+            client_key: None,
             started_at: None,
             terminal_error_code: None,
             async_operation_pending: false,

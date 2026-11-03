@@ -285,9 +285,11 @@ pub async fn delegate(
             "Voice delegation needs a complete user segment".into(),
         ));
     }
+    Box::pin(super::client_key::revalidate(db, call)).await?;
     super::super::assistant_voice::require_enabled(db, &call.user_id).await?;
     super::super::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
     let request = VoiceRequest {
+        client_key: call.client_key.clone(),
         started_at: None,
         terminal_error_code: None,
         async_operation_pending: false,

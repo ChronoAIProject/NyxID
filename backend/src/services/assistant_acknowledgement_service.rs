@@ -1484,6 +1484,18 @@ pub async fn for_key_with_access(
     key: Option<&str>,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<Option<ChatAuthority>> {
+    Box::pin(for_key_with_access_for_watch(db, user, key, access, false)).await
+}
+
+/// The server's exact async watch checks its causing voice request separately;
+/// this permits bounded cancellation after the originating device is revoked.
+pub(crate) async fn for_key_with_access_for_watch(
+    db: &Database,
+    user: &str,
+    key: Option<&str>,
+    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+    watch: bool,
+) -> AppResult<Option<ChatAuthority>> {
     let Some(key) = key else { return Ok(None) };
     let Some(row) = db
         .collection::<bson::Document>(CREDENTIALS)
@@ -1523,6 +1535,14 @@ pub async fn for_key_with_access(
             super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
         (conversation, agent)
     };
+    if !watch
+        && let Some(request) = conversation
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.voice_request_id.as_deref())
+    {
+        Box::pin(super::voice::client_key::request(db, user, request)).await?;
+    }
     let resolved = if access.is_none() && agent.user_id != user {
         super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
     } else {
@@ -1670,6 +1690,19 @@ pub(crate) async fn fence(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    if let Some(request) = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.voice_request_id.as_deref())
+    {
+        Box::pin(super::voice::client_key::fence_request(
+            db,
+            &row.user_id,
+            request,
+            session,
+        ))
+        .await?;
+    }
     let key = db
         .collection::<ApiKey>(KEYS)
         .find_one(doc! {"_id": &chat.api_key_id, "user_id": &chat.user_id, "is_active": true})

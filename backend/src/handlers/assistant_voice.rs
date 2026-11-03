@@ -1,8 +1,13 @@
+mod client_key;
+pub use client_key::{
+    agents, publish_voice_service, service_announcement, service_control, service_start,
+    service_status, service_stream, voice_service,
+};
 mod dictation;
 mod socket;
 pub use dictation::{dictation_options, dictation_stream};
 pub use socket::stream;
-// Human-only voice control and durable request dispatch.
+// Browser and ordinary Agent Key voice control; durable request dispatch.
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -76,7 +81,24 @@ pub async fn options(
     auth: AuthUser,
     Query(q): Query<OptionsQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    super::login_client_context::require_first_party_human(&auth)?;
+    if let Some(id) = &q.conversation_id {
+        crate::services::voice::client_key::operation(
+            &state.db,
+            &auth,
+            id,
+            "GET",
+            "/voice/options",
+            false,
+        )
+        .await?;
+    } else if crate::services::voice::client_key::authenticate(&state.db, &auth)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::ValidationError(
+            "An Agent Key must select a voice conversation".into(),
+        ));
+    }
     let user = auth.user_id.to_string();
     voice::require_enabled(&state.db, &user).await?;
     let options = if let Some(id) = q.conversation_id {
@@ -112,16 +134,18 @@ pub async fn start(
 ) -> AppResult<Json<StartResponse>> {
     use crate::errors::voice_start::Stage;
     let result = async {
-        super::login_client_context::require_first_party_human(&auth)
+        let proof = crate::services::voice::client_key::authorize(&state.db, &auth, &id)
+            .await
             .map_err(|e| Stage::Origin.error(e))?;
-        require_origin(&state, &headers).map_err(|e| Stage::Origin.error(e))?;
-        let started = Box::pin(crate::services::voice::runtime::start(
+        client_key::origin(&state, &auth, &headers).map_err(|e| Stage::Origin.error(e))?;
+        let started = Box::pin(crate::services::voice::runtime::start_for_client_key(
             &state,
             &auth.user_id.to_string(),
             &id,
             &body.client_request_id,
             body.preferences.into(),
             &body.sdp_offer,
+            proof,
         ))
         .await?;
         Ok(Json(StartResponse {
@@ -193,10 +217,26 @@ pub async fn active_session(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<ActiveSessionResponse>> {
-    super::login_client_context::require_first_party_human(&auth)?;
+    crate::services::voice::client_key::operation(
+        &state.db,
+        &auth,
+        &id,
+        "GET",
+        &format!("/conversations/{id}/voice-sessions/active"),
+        false,
+    )
+    .await?;
+    crate::services::voice::client_key::authorize(&state.db, &auth, &id).await?;
     let user = auth.user_id.to_string();
-    let session =
+    let mut session =
         crate::services::voice::session::active_for_conversation(&state.db, &user, &id).await?;
+    if let Some(call) = &session {
+        match crate::services::voice::client_key::own_call(&state.db, &auth, call).await {
+            Ok(()) => {}
+            Err(AppError::ApiKeyScopeForbidden(_)) => session = None,
+            Err(error) => return Err(error),
+        }
+    }
     Ok(Json(ActiveSessionResponse {
         session: session.map(Into::into),
     }))
@@ -206,12 +246,20 @@ pub async fn session_status(
     auth: AuthUser,
     Path((id, sid)): Path<(String, String)>,
 ) -> AppResult<Json<SessionResponse>> {
-    super::login_client_context::require_first_party_human(&auth)?;
-    Ok(Json(
+    crate::services::voice::client_key::operation(
+        &state.db,
+        &auth,
+        &id,
+        "GET",
+        &format!("/voice/sessions/{sid}"),
+        false,
+    )
+    .await?;
+    let call =
         crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
-            .await?
-            .into(),
-    ))
+            .await?;
+    crate::services::voice::client_key::own_call(&state.db, &auth, &call).await?;
+    Ok(Json(call.into()))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -220,6 +268,44 @@ pub struct ControlRequest {
     expected_revision: i64,
     action: String,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnnouncementRequest {
+    request_id: String,
+    text: String,
+}
+pub async fn announcement(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, sid)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<AnnouncementRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    crate::services::voice::client_key::operation(
+        &state.db,
+        &auth,
+        &id,
+        "POST",
+        &format!("/voice/sessions/{sid}/announcements"),
+        false,
+    )
+    .await?;
+    client_key::origin(&state, &auth, &headers)?;
+    let call =
+        crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
+            .await?;
+    crate::services::voice::client_key::own_call(&state.db, &auth, &call).await?;
+    let row = crate::services::voice::announcements::enqueue(
+        &state.db,
+        &call,
+        &body.request_id,
+        &body.text,
+    )
+    .await?;
+    Ok(Json(
+        serde_json::json!({"request_id":row.request_id,"state":row.state}),
+    ))
+}
 pub async fn control(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -227,13 +313,21 @@ pub async fn control(
     headers: axum::http::HeaderMap,
     Json(body): Json<ControlRequest>,
 ) -> AppResult<Json<SessionResponse>> {
-    super::login_client_context::require_first_party_human(&auth)?;
-    require_origin(&state, &headers)?;
-    if crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
-        .await?
-        .dictation
-        && body.action != "end"
-    {
+    crate::services::voice::client_key::operation(
+        &state.db,
+        &auth,
+        &id,
+        "POST",
+        &format!("/voice/sessions/{sid}/control"),
+        false,
+    )
+    .await?;
+    client_key::origin(&state, &auth, &headers)?;
+    let call =
+        crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
+            .await?;
+    crate::services::voice::client_key::own_call(&state.db, &auth, &call).await?;
+    if call.dictation && body.action != "end" {
         return Err(AppError::Forbidden(
             "Dictation only supports ending capture".into(),
         ));
@@ -266,9 +360,23 @@ pub async fn request(
     auth: AuthUser,
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<Json<RequestResponse>> {
-    super::login_client_context::require_first_party_human(&auth)?;
+    crate::services::voice::client_key::operation(
+        &state.db,
+        &auth,
+        &id,
+        "GET",
+        &format!("/conversations/{id}/voice-requests/{rid}"),
+        false,
+    )
+    .await?;
+    crate::services::voice::client_key::authorize(&state.db, &auth, &id).await?;
     let user = auth.user_id.to_string();
     let row = voice::get(&state.db, &user, &id, &rid).await?;
+    if auth.auth_method == crate::mw::auth::AuthMethod::ApiKey {
+        let call =
+            crate::services::voice::session::get(&state.db, &user, &id, &row.session_id).await?;
+        crate::services::voice::client_key::own_call(&state.db, &auth, &call).await?;
+    }
     Ok(Json(RequestResponse {
         outcome: voice::request_outcome(&row),
         pending_acknowledgement_ids: row.pending_acknowledgement_ids,
@@ -282,9 +390,23 @@ pub async fn cancel(
     auth: AuthUser,
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<()> {
-    super::login_client_context::require_first_party_human(&auth)?;
+    crate::services::voice::client_key::operation(
+        &state.db,
+        &auth,
+        &id,
+        "POST",
+        &format!("/conversations/{id}/voice-requests/{rid}/cancel"),
+        false,
+    )
+    .await?;
+    crate::services::voice::client_key::authorize(&state.db, &auth, &id).await?;
     let user = auth.user_id.to_string();
     let request = voice::get(&state.db, &user, &id, &rid).await?;
+    if auth.auth_method == crate::mw::auth::AuthMethod::ApiKey {
+        let call = crate::services::voice::session::get(&state.db, &user, &id, &request.session_id)
+            .await?;
+        crate::services::voice::client_key::own_call(&state.db, &auth, &call).await?;
+    }
     voice::cancel(&state.db, &user, &id, &rid).await?;
     super::mcp_transport::async_operations::drain_cancellations(&state, &user, &id).await?;
     if let Some(task) = request.task_conversation_id {
@@ -308,6 +430,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
             if request.expires_at <= chrono::Utc::now() {
                 return Err(AppError::Conflict("Voice request expired".into()));
             }
+            Box::pin(crate::services::voice::client_key::request(&state.db, &request.user_id, &request.id)).await?;
             voice::thread(&state.db, &request.user_id, &request.conversation_id).await?;
             let running = state
                 .db

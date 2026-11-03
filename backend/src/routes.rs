@@ -2946,6 +2946,74 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
 
+    // Browser sessions and explicitly authorized ordinary Agent Keys only.
+    let voice_routes = Router::new()
+        .route(
+            "/assistant/nyxagent/voice/agents",
+            get(handlers::assistant_voice::agents),
+        )
+        .route(
+            "/assistant/nyxagent/voice/sessions",
+            post(handlers::assistant_voice::service_start)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/assistant/nyxagent/voice/sessions/{sid}",
+            get(handlers::assistant_voice::service_status),
+        )
+        .route(
+            "/assistant/nyxagent/voice/sessions/{sid}/control",
+            post(handlers::assistant_voice::service_control),
+        )
+        .route(
+            "/assistant/nyxagent/voice/sessions/{sid}/stream",
+            get(handlers::assistant_voice::service_stream),
+        )
+        .route(
+            "/assistant/nyxagent/voice/sessions/{sid}/announcements",
+            post(handlers::assistant_voice::service_announcement)
+                .layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/assistant/nyxagent/voice/options",
+            get(handlers::assistant_voice::options),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions",
+            post(handlers::assistant_voice::start)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/active",
+            get(handlers::assistant_voice::active_session),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}",
+            get(handlers::assistant_voice::session_status),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/stream",
+            get(handlers::assistant_voice::stream),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/control",
+            post(handlers::assistant_voice::control),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}",
+            get(handlers::assistant_voice::request),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}/cancel",
+            post(handlers::assistant_voice::cancel),
+        )
+        .layer(middleware::from_fn(
+            crate::mw::auth::reject_oauth_client_tokens,
+        ))
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .route(
@@ -3151,45 +3219,17 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::machine_activity::list),
         )
         .route(
+            "/assistant/nyxagent/agents/{id}/voice-service",
+            get(handlers::assistant_voice::voice_service)
+                .put(handlers::assistant_voice::publish_voice_service),
+        )
+        .route(
             "/assistant/nyxagent/dictation/options",
             get(handlers::assistant_voice::dictation_options),
         )
         .route(
             "/assistant/nyxagent/conversations/{id}/dictation",
             get(handlers::assistant_voice::dictation_stream),
-        )
-        .route(
-            "/assistant/nyxagent/voice/options",
-            get(handlers::assistant_voice::options),
-        )
-        .route(
-            "/assistant/nyxagent/conversations/{id}/voice-sessions",
-            post(handlers::assistant_voice::start)
-                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
-        )
-        .route(
-            "/assistant/nyxagent/conversations/{id}/voice-sessions/active",
-            get(handlers::assistant_voice::active_session),
-        )
-        .route(
-            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}",
-            get(handlers::assistant_voice::session_status),
-        )
-        .route(
-            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/stream",
-            get(handlers::assistant_voice::stream),
-        )
-        .route(
-            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/control",
-            post(handlers::assistant_voice::control),
-        )
-        .route(
-            "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}",
-            get(handlers::assistant_voice::request),
-        )
-        .route(
-            "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}/cancel",
-            post(handlers::assistant_voice::cancel),
         )
         .route(
             "/machines/updater-image",
@@ -3481,6 +3521,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
         .merge(api_v1_human_only)
+        .merge(voice_routes)
         .merge(key_update_routes)
         .merge(service_preference_writes)
         .merge(ownership_routes);

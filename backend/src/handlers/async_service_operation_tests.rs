@@ -797,6 +797,7 @@ async fn async_revocation_and_timeout_wake_with_stable_reason_without_polling() 
 #[tokio::test]
 async fn async_delivery_binding_survives_thread_destination_changes() {
     let a = AsyncFixture::new().await;
+    let (_, request) = attach_voice(&a).await;
     let origin = ChannelOrigin {
         native_event_id: None,
         thread: None,
@@ -804,7 +805,7 @@ async fn async_delivery_binding_survives_thread_destination_changes() {
         partition: "source-place".into(),
         platform: "telegram".into(),
     };
-    a.f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc!{"_id":&a.f.row.id},doc!{"$set":{"reply_channel":bson::to_bson(&origin).unwrap(),"active_turn.voice_request_id":"voice-task","active_turn.trigger_run_id":"automation","group_id":"group","group_request_id":"request"}}).await.unwrap();
+    a.f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc!{"_id":&a.f.row.id},doc!{"$set":{"reply_channel":bson::to_bson(&origin).unwrap(),"active_turn.trigger_run_id":"automation","group_id":"group","group_request_id":"request"}}).await.unwrap();
     let w = a.submit().await;
     let mut row = a.f.row.clone();
     row.reply_channel = None;
@@ -818,7 +819,7 @@ async fn async_delivery_binding_survives_thread_destination_changes() {
             .unwrap()
             .voice_request_id
             .as_deref(),
-        Some("voice-task")
+        Some(request.id.as_str())
     );
     assert_eq!(
         row.active_turn.as_ref().unwrap().trigger_run_id.as_deref(),
@@ -1263,6 +1264,7 @@ async fn attach_voice(
     .await;
     let now = chrono::Utc::now();
     let request = VoiceRequest {
+        client_key: None,
         started_at: None,
         terminal_error_code: None,
         async_operation_pending: false,
@@ -1344,6 +1346,56 @@ async fn async_voice_cancel_stops_hidden_watch_and_calls_cancel() {
             .unwrap();
     assert_eq!(message.error_code.as_deref(), Some("cancelled"));
     assert_ne!(message.text, "submitted");
+}
+
+#[tokio::test]
+async fn async_voice_lost_device_source_cancels_upstream_without_fetching_result() {
+    let a = AsyncFixture::new().await;
+    let (visible, request) = attach_voice(&a).await;
+    a.submit().await;
+    finish(&a, &a.f.row, "submitted").await;
+    // A device-bound request whose source call has disappeared must fail closed,
+    // while the already admitted watch retains only its bounded cleanup ability.
+    let binding = crate::services::voice::client_key::ClientKey {
+        key_id: uuid::Uuid::new_v4().to_string(),
+        credential_id: Some(uuid::Uuid::new_v4().to_string()),
+        key_version: 0,
+        agent_id: uuid::Uuid::new_v4().to_string(),
+        service_id: uuid::Uuid::new_v4().to_string(),
+        service_version: 0,
+    };
+    a.f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+        .update_one(
+            doc! {"_id":&request.id},
+            doc! {"$set":{
+                "client_key":bson::to_bson(&binding).unwrap(),
+            }},
+        )
+        .await
+        .unwrap();
+    a.calls.lock().unwrap().clear();
+    a.due().await;
+    Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    async_operations::drain_cancellations(&a.f.state, &a.f.owner, &a.f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(a.watch().await.state, "cancelled");
+    let calls = a.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls.len(),
+        1,
+        "Only the admitted operation's cancel may be dispatched: {calls:?}"
+    );
+    assert!(calls[0].ends_with("/cancel"));
+    assert_eq!(
+        crate::services::assistant_voice::get(&a.f.state.db, &a.f.owner, &visible.id, &request.id,)
+            .await
+            .unwrap()
+            .state,
+        crate::models::assistant_voice::RequestState::Cancelled
+    );
 }
 
 #[tokio::test]

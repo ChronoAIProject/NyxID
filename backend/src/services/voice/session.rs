@@ -15,6 +15,7 @@ use mongodb::{
 };
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::announcements::ensure_indexes(db).await?;
     db.collection::<VoiceSession>(COLLECTION_NAME)
         .create_indexes([
             IndexModel::builder()
@@ -47,6 +48,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn admit(
     db: &Database,
     user: &str,
@@ -65,6 +67,32 @@ pub async fn admit(
         credential_identity,
         worker,
         false,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn admit_for_client_key(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    request: &str,
+    preferences: VoicePreferences,
+    identity: String,
+    worker: &str,
+    key: Option<super::client_key::ClientKey>,
+) -> AppResult<VoiceSession> {
+    admit_audio(
+        db,
+        user,
+        conversation,
+        request,
+        preferences,
+        identity,
+        worker,
+        false,
+        key,
     )
     .await
 }
@@ -87,6 +115,7 @@ pub async fn admit_dictation(
         identity,
         worker,
         true,
+        None,
     )
     .await
 }
@@ -101,6 +130,7 @@ async fn admit_audio(
     credential_identity: String,
     worker: &str,
     dictation: bool,
+    client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<VoiceSession> {
     super::super::assistant_voice::require_enabled(db, user)
         .await
@@ -130,6 +160,7 @@ async fn admit_audio(
     let shared_execution =
         super::shared::admit(db, user, &thread, client_request_id, &preferences).await?;
     let row = VoiceSession {
+        client_key,
         shared_execution,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user.into(),
@@ -314,6 +345,10 @@ pub async fn close(
                     && closed.billing_finalized
                     && (closed.final_usage_confirmed || Utc::now() >= closed.reconcile_deadline)
                 {
+                    db.collection::<Document>(super::announcements::COLLECTION)
+                        .delete_many(doc! {"user_id":&closed.user_id,"session_id":&closed.id})
+                        .session(&mut *tx)
+                        .await?;
                     db.collection::<VoiceSession>(COLLECTION_NAME)
                         .delete_one(doc! {"_id":&closed.id})
                         .session(&mut *tx)
