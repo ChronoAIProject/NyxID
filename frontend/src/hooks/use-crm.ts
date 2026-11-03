@@ -23,6 +23,7 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 
 const CRM_PATH = "/assistant/crm";
+const CRM_POLL_INTERVAL_MS = 30_000;
 
 export const crmQueryKeys = {
   root: (owner: string | undefined) => ["crm", owner] as const,
@@ -60,8 +61,12 @@ function ownerBody<T extends object>(
   return owner && owner !== actor ? { ...body, owner_id: owner } : body;
 }
 
+export function createCrmIdempotencyKey() {
+  return crypto.randomUUID();
+}
+
 function mutationHeaders(idempotencyKey?: string) {
-  const key = idempotencyKey ?? crypto.randomUUID();
+  const key = idempotencyKey ?? createCrmIdempotencyKey();
   if (!/^[\x20-\x7e]{1,128}$/.test(key)) {
     throw new Error("Idempotency-Key must be 1-128 visible ASCII characters.");
   }
@@ -78,6 +83,8 @@ export function useCrmObjects(ownerId?: string, enabled = true) {
       ).objects,
     enabled: enabled && Boolean(actor && owner),
     retry: false,
+    refetchInterval: CRM_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -97,6 +104,8 @@ export function useCrmObject(
       ),
     enabled: enabled && Boolean(actor && owner && objectKey),
     retry: false,
+    refetchInterval: CRM_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -126,6 +135,8 @@ export function useCrmTableQuery(
       (options?.enabled ?? true) &&
       Boolean(actor && owner && query && parsed?.success),
     retry: false,
+    refetchInterval: CRM_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -158,6 +169,8 @@ export function useCrmAggregate(
     },
     enabled: enabled && Boolean(actor && owner && query && parsed?.success),
     retry: false,
+    refetchInterval: CRM_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -173,6 +186,8 @@ export function useCrmRecord(recordId: string | undefined, ownerId?: string) {
       ),
     enabled: Boolean(actor && owner && recordId),
     retry: false,
+    refetchInterval: CRM_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -196,6 +211,8 @@ export function useCrmActivities(
     },
     enabled: Boolean(actor && owner && recordId),
     retry: false,
+    refetchInterval: CRM_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -211,6 +228,8 @@ export function useCrmRelated(recordId: string | undefined, ownerId?: string) {
       ),
     enabled: Boolean(actor && owner && recordId),
     retry: false,
+    refetchInterval: CRM_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -368,16 +387,97 @@ export function useSetCrmRecordArchived(ownerId?: string) {
 export function useAddCrmNote(ownerId?: string) {
   const context = useCrmMutationContext(ownerId);
   return useMutation({
-    mutationFn: async ({ id, body }: { id: string; body: string }) =>
+    mutationFn: async ({
+      id,
+      body,
+      idempotencyKey,
+    }: {
+      id: string;
+      body: string;
+      idempotencyKey?: string;
+    }) =>
       crmActivitiesResponseSchema.shape.activities.element.parse(
         await assistantJson(
           `${CRM_PATH}/records/${encodeURIComponent(id)}/notes`,
           {
             method: "POST",
+            headers: mutationHeaders(idempotencyKey),
             body: ownerBody({ body }, context.owner, context.actor),
           },
         ),
       ),
     onSuccess: (activity) => context.invalidate(activity.record_id),
+  });
+}
+
+export function useAddCrmField(ownerId?: string) {
+  const context = useCrmMutationContext(ownerId);
+  return useMutation({
+    mutationFn: async ({
+      objectKey,
+      expectedSchemaRevision,
+      field,
+      idempotencyKey,
+    }: {
+      objectKey: string;
+      expectedSchemaRevision: number;
+      field: unknown;
+      idempotencyKey?: string;
+    }) =>
+      crmObjectSchema.parse(
+        await assistantJson(
+          `${CRM_PATH}/objects/${encodeURIComponent(objectKey)}/fields`,
+          {
+            method: "POST",
+            headers: mutationHeaders(idempotencyKey),
+            body: ownerBody(
+              {
+                expected_schema_revision: expectedSchemaRevision,
+                field,
+              },
+              context.owner,
+              context.actor,
+            ),
+          },
+        ),
+      ),
+    onSuccess: () => context.invalidate(),
+  });
+}
+
+export function useUpdateCrmField(ownerId?: string) {
+  const context = useCrmMutationContext(ownerId);
+  return useMutation({
+    mutationFn: async ({
+      objectKey,
+      fieldKey,
+      expectedSchemaRevision,
+      change,
+      idempotencyKey,
+    }: {
+      objectKey: string;
+      fieldKey: string;
+      expectedSchemaRevision: number;
+      change: Readonly<Record<string, unknown>>;
+      idempotencyKey?: string;
+    }) =>
+      crmObjectSchema.parse(
+        await assistantJson(
+          `${CRM_PATH}/objects/${encodeURIComponent(objectKey)}/fields/${encodeURIComponent(fieldKey)}`,
+          {
+            method: "PATCH",
+            headers: mutationHeaders(idempotencyKey),
+            body: ownerBody(
+              {
+                expected_schema_revision: expectedSchemaRevision,
+                ...change,
+              },
+              context.owner,
+              context.actor,
+            ),
+          },
+        ),
+      ),
+    onSuccess: () => context.invalidate(),
   });
 }

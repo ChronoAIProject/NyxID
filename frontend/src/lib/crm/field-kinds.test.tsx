@@ -29,6 +29,15 @@ describe("CRM field-kind registry", () => {
     expect(() => parseCrmFieldInput(field, "12.345")).toThrow(
       "at most 2 decimal places",
     );
+    expect(
+      parseCrmFieldInput(field, { amount_minor: 125000, currency: "USD" }),
+    ).toBe(125000);
+    expect(() =>
+      parseCrmFieldInput(field, { amount_minor: 125000, currency: "EUR" }),
+    ).toThrow("Currency must be USD");
+    expect(() =>
+      parseCrmFieldInput(field, Number.MAX_SAFE_INTEGER + 1),
+    ).toThrow();
   });
 
   it("round-trips percentages through their stored fraction", () => {

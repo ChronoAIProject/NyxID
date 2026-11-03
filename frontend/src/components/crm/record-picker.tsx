@@ -69,7 +69,12 @@ export function CrmRecordPicker({
       ),
     [value],
   );
-  const labels = new Map(selectedLinks.map((link) => [link.id, link.label]));
+  const labels = new Map(
+    selectedLinks.map((link) => [
+      link.id,
+      `${link.label}${link.archived ? " (archived)" : ""}`,
+    ]),
+  );
   for (const row of records.data?.rows ?? []) {
     if (titleField)
       labels.set(row.id, String(row.values[titleField.key] ?? "Untitled"));

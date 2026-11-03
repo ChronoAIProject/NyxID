@@ -6,6 +6,11 @@ const crmOptionValueSchema = z.string().regex(/^[a-z0-9_]{1,48}$/);
 const crmInstantSchema = z.string().datetime({ offset: true });
 const crmCalendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const crmRevisionSchema = z.number().int().positive();
+const crmViewIdentifierSchema = z
+  .string()
+  .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/);
+
+export const crmAccessSchema = z.enum(["read", "work", "schema"]);
 
 export const crmCurrencyCodeSchema = z.enum([
   "USD",
@@ -113,6 +118,7 @@ export const crmObjectSchema = z.object({
   pipeline: crmPipelineSchema.nullable(),
   default_columns: z.array(crmKeySchema),
   seeded: z.boolean(),
+  access: crmAccessSchema,
   created_at: crmInstantSchema,
   updated_at: crmInstantSchema,
 });
@@ -125,6 +131,7 @@ export const crmRecordLinkSchema = z.object({
   id: crmIdSchema,
   object_key: crmKeySchema,
   label: z.string(),
+  archived: z.boolean(),
 });
 
 export const crmActorSchema = z.object({
@@ -218,6 +225,7 @@ export const crmAggregateResultSchema = z.object({
       key: z.string().nullable(),
       label: z.string(),
       value: z.number(),
+      archived: z.boolean(),
     }),
   ),
   unit: z.object({
@@ -225,6 +233,7 @@ export const crmAggregateResultSchema = z.object({
     currency: crmCurrencyCodeSchema.optional(),
   }),
   total: z.number(),
+  truncated: z.boolean(),
 });
 
 export const crmRecordResponseSchema = z.object({
@@ -360,6 +369,16 @@ const crmPipelineBoardElementSchema = z.object({
   props: z.object({ queryId: z.string().min(1) }),
   children: z.array(z.string()).max(0),
 });
+const crmRecordFormElementSchema = z.object({
+  type: z.literal("RecordForm"),
+  props: z.object({
+    object: crmKeySchema,
+    fields: z.array(crmKeySchema).optional(),
+    title: z.string().min(1),
+    submitLabel: z.string().min(1).optional(),
+  }),
+  children: z.array(z.string()).max(0),
+});
 
 export const crmViewElementSchema = z.discriminatedUnion("type", [
   crmStackElementSchema,
@@ -370,6 +389,7 @@ export const crmViewElementSchema = z.discriminatedUnion("type", [
   crmPieChartElementSchema,
   crmObjectTableElementSchema,
   crmPipelineBoardElementSchema,
+  crmRecordFormElementSchema,
 ]);
 
 export const crmSavedViewEnvelopeSchema = z.object({
@@ -377,7 +397,7 @@ export const crmSavedViewEnvelopeSchema = z.object({
   renderer: z.literal("json-render"),
   rendererSpecVersion: z.literal("nyxid-crm-v1"),
   queries: z.record(
-    z.string(),
+    crmViewIdentifierSchema,
     z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("table"), query: crmTableQuerySchema }),
       z.object({
@@ -387,8 +407,8 @@ export const crmSavedViewEnvelopeSchema = z.object({
     ]),
   ),
   spec: z.object({
-    root: z.string().min(1),
-    elements: z.record(z.string(), crmViewElementSchema),
+    root: crmViewIdentifierSchema,
+    elements: z.record(crmViewIdentifierSchema, crmViewElementSchema),
   }),
 });
 

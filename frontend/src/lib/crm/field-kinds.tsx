@@ -97,8 +97,27 @@ function currencyMinor(value: unknown): number | null {
   return null;
 }
 
-function parseCurrencyInput(value: unknown): number | null {
+function parseCurrencyInput(field: CrmField, value: unknown): number | null {
   if (empty(value)) return null;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error("Enter an integer amount in minor units.");
+    }
+    return value;
+  }
+  if (typeof value === "object" && value !== null) {
+    const minor = currencyMinor(value);
+    if (minor === null)
+      throw new Error("Enter an integer amount in minor units.");
+    if (
+      field.type === "currency" &&
+      "currency" in value &&
+      value.currency !== field.currency
+    ) {
+      throw new Error(`Currency must be ${field.currency}.`);
+    }
+    return minor;
+  }
   const input = String(value).trim();
   const match = /^(-?)(\d+)(?:\.(\d{0,2}))?$/.exec(input);
   if (!match?.[2])
@@ -208,7 +227,7 @@ const numberDefinition: CrmFieldKindDefinition = {
 const currencyDefinition: CrmFieldKindDefinition = {
   filterOperators: ORDERED_OPERATORS,
   formatInput: (_field, value) => formatCurrencyInput(value),
-  parseInput: (_field, value) => parseCurrencyInput(value),
+  parseInput: (field, value) => parseCurrencyInput(field, value),
   renderCell: (field, { value }) => {
     const minor = currencyMinor(value);
     if (minor === null || field.type !== "currency") return plainCell(null);
@@ -270,7 +289,9 @@ const recordDefinition: CrmFieldKindDefinition = {
   parseInput: (_field, value) => value,
   renderCell: (_field, { links }) =>
     links?.length
-      ? links.map((link) => link.label).join(", ")
+      ? links
+          .map((link) => `${link.label}${link.archived ? " (archived)" : ""}`)
+          .join(", ")
       : plainCell(null),
 };
 
@@ -308,6 +329,10 @@ export function isCrmFilterOperatorAllowed(
   operator: CrmFilterOperator,
 ): boolean {
   return crmFilterOperators(field).includes(operator);
+}
+
+export function isCrmSortableField(field: CrmField): boolean {
+  return field.type !== "record" && field.type !== "user";
 }
 
 export function formatCrmFieldInput(field: CrmField, value: unknown): unknown {
