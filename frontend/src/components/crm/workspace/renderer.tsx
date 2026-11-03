@@ -2,14 +2,11 @@ import { JSONUIProvider, Renderer } from "@json-render/react";
 import { crmViewRegistry } from "@/components/crm/workspace/registry";
 import { CrmViewErrors } from "@/components/crm/workspace/view-errors";
 import { CrmViewQueryProvider } from "@/lib/crm/views/query-runner";
-import type {
-  CrmValidationError,
-  CrmViewEnvelope,
-} from "@/lib/crm/views/schema";
+import type { CrmValidationError } from "@/lib/crm/views/schema";
 import { validateCrmViewEnvelope } from "@/lib/crm/views/validation";
 
 export interface CrmViewRendererProps {
-  readonly envelope: CrmViewEnvelope;
+  readonly envelope: unknown;
   readonly ownerId?: string;
   readonly valid?: boolean;
   readonly errors?: readonly CrmValidationError[];

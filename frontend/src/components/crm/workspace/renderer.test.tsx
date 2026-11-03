@@ -165,8 +165,8 @@ describe("CrmViewRenderer", () => {
     expect(
       screen.getByRole("heading", { name: "Open pipeline by stage" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Acme renewal")).toBeInTheDocument();
-    expect(screen.getByText("Acme")).toBeInTheDocument();
+    expect(screen.getAllByText("Acme renewal")).toHaveLength(2);
+    expect(screen.getAllByText("Acme")).toHaveLength(2);
     expect(mockAggregate).toHaveBeenCalledWith(
       exampleEnvelope.queries.pipeline!.query,
       undefined,
