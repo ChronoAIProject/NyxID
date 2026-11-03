@@ -144,6 +144,7 @@ pub(crate) async fn authority_with_access(
         )
         .await?;
     }
+    super::assistant_group_service::fence_member_thread(db, conversation, session).await?;
     let Some(agent_id) = conversation.agent_id.as_deref() else {
         return Ok(KeyAuthority::Orchestrator);
     };

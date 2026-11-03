@@ -322,6 +322,19 @@ Organization groups, automation and platform/channel threads still reject shared
 agents. Multi-person collaboration uses the explicit Phase 2 surface in
 [the shared-agent design](12-shared-agents-and-groups.md).
 
+Removing an agent from a personal crew settles its active turn through Stop,
+then removes its hidden conversation and revokes its Agent Key in the same
+transaction as the roster change. Encrypted credentials, session bindings and
+pending cards are removed; bound approvals expire. Previously published group
+messages stay. Re-adding the agent creates a new thread and key. Concurrent
+roster edits conflict rather than restoring an old roster; if a replacement
+turn wins admission while removal is being prepared, the save returns
+`turn_active` without changing membership and can be retried. Late workers
+cannot publish or hand off through a retired thread, even after re-addition.
+No persisted enum or index changes are required; the deleted conversation
+releases the existing unique member-thread slot. Upgrade every writer before
+relying on the new removal/admission transaction fences.
+
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
 `assistant_group_messages` holds the shared transcript (`user`, `agent`,
 `notice`). A user message goes to the recipients picked in the composer's pills
