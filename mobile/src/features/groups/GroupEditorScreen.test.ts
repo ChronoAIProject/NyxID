@@ -186,8 +186,13 @@ function setup({
         (name) => [name, name],
       ),
     ),
-    "../../components/workspace/WorkspaceSelectionField": {
-      WorkspaceSelectionField: "WorkspaceSelectionField",
+    "../../components/settings/SettingsList": Object.fromEntries(
+      ["SettingsGroup", "SettingsPage", "SettingsRow", "SettingsTextField"].map(
+        (name) => [name, name],
+      ),
+    ),
+    "../../components/settings/SettingsSelectionRow": {
+      SettingsSelectionRow: "SettingsSelectionRow",
     },
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/groupsApi": {
@@ -239,7 +244,11 @@ function setup({
   });
   const find = (type: string, label: string) => {
     const row = elements(harness.flush()).find(
-      (item) => item.type === type && item.props.label === label,
+      (item) =>
+        item.type === type &&
+        (type === "SettingsSelectionRow"
+          ? item.props.label
+          : item.props.accessibilityLabel) === label,
     );
     assert.ok(row, `Expected ${type}: ${label}`);
     return row.props;
@@ -251,12 +260,15 @@ function setup({
       harness.flush();
       return backOptions.discardOnClose;
     },
-    field: (label: string) => find("WorkspaceSelectionField", label),
-    button: (label: string) => find("ActionButton", label),
-    name: (value: string) => find("Field", "Name").onChangeText(value),
+    field: (label: string) => find("SettingsSelectionRow", label),
+    button: (label: string) => find("SettingsRow", label),
+    name: (value: string) =>
+      find("SettingsTextField", "Name").onChangeText(value),
     hasButton: (label: string) =>
       elements(harness.flush()).some(
-        (item) => item.type === "ActionButton" && item.props.label === label,
+        (item) =>
+          item.type === "SettingsRow" &&
+          item.props.accessibilityLabel === label,
       ),
     notices: () =>
       elements(harness.flush())
@@ -479,4 +491,22 @@ test("drawer dismissal no longer treats a saved group as an unsaved draft", asyn
   env.button("Save changes").onPress();
   await env.harness.settle();
   assert.equal(env.closeGuard(), undefined);
+});
+
+test("crew settings are a grouped form: name field, selection rows, tinted save and solid delete", () => {
+  const env = setup();
+  const rows = elements(env.harness.flush());
+  assert.equal(rows[0]!.type, "SettingsPage");
+  assert.equal(
+    rows.some((row) =>
+      ["ActionButton", "Card", "Field", "WorkspaceSelectionField"].includes(
+        row.type as string,
+      ),
+    ),
+    false,
+  );
+  assert.equal(env.button("Save changes").tone, "action");
+  const remove = env.button("Delete crew");
+  assert.equal(remove.destructive, true);
+  assert.equal(remove.centered, true);
 });

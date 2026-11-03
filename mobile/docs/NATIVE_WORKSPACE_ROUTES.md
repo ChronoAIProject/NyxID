@@ -18,13 +18,13 @@ transient interactions, rather than workspace destinations.
 | Stack / routes                                                                       | Purpose                                                                                                                                    |
 | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Content / Assistant                                                                  | Explicit NyxBot Home or a private chat. `home: true` selects Home; `home: false` and a fresh `draftId` select an empty normal chat.        |
-| Content / AssistantDetails, AssistantHistory, AssistantWorkingContext                | Readable chat details with guarded rename/delete, agent-scoped paged history, checkpoint and guarded context reset.                        |
+| Content / AssistantDetails, AssistantTitleEdit, AssistantHistory, AssistantWorkingContext | Grouped chat details with a guarded title edit page and delete, agent-scoped paged history, checkpoint and guarded context reset.      |
 | Content / AssistantContext, GroupChat                                                | Contextual private and crew chats, preserving the primary chat and draft.                                                                  |
 | Content / Automations, AutomationAgentFilter, AutomationDetail, AutomationRuns, AutomationRunDetail | Read-only configured tasks with an agent filter, details, cursor-paged run history and run detail, with exact conversation links. |
 | Content / Machines, MachineDetail, MachinePolicy, MachineActivity                    | Inventory, detail, owner policy, updates, saved logins and machine activity.                                                               |
 | Content / AgentMachines, AgentMachineEditor                                          | Guarded per-agent machine access.                                                                                                          |
 | Content / Plugins, PluginConnections, Services, ServiceSetup, ConnectionHistoryDetail | Plugins, connections, hosted service setup and one recorded connection change.                                                            |
-| Content / Agents, AgentCreate, AgentDetail, GroupEditor                              | Agents, crews and their guarded editors.                                                                                                   |
+| Content / Agents, AgentCreate, AgentDetail, AgentProfileEdit, GroupEditor            | Agents, crews and their guarded editors; each agent profile value is edited on its own page.                                              |
 | Content / AgentSkills, SkillDetail, SkillVersions, SkillHistory, AuthoredSkillReview | Read-only skill files/history, exact version pinning and owner publication decisions.                                                      |
 | Content / Activity, ActivityDetail, ActiveGrants                                     | Incoming actionable approvals, date-grouped history, detail and the existing grants view. Canonical approval links still address Activity. |
 | Content / WorkspaceSearch, WorkspaceRecents                                          | Grouped local search and cursor-paged See all, with chat-title search and per-agent filtering.                                             |
@@ -39,8 +39,8 @@ Chat Details, History and Working context are nested content pages. History
 reuses the thread browser, initially filtered to the viewed agent; its New chat
 keeps that agent. Choosing Details/History from the agent picker first dismisses
 the native picker, then pushes the content page. Agent/permissions/options and
-recipients/connections pickers remain transient choices. Attachment preview and
-voice conversation retain their media presentation.
+recipients/connections pickers remain transient choices. Attachment preview
+retains its media presentation.
 
 ## Sidebar and destination transitions
 
