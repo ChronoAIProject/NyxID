@@ -162,4 +162,28 @@ describe("CrmViewEditor", () => {
     );
     expect(onReload).toHaveBeenCalledOnce();
   });
+
+  it("reuses the action key when an unchanged draft retries an uncertain save", async () => {
+    mockUpdate
+      .mockRejectedValueOnce(new Error("Network unavailable"))
+      .mockResolvedValueOnce({ ...view, title: "Retry draft" });
+    render(
+      <CrmViewEditor
+        view={view}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("View name"), {
+      target: { value: "Retry draft" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save view" }));
+    await screen.findByText("Network unavailable");
+    const firstKey = mockUpdate.mock.calls[0]?.[0].idempotencyKey as string;
+    fireEvent.click(screen.getByRole("button", { name: "Save view" }));
+
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(2));
+    expect(mockUpdate.mock.calls[1]?.[0].idempotencyKey).toBe(firstKey);
+  });
 });

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { CheckCircle2, Save, ShieldCheck, X } from "lucide-react";
 import { z } from "zod";
 import { CrmViewErrors } from "@/components/crm/workspace/view-errors";
@@ -86,6 +86,7 @@ export function CrmViewEditor({
   const [validated, setValidated] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [requestError, setRequestError] = useState<string>();
+  const actionKey = useRef<string | null>(null);
   const validateView = useValidateCrmView(ownerId);
   const createView = useCreateCrmView(ownerId);
   const updateView = useUpdateCrmView(ownerId);
@@ -137,7 +138,8 @@ export function CrmViewEditor({
   }
 
   async function handleSave() {
-    const idempotencyKey = crypto.randomUUID();
+    actionKey.current ??= crypto.randomUUID();
+    const idempotencyKey = actionKey.current;
     const envelope = await validateDraft();
     if (!envelope) return;
     try {
@@ -154,6 +156,7 @@ export function CrmViewEditor({
             envelope,
             idempotencyKey,
           });
+      actionKey.current = null;
       onSaved(saved);
     } catch (cause) {
       if (
@@ -202,6 +205,7 @@ export function CrmViewEditor({
           value={title}
           maxLength={200}
           onChange={(event) => {
+            actionKey.current = null;
             setTitle(event.target.value);
             setValidated(false);
           }}
@@ -215,6 +219,7 @@ export function CrmViewEditor({
           value={json}
           spellCheck={false}
           onChange={(event) => {
+            actionKey.current = null;
             setJson(event.target.value);
             setValidated(false);
           }}
