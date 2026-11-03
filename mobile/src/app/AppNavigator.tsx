@@ -37,6 +37,15 @@ import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen
 import { DisplaySettingsScreen } from "../features/account/DisplaySettingsScreen";
 import { NotificationSettingsScreen } from "../features/account/NotificationSettingsScreen";
 import { PrivacySettingsScreen } from "../features/account/PrivacySettingsScreen";
+import {
+  ProfileFieldEditScreen,
+  profileFieldTitle,
+} from "../features/account/ProfileFieldEditScreen";
+import { SessionDetailScreen } from "../features/account/SessionDetailScreen";
+import {
+  ChatLayoutEditScreen,
+  chatLayoutTitle,
+} from "../features/display/ChatLayoutEditScreen";
 import { AccountSecurityScreen } from "../features/account/AccountSecurityScreen";
 import { MachinePolicyScreen } from "../features/machines/MachinePolicyScreen";
 import { MachineActivityScreen } from "../features/machines/MachineActivityScreen";
@@ -664,6 +673,23 @@ function SettingsSheetRoute({
             name="PrivacySettings"
             component={PrivacySettingsScreen}
             options={{ title: "Privacy" }}
+          />
+          <SheetStack.Screen
+            name="ProfileEdit"
+            component={ProfileFieldEditScreen}
+            options={({ route }) => ({
+              title: profileFieldTitle(route.params.field),
+            })}
+          />
+          <SheetStack.Screen
+            name="SessionDetail"
+            component={SessionDetailScreen}
+            options={{ title: "Session" }}
+          />
+          <SheetStack.Screen
+            name="ChatLayoutEdit"
+            component={ChatLayoutEditScreen}
+            options={({ route }) => ({ title: chatLayoutTitle(route.params.key) })}
           />
           <SheetStack.Screen
             name="TermsOfService"

@@ -104,7 +104,17 @@ export function setupSettingsScreen(
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": {
       ...Object.fromEntries(
-        ["View", "Text", "Image", "Pressable", "ScrollView", "Switch"].map(
+        [
+          "View",
+          "Text",
+          "Image",
+          "Pressable",
+          "ScrollView",
+          "Switch",
+          "TextInput",
+          "RefreshControl",
+          "ActivityIndicator",
+        ].map(
           (name) => [name, name],
         ),
       ),
@@ -146,6 +156,7 @@ export function setupSettingsScreen(
         isPending: pending,
       }),
     },
+    "../display/ChatPreview": { ChatPreview: "ChatPreview" },
     "../display/ChatDisplaySettings": {
       ChatDisplaySettings: "ChatDisplaySettings",
     },

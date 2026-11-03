@@ -63,23 +63,24 @@ export function PrivacySettingsScreen(
         kind: "error",
       }),
   });
-  const accountLabel = analyticsPermission.isFetching
+  // The row names the setting; the switch shows its state. Only loading and
+  // error states need words.
+  const accountDetail = analyticsPermission.isFetching
     ? "Loading permission…"
     : analyticsPermission.isError
       ? "Permission unavailable"
-      : analyticsPermission.data?.enabled
-        ? "Account permission enabled"
-        : "Account permission disabled";
+      : undefined;
   return (
     <>
       <SettingsPage>
         <SettingsGroup
           title="Usage analytics"
-          footer="Optional events require account permission and this device's choice. Security and billing records have separate retention rules."
+          footer="Optional usage events are sent only when both your account and this device allow them. Security and billing records have separate retention rules."
         >
           <SettingsRow
             icon={ChartColumn}
-            label={accountLabel}
+            label="Allow for my account"
+            detail={accountDetail}
             accessory={
               <Switch
                 accessibilityLabel="Allow account usage analytics"

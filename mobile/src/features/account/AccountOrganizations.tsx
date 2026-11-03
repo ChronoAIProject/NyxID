@@ -2,13 +2,13 @@ import { useRef, useState } from "react";
 import { Alert } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import {
-  ActionButton,
-  Field,
-  Label,
-  Notice,
-  Section,
-} from "../../components/workspace/WorkspaceUI";
+  SettingsCheckRow,
+  SettingsGroup,
+  SettingsRow,
+  SettingsTextField,
+} from "../../components/settings/SettingsList";
 import { accountApi } from "../../lib/api/accountApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { NYXID_FRONTEND_URL } from "../../lib/env";
@@ -141,116 +141,126 @@ export function AccountOrganizations({
     }
   }
   const disabled = !isConnected || busy || orgs.isFetching;
+  const joinWithCode = () => {
+    const ticket = current.capture();
+    Alert.alert(
+      "Join organization?",
+      `Accept this invitation as ${email}? The server will verify its validity and assigned role.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Join", onPress: () => void mutate("join", ticket) },
+      ],
+    );
+  };
   return (
-    <Section title="Organizations">
-      <Label muted>
-        Signed in as {email}. Your personal account remains the acting identity.
-        Select an organization below to manage its own resources.
-      </Label>
+    <>
       {message ? <Notice {...message} /> : null}
-      {orgs.isPending ? (
-        <Label muted>Loading memberships…</Label>
-      ) : orgs.isError ? (
-        <Notice
-          tone="error"
-          message="Could not verify memberships. Organization actions are unavailable until refresh succeeds."
-        />
-      ) : orgs.data?.length === 0 ? (
-        <Label muted>You are not a member of any organizations.</Label>
-      ) : (
-        orgs.data?.map((org) => (
-          <ActionButton
-            key={org.id}
-            label={`${selectedId === org.id ? "Selected: " : ""}${org.display_name ?? org.slug} · ${org.your_role}`}
-            variant="secondary"
-            disabled={disabled}
-            onPress={() => setSelectedId(org.id)}
+      <SettingsGroup
+        title="Organizations"
+        inset={false}
+        footer={`Signed in as ${email}. Your personal account stays the acting identity; tap an organization to manage its resources.`}
+      >
+        {orgs.isPending ? (
+          <SettingsRow label="Loading memberships…" />
+        ) : orgs.isError ? (
+          <SettingsRow
+            label="Couldn't verify memberships"
+            detail="Organization actions are unavailable until refresh succeeds."
           />
-        ))
-      )}
+        ) : orgs.data?.length === 0 ? (
+          <SettingsRow label="Not a member of any organization" />
+        ) : (
+          orgs.data?.map((org) => (
+            <SettingsCheckRow
+              key={org.id}
+              label={org.display_name ?? org.slug}
+              detail={org.your_role}
+              selected={selectedId === org.id}
+              disabled={disabled}
+              onPress={() => setSelectedId(org.id)}
+            />
+          ))
+        )}
+        <SettingsRow
+          tone="action"
+          label={orgs.isFetching ? "Refreshing…" : "Refresh Memberships"}
+          disabled={busy || !isConnected}
+          onPress={() => {
+            const ticket = current.capture();
+            void refresh().catch((error) => {
+              if (ticket.isCurrent())
+                setMessage({
+                  message: resolveErrorMessage(error),
+                  tone: "error",
+                });
+            });
+          }}
+        />
+      </SettingsGroup>
       {selected ? (
-        <>
-          <Label>
-            Organization: {selected.display_name ?? selected.slug} · Role:{" "}
-            {selected.your_role}
-          </Label>
-          <Label muted>
-            Invitations, members/roles, role permissions, approval policy,
-            profile changes and deletion continue on the website. Sign in there
-            as {email}; organization access is verified by the server. Close the
-            browser to return here and refresh.
-          </Label>
+        <SettingsGroup
+          title={`Manage ${selected.display_name ?? selected.slug}`}
+          inset={false}
+          footer={`These open on the website. Sign in there as ${email}; access is verified by the server.${
+            admin
+              ? ""
+              : " Only owners and admins can manage invitations, roles, approvals and settings."
+          }`}
+        >
+          <SettingsRow label="Your role" value={selected.your_role} />
           {ORGANIZATION_WEB_ACTIONS.filter(
             (action) => !action.adminOnly || admin,
           ).map((action) => (
-            <ActionButton
+            <SettingsRow
               key={action.tab}
-              label={`${action.label} on website`}
-              variant="secondary"
+              label={action.label}
+              value="Website"
               disabled={disabled}
+              accessibilityHint={`Opens ${action.label} on the website`}
               onPress={() => void openOrganization(action.tab)}
             />
           ))}
-          {!admin ? (
-            <Label muted>
-              Only organization owners/admins can manage invitations, roles,
-              approvals and settings.
-            </Label>
-          ) : null}
-        </>
+        </SettingsGroup>
       ) : null}
-      <Field
-        label="New organization name"
-        value={name}
-        onChangeText={setName}
-        editable={!disabled}
-        autoCapitalize="words"
-        maxLength={128}
-      />
-      <ActionButton
-        label="Create organization"
-        disabled={disabled || !name.trim()}
-        onPress={() => void mutate("create")}
-      />
-      <Field
-        label="Organization invitation code"
-        value={nonce}
-        onChangeText={setNonce}
-        editable={!disabled}
-        autoCorrect={false}
-        secureTextEntry
-      />
-      <ActionButton
-        label="Accept organization invitation"
-        disabled={disabled || !nonce.trim()}
-        onPress={() => {
-          const ticket = current.capture();
-          Alert.alert(
-            "Join organization?",
-            `Accept this invitation as ${email}? The server will verify its validity and assigned role.`,
-            [
-              { text: "Cancel", style: "cancel" },
-              { text: "Join", onPress: () => void mutate("join", ticket) },
-            ],
-          );
-        }}
-      />
-      <ActionButton
-        label="Refresh memberships & permissions"
-        variant="secondary"
-        loading={orgs.isFetching}
-        disabled={busy || !isConnected}
-        onPress={() => {
-          const ticket = current.capture();
-          void refresh().catch((error) => {
-            if (ticket.isCurrent())
-              setMessage({
-                message: resolveErrorMessage(error),
-                tone: "error",
-              });
-          });
-        }}
-      />
-    </Section>
+      <SettingsGroup title="Create organization" inset={false}>
+        <SettingsTextField
+          accessibilityLabel="New organization name"
+          placeholder="Organization name"
+          value={name}
+          onChangeText={setName}
+          editable={!disabled}
+          autoCapitalize="words"
+          maxLength={128}
+        />
+        <SettingsRow
+          tone="action"
+          label="Create Organization"
+          disabled={disabled || !name.trim()}
+          onPress={() => void mutate("create")}
+        />
+      </SettingsGroup>
+      <SettingsGroup
+        title="Join an organization"
+        inset={false}
+        footer="Paste the invitation code an organization admin sent you."
+      >
+        <SettingsTextField
+          accessibilityLabel="Organization invitation code"
+          placeholder="Invitation code"
+          value={nonce}
+          onChangeText={setNonce}
+          editable={!disabled}
+          autoCorrect={false}
+          autoCapitalize="none"
+          secureTextEntry
+        />
+        <SettingsRow
+          tone="action"
+          label="Accept Invitation"
+          disabled={disabled || !nonce.trim()}
+          onPress={joinWithCode}
+        />
+      </SettingsGroup>
+    </>
   );
 }

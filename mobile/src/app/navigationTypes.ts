@@ -97,6 +97,9 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   NotificationSettings: undefined;
   DisplaySettings: undefined;
   PrivacySettings: undefined;
+  ProfileEdit: { field: "display_name" | "avatar_url" };
+  SessionDetail: { sessionId: string };
+  ChatLayoutEdit: { key: "columnWidth" | "composerMaxHeight" };
 };
 
 export type RootStackParamList = SharedEntryParamList & {

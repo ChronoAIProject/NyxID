@@ -5,7 +5,8 @@ import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (root: Element): Element[] => [
   root,
-  ...[root.props.children]
+  // Settings rows carry controls (switches) in their accessory slot.
+  ...[root.props.children, root.props.accessory]
     .flat(Infinity)
     .flatMap((child) =>
       child && typeof child === "object" && "props" in child
@@ -91,6 +92,15 @@ function setup(
         (name) => [name, name],
       ),
     ),
+    "../../components/settings/SettingsList": Object.fromEntries(
+      [
+        "SettingsCheckRow",
+        "SettingsGroup",
+        "SettingsRow",
+        "SettingsTextField",
+      ].map((name) => [name, name]),
+    ),
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../lib/api/accountApi": { accountApi: api },
     "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.example" },
     "../../hooks/useNetworkStatus": {
@@ -138,7 +148,11 @@ function setup(
   harness.mount(() => loaded[component]!(props));
   const find = (label: string) => {
     const node = nodes(harness.value()).find(
-      (node) => node.props.label === label,
+      (node) =>
+        node.props.label === label ||
+        node.props.accessibilityHint === label ||
+        (node.type === "SettingsTextField" &&
+          node.props.accessibilityLabel === label),
     );
     assert.ok(node, `Missing ${label}`);
     return node;
@@ -277,9 +291,9 @@ test("organizations expose native create/join and owner-specific browser actions
     { accountId: "owner", email: "person@example.test" },
     { owner: [org] },
   );
-  env.find("Team · admin").props.onPress();
+  env.find("Team").props.onPress();
   env.harness.flush();
-  env.find("Role permissions on website").props.onPress();
+  env.find("Role permissions").props.onPress();
   await env.harness.settle();
   assert.ok(
     env.calls.some(
@@ -297,13 +311,13 @@ test("organizations expose native create/join and owner-specific browser actions
   env.harness.render();
   assert.equal(
     nodes(env.harness.value()).some(
-      (node) => node.props.label === "Invitations on website",
+      (node) => node.props.label === "Invitations",
     ),
     false,
   );
   env.find("New organization name").props.onChangeText("New Team");
   env.harness.flush();
-  env.find("Create organization").props.onPress();
+  env.find("Create Organization").props.onPress();
   await env.harness.settle();
   assert.ok(
     env.calls.some(
@@ -315,7 +329,7 @@ test("organizations expose native create/join and owner-specific browser actions
   );
   env.find("Organization invitation code").props.onChangeText("nonce");
   env.harness.flush();
-  env.find("Accept organization invitation").props.onPress();
+  env.find("Accept Invitation").props.onPress();
   env.confirm();
   await env.harness.settle();
   assert.ok(
@@ -335,7 +349,7 @@ test("a created organization is reported as created even when the list cannot re
   env.failListReload();
   env.find("New organization name").props.onChangeText("New Team");
   env.harness.flush();
-  env.find("Create organization").props.onPress();
+  env.find("Create Organization").props.onPress();
   await env.harness.settle();
   const notice = nodes(env.harness.value()).find(
     (node) => node.type === "Notice",
@@ -443,7 +457,7 @@ test("organization join confirmation and queued creation retain their originatin
   );
   env.find("Organization invitation code").props.onChangeText("nonce");
   env.harness.flush();
-  env.find("Accept organization invitation").props.onPress();
+  env.find("Accept Invitation").props.onPress();
   env.setAllowed(false);
   env.setAllowed(true);
   env.confirm();
@@ -453,7 +467,7 @@ test("organization join confirmation and queued creation retain their originatin
   env.queueDispatch(queued.promise);
   env.find("New organization name").props.onChangeText("Team");
   env.harness.flush();
-  env.find("Create organization").props.onPress();
+  env.find("Create Organization").props.onPress();
   env.setAllowed(false);
   env.setAllowed(true);
   queued.resolve();

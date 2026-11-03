@@ -1,41 +1,89 @@
-import { StyleSheet, Switch, View } from "react-native";
-import Svg, { Circle, Path } from "react-native-svg";
-import { SunMoon } from "lucide-react-native";
+import { Pressable, StyleSheet, Switch, View } from "react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
-import { SegmentControl } from "../../components/SegmentControl";
+import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import {
   SettingsGroup,
   SettingsPage,
   SettingsRow,
-  useSettingsStacked,
 } from "../../components/settings/SettingsList";
 import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
-import { spacing } from "../../theme/designTokens";
+import { spacing, typeScale } from "../../theme/designTokens";
 import { ChatDisplaySettings } from "../display/ChatDisplaySettings";
+import { ChatPreview } from "../display/ChatPreview";
 
-/** Settings › Display: chat layout and the app's light/dark appearance. */
+/**
+ * Settings › Display, in the shape of iOS Display & Brightness: a live preview,
+ * Light/Dark tiles with a radio under each, then the per-chat choices.
+ */
 export function DisplaySettingsScreen(
   _props: SheetScreenProps<"DisplaySettings">,
 ) {
   const { colors, mode, preference, setPreference } = useTheme();
-  const stacked = useSettingsStacked();
-  const isLight =
-    preference === "light" || (preference === "system" && mode === "light");
-  const isDark =
-    preference === "dark" || (preference === "system" && mode === "dark");
-  const lightColor = isLight ? colors.primary : colors.textMuted;
-  const darkColor = isDark ? colors.primary : colors.textMuted;
+  const automatic = preference === "system";
+  const current = mode === "dark" ? "dark" : "light";
+  const choose = (value: "light" | "dark") => {
+    capture({
+      name: "ui.mobile_preference_toggled",
+      props: { name: "theme", value },
+    });
+    setPreference(value);
+  };
   return (
     <SettingsPage>
-      <SettingsGroup title="Appearance">
+      <ChatPreview />
+      <SettingsGroup title="Appearance" inset={false}>
+        <View accessibilityRole="radiogroup" style={styles.tiles}>
+          {(["light", "dark"] as const).map((value) => {
+            const selected = current === value;
+            return (
+              <Pressable
+                key={value}
+                accessibilityRole="radio"
+                accessibilityLabel={`${value === "light" ? "Light" : "Dark"} appearance`}
+                accessibilityState={{ checked: selected, selected }}
+                onPress={() => choose(value)}
+                style={styles.tile}
+              >
+                <View
+                  style={[
+                    styles.thumb,
+                    {
+                      borderColor: selected ? colors.primary : "transparent",
+                    },
+                  ]}
+                >
+                  <ChatPreview mode={value} compact />
+                </View>
+                <Text style={[styles.tileLabel, { color: colors.textPrimary }]}>
+                  {value === "light" ? "Light" : "Dark"}
+                </Text>
+                <View
+                  style={[
+                    styles.radio,
+                    {
+                      borderColor: selected ? colors.primary : colors.controlBorder,
+                      backgroundColor: selected ? colors.primary : "transparent",
+                    },
+                  ]}
+                >
+                  {selected ? (
+                    <View
+                      style={[styles.radioDot, { backgroundColor: colors.onPrimary }]}
+                    />
+                  ) : null}
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
         <SettingsRow
-          icon={SunMoon}
-          label="Use system setting"
+          label="Automatic"
+          detail={automatic ? "Follows your iPhone's appearance" : undefined}
           accessory={
             <Switch
-              accessibilityLabel="Use system setting"
-              value={preference === "system"}
+              accessibilityLabel="Automatic appearance"
+              value={automatic}
               onValueChange={(on) => {
                 capture({
                   name: "ui.mobile_preference_toggled",
@@ -47,60 +95,6 @@ export function DisplaySettingsScreen(
             />
           }
         />
-        <View style={styles.segment}>
-          <SegmentControl
-            accessibilityLabel="Appearance"
-            stacked={stacked}
-            activeIndex={isLight ? 0 : 1}
-            segments={[
-              {
-                label: "Light",
-                accessibilityLabel: "Light appearance",
-                icon: (
-                  <Svg
-                    width={16}
-                    height={16}
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke={lightColor}
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <Circle cx={12} cy={12} r={5} />
-                    <Path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-                  </Svg>
-                ),
-              },
-              {
-                label: "Dark",
-                accessibilityLabel: "Dark appearance",
-                icon: (
-                  <Svg
-                    width={16}
-                    height={16}
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke={darkColor}
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <Path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                  </Svg>
-                ),
-              },
-            ]}
-            onPress={(index) => {
-              const value = index === 0 ? "light" : "dark";
-              capture({
-                name: "ui.mobile_preference_toggled",
-                props: { name: "theme", value },
-              });
-              setPreference(value);
-            }}
-          />
-        </View>
       </SettingsGroup>
       <ChatDisplaySettings />
     </SettingsPage>
@@ -108,5 +102,23 @@ export function DisplaySettingsScreen(
 }
 
 const styles = StyleSheet.create({
-  segment: { padding: spacing.lg },
+  tiles: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: spacing.huge,
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.xxl,
+  },
+  tile: { flex: 1, maxWidth: 140, alignItems: "center", gap: spacing.sm },
+  thumb: { width: "100%", borderRadius: 14, borderWidth: 2, padding: 2 },
+  tileLabel: { ...typeScale.label },
+  radio: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1.5,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  radioDot: { width: 8, height: 8, borderRadius: 4 },
 });

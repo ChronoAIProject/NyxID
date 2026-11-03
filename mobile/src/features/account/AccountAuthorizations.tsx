@@ -1,13 +1,11 @@
 import { useRef, useState } from "react";
 import { Alert } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import {
-  ActionButton,
-  Card,
-  Label,
-  Notice,
-  Section,
-} from "../../components/workspace/WorkspaceUI";
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
 import { accountApi } from "../../lib/api/accountApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
@@ -94,99 +92,103 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
   }
   const disabled =
     !isConnected || busy || apps.isFetching || bindings.isFetching;
+  const services = (app: NonNullable<typeof apps.data>[number]) =>
+    app.legacy_unrestricted
+      ? "Legacy unrestricted service access"
+      : app.allow_all_services
+        ? "All services"
+        : app.allowed_services
+            .map(
+              (service) =>
+                `${service.label}${service.deleted ? " (deleted)" : ""}`,
+            )
+            .join(", ") || "No services";
   return (
-    <Section title="Access & authorizations">
-      <Label muted>
-        Personal account authorizations. These are separate from approval grants
-        in Activity.
-      </Label>
+    <>
       {feedback ? <Notice {...feedback} /> : null}
-      <Label>Authorized OAuth apps</Label>
-      {apps.isPending ? (
-        <Label muted>Loading authorized apps…</Label>
-      ) : apps.isError ? (
-        <Notice
-          tone="error"
-          message="Could not load authorized apps. Retry to confirm current access."
-        />
-      ) : apps.data?.length === 0 ? (
-        <Label muted>No authorized apps.</Label>
-      ) : (
-        apps.data?.map((app) => (
-          <Card key={app.client_id}>
-            <Label>{app.client_name}</Label>
-            <Label muted>{app.scopes || "No scopes"}</Label>
-            <Label muted>
-              {app.legacy_unrestricted
-                ? "Legacy unrestricted service access"
-                : app.allow_all_services
-                  ? "All services"
-                  : app.allowed_services
-                      .map(
-                        (service) =>
-                          `${service.label}${service.deleted ? " (deleted)" : ""}`,
-                      )
-                      .join(", ") || "No services"}
-            </Label>
-            <Label muted>
-              Granted {app.granted_at} · Expires {app.expires_at ?? "never"}
-            </Label>
-            <ActionButton
-              label={`Revoke ${app.client_name}`}
-              variant="danger"
+      <SettingsGroup
+        title="Authorized apps"
+        inset={false}
+        footer="Apps you signed in to with NyxID. Tap one to revoke it. These are separate from approval grants in Activity."
+      >
+        {apps.isPending ? (
+          <SettingsRow label="Loading authorized apps…" />
+        ) : apps.isError ? (
+          <SettingsRow
+            label="Couldn't load authorized apps"
+            detail="Tap to retry."
+            tone="action"
+            onPress={refresh}
+          />
+        ) : apps.data?.length === 0 ? (
+          <SettingsRow label="No authorized apps" />
+        ) : (
+          apps.data?.map((app) => (
+            <SettingsRow
+              key={app.client_id}
+              label={app.client_name}
+              detail={`${services(app)} · ${app.scopes || "No scopes"}\nGranted ${app.granted_at} · Expires ${app.expires_at ?? "never"}`}
+              value="Revoke"
               disabled={disabled}
+              accessibilityHint={`Revoke ${app.client_name}`}
               onPress={() => confirm("app", app.client_id, app.client_name)}
             />
-          </Card>
-        ))
-      )}
-      <Label>Broker authorizations</Label>
-      {bindings.isPending ? (
-        <Label muted>Loading broker authorizations…</Label>
-      ) : bindings.isError ? (
-        <Notice
-          tone="error"
-          message="Could not load broker authorizations. Retry to confirm current access."
+          ))
+        )}
+      </SettingsGroup>
+      <SettingsGroup
+        title="Broker authorizations"
+        inset={false}
+        footer="Apps acting for you through NyxID's broker."
+      >
+        {bindings.isPending ? (
+          <SettingsRow label="Loading broker authorizations…" />
+        ) : bindings.isError ? (
+          <SettingsRow
+            label="Couldn't load broker authorizations"
+            detail="Tap to retry."
+            tone="action"
+            onPress={refresh}
+          />
+        ) : bindings.data?.length === 0 ? (
+          <SettingsRow label="No broker authorizations" />
+        ) : (
+          bindings.data?.map((binding) => {
+            const name = binding.client_name ?? binding.client_id;
+            return (
+              <SettingsRow
+                key={binding.binding_hash}
+                label={name}
+                detail={`${
+                  binding.external_subject
+                    ? `${binding.external_subject.platform} · ${binding.external_subject.external_user_id}\n`
+                    : ""
+                }${binding.scopes.join(" ")}\nCreated ${binding.created_at} · Last used ${binding.last_used_at ?? "never"}`}
+                value="Revoke"
+                disabled={disabled}
+                accessibilityHint={`Revoke ${binding.client_name ?? "authorization"}`}
+                onPress={() =>
+                  confirm(
+                    "binding",
+                    binding.binding_hash,
+                    binding.client_name ?? "authorization",
+                  )
+                }
+              />
+            );
+          })
+        )}
+        <SettingsRow
+          tone="action"
+          label={
+            apps.isFetching || bindings.isFetching
+              ? "Refreshing…"
+              : "Refresh Authorizations"
+          }
+          disabled={busy || !isConnected}
+          onPress={refresh}
         />
-      ) : bindings.data?.length === 0 ? (
-        <Label muted>No broker authorizations.</Label>
-      ) : (
-        bindings.data?.map((binding) => (
-          <Card key={binding.binding_hash}>
-            <Label>{binding.client_name ?? binding.client_id}</Label>
-            {binding.external_subject ? (
-              <Label muted>
-                {binding.external_subject.platform} ·{" "}
-                {binding.external_subject.external_user_id}
-              </Label>
-            ) : null}
-            <Label muted>{binding.scopes.join(" ")}</Label>
-            <Label muted>
-              Created {binding.created_at} · Last used{" "}
-              {binding.last_used_at ?? "never"}
-            </Label>
-            <ActionButton
-              label={`Revoke ${binding.client_name ?? "authorization"}`}
-              variant="danger"
-              disabled={disabled}
-              onPress={() =>
-                confirm(
-                  "binding",
-                  binding.binding_hash,
-                  binding.client_name ?? "authorization",
-                )
-              }
-            />
-          </Card>
-        ))
-      )}
-      <ActionButton
-        label="Refresh authorizations"
-        variant="secondary"
-        disabled={busy || !isConnected}
-        loading={apps.isFetching || bindings.isFetching}
-        onPress={refresh}
-      />
-    </Section>
+      </SettingsGroup>
+    </>
   );
 }

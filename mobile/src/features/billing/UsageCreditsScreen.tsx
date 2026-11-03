@@ -4,6 +4,7 @@ import { useIsFocused } from "@react-navigation/native";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { z } from "zod";
 import { ActionButton, Label, Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { SettingsGroup, SettingsPage, SettingsRow } from "../../components/settings/SettingsList";
 import { SegmentControl } from "../../components/SegmentControl";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -83,7 +84,7 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
   const loaded = wallet.data?.kind === "ready" && wallet.data.data && grants.data?.kind === "ready" && allowances.data?.kind === "ready"
     ? { wallet: wallet.data.data, grants: grants.data.data.grants, allowances: allowances.data.data.allowances } : undefined;
   const historyIssue = expanded ? unavailable([usage]) : undefined;
-  return <WorkspacePage title="Usage & credits" showHeading={false} refreshing={fetching} onRefresh={() => void refresh()}>
+  return <SettingsPage refreshing={fetching} onRefresh={() => void refresh()}>
     {issue ? <>
       <Notice tone="error" message={issue} />
       <ActionButton label="Retry" variant="secondary" disabled={fetching} onPress={() => void refresh()} />
@@ -99,13 +100,13 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
         {historyIssue ? <>
           <Notice tone="error" message={historyIssue} />
           <ActionButton label="Retry" variant="secondary" disabled={fetching} onPress={() => void refresh()} />
-        </> : usage.data?.kind === "ready" ? <>
-          {usage.data.data.billing.rates_are_approximate && <Label muted>Usage costs are estimates.</Label>}
-          {services.length === 0 && <Label muted>No usage recorded for this period.</Label>}
+        </> : usage.data?.kind === "ready" ? <SettingsGroup title="Usage by service" inset={false}
+          footer={usage.data.data.billing.rates_are_approximate ? "Usage costs are estimates." : undefined}>
+          {services.length === 0 && <SettingsRow label="No usage recorded for this period" />}
           {services.slice(0, serviceLimit).map((service) => <BillingServiceCard key={`${period}:${service.key}`} service={service} />)}
-          {services.length > serviceLimit && <ActionButton label="Show more services" variant="secondary" onPress={() => setServiceLimit((limit) => limit + 10)} />}
-        </> : <Label muted>{isConnected ? "Loading usage…" : "Offline. Connect to load usage."}</Label>}
+          {services.length > serviceLimit && <SettingsRow tone="action" label="Show More Services" onPress={() => setServiceLimit((limit) => limit + 10)} />}
+        </SettingsGroup> : <Label muted>{isConnected ? "Loading usage…" : "Offline. Connect to load usage."}</Label>}
       </>}
     </>}
-  </WorkspacePage>;
+  </SettingsPage>;
 }

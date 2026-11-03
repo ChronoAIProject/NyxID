@@ -14,7 +14,7 @@ const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 function elements(root: Element): Element[] {
   return [root, ...[root.props.children].flat(Infinity).flatMap((child) => child && typeof child === "object" && "props" in child ? elements(child) : [])];
 }
-const text = (root: Element) => elements(root).flatMap((item) => [item.props.children, item.props.message].flat(Infinity)).filter((value) => typeof value === "string").join(" ");
+const text = (root: Element) => elements(root).flatMap((item) => [item.props.children, item.props.message, item.props.label].flat(Infinity)).filter((value) => typeof value === "string").join(" ");
 const ready = (data: unknown) => ({ data: { kind: "ready", data } });
 
 function setup({ params = {}, states = {} }: { params?: { period?: string; ownerId?: string }; states?: Record<string, State> } = {}) {
@@ -55,6 +55,7 @@ function setup({ params = {}, states = {} }: { params?: { period?: string; owner
     },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(["ActionButton", "Card", "Label", "Notice", "WorkspacePage"].map((name) => [name, name])),
     "../../components/SegmentControl": { SegmentControl: "SegmentControl" },
+    "../../components/settings/SettingsList": { SettingsPage: "SettingsPage", SettingsGroup: "SettingsGroup", SettingsRow: "SettingsRow" },
     "../../hooks/useNetworkStatus": { useNetworkStatus: () => ({ isConnected: online, recheckConnection: () => recheck() }) },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../auth/AuthSessionContext": { useAuthSession: () => ({ isAuthenticated: authenticated }) },
@@ -94,8 +95,7 @@ function setup({ params = {}, states = {} }: { params?: { period?: string; owner
 test("personal balance alone is visible, without headings, account selectors or eager usage", async (t) => {
   const screen = setup({ params: { ownerId: ORG_ADMIN } });
   t.after(screen.harness.unmount);
-  assert.equal(screen.harness.value().props.showHeading, false);
-  assert.equal(screen.harness.value().props.subtitle, undefined);
+  assert.equal(screen.harness.value().type, "SettingsPage");
   assert.equal(screen.find("BillingWalletCard").props.wallet.balance, "-0.000000000001");
   assert.equal(screen.find("BillingWalletCard").props.grants.length, 1);
   assert.equal(screen.find("BillingWalletCard").props.allowances.length, 1);
@@ -264,7 +264,7 @@ test("large service lists expand only inside optional history", (t) => {
   assert.equal(screen.all().some((item) => item.type === "BillingServiceCard"), false);
   screen.toggle();
   assert.equal(screen.all().filter((item) => item.type === "BillingServiceCard").length, 10);
-  screen.find("ActionButton", "Show more services").props.onPress();
+  screen.find("SettingsRow", "Show More Services").props.onPress();
   screen.harness.flush();
   assert.equal(screen.all().filter((item) => item.type === "BillingServiceCard").length, 11);
 });
