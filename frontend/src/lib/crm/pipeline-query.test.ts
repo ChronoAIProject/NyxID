@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   crmPipelineCountQuery,
   crmPipelineLaneQuery,
+  crmPipelineStageMatches,
 } from "./pipeline-query";
 import type { CrmTableQuery } from "@/schemas/crm";
 
@@ -34,5 +35,12 @@ describe("CRM pipeline query refinement", () => {
     expect(crmPipelineCountQuery(query, "stage").filters).toEqual(
       query.filters,
     );
+  });
+
+  it("applies saved stage predicates to optimistic destinations", () => {
+    const filters = [{ field: "stage", op: "neq", value: "won" }] as const;
+
+    expect(crmPipelineStageMatches(filters, "stage", "qualified")).toBe(true);
+    expect(crmPipelineStageMatches(filters, "stage", "won")).toBe(false);
   });
 });

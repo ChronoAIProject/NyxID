@@ -38,3 +38,23 @@ export function crmPipelineCountQuery(
     order: "option_order",
   };
 }
+
+export function crmPipelineStageMatches(
+  filters: readonly CrmFilter[],
+  stageField: string,
+  stageValue: string,
+): boolean {
+  return filters
+    .filter((filter) => filter.field === stageField)
+    .every((filter) => {
+      if (filter.op === "eq") return filter.value === stageValue;
+      if (filter.op === "neq") return filter.value !== stageValue;
+      if (filter.op === "in")
+        return Array.isArray(filter.value) && filter.value.includes(stageValue);
+      if (filter.op === "nin")
+        return Array.isArray(filter.value) && !filter.value.includes(stageValue);
+      if (filter.op === "is_set") return true;
+      if (filter.op === "is_unset") return false;
+      return false;
+    });
+}

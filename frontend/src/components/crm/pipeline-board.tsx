@@ -33,6 +33,7 @@ import {
 import {
   crmPipelineCountQuery,
   crmPipelineLaneQuery,
+  crmPipelineStageMatches,
 } from "@/lib/crm/pipeline-query";
 import type { CrmField, CrmRecordRow, CrmTableQuery } from "@/schemas/crm";
 
@@ -168,6 +169,8 @@ function PipelineLane({
     lane.data?.rows ?? [],
     stage.value,
     moves,
+    (move) =>
+      crmPipelineStageMatches(query.filters, stageField.key, move.to),
   );
   return (
     <section
@@ -322,7 +325,9 @@ export function CrmPipelineBoard({
       pending.from,
       Math.max(0, (countByStage.get(pending.from) ?? 0) - 1),
     );
-    countByStage.set(pending.to, (countByStage.get(pending.to) ?? 0) + 1);
+    if (crmPipelineStageMatches(query.filters, stageField.key, pending.to)) {
+      countByStage.set(pending.to, (countByStage.get(pending.to) ?? 0) + 1);
+    }
   }
   const liveStages = stageField.options.filter((option) => !option.archived);
   const archivedStages = stageField.options.filter((option) => option.archived);

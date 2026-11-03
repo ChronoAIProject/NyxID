@@ -28,4 +28,18 @@ describe("CRM pipeline optimistic moves", () => {
     ]);
     expect(applyOptimisticPipelineRows([], "proposal", {})).toEqual([]);
   });
+
+  it("does not add a move to a destination excluded by the saved query", () => {
+    const pending = {
+      [deal.id]: { record: deal, from: "qualified", to: "won" },
+    };
+    const includeMove = () => false;
+
+    expect(
+      applyOptimisticPipelineRows([deal], "qualified", pending, includeMove),
+    ).toEqual([]);
+    expect(
+      applyOptimisticPipelineRows([], "won", pending, includeMove),
+    ).toEqual([]);
+  });
 });

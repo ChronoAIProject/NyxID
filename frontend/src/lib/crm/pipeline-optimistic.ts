@@ -10,13 +10,15 @@ export function applyOptimisticPipelineRows(
   rows: readonly CrmRecordRow[],
   stage: string,
   moves: Readonly<Record<string, CrmOptimisticPipelineMove>>,
+  includeMove: (move: CrmOptimisticPipelineMove) => boolean = () => true,
 ): CrmRecordRow[] {
-  const retained = rows.filter(
-    (row) => !moves[row.id] || moves[row.id]?.to === stage,
-  );
+  const retained = rows.filter((row) => {
+    const move = moves[row.id];
+    return !move || (move.to === stage && includeMove(move));
+  });
   const ids = new Set(retained.map((row) => row.id));
   for (const move of Object.values(moves)) {
-    if (move.to === stage && !ids.has(move.record.id)) {
+    if (move.to === stage && includeMove(move) && !ids.has(move.record.id)) {
       retained.push(move.record);
       ids.add(move.record.id);
     }
