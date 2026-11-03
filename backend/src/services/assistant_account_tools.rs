@@ -1368,17 +1368,33 @@ impl AccountTools<'_> {
                 let providers = platform_key_service::load_providers(self.db).await?;
                 let services =
                     unified_key_service::list_keys(self.db, self.keys, user, &providers).await?;
-                Ok(bounded_list(
-                    services
-                        .iter()
-                        .map(|s| {
-                            json!({"id": s.id, "slug": s.slug,
-                    "label": short(&s.label), "is_active": s.is_active, "status": s.status,
-                    "api_key_id": s.api_key_id, "auto_connected": s.auto_connected})
-                        })
-                        .collect(),
-                ))
+                use futures::TryStreamExt;
+                let connections: Vec<crate::models::user_service::UserService> = self
+                    .db
+                    .collection("user_services")
+                    .find(doc! {"_id":{"$in":services.iter().map(|s| s.id.as_str()).collect::<Vec<_>>()}})
+                    .await?
+                    .try_collect()
+                    .await?;
+                // Facts are advisory; a lookup failure never fails the listing.
+                let facts =
+                    super::assistant_connection_service::facts_for(self.db, user, &connections)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::warn!(%error, "connection facts unavailable");
+                            Default::default()
+                        });
+                let rows: Vec<Value> = services
+                    .iter()
+                    .map(|service| {
+                        json!({"id":service.id,"slug":service.slug,"label":short(&service.label),"is_active":service.is_active,
+                        "status":service.status,"api_key_id":service.api_key_id,"auto_connected":service.auto_connected,
+                        "connection":facts.get(&service.id).cloned().unwrap_or(Value::Null)})
+                    })
+                    .collect();
+                Ok(bounded_list(rows))
             }
+
             "set_service_enabled" => {
                 user_service_service::update_user_service(
                     self.db,

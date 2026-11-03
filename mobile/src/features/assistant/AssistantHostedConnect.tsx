@@ -135,7 +135,13 @@ export function AssistantHostedConnect({
         }
       />
       {flow.error ? <Notice tone="error" message={flow.error} /> : null}
-      {flow.platformAvailable ? (
+      {flow.platformAvailable && p.assistant_intent_locked ? (
+        <Label muted>
+          {p.use_platform_key
+            ? "This link uses NyxID's platform connection."
+            : "This link connects your own account."}
+        </Label>
+      ) : flow.platformAvailable ? (
         <View style={{ gap: 6 }}>
           <Label>Connection</Label>
           <SegmentControl

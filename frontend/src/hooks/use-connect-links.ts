@@ -1,7 +1,8 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
   completeConnectLinkResponseSchema,
+  createConnectLinkResponseSchema,
   connectLinkPreviewSchema,
   connectLinkStatusResponseSchema,
   type CompleteConnectLinkInput,
@@ -40,6 +41,7 @@ export function usePreviewConnectLink() {
 }
 
 export function useCompleteConnectLink() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
       token,
@@ -53,6 +55,11 @@ export function useCompleteConnectLink() {
         { token, ...compactCompleteConnectLinkInput(values) },
       );
       return completeConnectLinkResponseSchema.parse(response);
+    },
+    onSuccess: (result) => {
+      if (result.status === "completed") {
+        void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      }
     },
   });
 }
@@ -72,17 +79,46 @@ export function useCancelHostedConnectLink() {
 }
 
 export function useConnectLinkStatus(id: string, enabled = true) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: ["connect-links", id],
     queryFn: async (): Promise<ConnectLinkStatusResponse> => {
       const response = await api.get<ConnectLinkStatusResponse>(
         `/connect-links/${id}`,
       );
-      return connectLinkStatusResponseSchema.parse(response);
+      const result = connectLinkStatusResponseSchema.parse(response);
+      if (result.status === "completed") {
+        void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      }
+      return result;
     },
     enabled: enabled && id.length > 0,
     refetchInterval: (query) =>
       query.state.data?.status === "pending" ? 1_000 : false,
     refetchOnWindowFocus: true,
+  });
+}
+
+export interface AssistantConnectLinkInput {
+  readonly serviceSlug: string;
+  /**
+   * "Connect your own" pins the link to the person's own account. Plain
+   * Connect leaves the credential choice to the hosted page, as before.
+   */
+  readonly personal: boolean;
+}
+
+/** Creates a hosted connect link for a user-clicked assistant setup. */
+export function useCreateAssistantConnectLink() {
+  return useMutation({
+    mutationFn: async ({ serviceSlug, personal }: AssistantConnectLinkInput) => {
+      const response = await api.post(
+        "/connect-links",
+        personal
+          ? { service_slug: serviceSlug, use_platform_key: false, assistant_personal: true }
+          : { service_slug: serviceSlug },
+      );
+      return createConnectLinkResponseSchema.parse(response).connect_url;
+    },
   });
 }

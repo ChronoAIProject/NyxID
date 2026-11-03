@@ -383,6 +383,7 @@ export const ACTION_RISK_LABEL = {
 
 /** Why a card asks, for its risk line. */
 export function confirmationReason(confirmation: NyxAgentActionConfirmation): string {
+  if (confirmation.reason === "org_connection") return "Using this organization connection requires your instruction, including in Full access.";
   if (confirmation.reason === "webhook") return "This automation's confirmation policy asks.";
   if (confirmation.reason === "policy") {
     return "This machine's or saved login's confirmation setting asks.";

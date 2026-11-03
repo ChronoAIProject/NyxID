@@ -82,6 +82,8 @@ pub struct AsyncServiceOperation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(default)]
+    pub instruction_receipt_version: u32,
+    #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]
     pub cma: Option<CmaOperation>,

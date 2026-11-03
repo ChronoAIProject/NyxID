@@ -137,3 +137,38 @@ pub(super) fn capture_client_context(
         client_device_memory: body.client_device_memory,
     })
 }
+
+#[cfg(test)]
+mod protected_owner_instruction_tests {
+    use super::*;
+    use crate::mw::auth::AuthMethod;
+
+    #[test]
+    fn only_first_party_human_credentials_can_mint_owner_instruction_provenance() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        for method in [
+            AuthMethod::Session,
+            AuthMethod::AccessToken,
+            AuthMethod::ApiKey,
+            AuthMethod::Delegated,
+            AuthMethod::Relay,
+            AuthMethod::ServiceAccount,
+        ] {
+            let mut auth = crate::test_utils::test_auth_user(&owner);
+            auth.auth_method = method.clone();
+            assert_eq!(
+                require_first_party_human(&auth).is_ok(),
+                matches!(method, AuthMethod::Session | AuthMethod::AccessToken)
+            );
+            for field in 0..3 {
+                let mut derived = auth.clone();
+                match field {
+                    0 => derived.oauth_client_id = Some("external-app".into()),
+                    1 => derived.acting_client_id = Some("delegated-client".into()),
+                    _ => derived.api_key_id = Some("api-key".into()),
+                }
+                assert!(require_first_party_human(&derived).is_err());
+            }
+        }
+    }
+}

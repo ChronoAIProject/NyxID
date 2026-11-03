@@ -254,6 +254,19 @@ const MACHINE_CAPABILITIES_FLAG: FeatureFlagDef = FeatureFlagDef {
     description: "Enable the capability editor and deny-by-default new assignments after upgrading all replicas; stored restrictions are always enforced.",
     default_enabled: false,
 };
+pub const ORG_INSTRUCTION_FLAG_KEY: &str = "assistant:org-instruction-v1";
+const ORG_INSTRUCTION_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ORG_INSTRUCTION_FLAG_KEY,
+    description: "Require exact owner instruction for organization connections in every access mode",
+    default_enabled: false,
+};
+pub const HOSTED_CONNECT_INTENT_FLAG_KEY: &str = "assistant:hosted-connect-intent-v1";
+const HOSTED_CONNECT_INTENT_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: HOSTED_CONNECT_INTENT_FLAG_KEY,
+    description: "Write immutable assistant hosted connection intent",
+    default_enabled: false,
+};
+
 pub const MACHINE_CONTEXTS_FLAG_KEY: &str = "assistant:machine-contexts";
 const MACHINE_CONTEXTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: MACHINE_CONTEXTS_FLAG_KEY,
@@ -393,6 +406,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
+    ORG_INSTRUCTION_FLAG,
+    HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
     SHARED_AGENTS_FLAG,
@@ -439,6 +454,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
+    ORG_INSTRUCTION_FLAG,
+    HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
     SHARED_AGENTS_FLAG,
@@ -3039,6 +3056,8 @@ mod tests {
                 "assistant:owner-invocations",
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
+                "assistant:org-instruction-v1",
+                "assistant:hosted-connect-intent-v1",
                 "assistant:agent-learning",
                 "assistant:org-agents",
                 "assistant:shared-agents",

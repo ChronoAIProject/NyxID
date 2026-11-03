@@ -33,6 +33,17 @@ const preview = () =>
   });
 const completed = { id, status: "completed", service_slug: "github" };
 
+test("connect previews default to an unlocked intent and keep an explicit assistant lock", () => {
+  assert.equal(preview().assistant_intent_locked, false);
+  const locked = connectLinkPreviewSchema.parse({
+    ...preview(),
+    assistant_intent_locked: true,
+    use_platform_key: false,
+  });
+  assert.equal(locked.assistant_intent_locked, true);
+  assert.equal(locked.use_platform_key, false);
+});
+
 test("assistant link classification preserves the exact web handoff and admits native UI only for the configured origin", () => {
   const href = `${origin}/channel-bots/connect/telegram?label=Release%20bot&target_org_id=org&return_to=%2Fassistant%3Fc%3Dchat&extra=kept`;
   const channel = assistantLinkTarget(href, origin)!;

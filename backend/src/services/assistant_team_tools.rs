@@ -113,19 +113,13 @@ pub const SETTINGS_AREAS: &[&str] = &[
 ];
 
 /// The frontend path (with query) for a settings area.
-pub fn settings_path(area: &str, service: Option<&str>, org_id: Option<&str>) -> Option<String> {
+pub fn settings_path(area: &str, _service: Option<&str>, org_id: Option<&str>) -> Option<String> {
     let encode =
         |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
     Some(match area {
         "create_agent_key" => "/keys?tab=nyxid&action=create-key".into(),
         "agent_keys" => "/keys?tab=nyxid".into(),
-        "add_service" => match service {
-            Some(slug) => format!(
-                "/keys?tab=services&action=add-service&slug={}",
-                encode(slug)
-            ),
-            None => "/keys?tab=services&action=add-service".into(),
-        },
+        "add_service" => "/assistant/plugins".into(),
         "services" => "/keys?tab=services".into(),
         "service_pools" => "/keys?tab=pools".into(),
         "channel_bots" => "/channel-bots".into(),
@@ -540,7 +534,7 @@ pub fn schema(name: &str) -> Value {
             json!({"area": {"type": "string", "enum": SETTINGS_AREAS},
                 "agent": string(64), "label":string(128), "instruction":string(8192),
                 "service": {"type": "string", "minLength": 1, "maxLength": 100,
-                    "description": "add_service only: catalog slug to preselect"},
+                    "description": "add_service only: authorized catalog slug or UUID; returns nyx__connect_service guidance, never a Studio connection URL"},
                 "org_id": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "organizations only: open this organization"}}),
             vec!["area"],
@@ -797,7 +791,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Change NyxBot settings only when the owner asks. Automatic continuations preserve context and the same logical task; higher limits may use more credits."
         }
         "settings_link" => {
-            "Link the user to the exact NyxID page for a configuration you cannot or should not \
+            "For add_service with a named catalog, return nyx__connect_service guidance; without a name open Plugins. Never send /keys for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
             MFA), profile, sessions, MCP, display, privacy, billing, usage, NyxBot settings (nyxbot_settings), organizations, automations, machines, saved_logins, developer apps, devices \
             and more. Account settings, NyxBot settings, billing and usage open as panels over the current assistant view; automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \
@@ -1150,7 +1144,7 @@ mod tests {
             ("triggers", "/triggers"),
             ("create_agent_key", "/keys?tab=nyxid&action=create-key"),
             ("agent_keys", "/keys?tab=nyxid"),
-            ("add_service", "/keys?tab=services&action=add-service"),
+            ("add_service", "/assistant/plugins"),
             ("services", "/keys?tab=services"),
             ("service_pools", "/keys?tab=pools"),
             ("channel_bots", "/channel-bots"),
@@ -1174,7 +1168,7 @@ mod tests {
 
         assert_eq!(
             settings_path("add_service", Some("api-github"), None).as_deref(),
-            Some("/keys?tab=services&action=add-service&slug=api-github")
+            Some("/assistant/plugins")
         );
         assert_eq!(
             settings_path("organizations", None, Some("acme corp")).as_deref(),
