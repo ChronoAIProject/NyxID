@@ -28,6 +28,10 @@ import {
   type NyxAgentChannelChatSettings,
   type NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
+import {
+  assistantOnboardingSchema,
+  type OnboardingAnswers,
+} from "@/schemas/assistant-onboarding";
 
 const ROOT = "/assistant/nyxagent";
 const agentPath = (id: string) => `${ROOT}/agents/${encodeURIComponent(id)}`;
@@ -108,6 +112,24 @@ export const nyxBotApi = {
   async updateSettings(update: NyxAgentSettingsUpdate) {
     return nyxAgentSettingsSchema.parse(
       await assistantJson(`${ROOT}/settings`, { method: "PUT", body: update }),
+    );
+  },
+  /** First-run intro state, the answer choices and next-step cards. */
+  async onboarding() {
+    return assistantOnboardingSchema.parse(await assistantJson(`${ROOT}/onboarding`));
+  },
+  /** Finish or skip the intro; replaces earlier answers. */
+  async saveOnboarding(answers: OnboardingAnswers) {
+    return assistantOnboardingSchema.parse(
+      await assistantJson(`${ROOT}/onboarding`, { method: "PUT", body: answers }),
+    );
+  },
+  /** Hides one next step for good; returns the refreshed state. */
+  async dismissNextStep(id: string) {
+    return assistantOnboardingSchema.parse(
+      await assistantJson(`${ROOT}/onboarding/recommendations/${encodeURIComponent(id)}/dismiss`, {
+        method: "POST",
+      }),
     );
   },
   async channels() {

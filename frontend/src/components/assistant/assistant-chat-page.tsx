@@ -83,6 +83,14 @@ import { isLegacyConversationId } from "@/lib/assistant/conversation-ids";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import {
+  useAssistantOnboarding,
+  useDismissNextStep,
+  useIntroReplay,
+} from "@/hooks/use-assistant-onboarding";
+import { FirstRunIntro } from "./onboarding/first-run-intro";
+import { GuidedTour } from "./onboarding/guided-tour";
+import type { NextStep } from "@/schemas/assistant-onboarding";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
 
@@ -836,6 +844,70 @@ function NyxAgentThreadPage() {
     } else navigateTo({});
   }
 
+  async function sendMessage(text: string, uploads?: Parameters<typeof chat.send>[1], model?: string) {
+    const sending = { scope: errorScope };
+    pendingSend.current = sending;
+    setRequestError(undefined);
+    try {
+      await chat.send(text, uploads, model);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "NyxBot is temporarily unavailable. Try again shortly.";
+      setRequestError({ scope: sending.scope, message });
+      toast.error(
+        isAdmittedSendError(error)
+          ? "Live reply interrupted"
+          : "Could not send your message",
+        {
+          description: assistantErrorSummary(message),
+        },
+      );
+      throw error;
+    } finally {
+      if (pendingSend.current === sending)
+        pendingSend.current = undefined;
+    }
+  }
+
+  // First-run intro and next steps. A step's prompt goes to NyxBot from its
+  // home, so a step started elsewhere returns home first.
+  const onboarding = useAssistantOnboarding(onChatRoute && !search.mock);
+  const dismissNextStep = useDismissNextStep();
+  const replayRequested = useIntroReplay((state) => state.requested);
+  const [intro, setIntro] = useState<"first_run" | "account_menu">();
+  const [touring, setTouring] = useState(false);
+  const introShown = useRef(false);
+  const pendingStep = useRef<NextStep | undefined>(undefined);
+  useEffect(() => {
+    if (onboarding.data?.show_intro && home && !introShown.current) {
+      introShown.current = true;
+      setIntro("first_run");
+    }
+  }, [onboarding.data?.show_intro, home]);
+  const seenReplay = useRef(replayRequested);
+  useEffect(() => {
+    if (replayRequested === seenReplay.current) return;
+    seenReplay.current = replayRequested;
+    setIntro("account_menu");
+  }, [replayRequested]);
+  function startNextStep(step: NextStep) {
+    if (home && !chat.isStreaming) {
+      void sendMessage(step.prompt).catch(() => undefined);
+      return;
+    }
+    pendingStep.current = step;
+    navigateTo({});
+  }
+  useEffect(() => {
+    const step = pendingStep.current;
+    if (!step || !home || chat.isStreaming) return;
+    pendingStep.current = undefined;
+    void sendMessage(step.prompt).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [home, chat.isStreaming]);
+
   const conversation = chat.conversation;
   // Threads carry the agent's handle; its display name lives on the agent list.
   const headerNamed = headerAgent ? withDisplayName(headerAgent, agents.data?.agents) : undefined;
@@ -1040,6 +1112,19 @@ function NyxAgentThreadPage() {
             }}
           />
         ) : null}
+        {intro && onboarding.data ? (
+          <FirstRunIntro
+            open
+            state={onboarding.data}
+            entryPoint={intro}
+            onOpenChange={(open) => {
+              if (!open) setIntro(undefined);
+            }}
+            onStart={startNextStep}
+            onTour={() => setTouring(true)}
+          />
+        ) : null}
+        {touring ? <GuidedTour onClose={() => setTouring(false)} /> : null}
         {chat.beforeSeq && !showHome ? (
           <Button variant="ghost" onClick={() => void chat.loadOlder()}>
             Load earlier messages
@@ -1063,6 +1148,10 @@ function NyxAgentThreadPage() {
               const nyxbot = nyxBotOf(agents.data?.agents);
               if (nyxbot) setDetailsAgentId(nyxbot.id);
             }}
+            nextSteps={onboarding.data?.recommendations}
+            onStartNextStep={startNextStep}
+            onDismissNextStep={(step) => dismissNextStep.mutate(step.id)}
+            onReplayIntro={() => setIntro("account_menu")}
           />
         ) : chat.isLoading && !chat.session.messages.length ? (
           <div className="flex flex-1 items-center justify-center text-12 text-text-tertiary">
@@ -1224,7 +1313,7 @@ function NyxAgentThreadPage() {
               onClose={() => setVoiceSettingsOpen(false)} />
           </DialogContent>
         </Dialog>}
-        <div ref={composerRef} data-composer-dock="" className="absolute inset-x-0 bottom-0 z-10">
+        <div ref={composerRef} data-composer-dock="" data-tour="composer" className="absolute inset-x-0 bottom-0 z-10">
           {/* Failures sit with the composer, where the next attempt starts. */}
           <AssistantErrorNotice
             docked
@@ -1308,32 +1397,7 @@ function NyxAgentThreadPage() {
             focusRequest={focusRequest}
             agentOverride={agentOverride}
             placeholder={`Message ${agentName}`}
-            onSend={async (text, uploads, model) => {
-              const sending = { scope: errorScope };
-              pendingSend.current = sending;
-              setRequestError(undefined);
-              try {
-                await chat.send(text, uploads, model);
-              } catch (error) {
-                const message =
-                  error instanceof Error
-                    ? error.message
-                    : "NyxBot is temporarily unavailable. Try again shortly.";
-                setRequestError({ scope: sending.scope, message });
-                toast.error(
-                  isAdmittedSendError(error)
-                    ? "Live reply interrupted"
-                    : "Could not send your message",
-                  {
-                    description: assistantErrorSummary(message),
-                  },
-                );
-                throw error;
-              } finally {
-                if (pendingSend.current === sending)
-                  pendingSend.current = undefined;
-              }
-            }}
+            onSend={sendMessage}
             onStop={async () => {
               setRequestError(undefined);
               try {

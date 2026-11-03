@@ -251,6 +251,7 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::assistant_voice::REQUESTS, doc! {"user_id":owner}),
         (m::assistant_settings::COLLECTION_NAME, doc! {"_id":owner}),
+        (m::assistant_onboarding::COLLECTION_NAME, doc! {"_id":owner}),
         (
             m::assistant_sharing::COLLECTION_NAME,
             doc! {"owner_id": owner},

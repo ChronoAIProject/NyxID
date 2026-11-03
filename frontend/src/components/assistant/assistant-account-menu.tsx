@@ -9,6 +9,7 @@ import {
   Settings,
   Settings2,
   SlidersHorizontal,
+  Sparkles,
   WalletCards,
 } from "lucide-react";
 import {
@@ -21,6 +22,7 @@ import {
 import { useAssistantDrawerDismiss } from "@/components/assistant/assistant-drawer-context";
 import { useLogout } from "@/hooks/use-auth";
 import { useFeature } from "@/hooks/use-feature-flag";
+import { useIntroReplay } from "@/hooks/use-assistant-onboarding";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { isBillingAvailable } from "@/types/api";
@@ -30,6 +32,7 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
   const billingAvailable = isBillingAvailable(user);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const dismissDrawer = useAssistantDrawerDismiss();
+  const replayIntro = useIntroReplay((state) => state.replay);
   const logout = useLogout();
   const navigate = useNavigate();
 
@@ -84,9 +87,19 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
         </Link>
       </DropdownMenuItem>
       {nyxagentEnabled ? (
-        <DropdownMenuItem onSelect={() => onPanel("nyxbot")}>
-          <Settings2 aria-hidden="true" />NyxBot settings
-        </DropdownMenuItem>
+        <>
+          <DropdownMenuItem onSelect={() => onPanel("nyxbot")}>
+            <Settings2 aria-hidden="true" />NyxBot settings
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={() => {
+              dismissDrawer();
+              replayIntro();
+            }}
+          >
+            <Sparkles aria-hidden="true" />Replay intro
+          </DropdownMenuItem>
+        </>
       ) : null}
       <DropdownMenuSeparator />
       <DropdownMenuItem asChild>

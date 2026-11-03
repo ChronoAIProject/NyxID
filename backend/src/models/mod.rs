@@ -149,6 +149,7 @@ pub mod assistant_message;
 pub mod assistant_message_feedback;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
+pub mod assistant_onboarding;
 pub mod assistant_skill_draft_attempt;
 pub mod catalog_skill_revision;
 pub mod channel_delivery;

@@ -14,6 +14,8 @@ import {
 } from "@/lib/assistant/nyxbot-labels";
 import { formatRelativeTime } from "@/lib/utils";
 import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
+import type { NextStep } from "@/schemas/assistant-onboarding";
+import { NextStepCards } from "./onboarding/next-step-cards";
 
 const MEMORY_PREVIEW = 3;
 
@@ -30,7 +32,7 @@ function Section({
   readonly children: ReactNode;
 }) {
   return (
-    <section aria-labelledby={id} className="space-y-3">
+    <section aria-labelledby={id} data-tour={id} className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <h2 id={id} className="text-15 font-semibold text-foreground">
           {title}
@@ -362,6 +364,10 @@ export function NyxBotHome({
   onNewGroup,
   onNewAgent,
   onManageMemory,
+  nextSteps,
+  onStartNextStep,
+  onDismissNextStep,
+  onReplayIntro,
 }: {
   readonly userName: string | undefined;
   readonly agents: readonly AssistantAgent[];
@@ -374,6 +380,11 @@ export function NyxBotHome({
   readonly onNewGroup: () => void;
   readonly onNewAgent: () => void;
   readonly onManageMemory: () => void;
+  /** Suggested next steps; the section is hidden when there are none. */
+  readonly nextSteps?: readonly NextStep[];
+  readonly onStartNextStep?: (step: NextStep) => void;
+  readonly onDismissNextStep?: (step: NextStep) => void;
+  readonly onReplayIntro?: () => void;
 }) {
   const [now] = useState(() => new Date());
   const firstName = userName?.trim().split(/\s+/)[0];
@@ -403,6 +414,27 @@ export function NyxBotHome({
             </p>
           </div>
         </header>
+
+        {nextSteps?.length && onStartNextStep ? (
+          <Section
+            id="nyxbot-home-next-steps"
+            title="Suggested for you"
+            action={
+              onReplayIntro ? (
+                <Button size="sm" variant="ghost" onClick={onReplayIntro}>
+                  Replay intro
+                </Button>
+              ) : undefined
+            }
+          >
+            <NextStepCards
+              steps={nextSteps}
+              onStart={onStartNextStep}
+              onDismiss={onDismissNextStep}
+              className="sm:grid-cols-2"
+            />
+          </Section>
+        ) : null}
 
         <Section id="nyxbot-home-away" title="While you were away">
           {agentsLoading ? (
