@@ -1,0 +1,456 @@
+/* eslint-disable react-refresh/only-export-components -- the closed catalog intentionally owns its React implementations. */
+import type { ReactNode } from "react";
+import { z } from "zod";
+import {
+  Bar,
+  BarChart as RechartsBarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart as RechartsPieChart,
+  XAxis,
+  YAxis,
+} from "recharts";
+import type { BaseComponentProps } from "@json-render/react";
+import { CrmObjectTable } from "@/components/crm/object-table";
+import { CrmPipelineBoard } from "@/components/crm/pipeline-board";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart";
+import { cn } from "@/lib/utils";
+import {
+  aggregateResultToChartPoints,
+  formatAggregateValue,
+} from "@/lib/crm/views/chart-adapters";
+import {
+  crmFieldKeySchema,
+  type CrmAggregateResult,
+} from "@/lib/crm/views/schema";
+import {
+  useCrmNamedAggregateQuery,
+  useCrmNamedTableQuery,
+} from "@/lib/crm/views/query-runner";
+
+export type CrmViewQueryRequirement =
+  | { readonly kind: "none" }
+  | { readonly kind: "table" }
+  | { readonly kind: "aggregate"; readonly grouped: boolean };
+
+interface CrmViewCatalogEntry<PropsSchema extends z.ZodType> {
+  readonly props: PropsSchema;
+  readonly description: string;
+  readonly slots: readonly string[];
+  readonly query: CrmViewQueryRequirement;
+  readonly allowsChildren: boolean;
+  readonly component: (
+    context: BaseComponentProps<z.infer<PropsSchema>>,
+  ) => ReactNode;
+}
+
+const stackPropsSchema = z
+  .object({
+    gap: z.enum(["sm", "md", "lg"]),
+    direction: z.enum(["vertical", "horizontal"]).optional(),
+  })
+  .strict();
+
+const gridPropsSchema = z
+  .object({ columns: z.number().int().min(1).max(4) })
+  .strict();
+
+const textPropsSchema = z
+  .object({
+    content: z.string().min(1).max(2_000),
+    variant: z.enum(["title", "heading", "body", "muted"]),
+  })
+  .strict();
+
+const metricPropsSchema = z
+  .object({ queryId: z.string().min(1), title: z.string().min(1) })
+  .strict();
+
+const chartPropsSchema = z
+  .object({
+    queryId: z.string().min(1),
+    title: z.string().min(1),
+    height: z.enum(["small", "medium", "large"]).optional(),
+  })
+  .strict();
+
+const objectTablePropsSchema = z
+  .object({
+    queryId: z.string().min(1),
+    columns: z.array(crmFieldKeySchema).optional(),
+  })
+  .strict();
+
+const pipelineBoardPropsSchema = z
+  .object({ queryId: z.string().min(1) })
+  .strict();
+
+const gapClasses = {
+  sm: "gap-2",
+  md: "gap-4",
+  lg: "gap-6",
+} as const;
+
+function StackComponent({
+  props,
+  children,
+}: BaseComponentProps<z.infer<typeof stackPropsSchema>>) {
+  return (
+    <div
+      className={cn(
+        "flex min-w-0",
+        gapClasses[props.gap],
+        props.direction === "horizontal"
+          ? "flex-col md:flex-row md:items-start"
+          : "flex-col",
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+const gridClasses = {
+  1: "grid-cols-1",
+  2: "grid-cols-1 md:grid-cols-2",
+  3: "grid-cols-1 md:grid-cols-2 xl:grid-cols-3",
+  4: "grid-cols-1 md:grid-cols-2 xl:grid-cols-4",
+} as const;
+
+function GridComponent({
+  props,
+  children,
+}: BaseComponentProps<z.infer<typeof gridPropsSchema>>) {
+  return (
+    <div
+      className={cn(
+        "grid min-w-0 gap-4",
+        gridClasses[props.columns as keyof typeof gridClasses],
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+const textClasses = {
+  title: "text-22 font-bold leading-tight sm:text-28",
+  heading: "text-15 font-semibold leading-tight",
+  body: "text-13 leading-relaxed text-foreground",
+  muted: "text-12 leading-relaxed text-muted-foreground",
+} as const;
+
+function TextComponent({
+  props,
+}: BaseComponentProps<z.infer<typeof textPropsSchema>>) {
+  const Tag = props.variant === "title" ? "h2" : "p";
+  return <Tag className={textClasses[props.variant]}>{props.content}</Tag>;
+}
+
+function ComponentQueryError({ message }: { readonly message: string }) {
+  return (
+    <div
+      role="alert"
+      className="rounded-lg border border-destructive/20 bg-destructive/[0.04] px-4 py-3 text-12 text-destructive"
+    >
+      {message}
+    </div>
+  );
+}
+
+function MetricComponent({
+  props,
+}: BaseComponentProps<z.infer<typeof metricPropsSchema>>) {
+  const { namedQuery, result } = useCrmNamedAggregateQuery(props.queryId);
+  if (!namedQuery) {
+    return <ComponentQueryError message="This metric query is unavailable." />;
+  }
+  if (result.isPending) {
+    return (
+      <div role="status" className="rounded-xl border border-border/50 p-4">
+        <p className="text-11 text-text-tertiary">Loading {props.title}...</p>
+      </div>
+    );
+  }
+  if (result.isError || !result.data) {
+    return <ComponentQueryError message={`Could not load ${props.title}.`} />;
+  }
+
+  return (
+    <section className="rounded-xl border border-border/50 bg-card p-4 shadow-sm">
+      <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+        {props.title}
+      </p>
+      <p className="mt-2 text-28 font-semibold tabular-nums text-foreground">
+        {formatAggregateValue(result.data.total, result.data.unit)}
+      </p>
+    </section>
+  );
+}
+
+const chartConfig = {
+  value: { label: "Value", color: "var(--color-primary)" },
+} satisfies ChartConfig;
+
+const chartHeightClasses = {
+  small: "h-40",
+  medium: "h-56",
+  large: "h-72",
+} as const;
+
+const pieColors = [
+  "var(--color-primary)",
+  "var(--color-success)",
+  "var(--color-info)",
+  "var(--color-warning)",
+  "var(--color-muted-foreground)",
+] as const;
+
+interface AggregateChartFrameProps {
+  readonly title: string;
+  readonly height: "small" | "medium" | "large";
+  readonly result: CrmAggregateResult;
+  readonly children: (points: ReturnType<typeof aggregateResultToChartPoints>) => ReactNode;
+}
+
+function AggregateChartFrame({
+  title,
+  height,
+  result,
+  children,
+}: AggregateChartFrameProps) {
+  const points = aggregateResultToChartPoints(result);
+  return (
+    <section className="min-w-0 rounded-xl border border-border/50 bg-card p-4 shadow-sm">
+      <h3 className="mb-3 text-15 font-semibold">{title}</h3>
+      {points.length === 0 ? (
+        <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-border text-12 text-text-tertiary">
+          No data matches this view.
+        </div>
+      ) : (
+        <ChartContainer
+          config={chartConfig}
+          className={cn("aspect-auto w-full", chartHeightClasses[height])}
+        >
+          {children(points)}
+        </ChartContainer>
+      )}
+    </section>
+  );
+}
+
+function AggregateChartState({
+  queryId,
+  title,
+  height,
+  render,
+}: {
+  readonly queryId: string;
+  readonly title: string;
+  readonly height?: "small" | "medium" | "large";
+  readonly render: AggregateChartFrameProps["children"];
+}) {
+  const { namedQuery, result } = useCrmNamedAggregateQuery(queryId);
+  if (!namedQuery) {
+    return <ComponentQueryError message="This chart query is unavailable." />;
+  }
+  if (result.isPending) {
+    return (
+      <div
+        role="status"
+        className={cn(
+          "flex items-center justify-center rounded-xl border border-border/50 text-12 text-text-tertiary",
+          chartHeightClasses[height ?? "medium"],
+        )}
+      >
+        Loading {title}...
+      </div>
+    );
+  }
+  if (result.isError || !result.data) {
+    return <ComponentQueryError message={`Could not load ${title}.`} />;
+  }
+  return (
+    <AggregateChartFrame
+      title={title}
+      height={height ?? "medium"}
+      result={result.data}
+    >
+      {render}
+    </AggregateChartFrame>
+  );
+}
+
+function BarChartComponent({
+  props,
+}: BaseComponentProps<z.infer<typeof chartPropsSchema>>) {
+  return (
+    <AggregateChartState
+      queryId={props.queryId}
+      title={props.title}
+      height={props.height}
+      render={(points) => (
+        <RechartsBarChart data={points} accessibilityLayer>
+          <CartesianGrid vertical={false} strokeDasharray="3 3" />
+          <XAxis
+            dataKey="label"
+            tickLine={false}
+            axisLine={false}
+            tickMargin={8}
+          />
+          <YAxis tickLine={false} axisLine={false} width={48} />
+          <ChartTooltip
+            cursor={{ fill: "var(--color-muted)", opacity: 0.4 }}
+            content={<ChartTooltipContent hideLabel />}
+          />
+          <Bar dataKey="value" fill="var(--color-value)" radius={4} />
+        </RechartsBarChart>
+      )}
+    />
+  );
+}
+
+function PieChartComponent({
+  props,
+}: BaseComponentProps<z.infer<typeof chartPropsSchema>>) {
+  return (
+    <AggregateChartState
+      queryId={props.queryId}
+      title={props.title}
+      height={props.height}
+      render={(points) => (
+        <RechartsPieChart accessibilityLayer>
+          <ChartTooltip content={<ChartTooltipContent nameKey="label" />} />
+          <Pie
+            data={points}
+            dataKey="value"
+            nameKey="label"
+            innerRadius="42%"
+            outerRadius="78%"
+            paddingAngle={2}
+          >
+            {points.map((point, index) => (
+              <Cell
+                key={point.key}
+                fill={pieColors[index % pieColors.length]}
+              />
+            ))}
+          </Pie>
+        </RechartsPieChart>
+      )}
+    />
+  );
+}
+
+function ObjectTableComponent({
+  props,
+}: BaseComponentProps<z.infer<typeof objectTablePropsSchema>>) {
+  const { namedQuery, ownerId } = useCrmNamedTableQuery(props.queryId);
+  if (!namedQuery) {
+    return <ComponentQueryError message="This table query is unavailable." />;
+  }
+  return (
+    <CrmObjectTable
+      query={namedQuery.query}
+      columns={props.columns}
+      ownerId={ownerId}
+    />
+  );
+}
+
+function PipelineBoardComponent({
+  props,
+}: BaseComponentProps<z.infer<typeof pipelineBoardPropsSchema>>) {
+  const { namedQuery, ownerId } = useCrmNamedTableQuery(props.queryId);
+  if (!namedQuery) {
+    return <ComponentQueryError message="This pipeline query is unavailable." />;
+  }
+  return <CrmPipelineBoard query={namedQuery.query} ownerId={ownerId} />;
+}
+
+function defineCatalogEntry<PropsSchema extends z.ZodType>(
+  entry: CrmViewCatalogEntry<PropsSchema>,
+) {
+  return entry;
+}
+
+export const crmViewComponentCatalog = {
+  Stack: defineCatalogEntry({
+    props: stackPropsSchema,
+    description: "A vertical or responsive horizontal layout stack",
+    slots: ["default"],
+    query: { kind: "none" },
+    allowsChildren: true,
+    component: StackComponent,
+  }),
+  Grid: defineCatalogEntry({
+    props: gridPropsSchema,
+    description: "A responsive one-to-four column grid",
+    slots: ["default"],
+    query: { kind: "none" },
+    allowsChildren: true,
+    component: GridComponent,
+  }),
+  Text: defineCatalogEntry({
+    props: textPropsSchema,
+    description: "Literal saved-view text",
+    slots: [],
+    query: { kind: "none" },
+    allowsChildren: false,
+    component: TextComponent,
+  }),
+  Metric: defineCatalogEntry({
+    props: metricPropsSchema,
+    description: "A single aggregate value",
+    slots: [],
+    query: { kind: "aggregate", grouped: false },
+    allowsChildren: false,
+    component: MetricComponent,
+  }),
+  BarChart: defineCatalogEntry({
+    props: chartPropsSchema,
+    description: "A bar chart backed by a grouped aggregate query",
+    slots: [],
+    query: { kind: "aggregate", grouped: true },
+    allowsChildren: false,
+    component: BarChartComponent,
+  }),
+  PieChart: defineCatalogEntry({
+    props: chartPropsSchema,
+    description: "A pie chart backed by a grouped aggregate query",
+    slots: [],
+    query: { kind: "aggregate", grouped: true },
+    allowsChildren: false,
+    component: PieChartComponent,
+  }),
+  ObjectTable: defineCatalogEntry({
+    props: objectTablePropsSchema,
+    description: "A CRM record table",
+    slots: [],
+    query: { kind: "table" },
+    allowsChildren: false,
+    component: ObjectTableComponent,
+  }),
+  PipelineBoard: defineCatalogEntry({
+    props: pipelineBoardPropsSchema,
+    description: "A CRM pipeline board",
+    slots: [],
+    query: { kind: "table" },
+    allowsChildren: false,
+    component: PipelineBoardComponent,
+  }),
+} as const;
+
+export type CrmViewComponentType = keyof typeof crmViewComponentCatalog;
+
+export function isCrmViewComponentType(
+  type: string,
+): type is CrmViewComponentType {
+  return Object.hasOwn(crmViewComponentCatalog, type);
+}
