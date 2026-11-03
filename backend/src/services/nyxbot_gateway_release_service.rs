@@ -719,7 +719,7 @@ fn backoff(attempt: i64) -> i64 {
     }
 }
 
-async fn destination(state: &AppState, release: &Release) -> AppResult<bool> {
+pub(crate) async fn destination(state: &AppState, release: &Release) -> AppResult<bool> {
     let row =
         match super::assistant_service::resolve_admin_service_by_slug(&state.db, "cmaeg").await {
             Ok(row) => row,
@@ -1250,17 +1250,23 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     reconcile_step(state).await
 }
 
-pub(crate) fn spawn_worker(state: AppState) {
+pub(crate) fn spawn_worker(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut host_move = super::nyxbot_gateway_host_move::Reconciler::default();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
+            // The first tick runs immediately, inside this spawned task. Never
+            // block boot; reconcile before release destination validation.
+            if host_move.tick(&state).await.is_err() {
+                tracing::warn!("Gateway host reconciliation deferred");
+            }
             if sweep(&state).await.is_err() {
                 tracing::debug!("Gateway release maintenance deferred");
             }
         }
-    });
+    })
 }
 
 pub(crate) async fn reconcile_step(state: &AppState) -> AppResult<()> {

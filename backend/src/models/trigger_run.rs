@@ -31,6 +31,8 @@ impl RunOutcome {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriggerRun {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<super::assistant_message::WorkEvidence>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub trigger_generation: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

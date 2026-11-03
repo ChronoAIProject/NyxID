@@ -69,6 +69,7 @@ pub(crate) struct McpBillingRouteContextBuilder {
     user_service_id: Option<String>,
     is_user_service: bool,
     credential_class_override: Option<CredentialClass>,
+    auto_connected: bool,
     credential_source: Option<String>,
 }
 
@@ -90,6 +91,7 @@ impl McpBillingRouteContextBuilder {
                 .master_credential
                 .then_some(CredentialClass::NyxidManagedMaster),
             credential_source: resolution.credential_source.clone(),
+            auto_connected: resolution.is_auto_connected,
         }
     }
 
@@ -99,6 +101,7 @@ impl McpBillingRouteContextBuilder {
             user_service_id: None,
             is_user_service: false,
             credential_class_override: None,
+            auto_connected: false,
             credential_source: None,
         }
     }
@@ -6107,6 +6110,7 @@ async fn execute_tool_resolved_inner(
                 body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
                 .map_err(|_|super::lark_attachment_tool::refused())?);
         }
+        let auto_connected = billing_context_builder.auto_connected;
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
             .build(
@@ -6158,6 +6162,7 @@ async fn execute_tool_resolved_inner(
             billing_ctx.credential_class,
         );
         request_audit.assistant(assistant_chat.as_ref());
+        request_audit.business_service(assistant_chat.as_ref(), &target.service, auto_connected);
         if super::telnyx_platform_service::contract(&target.service).is_some() {
             if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
                 return Err(AppError::BadRequest(
@@ -6198,7 +6203,7 @@ async fn execute_tool_resolved_inner(
                 }
             };
             destination_audit.complete(managed.status);
-            request_audit.response(managed.status);
+            request_audit.response(managed.status).await;
             if let (Some(chat), Some(admission)) =
                 (assistant_chat.as_ref(), assistant_admission.as_ref())
             {
@@ -6245,7 +6250,7 @@ async fn execute_tool_resolved_inner(
             };
             billing.settle(&metered,mcp_platform_usage_for_path(text.as_bytes(),request_len,&target.service,&path,status),None,None).await?;
             destination_audit.complete(status);
-            request_audit.response(status);
+            request_audit.response(status).await;
             if let Some(chat)=assistant_chat.as_ref() {
                 if let Some(receipt)=&automatic_receipt {receipt.record(db,chat).await;}
                 else {admission.receipt(db,chat,assistant_auto).await;}
@@ -6389,7 +6394,7 @@ async fn execute_tool_resolved_inner(
                             ))
                             .await?;
                         destination_audit.complete(resp.status);
-                        request_audit.response(resp.status);
+                        request_audit.response(resp.status).await;
                         if (200..300).contains(&resp.status)
                             && let (Some(chat), Some(admission)) =
                                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -6434,7 +6439,7 @@ async fn execute_tool_resolved_inner(
                             ))
                             .await?;
                         destination_audit.complete(status);
-                        request_audit.response(status);
+                        request_audit.response(status).await;
                         if (200..300).contains(&status)
                             && let (Some(chat), Some(admission)) =
                                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -6664,7 +6669,7 @@ async fn execute_tool_resolved_inner(
             .await?;
 
         destination_audit.complete(status);
-        request_audit.response(status);
+        request_audit.response(status).await;
         if (200..300).contains(&status)
             && let (Some(chat), Some(admission)) =
                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -9556,6 +9561,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,
