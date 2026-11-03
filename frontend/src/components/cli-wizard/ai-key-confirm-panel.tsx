@@ -17,11 +17,18 @@ import type { LanePricingView } from "@/schemas/platform-keys";
 // OAuth/device-code sub-flows live in `./ai-key-auth-flows.tsx` to
 // keep this file focused on catalog lookup + dispatch.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
@@ -30,7 +37,7 @@ import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import { cn } from "@/lib/utils";
 import type { ScopeCatalogEntry } from "@/types/keys";
-import { ArrowRight, Building2, ExternalLink } from "lucide-react";
+import { ArrowRight, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
 import {
@@ -572,20 +579,21 @@ function OwnerPicker({
   readonly onChange: (orgId: string | null) => void;
 }) {
   const { data: orgs } = useOrgs();
+  const id = useId();
   const hasAdminOrg = (orgs ?? []).some((o) => o.your_role === "admin");
   if (!hasAdminOrg) return null;
+  // Same label / control / hint shape as every other wizard field.
   return (
-    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          <Building2 className="h-3.5 w-3.5" />
-          Owner
-        </div>
-        <div className="w-[220px]">
-          <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
-        </div>
-      </div>
-      <p className="mt-1 text-11 text-muted-foreground">
+    <div className="flex flex-col gap-1.5">
+      <FieldLabel htmlFor={id}>Owner</FieldLabel>
+      <OrgScopeSelect
+        id={id}
+        aria-describedby={`${id}-hint`}
+        value={value}
+        onChange={onChange}
+        label="Owner"
+      />
+      <p id={`${id}-hint`} className="text-xs text-muted-foreground">
         Org-owned services are shared with every admin of that organization
         and can be proxied by its members.
       </p>
@@ -610,6 +618,21 @@ type CustomAuthMethod =
   | "bot_bearer"
   | "ifttt_webhook"
   | "none";
+
+const AUTH_METHOD_OPTIONS: readonly {
+  readonly value: CustomAuthMethod;
+  readonly label: string;
+}[] = [
+  { value: "bearer", label: "bearer (Authorization: Bearer …)" },
+  { value: "bot_bearer", label: "bot_bearer (Authorization: Bot …)" },
+  { value: "header", label: "header (custom header)" },
+  { value: "query", label: "query (?key=…)" },
+  { value: "path", label: "path (path-prefix injection)" },
+  { value: "ifttt_webhook", label: "IFTTT Webhooks (raw key)" },
+  { value: "basic", label: "basic (Authorization: Basic …)" },
+  { value: "body", label: "body (JSON-body field injection)" },
+  { value: "none", label: "none (no auth injection)" },
+];
 
 /** Sensible default auth-key-name per method. Mirrors the CLI's
  *  `default_auth_key_name` in `cli/src/commands/service.rs:1437`. */
@@ -673,7 +696,30 @@ interface CustomServiceFormProps {
 }
 
 function RequiredMarker() {
-  return <span aria-hidden="true" className="text-destructive ml-0.5">*</span>;
+  return <span aria-hidden="true" className="ml-0.5 leading-none text-destructive">*</span>;
+}
+
+/**
+ * A wizard field's label row. The fixed height gives every field the same
+ * label-to-control gap whether or not it carries the required marker, and
+ * the wrapper keeps the control from being the label's adjacent sibling,
+ * which app.css's global `label + input` rule would push 0.75rem down.
+ */
+function FieldLabel({
+  htmlFor,
+  required = false,
+  children,
+}: {
+  readonly htmlFor: string;
+  readonly required?: boolean;
+  readonly children: React.ReactNode;
+}) {
+  return (
+    <div className="flex h-4 items-center">
+      <Label htmlFor={htmlFor}>{children}</Label>
+      {required ? <RequiredMarker /> : null}
+    </div>
+  );
 }
 
 function CustomServiceForm({
@@ -783,10 +829,7 @@ function CustomServiceForm({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-label">Label</Label>
-            <RequiredMarker />
-          </div>
+          <FieldLabel htmlFor="pair-custom-label" required>Label</FieldLabel>
           <Input
             id="pair-custom-label"
             value={label}
@@ -803,10 +846,7 @@ function CustomServiceForm({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-endpoint">Endpoint URL</Label>
-            <RequiredMarker />
-          </div>
+          <FieldLabel htmlFor="pair-custom-endpoint" required>Endpoint URL</FieldLabel>
           <Input
             id="pair-custom-endpoint"
             value={endpointUrl}
@@ -822,15 +862,11 @@ function CustomServiceForm({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-auth-method">Auth method</Label>
-            <RequiredMarker />
-          </div>
-          <select
-            id="pair-custom-auth-method"
+          <FieldLabel htmlFor="pair-custom-auth-method" required>Auth method</FieldLabel>
+          <Select
             value={authMethod}
-            onChange={(e) => {
-              const next = e.target.value as CustomAuthMethod;
+            onValueChange={(value) => {
+              const next = value as CustomAuthMethod;
               setAuthMethod(next);
               // Reset the key-name to the new method's default if the
               // user hadn't customized it yet — saves them re-typing
@@ -848,19 +884,18 @@ function CustomServiceForm({
                 setAuthKeyName(defaultAuthKeyName(next));
               }
             }}
-            className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-13 text-foreground focus-visible:outline-none focus-visible:border-input-focus"
-            aria-required="true"
           >
-            <option value="bearer">bearer (Authorization: Bearer …)</option>
-            <option value="bot_bearer">bot_bearer (Authorization: Bot …)</option>
-            <option value="header">header (custom header)</option>
-            <option value="query">query (?key=…)</option>
-            <option value="path">path (path-prefix injection)</option>
-            <option value="ifttt_webhook">IFTTT Webhooks (raw key)</option>
-            <option value="basic">basic (Authorization: Basic …)</option>
-            <option value="body">body (JSON-body field injection)</option>
-            <option value="none">none (no auth injection)</option>
-          </select>
+            <SelectTrigger id="pair-custom-auth-method" aria-required="true">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {AUTH_METHOD_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <p className="text-xs text-muted-foreground">
             How NyxID attaches the credential to outgoing requests.
           </p>
@@ -868,10 +903,7 @@ function CustomServiceForm({
 
         {needsCredential ? (
           <div className="flex flex-col gap-1.5">
-            <div className="flex items-center">
-              <Label htmlFor="pair-custom-credential">{credentialLabel}</Label>
-              <RequiredMarker />
-            </div>
+            <FieldLabel htmlFor="pair-custom-credential" required>{credentialLabel}</FieldLabel>
             <Input
               id="pair-custom-credential"
               type="password"
@@ -894,7 +926,7 @@ function CustomServiceForm({
 
         {needsKeyName ? (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-custom-auth-key-name">
+            <FieldLabel htmlFor="pair-custom-auth-key-name">
               {authMethod === "header"
                 ? "Header name"
                 : authMethod === "query"
@@ -902,7 +934,7 @@ function CustomServiceForm({
                   : authMethod === "path"
                     ? "Path prefix segment"
                     : "Body field name"}
-            </Label>
+            </FieldLabel>
             <Input
               id="pair-custom-auth-key-name"
               value={authKeyName}
@@ -932,7 +964,7 @@ function CustomServiceForm({
         ) : null}
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-slug">Custom slug (optional)</Label>
+          <FieldLabel htmlFor="pair-custom-slug">Custom slug (optional)</FieldLabel>
           <Input
             id="pair-custom-slug"
             value={slug}
@@ -1488,7 +1520,7 @@ function Field({
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <Label htmlFor={htmlFor}>{label}</Label>
+      <FieldLabel htmlFor={htmlFor}>{label}</FieldLabel>
       {children}
     </div>
   );

@@ -50,15 +50,18 @@ vi.mock("@/hooks/use-orgs", () => ({
 
 vi.mock("@/components/shared/org-scope-select", () => ({
   OrgScopeSelect: ({
+    id,
     value,
     onChange,
     label,
   }: {
+    readonly id?: string;
     readonly value: string | null;
     readonly onChange: (value: string | null) => void;
     readonly label?: string;
   }) => (
     <select
+      id={id}
       aria-label={label ?? "Scope"}
       value={value ?? ""}
       onChange={(event) => onChange(event.target.value || null)}
@@ -217,7 +220,9 @@ describe("AiKeyConfirm — issue #414 custom-mode entry", () => {
     expect(screen.getByLabelText("Custom slug (optional)")).toHaveValue(
       "home-assistant-admin",
     );
-    expect(screen.getByLabelText("Auth method")).toHaveValue("bearer");
+    expect(screen.getByLabelText("Auth method")).toHaveTextContent(
+      "bearer (Authorization: Bearer …)",
+    );
   });
 
   it("shows the node-bound badge when prefill.via_node is set", () => {
@@ -342,9 +347,18 @@ describe("AiKeyConfirm — issue #414 custom-mode entry", () => {
   // method is its own test case (rather than a loop in one test)
   // so a single regression flags one specific value rather than
   // failing the whole batch.
-  it.each(["bearer", "bot_bearer", "header", "query", "path", "basic", "body", "none"] as const)(
+  it.each([
+    ["bearer", "bearer (Authorization: Bearer …)"],
+    ["bot_bearer", "bot_bearer (Authorization: Bot …)"],
+    ["header", "header (custom header)"],
+    ["query", "query (?key=…)"],
+    ["path", "path (path-prefix injection)"],
+    ["basic", "basic (Authorization: Basic …)"],
+    ["body", "body (JSON-body field injection)"],
+    ["none", "none (no auth injection)"],
+  ] as const)(
     "supports auth_method=%s in the dropdown",
-    (method) => {
+    (method, optionLabel) => {
       render(
         <AiKeyConfirm
           {...baseProps}
@@ -357,7 +371,9 @@ describe("AiKeyConfirm — issue #414 custom-mode entry", () => {
         />,
         { wrapper: createWrapper() },
       );
-      expect(screen.getByLabelText("Auth method")).toHaveValue(method);
+      expect(screen.getByLabelText("Auth method")).toHaveTextContent(
+        optionLabel,
+      );
     },
   );
 });
@@ -537,7 +553,10 @@ describe("AiKeyConfirm — custom-service required markers", () => {
 
     expect(screen.getByLabelText("API key / credential")).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByLabelText("Auth method"), "none");
+    await user.click(screen.getByLabelText("Auth method"));
+    await user.click(
+      await screen.findByRole("option", { name: "none (no auth injection)" }),
+    );
 
     expect(
       screen.queryByLabelText("API key / credential"),
@@ -1317,6 +1336,8 @@ describe("CLI wizard OAuth app choice", () => {
 
     await screen.findByRole("heading", { name: "Connect GitHub to NyxID" });
     expect(screen.getAllByRole("button", { name: "Back" })).toHaveLength(1);
+    // aria-label names it; a `title` would add a native hover tooltip.
+    expect(screen.getByRole("button", { name: "Back" })).not.toHaveAttribute("title");
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
 
     expect(
