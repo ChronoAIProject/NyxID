@@ -5,7 +5,6 @@ import {
   Platform,
   Pressable,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -23,6 +22,7 @@ import {
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts, radius, TOUCH_TARGET } from "../../theme/designTokens";
 import { AndroidKeyboardAvoidingView } from "./AndroidKeyboardAvoidingView";
+import { PageScrollView } from "./ScrollEdgeFades";
 
 export function WorkspacePage({
   title,
@@ -40,6 +40,7 @@ export function WorkspacePage({
   subtitle?: string;
   scroll?: boolean;
   showHeading?: boolean;
+  /** Pull-to-refresh spinner: bind to `usePullRefresh`, never a query's `isFetching`. */
   refreshing?: boolean;
   onRefresh?: () => void;
   contentStyle?: StyleProp<ViewStyle>;
@@ -82,7 +83,8 @@ export function WorkspacePage({
     </>
   );
   const body = scroll ? (
-    <ScrollView
+    <PageScrollView
+      fadeColor={colors.bg}
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
       contentContainerStyle={[styles.content, contentStyle]}
@@ -101,7 +103,7 @@ export function WorkspacePage({
       }
     >
       {content}
-    </ScrollView>
+    </PageScrollView>
   ) : (
     <View style={[styles.content, styles.fill, contentStyle]}>{content}</View>
   );

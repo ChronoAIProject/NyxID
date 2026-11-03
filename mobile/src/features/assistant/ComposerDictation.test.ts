@@ -57,11 +57,15 @@ function setup({ introSeen = true } = {}) {
       },
     },
     "./voice/VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
+    "react-native-safe-area-context": {
+      useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
+    },
     "react-native": {
       ActivityIndicator: "ActivityIndicator",
       Keyboard: { dismiss: () => events.push("keyboard") },
       Modal: "Modal",
       Pressable: "Pressable",
+      ScrollView: "ScrollView",
       Text: "Text",
       View: "View",
       StyleSheet: { create: (styles: unknown) => styles },
@@ -78,6 +82,7 @@ function setup({ introSeen = true } = {}) {
       useTheme: () => ({
         colors: {
           composerBg: "#222222",
+          bg: "#111111",
           textPrimary: "#ffffff",
           textTertiary: "#888888",
         },
@@ -199,7 +204,7 @@ test("idle dictation adds no blank space; an idle error is a compact dismissible
   assert.deepEqual(x.events, ["settings", "discard"]);
 });
 
-test("listening takes over the composer with a live transcript, meter and Done", () => {
+test("listening fills the screen with a live transcript, meter and Finish", () => {
   const x = setup();
   x.dictation.phase = "listening";
   x.dictation.active = true;
@@ -210,7 +215,10 @@ test("listening takes over the composer with a live transcript, meter and Done",
   const tree = all(
     render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
   );
+  assert.equal(tree[0]!.type, "Modal");
+  assert.equal(tree[0]!.props.presentationStyle, "fullScreen");
   const texts = tree.filter((node) => node.type === "Text");
+  assert.ok(texts.some((node) => node.props.children === "Speech to Text"));
   assert.ok(texts.some((node) => node.props.children === "Listening"));
   const interim = texts.find((node) =>
     [node.props.children].flat().includes("for two"),
@@ -237,7 +245,7 @@ test("listening takes over the composer with a live transcript, meter and Done",
   );
 });
 
-test("review keeps long text scrollable with fades and offers Insert instead of Done", () => {
+test("review keeps the full transcript scrollable and selectable, offering Insert instead of Finish", () => {
   const x = setup();
   x.dictation.phase = "review";
   x.dictation.active = true;
@@ -246,9 +254,12 @@ test("review keeps long text scrollable with fades and offers Insert instead of 
   const tree = all(
     render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
   );
-  const scroller = tree.find((node) => node.type === "OverflowScrollView")!;
-  assert.equal(scroller.props.fadeColor, "#222222");
-  assert.equal(scroller.props.style.maxHeight, 280);
+  const scroller = tree.find((node) => node.type === "ScrollView")!;
+  assert.equal(scroller.props.style.flex, 1);
+  const transcript = all(scroller).find(
+    (node) => node.type === "Text" && node.props.selectable !== undefined,
+  )!;
+  assert.equal(transcript.props.selectable, true);
   assert.equal(
     tree.some((node) => node.props.accessibilityLabel === "Finish dictation"),
     false,
@@ -311,6 +322,7 @@ test("the first tap explains dictation once; Start begins it and a held press sk
   const find = (label: string) =>
     all(sheet()).find((node) => node.props.accessibilityLabel === label)!;
   assert.equal(sheet().props.visible, false);
+  assert.equal(sheet().props.transparent, true, "a compact sheet over the chat");
   mic().props.onPress();
   await x.h.settle();
   assert.deepEqual(x.events, ["keyboard"], "nothing records before Start");

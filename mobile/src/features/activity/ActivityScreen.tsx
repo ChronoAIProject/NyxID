@@ -30,6 +30,7 @@ import { ScreenContainer } from "../../components/ScreenContainer";
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
 import { GrantCard } from "../../components/GrantCard";
 import { OfflineBanner } from "../../components/OfflineBanner";
+import { SkeletonRows } from "../../components/Skeleton";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import {
@@ -85,7 +86,7 @@ export function ActivityScreen() {
   const activeSegmentRef = useRef(activeSegment);
   activeSegmentRef.current = activeSegment;
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
-  const [isRefreshRunning, setIsRefreshRunning] = useState(false);
+  const [isHeaderRefreshing, setIsHeaderRefreshing] = useState(false);
   const [isUserRefreshRunning, setIsUserRefreshRunning] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [mutatingIds, setMutatingIds] = useState<Set<string>>(new Set());
@@ -359,7 +360,6 @@ export function ActivityScreen() {
         return refreshInFlightRef.current;
       }
 
-      setIsRefreshRunning(true);
       const refreshPromise = (async () => {
         let shouldRefreshAllSegments = source === "signal";
         let shouldRunAgain = false;
@@ -390,7 +390,6 @@ export function ActivityScreen() {
         }
       })().finally(() => {
         refreshInFlightRef.current = null;
-        setIsRefreshRunning(false);
       });
 
       refreshInFlightRef.current = refreshPromise;
@@ -463,12 +462,14 @@ export function ActivityScreen() {
     if (startedUserRefresh) {
       setIsUserRefreshRunning(true);
     }
+    setIsHeaderRefreshing(true);
     try {
       await handleRefresh("user");
     } finally {
       if (startedUserRefresh) {
         setIsUserRefreshRunning(false);
       }
+      setIsHeaderRefreshing(false);
     }
   }, [handleRefresh]);
 
@@ -493,9 +494,9 @@ export function ActivityScreen() {
     }
   }, [recheckConnection, handleRefresh]);
 
-  // Passive backstop polls deliberately stay invisible. Only refreshes started
-  // by the user or approval signal own the header/pull refresh feedback.
-  const isRefreshing = isRefreshRunning || isPullRefreshing;
+  // Passive backstop polls and approval-signal refreshes stay invisible. Only
+  // the user's own Refresh tap or pull owns the refresh feedback.
+  const isRefreshing = isHeaderRefreshing || isPullRefreshing;
 
   const sortedActiveItems = [...activeItems].sort(
     (a, b) =>
@@ -659,10 +660,9 @@ export function ActivityScreen() {
                   </Text>
                 </View>
               ) : approvalsQuery.isPending ? (
-                <ActivityIndicator
+                <SkeletonRows
+                  rows={3}
                   accessibilityLabel="Loading active grants"
-                  color={colors.primary}
-                  style={styles.loadingFooter}
                 />
               ) : !approvalsQuery.isError ? (
                 <View style={styles.emptyCell}>

@@ -65,6 +65,7 @@ function setup(passwordAccount: boolean) {
     },
     "expo-clipboard": {},
     "../../app/WorkspaceHeader": { useWorkspaceBack() {} },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       [
         "ActionButton",

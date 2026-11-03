@@ -22,6 +22,7 @@ import {
 } from "react-native";
 import { ChevronLeft, RefreshCw, Search, X } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SkeletonRows } from "../Skeleton";
 import { fonts } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import { searchDrawerItems } from "./workspaceChatListModel";
@@ -49,6 +50,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   refreshLabel = `Refresh ${title.toLowerCase()}`,
   footer,
   emptyText = "Nothing here yet.",
+  loadingLabel,
 }: {
   title: string;
   /** Shown before the centred title, e.g. the agent's avatar. */
@@ -73,6 +75,8 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   };
   footer?: ReactNode;
   emptyText?: string;
+  /** Set while the list's first load is pending: shows a skeleton, not emptyText. */
+  loadingLabel?: string;
 }) {
   const { colors } = useTheme();
   const reducedMotion = useReducedMotion();
@@ -323,23 +327,27 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                 ) : undefined
               }
               ListEmptyComponent={
-                <View style={styles.empty}>
-                  <Text
-                    style={[styles.emptyTitle, { color: colors.textPrimary }]}
-                  >
-                    {searching ? "No matches" : emptyText}
-                  </Text>
-                  {searching ? (
+                loadingLabel && !searching ? (
+                  <SkeletonRows rows={5} accessibilityLabel={loadingLabel} />
+                ) : (
+                  <View style={styles.empty}>
                     <Text
-                      style={[
-                        styles.description,
-                        { color: colors.textSecondary },
-                      ]}
+                      style={[styles.emptyTitle, { color: colors.textPrimary }]}
                     >
-                      Try another search.
+                      {searching ? "No matches" : emptyText}
                     </Text>
-                  ) : null}
-                </View>
+                    {searching ? (
+                      <Text
+                        style={[
+                          styles.description,
+                          { color: colors.textSecondary },
+                        ]}
+                      >
+                        Try another search.
+                      </Text>
+                    ) : null}
+                  </View>
+                )
               }
               ListFooterComponent={
                 footer ? <View style={styles.footer}>{footer}</View> : null

@@ -47,6 +47,7 @@ function load() {
       radius: { md: 8, lg: 12 },
       TOUCH_TARGET: 44,
     },
+    "./ScrollEdgeFades": { PageScrollView: "ScrollView" },
     "./AndroidKeyboardAvoidingView": { AndroidKeyboardAvoidingView: "AKAV" },
   });
   const ui = h.load(

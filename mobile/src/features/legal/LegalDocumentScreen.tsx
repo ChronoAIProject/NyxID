@@ -1,7 +1,6 @@
 import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   ScrollView,
   StyleSheet,
   Text,
@@ -12,6 +11,7 @@ import Markdown from "react-native-markdown-display";
 
 import { BlurBackButton } from "../../components/BlurBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
+import { SkeletonRows } from "../../components/Skeleton";
 import { NYXID_LEGAL_BASE_URL } from "../../lib/env";
 import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
@@ -151,9 +151,11 @@ export function LegalDocumentScreen({
           ) : content ? (
             <Markdown style={markdownStyles}>{content}</Markdown>
           ) : (
-            <View style={styles.loading}>
-              <ActivityIndicator color={colors.textSecondary} />
-            </View>
+            <SkeletonRows
+              rows={6}
+              icon={false}
+              accessibilityLabel={`Loading ${title.toLowerCase()}`}
+            />
           )}
         </View>
       </ScrollView>
@@ -172,10 +174,6 @@ const createStyles = (c: ThemeColors) =>
     scrollContentExtra: {
       paddingTop: 64,
       paddingBottom: spacing.xxxl,
-    },
-    loading: {
-      paddingVertical: spacing.xxl,
-      alignItems: "center",
     },
     errorTitle: {
       color: c.textPrimary,

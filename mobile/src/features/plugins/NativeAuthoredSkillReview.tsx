@@ -10,6 +10,7 @@ import {
 import { BookOpen } from "lucide-react-native";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { SkeletonRows } from "../../components/Skeleton";
 import {
   SettingsGroup,
   SettingsRow,
@@ -20,6 +21,7 @@ import {
   Notice,
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { pluginSkillsApi as api } from "../../lib/api/pluginSkillsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { spacing, typeScale } from "../../theme/designTokens";
@@ -105,7 +107,11 @@ export function AuthoredSkillPage({
     >
       {assistant.error && <Notice tone="error" message={assistant.error} />}
       {assistant.loading && !acknowledgement && (
-        <ActivityIndicator accessibilityLabel="Loading skill confirmation" />
+        <SkeletonRows
+          rows={3}
+          title
+          accessibilityLabel="Loading skill confirmation"
+        />
       )}
       {acknowledgement?.authored_skill ? (
         <AuthoredSkillReviewContent
@@ -254,6 +260,13 @@ export function AuthoredSkillReviewContent({
       setBusy(false);
     }
   }
+  // Publication polling and refocus refetches stay silent; only the first
+  // load (skeleton) and the user's own Reload show progress.
+  const reload = usePullRefresh(() =>
+    refresh().catch(() =>
+      setError("The confirmation could not be refreshed. Try again."),
+    ),
+  );
   useWorkspaceBack({
     active: false,
     onBack: navigation.goBack,
@@ -277,11 +290,19 @@ export function AuthoredSkillReviewContent({
         {!online && (
           <Notice message="Connect to the internet to load and confirm the current draft." />
         )}
-        {preview.isFetching && (
-          <ActivityIndicator
+        {preview.isPending && preview.isFetching ? (
+          <SkeletonRows
+            rows={3}
+            icon={false}
             accessibilityLabel="Loading complete skill draft"
-            color={colors.primary}
           />
+        ) : (
+          reload.refreshing && (
+            <ActivityIndicator
+              accessibilityLabel="Loading complete skill draft"
+              color={colors.primary}
+            />
+          )
         )}
         {preview.isError && (
           <Notice
@@ -404,11 +425,7 @@ export function AuthoredSkillReviewContent({
             label="Reload confirmation"
             tone="action"
             disabled={busy || !online}
-            onPress={() => {
-              void refresh().catch(() =>
-                setError("The confirmation could not be refreshed. Try again."),
-              );
-            }}
+            onPress={reload.onRefresh}
           />
         </SettingsGroup>
       </ScrollView>

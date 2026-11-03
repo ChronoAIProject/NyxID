@@ -13,7 +13,8 @@ import {
   SettingsRow,
   SettingsTextField,
 } from "../../components/settings/SettingsList";
-import { Label, Notice } from "../../components/workspace/WorkspaceUI";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { accountApi } from "../../lib/api/accountApi";
 import {
@@ -344,45 +345,54 @@ export function AccountSecurityScreen() {
       ) : null}
       {feedback ? <Notice {...feedback} /> : null}
 
-      <SettingsGroup title="Profile" inset={false}>
-        {profile.isPending ? (
-          <SettingsRow label="Loading your account…" />
-        ) : profile.isError || !profile.data ? (
-          <SettingsRow
-            label="Couldn't load your profile"
-            detail="Tap to retry."
-            tone="action"
-            onPress={() => void profile.refetch()}
-          />
-        ) : (
-          [
+      {profile.isPending ? (
+        <SkeletonRows
+          rows={3}
+          icon={false}
+          title
+          accessibilityLabel="Loading your account"
+        />
+      ) : (
+        <SettingsGroup title="Profile" inset={false}>
+          {profile.isError || !profile.data ? (
             <SettingsRow
-              key="email"
-              label="Email"
-              detail={profile.data.email_verified ? "Verified" : "Not verified"}
-              value={profile.data.email}
-            />,
-            <SettingsRow
-              key="name"
-              label="Display name"
-              value={profile.data.display_name || "Not set"}
-              disabled={!isConnected}
-              onPress={() =>
-                navigation.navigate("ProfileEdit", { field: "display_name" })
-              }
-            />,
-            <SettingsRow
-              key="avatar"
-              label="Avatar"
-              value={profile.data.avatar_url ? "Custom image" : "Initial"}
-              disabled={!isConnected}
-              onPress={() =>
-                navigation.navigate("ProfileEdit", { field: "avatar_url" })
-              }
-            />,
-          ]
-        )}
-      </SettingsGroup>
+              label="Couldn't load your profile"
+              detail="Tap to retry."
+              tone="action"
+              onPress={() => void profile.refetch()}
+            />
+          ) : (
+            [
+              <SettingsRow
+                key="email"
+                label="Email"
+                detail={
+                  profile.data.email_verified ? "Verified" : "Not verified"
+                }
+                value={profile.data.email}
+              />,
+              <SettingsRow
+                key="name"
+                label="Display name"
+                value={profile.data.display_name || "Not set"}
+                disabled={!isConnected}
+                onPress={() =>
+                  navigation.navigate("ProfileEdit", { field: "display_name" })
+                }
+              />,
+              <SettingsRow
+                key="avatar"
+                label="Avatar"
+                value={profile.data.avatar_url ? "Custom image" : "Initial"}
+                disabled={!isConnected}
+                onPress={() =>
+                  navigation.navigate("ProfileEdit", { field: "avatar_url" })
+                }
+              />,
+            ]
+          )}
+        </SettingsGroup>
+      )}
 
       {profile.data && ownsPrivateState ? (
         <>
@@ -626,37 +636,53 @@ export function AccountSecurityScreen() {
         </>
       ) : null}
 
-      <SettingsGroup
-        title="Active sessions"
-        inset={false}
-        footer="Where your account is signed in. Tap a session for details or to sign it out."
-      >
-        {sessions.isPending ? (
-          <SettingsRow label="Loading sessions…" />
-        ) : sessions.isError ? (
-          <SettingsRow
-            label="Couldn't load active sessions"
-            detail="Tap to retry."
-            tone="action"
-            onPress={() => void sessions.refetch()}
-          />
-        ) : sessions.data?.length === 0 ? (
-          <SettingsRow label="No active sessions found." />
-        ) : (
-          sessions.data?.map((session) => (
+      {profile.isPending ? (
+        <SkeletonRows
+          rows={3}
+          icon={false}
+          title
+          accessibilityLabel="Loading security settings"
+        />
+      ) : null}
+      {sessions.isPending ? (
+        <SkeletonRows
+          rows={2}
+          icon={false}
+          title
+          accessibilityLabel="Loading sessions"
+        />
+      ) : (
+        <SettingsGroup
+          title="Active sessions"
+          inset={false}
+          footer="Where your account is signed in. Tap a session for details or to sign it out."
+        >
+          {sessions.isError ? (
             <SettingsRow
-              key={session.id}
-              label={sessionDeviceLabel(session.user_agent)}
-              detail={`Signed in ${formatSessionDate(session.created_at)}`}
-              value={session.is_current ? "This session" : undefined}
-              onPress={() =>
-                navigation.navigate("SessionDetail", { sessionId: session.id })
-              }
+              label="Couldn't load active sessions"
+              detail="Tap to retry."
+              tone="action"
+              onPress={() => void sessions.refetch()}
             />
-          ))
-        )}
-      </SettingsGroup>
-      {profile.isPending ? <Label muted>Loading security settings…</Label> : null}
+          ) : sessions.data?.length === 0 ? (
+            <SettingsRow label="No active sessions found." />
+          ) : (
+            sessions.data?.map((session) => (
+              <SettingsRow
+                key={session.id}
+                label={sessionDeviceLabel(session.user_agent)}
+                detail={`Signed in ${formatSessionDate(session.created_at)}`}
+                value={session.is_current ? "This session" : undefined}
+                onPress={() =>
+                  navigation.navigate("SessionDetail", {
+                    sessionId: session.id,
+                  })
+                }
+              />
+            ))
+          )}
+        </SettingsGroup>
+      )}
     </SettingsPage>
   );
 }

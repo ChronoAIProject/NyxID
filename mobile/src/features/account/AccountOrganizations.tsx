@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { Alert } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { SkeletonRows } from "../../components/Skeleton";
 import { Notice } from "../../components/workspace/WorkspaceUI";
 import {
   SettingsCheckRow,
@@ -155,48 +156,55 @@ export function AccountOrganizations({
   return (
     <>
       {message ? <Notice {...message} /> : null}
-      <SettingsGroup
-        title="Organizations"
-        inset={false}
-        footer={`Signed in as ${email}. Your personal account stays the acting identity; tap an organization to manage its resources.`}
-      >
-        {orgs.isPending ? (
-          <SettingsRow label="Loading memberships…" />
-        ) : orgs.isError ? (
-          <SettingsRow
-            label="Couldn't verify memberships"
-            detail="Organization actions are unavailable until refresh succeeds."
-          />
-        ) : orgs.data?.length === 0 ? (
-          <SettingsRow label="Not a member of any organization" />
-        ) : (
-          orgs.data?.map((org) => (
-            <SettingsCheckRow
-              key={org.id}
-              label={org.display_name ?? org.slug}
-              detail={org.your_role}
-              selected={selectedId === org.id}
-              disabled={disabled}
-              onPress={() => setSelectedId(org.id)}
-            />
-          ))
-        )}
-        <SettingsRow
-          tone="action"
-          label={orgs.isFetching ? "Refreshing…" : "Refresh Memberships"}
-          disabled={busy || !isConnected}
-          onPress={() => {
-            const ticket = current.capture();
-            void refresh().catch((error) => {
-              if (ticket.isCurrent())
-                setMessage({
-                  message: resolveErrorMessage(error),
-                  tone: "error",
-                });
-            });
-          }}
+      {orgs.isPending ? (
+        <SkeletonRows
+          rows={2}
+          icon={false}
+          title
+          accessibilityLabel="Loading memberships"
         />
-      </SettingsGroup>
+      ) : (
+        <SettingsGroup
+          title="Organizations"
+          inset={false}
+          footer={`Signed in as ${email}. Your personal account stays the acting identity; tap an organization to manage its resources.`}
+        >
+          {orgs.isError ? (
+            <SettingsRow
+              label="Couldn't verify memberships"
+              detail="Organization actions are unavailable until refresh succeeds."
+            />
+          ) : orgs.data?.length === 0 ? (
+            <SettingsRow label="Not a member of any organization" />
+          ) : (
+            orgs.data?.map((org) => (
+              <SettingsCheckRow
+                key={org.id}
+                label={org.display_name ?? org.slug}
+                detail={org.your_role}
+                selected={selectedId === org.id}
+                disabled={disabled}
+                onPress={() => setSelectedId(org.id)}
+              />
+            ))
+          )}
+          <SettingsRow
+            tone="action"
+            label={orgs.isFetching ? "Refreshing…" : "Refresh Memberships"}
+            disabled={busy || !isConnected}
+            onPress={() => {
+              const ticket = current.capture();
+              void refresh().catch((error) => {
+                if (ticket.isCurrent())
+                  setMessage({
+                    message: resolveErrorMessage(error),
+                    tone: "error",
+                  });
+              });
+            }}
+          />
+        </SettingsGroup>
+      )}
       {selected ? (
         <SettingsGroup
           title={`Manage ${selected.display_name ?? selected.slug}`}

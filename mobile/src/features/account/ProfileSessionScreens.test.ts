@@ -13,7 +13,12 @@ const nodes = (root: Element): Element[] => [
     ),
 ];
 
-function setup(file: string, exportName: string, params: Record<string, unknown>) {
+function setup(
+  file: string,
+  exportName: string,
+  params: Record<string, unknown>,
+  { pending = false }: { pending?: boolean } = {},
+) {
   const saved: unknown[] = [];
   const revoked: string[] = [];
   const events: string[] = [];
@@ -43,8 +48,8 @@ function setup(file: string, exportName: string, params: Record<string, unknown>
         clear: () => events.push("clear"),
       }),
       useQuery: ({ queryKey }: { queryKey: string[] }) => ({
-        data: queryKey[1] === "profile" ? profile : sessions,
-        isPending: false,
+        data: pending ? undefined : queryKey[1] === "profile" ? profile : sessions,
+        isPending: pending,
       }),
       useMutation: (options: any) => {
         mutation = { fn: options.mutationFn, onSuccess: options.onSuccess };
@@ -71,6 +76,7 @@ function setup(file: string, exportName: string, params: Record<string, unknown>
       },
     },
     "../../components/workspace/WorkspaceUI": { Label: "Label", Notice: "Notice" },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../hooks/useNetworkStatus": { useNetworkStatus: () => ({ isConnected: true }) },
     "../../lib/api/accountApi": {
       accountApi: {
@@ -176,4 +182,19 @@ test("a session page lists its details and signs it out only after confirmation"
   await mine.harness.settle();
   assert.deepEqual(mine.events, ["signOut", "clear"]);
   mine.harness.unmount();
+});
+
+test("a session page loads as a skeleton, not loading text", () => {
+  const env = setup(
+    "./SessionDetailScreen.tsx",
+    "SessionDetailScreen",
+    { sessionId: "other" },
+    { pending: true },
+  );
+  const skeleton = env.all().find((node) => node.type === "SkeletonRows");
+  assert.equal(skeleton?.props.accessibilityLabel, "Loading session");
+  assert.equal(
+    env.all().some((node) => node.type === "Label" || node.type === "Notice"),
+    false,
+  );
 });

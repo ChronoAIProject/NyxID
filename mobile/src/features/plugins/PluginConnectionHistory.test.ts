@@ -103,6 +103,7 @@ function setup({ groups = [] as unknown[] } = {}) {
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["ActionButton", "Notice", "WorkspacePage"].map((name) => [name, name]),
     ),
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceSelectionField": {
       WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
     },
@@ -227,7 +228,7 @@ test("history sheet keeps loading and Retry visible while blocking incomplete op
     env.actions.isPending = true;
     env.open();
     assert.equal(env.sheet().readOnly, true);
-    env.control("Loading history filters");
+    assert.equal(env.control("Loading history filters").type, "SkeletonRows");
     env.actions.isPending = false;
     env.actions.isError = true;
     env.harness.render();

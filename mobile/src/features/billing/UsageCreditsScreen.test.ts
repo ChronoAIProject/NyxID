@@ -40,7 +40,7 @@ function setup({ params = {}, states = {} }: { params?: { period?: string; owner
     allowances: ready(contracts.allowancesSchema.parse({ allowances: [allowanceFixture] })),
   };
   const jsx = (type: unknown, props: Record<string, any>) => ({ type, props });
-  const harness = hookHarness<Element>({
+  const mocks: Record<string, unknown> = {
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": { AppState: appState, View: "View", StyleSheet: { create: (styles: unknown) => styles } },
     "@react-navigation/native": { useIsFocused: () => focused },
@@ -64,7 +64,11 @@ function setup({ params = {}, states = {} }: { params?: { period?: string; owner
     "./billingContracts": contracts,
     "./credits": credits,
     "./BillingPresentation": Object.fromEntries(["BillingHistoryRow", "BillingServiceCard", "BillingWalletCard"].map((name) => [name, name])),
-  });
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
+  };
+  const harness = hookHarness<Element>(mocks);
+  // The real pull-refresh hook runs on the harness's React.
+  mocks["../../hooks/usePullRefresh"] = harness.load(fileURLToPath(new URL("../../hooks/usePullRefresh.ts", import.meta.url)));
   const { UsageCreditsScreen } = harness.load(fileURLToPath(new URL("./UsageCreditsScreen.tsx", import.meta.url))) as { UsageCreditsScreen: (props: unknown) => Element };
   harness.mount(() => UsageCreditsScreen({ route: { params } }));
   const all = () => elements(harness.value());
@@ -157,9 +161,13 @@ for (const state of ["unsupported", "disabled"] as const) {
 }
 
 test("loading, offline without cache and empty balances do not show section placeholders", async (t) => {
-  const screen = setup({ states: { wallet: { isPending: true } } });
+  const screen = setup({ states: { wallet: { isPending: true, isFetching: true } } });
   t.after(screen.harness.unmount);
-  assert.match(screen.text(), /Loading…/);
+  const skeleton = screen.all().find((item) => item.type === "SkeletonRows");
+  assert.equal(skeleton?.props.accessibilityLabel, "Loading balance");
+  assert.doesNotMatch(screen.text(), /Loading…/);
+  // A first load or background fetch never shows the pull spinner.
+  assert.equal(screen.harness.value().props.refreshing, false);
   screen.setOnline(false);
   assert.match(screen.text(), /Offline. Connect to load your balance/);
   await screen.readEnabled();
@@ -171,6 +179,20 @@ test("loading, offline without cache and empty balances do not show section plac
   assert.match(screen.text(), /Offline. Showing your saved balance/);
   assert.equal(screen.all().some((item) => item.type === "BillingWalletCard"), true);
   assert.doesNotMatch(screen.text(), /No active credit grants|No usage allowances/);
+});
+
+test("only a pull shows the refresh spinner, never a background fetch", async (t) => {
+  const screen = setup({ states: { wallet: { ...ready(contracts.walletSchema.parse(walletFixture)), isFetching: true } } });
+  t.after(screen.harness.unmount);
+  assert.equal(screen.harness.value().props.refreshing, false);
+  screen.states.wallet = ready(contracts.walletSchema.parse(walletFixture));
+  screen.harness.render();
+  screen.harness.value().props.onRefresh();
+  screen.harness.flush();
+  assert.equal(screen.harness.value().props.refreshing, true);
+  await screen.harness.settle();
+  assert.equal(screen.harness.value().props.refreshing, false);
+  assert.deepEqual(screen.refreshed.sort(), ["allowances", "grants", "wallet"]);
 });
 
 test("explicit wallet absence remains distinct even when benefit routes are unsupported", (t) => {

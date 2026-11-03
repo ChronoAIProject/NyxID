@@ -7,7 +7,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  ActivityIndicator,
   Alert,
   AppState,
   Keyboard,
@@ -34,6 +33,7 @@ import {
   Notice,
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
+import { SkeletonCards, SkeletonRows } from "../../components/Skeleton";
 import { agentsApi } from "../../lib/api/agentsApi";
 import {
   AgentCollaborationPanel,
@@ -436,10 +436,7 @@ export function AgentsScreen({
         {notice && <Notice message={notice} tone="success" />}
         {error && <Notice message={error} tone="error" />}
         {detail.isPending && (
-          <ActivityIndicator
-            accessibilityLabel="Loading agent"
-            color={colors.primary}
-          />
+          <SkeletonRows rows={4} title accessibilityLabel="Loading agent" />
         )}
         {detail.isError && (
           <>
@@ -863,12 +860,7 @@ export function AgentsScreen({
           onClose={() => setShowFilters(false)}
         />
       )}
-      {list.isPending && (
-        <ActivityIndicator
-          color={colors.primary}
-          accessibilityLabel="Loading agents"
-        />
-      )}
+      {list.isPending && <SkeletonCards accessibilityLabel="Loading agents" />}
       {list.isError && (
         <>
           <Notice message={errorMessage(list.error)} tone="error" />

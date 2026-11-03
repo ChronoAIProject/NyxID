@@ -23,6 +23,7 @@ import {
 } from "lucide-react-native";
 import { DynamicTypeText as Text } from "../DynamicTypeText";
 import { ScreenContainer } from "../ScreenContainer";
+import { PageScrollView } from "../workspace/ScrollEdgeFades";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
 
@@ -48,10 +49,12 @@ export function SettingsPage({
   refreshing?: boolean;
   onRefresh?: () => void;
 }) {
+  const { colors } = useTheme();
   return (
     <ScreenContainer>
-      <ScrollView
-        ref={scrollRef}
+      <PageScrollView
+        scrollRef={scrollRef}
+        fadeColor={colors.bg}
         refreshControl={
           onRefresh ? (
             <RefreshControl refreshing={!!refreshing} onRefresh={onRefresh} />
@@ -60,9 +63,11 @@ export function SettingsPage({
         style={styles.page}
         contentContainerStyle={styles.pageContent}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
       >
         {children}
-      </ScrollView>
+      </PageScrollView>
     </ScreenContainer>
   );
 }

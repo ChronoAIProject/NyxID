@@ -72,6 +72,7 @@ function setup({
   creating = false,
   role = "creator",
   missingAgent = false,
+  pendingAgents = false,
 } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   let latest = { ...plain(group), your_role: role };
@@ -103,6 +104,7 @@ function setup({
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
@@ -117,7 +119,7 @@ function setup({
       useQuery: ({ queryKey }: { queryKey: unknown[] }) => {
         const key = queryKey.includes("group-picker") ? "agents" : queryKey[3];
         return {
-          isPending: false,
+          isPending: key === "agents" && pendingAgents,
           isError: key === "participants" && participantError,
           refetch: async () => {},
           data:
@@ -256,6 +258,7 @@ function setup({
   return {
     harness,
     calls,
+    all: () => elements(harness.flush()),
     closeGuard: () => {
       harness.flush();
       return backOptions.discardOnClose;
@@ -509,4 +512,16 @@ test("crew settings are a grouped form: name field, selection rows, tinted save 
   const remove = env.button("Delete crew");
   assert.equal(remove.destructive, true);
   assert.equal(remove.centered, true);
+});
+
+test("the crew editor's first load shows a settings skeleton, not a spinner", () => {
+  const env = setup({ pendingAgents: true });
+  const rows = env.all();
+  const skeleton = rows.find((item) => item.type === "SkeletonRows");
+  assert.equal(skeleton?.props.accessibilityLabel, "Loading crew editor");
+  assert.equal(
+    rows.some((item) => item.type === "ActivityIndicator"),
+    false,
+  );
+  env.harness.unmount();
 });

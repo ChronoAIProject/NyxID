@@ -1,6 +1,7 @@
 import { AgentAvatar } from "../../components/AgentAvatar";
+import { SkeletonRows } from "../../components/Skeleton";
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert } from "react-native";
+import { Alert } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Notice } from "../../components/workspace/WorkspaceUI";
 import {
@@ -13,7 +14,6 @@ import { SettingsSelectionRow } from "../../components/settings/SettingsSelectio
 import { groupsApi } from "../../lib/api/groupsApi";
 import { agentsApi } from "../../lib/api/agentsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { useTheme } from "../../theme/ThemeContext";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import {
   groupCreateSchema,
@@ -48,7 +48,6 @@ function GroupEditor({
   onSaved,
   onRemoved,
 }: GroupEditorScreenProps) {
-  const { colors } = useTheme();
   const live = useGroupAvailability();
   const client = useQueryClient();
   const scope = useRef({ mounted: true, epoch: live.epoch });
@@ -348,10 +347,7 @@ function GroupEditor({
     <SettingsPage>
       {error && <Notice message={error} tone="error" />}
       {(agents.isPending || (!!groupId && detail.isPending)) && (
-        <ActivityIndicator
-          accessibilityLabel="Loading crew editor"
-          color={colors.primary}
-        />
+        <SkeletonRows rows={3} title accessibilityLabel="Loading crew editor" />
       )}
       {(agents.isError || detail.isError) && (
         <>

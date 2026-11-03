@@ -6,7 +6,8 @@ import {
   SettingsPage,
   SettingsRow,
 } from "../../components/settings/SettingsList";
-import { Label, Notice } from "../../components/workspace/WorkspaceUI";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { accountApi } from "../../lib/api/accountApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
@@ -49,7 +50,12 @@ export function SessionDetailScreen({
     return (
       <SettingsPage>
         {sessions.isPending ? (
-          <Label muted>Loading session…</Label>
+          <SkeletonRows
+            rows={4}
+            icon={false}
+            detail={false}
+            accessibilityLabel="Loading session"
+          />
         ) : (
           <Notice message="This session has already ended." />
         )}

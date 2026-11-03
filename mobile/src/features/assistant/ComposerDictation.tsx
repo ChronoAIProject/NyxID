@@ -4,10 +4,12 @@ import {
   Keyboard,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Check, Globe, Mic, ShieldCheck, Square, X } from "lucide-react-native";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
@@ -19,7 +21,6 @@ import {
 } from "./voice/VoiceMediaBridge";
 import { formatElapsed, pcmLevel } from "./voice/dictationLevel";
 import type { ComposerDictationState } from "./useComposerDictation";
-import { OverflowScrollView } from "../../components/workspace/ScrollEdgeFades";
 
 const BAR_PITCH = 5;
 const BAR_INTERVAL_MS = 90;
@@ -111,7 +112,10 @@ async function introSeen() {
   }
 }
 
-/** One-time explanation, in the shape of the iOS feature sheets. */
+/**
+ * One-time explanation as a compact sheet over the chat (the mockup's
+ * "Speech to Text" card): what it does, microphone access, language, Start.
+ */
 function DictationIntro({
   visible,
   onClose,
@@ -122,6 +126,7 @@ function DictationIntro({
   onStart: () => void;
 }) {
   const { colors } = useTheme();
+  const insets = useSafeAreaInsets();
   const rows = [
     {
       Icon: ShieldCheck,
@@ -138,11 +143,26 @@ function DictationIntro({
   return (
     <Modal
       visible={visible}
+      transparent
       animationType="slide"
-      presentationStyle="formSheet"
       onRequestClose={onClose}
     >
-      <View style={[styles.intro, { backgroundColor: colors.bg }]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Dismiss"
+        onPress={onClose}
+        style={[styles.introBackdrop, { backgroundColor: colors.sheetScrim }]}
+      />
+      <View
+        accessibilityViewIsModal
+        style={[
+          styles.intro,
+          {
+            backgroundColor: colors.bg,
+            paddingBottom: Math.max(insets.bottom, 16) + 12,
+          },
+        ]}
+      >
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Close"
@@ -153,7 +173,7 @@ function DictationIntro({
           <X size={18} color={colors.textPrimary} />
         </Pressable>
         <View style={styles.introHead}>
-          <Mic size={34} color={colors.primary} />
+          <Mic size={30} color={colors.primary} />
           <Text
             accessibilityRole="header"
             style={[styles.introTitle, { color: colors.textPrimary }]}
@@ -198,7 +218,6 @@ function DictationIntro({
             </View>
           ))}
         </View>
-        <View style={{ flex: 1 }} />
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Start dictation"
@@ -258,8 +277,15 @@ export function ComposerDictationReview({
   );
 }
 
+/**
+ * Dictation in progress fills the screen, as in the mockup: the transcript is
+ * the page, set large and following the speech, with the live waveform and
+ * one Finish (then Insert) action at the bottom. Nothing is sent from here.
+ */
 function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
   const { colors } = useTheme();
+  const insets = useSafeAreaInsets();
+  const scroller = useRef<ScrollView>(null);
   const { phase } = dictation;
   const [startedAt, setStartedAt] = useState<number>();
   const [now, setNow] = useState(() => Date.now());
@@ -282,113 +308,140 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
             : "Listening";
   const capturing = phase === "listening" || phase === "stopping";
   return (
-    <View style={styles.panel}>
-      {dictation.media && dictation.origin && (
-        <VoiceMediaBridge media={dictation.media} origin={dictation.origin} />
-      )}
-      <View style={styles.statusRow}>
-        {phase === "listening" ? (
-          <View style={[styles.liveDot, { backgroundColor: colors.danger }]} />
-        ) : phase === "review" ? null : (
-          <ActivityIndicator size="small" color={colors.textSecondary} />
+    <Modal
+      visible
+      animationType="slide"
+      presentationStyle="fullScreen"
+      onRequestClose={dictation.discard}
+    >
+      <View
+        style={[
+          styles.panel,
+          {
+            backgroundColor: colors.bg,
+            paddingTop: insets.top + 4,
+            paddingBottom: Math.max(insets.bottom, 16),
+          },
+        ]}
+      >
+        {dictation.media && dictation.origin && (
+          <VoiceMediaBridge media={dictation.media} origin={dictation.origin} />
         )}
-        <Text
-          accessibilityLiveRegion="polite"
-          style={[styles.status, { color: colors.textSecondary }]}
-        >
-          {status}
-        </Text>
-        {startedAt !== undefined && (
-          <Text
-            accessibilityLabel={`Recorded ${formatElapsed(now - startedAt)}`}
-            style={[styles.elapsed, { color: colors.textTertiary }]}
+        <View style={styles.panelHeader}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Discard dictation"
+            onPress={dictation.discard}
+            style={styles.target}
           >
-            {formatElapsed(now - startedAt)}
-          </Text>
-        )}
-      </View>
-      {dictation.text ? (
-        <OverflowScrollView
+            {({ pressed }) => (
+              <X
+                size={22}
+                color={colors.textPrimary}
+                opacity={pressed ? 0.6 : 1}
+              />
+            )}
+          </Pressable>
+          <View style={styles.panelTitle}>
+            <Text
+              accessibilityRole="header"
+              style={[styles.panelTitleText, { color: colors.textPrimary }]}
+            >
+              Speech to Text
+            </Text>
+            <View style={styles.statusRow}>
+              {phase === "listening" ? (
+                <View
+                  style={[styles.liveDot, { backgroundColor: colors.danger }]}
+                />
+              ) : phase === "review" ? null : (
+                <ActivityIndicator size="small" color={colors.textSecondary} />
+              )}
+              <Text
+                accessibilityLiveRegion="polite"
+                style={[styles.status, { color: colors.textSecondary }]}
+              >
+                {status}
+              </Text>
+              {startedAt !== undefined && (
+                <Text
+                  accessibilityLabel={`Recorded ${formatElapsed(now - startedAt)}`}
+                  style={[styles.elapsed, { color: colors.textTertiary }]}
+                >
+                  {formatElapsed(now - startedAt)}
+                </Text>
+              )}
+            </View>
+          </View>
+          <View style={styles.target} />
+        </View>
+        <ScrollView
+          ref={scroller}
           style={styles.transcript}
           contentContainerStyle={styles.transcriptContent}
-          fadeColor={colors.composerBg}
+          // The newest words stay in view while speaking.
+          onContentSizeChange={() => {
+            if (phase !== "review") scroller.current?.scrollToEnd?.({ animated: true });
+          }}
         >
-          <Text style={[styles.transcriptText, { color: colors.textPrimary }]}>
-            {dictation.final}
-            {dictation.interim ? (
-              <Text style={{ color: colors.textTertiary }}>
-                {dictation.final ? " " : ""}
-                {dictation.interim}
-              </Text>
-            ) : null}
-          </Text>
-        </OverflowScrollView>
-      ) : phase === "listening" ? (
-        <View style={styles.transcriptContent}>
-          <Text style={[styles.transcriptText, { color: colors.textTertiary }]}>
-            Start speaking…
-          </Text>
-        </View>
-      ) : (
-        <View style={styles.transcriptContent} />
-      )}
-      <View style={styles.meter}>
-        {capturing && <DictationWaveform media={dictation.media} />}
-      </View>
-      {dictation.error ? (
-        <Label
-          accessibilityLiveRegion="polite"
-          style={{ color: colors.danger }}
-        >
-          {dictation.error}
-        </Label>
-      ) : null}
-      <View style={styles.controls}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Discard dictation"
-          onPress={dictation.discard}
-          style={styles.target}
-        >
-          {({ pressed }) => (
-            <View
-              style={[
-                styles.discard,
-                {
-                  borderColor: colors.controlBorder,
-                  opacity: pressed ? 0.65 : 1,
-                },
-              ]}
+          {dictation.text ? (
+            <Text
+              selectable={phase === "review"}
+              style={[styles.transcriptText, { color: colors.textPrimary }]}
             >
-              <X size={18} color={colors.textPrimary} />
-            </View>
+              {dictation.final}
+              {dictation.interim ? (
+                <Text style={{ color: colors.textTertiary }}>
+                  {dictation.final ? " " : ""}
+                  {dictation.interim}
+                </Text>
+              ) : null}
+            </Text>
+          ) : (
+            <Text
+              style={[styles.transcriptText, { color: colors.textTertiary }]}
+            >
+              {phase === "listening" ? "Start speaking…" : ""}
+            </Text>
           )}
-        </Pressable>
-        {phase === "review" ? (
-          <PillButton
-            label="Insert"
-            accessibilityLabel="Insert text"
-            icon={<Check size={16} color={colors.bg} strokeWidth={2.5} />}
-            onPress={dictation.insert}
-          />
-        ) : (
-          <PillButton
-            label="Finish"
-            accessibilityLabel="Finish dictation"
-            icon={<Square size={10} color={colors.bg} fill={colors.bg} />}
-            busy={phase === "stopping"}
-            disabled={phase !== "listening"}
-            onPress={dictation.stop}
-          />
-        )}
-        <View style={styles.target} />
+        </ScrollView>
+        {dictation.error ? (
+          <Label
+            accessibilityLiveRegion="polite"
+            style={[styles.panelError, { color: colors.danger }]}
+          >
+            {dictation.error}
+          </Label>
+        ) : null}
+        <View style={[styles.meter, { backgroundColor: colors.groupedFill }]}>
+          {capturing && <DictationWaveform media={dictation.media} />}
+        </View>
+        <View style={styles.controls}>
+          {phase === "review" ? (
+            <PillButton
+              label="Insert"
+              accessibilityLabel="Insert text"
+              icon={<Check size={16} color={colors.bg} strokeWidth={2.5} />}
+              onPress={dictation.insert}
+            />
+          ) : (
+            <PillButton
+              label="Finish"
+              accessibilityLabel="Finish dictation"
+              icon={<Square size={10} color={colors.bg} fill={colors.bg} />}
+              busy={phase === "stopping"}
+              disabled={phase !== "listening"}
+              onPress={dictation.stop}
+            />
+          )}
+        </View>
+        <Text style={[styles.footnote, { color: colors.textTertiary }]}>
+          {phase === "review"
+            ? "Edit after inserting · Nothing is sent until you tap Send"
+            : "Language detected automatically"}
+        </Text>
       </View>
-      <Text style={[styles.footnote, { color: colors.textTertiary }]}>
-        {phase === "review"
-          ? "Edit after inserting · Nothing is sent until you tap Send"
-          : "Language detected automatically"}
-      </Text>
-    </View>
+    </Modal>
   );
 }
 
@@ -498,7 +551,15 @@ const styles = StyleSheet.create({
   notice: { paddingHorizontal: 12, paddingTop: 8, gap: 6 },
   noticeText: { fontSize: 13 },
   noticeActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  panel: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 6, gap: 10 },
+  panel: { flex: 1, paddingHorizontal: 20, gap: 14 },
+  panelHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginHorizontal: -10,
+  },
+  panelTitle: { flex: 1, alignItems: "center", gap: 2 },
+  panelTitleText: { fontFamily: fonts.displaySemi, fontSize: 17, lineHeight: 22 },
+  panelError: { textAlign: "center" },
   statusRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -506,15 +567,15 @@ const styles = StyleSheet.create({
     minHeight: 20,
   },
   liveDot: { width: 8, height: 8, borderRadius: 4 },
-  status: { flex: 1, fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
+  status: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
   elapsed: { fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 },
-  // The transcript is the focus: large, readable, and given real height.
-  transcript: { maxHeight: 280 },
-  transcriptContent: { minHeight: 132 },
+  // The transcript is the page: set large, as in a full-screen reading view.
+  transcript: { flex: 1 },
+  transcriptContent: { paddingTop: 12, paddingBottom: 24 },
   transcriptText: {
-    fontFamily: fonts.bodyRegular,
-    fontSize: 22,
-    lineHeight: 30,
+    fontFamily: fonts.displaySemi,
+    fontSize: 30,
+    lineHeight: 40,
   },
   footnote: {
     fontFamily: fonts.body,
@@ -522,12 +583,13 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     textAlign: "center",
   },
+  introBackdrop: { flex: 1 },
   intro: {
-    flex: 1,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
     paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 36,
-    gap: 22,
+    paddingTop: 16,
+    gap: 20,
   },
   introClose: {
     alignSelf: "flex-end",
@@ -569,19 +631,15 @@ const styles = StyleSheet.create({
   controls: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    minHeight: 48,
-    marginHorizontal: -8,
+    justifyContent: "center",
+    minHeight: 52,
   },
-  discard: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    borderWidth: 1,
-    alignItems: "center",
+  meter: {
+    height: 64,
+    borderRadius: 20,
+    paddingHorizontal: 14,
     justifyContent: "center",
   },
-  meter: { height: 36 },
   wave: {
     flex: 1,
     flexDirection: "row",
@@ -593,9 +651,9 @@ const styles = StyleSheet.create({
   bar: { width: 3, borderRadius: 1.5 },
   pillTarget: { minHeight: 44, justifyContent: "center", paddingHorizontal: 4 },
   pill: {
-    height: 44,
-    borderRadius: 22,
-    paddingHorizontal: 22,
+    height: 50,
+    borderRadius: 25,
+    paddingHorizontal: 30,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,

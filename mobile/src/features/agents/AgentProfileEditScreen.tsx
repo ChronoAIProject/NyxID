@@ -10,7 +10,8 @@ import {
   SettingsTextField,
 } from "../../components/settings/SettingsList";
 import { SettingsHeaderButton } from "../../components/settings/SettingsHeaderButton";
-import { Label, Notice } from "../../components/workspace/WorkspaceUI";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { agentsApi } from "../../lib/api/agentsApi";
 import {
@@ -191,7 +192,14 @@ export function AgentProfileEditScreen({
       {!isConnected && (
         <Notice message="You're offline. Connect to save changes." />
       )}
-      {detail.isPending && <Label muted>Loading agent…</Label>}
+      {detail.isPending && (
+        <SkeletonRows
+          rows={2}
+          icon={false}
+          title
+          accessibilityLabel="Loading agent"
+        />
+      )}
       {detail.isError && !baseline && (
         <Notice tone="error" message={errorMessage(detail.error)} />
       )}

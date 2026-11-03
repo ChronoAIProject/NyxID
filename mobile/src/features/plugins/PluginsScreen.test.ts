@@ -182,7 +182,7 @@ function setup({
     setOptions: record("setOptions"),
   };
   const openChat = record("openChat");
-  const harness = hookHarness<Element>({
+  const mocks: Record<string, unknown> = {
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
@@ -256,7 +256,13 @@ function setup({
     },
     "./pluginConnectors": { deriveConnectorItems, matchesPluginQuery },
     "./PluginSkills": { PluginSkills: "PluginSkills" },
-  });
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
+  };
+  const harness = hookHarness<Element>(mocks);
+  // The real pull-refresh hook runs on the harness's React.
+  mocks["../../hooks/usePullRefresh"] = harness.load(
+    fileURLToPath(new URL("../../hooks/usePullRefresh.ts", import.meta.url)),
+  );
   const { PluginsScreen } = harness.load(
     fileURLToPath(new URL("./PluginsScreen.tsx", import.meta.url)),
   ) as { PluginsScreen: (props?: unknown) => Element };
@@ -539,6 +545,54 @@ test("connector rows tag their state or sign-in method beside the name, never as
     );
     assert.equal(rows()[0]!.props.detailLines, 2);
     assert.equal(env.calls.some((call) => call.method === "push"), false);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("first load shows a skeleton of connector rows, not a spinner", () => {
+  const env = setup();
+  try {
+    Object.assign(env.states.plugins, { data: undefined, isPending: true });
+    env.harness.render();
+    const skeleton = env.all().find((node) => node.type === "SkeletonRows");
+    assert.equal(skeleton?.props.accessibilityLabel, "Loading plugins");
+    assert.equal(
+      env.all().some((node) => node.type === "ActivityIndicator"),
+      false,
+    );
+  } finally {
+    env.unmount();
+  }
+});
+
+test("background refetches never show the pull or Refresh spinner; the user's own refresh does", async () => {
+  const env = setup();
+  try {
+    Object.assign(env.states.plugins, { isFetching: true });
+    Object.assign(env.states.catalog, { isFetching: true });
+    env.harness.render();
+    assert.equal(env.list().refreshing, false);
+    assert.equal(
+      env.all().some((node) => node.type === "ActivityIndicator"),
+      false,
+    );
+    let finish!: () => void;
+    env.states.plugins.refetch = (() =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      })) as never;
+    env.harness.render();
+    env.list().onRefresh();
+    env.harness.flush();
+    assert.equal(env.list().refreshing, true);
+    assert.equal(
+      env.all().some((node) => node.type === "ActivityIndicator"),
+      true,
+    );
+    finish();
+    await env.harness.settle();
+    assert.equal(env.list().refreshing, false);
   } finally {
     env.unmount();
   }

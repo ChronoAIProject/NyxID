@@ -2,7 +2,6 @@ import { ServiceIcon } from "../../components/ServiceIcon";
 import { useNativeSheetDismiss } from "../../components/workspace/useNativeSheetDismiss";
 import { useRef, useState } from "react";
 import {
-  ActivityIndicator,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -24,6 +23,7 @@ import {
   X,
 } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SkeletonRows } from "../../components/Skeleton";
 import {
   SettingsGroup,
   SettingsRow,
@@ -255,10 +255,7 @@ export function AgentPermissionsSheet({
         </Label>
       )}
       {connectionsLoading && (
-        <ActivityIndicator
-          accessibilityLabel="Loading services"
-          color={colors.primary}
-        />
+        <SkeletonRows rows={3} accessibilityLabel="Loading services" />
       )}
       {connectionsError && (
         <Notice
@@ -465,15 +462,17 @@ export function AgentPermissionsSheet({
                   contentContainerStyle={styles.list}
                   ListHeaderComponent={header}
                   ListEmptyComponent={
-                    <Label muted>
-                      {search
-                        ? "No matching services. Try another name or service ID."
-                        : selectedOnly
-                          ? "No services selected. Choose services from All."
-                          : connectionsLoading
-                            ? "Loading your connected services…"
+                    // While connections load, the header's skeleton rows
+                    // stand in for the list.
+                    !search && !selectedOnly && connectionsLoading ? null : (
+                      <Label muted>
+                        {search
+                          ? "No matching services. Try another name or service ID."
+                          : selectedOnly
+                            ? "No services selected. Choose services from All."
                             : "No connected services yet. You can grant access later."}
-                    </Label>
+                      </Label>
+                    )
                   }
                   renderItem={({ item }) => {
                     const selected = draft.services.includes(item.value);

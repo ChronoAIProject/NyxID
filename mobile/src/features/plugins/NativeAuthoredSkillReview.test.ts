@@ -86,6 +86,13 @@ function setup(kind: "review" | "launcher" | "page" = "review") {
         name,
       ]),
     ),
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
+    "../../hooks/usePullRefresh": {
+      usePullRefresh: (refetch: () => Promise<unknown>) => ({
+        refreshing: false,
+        onRefresh: () => void refetch(),
+      }),
+    },
     "../../components/settings/SettingsList": {
       SettingsGroup: "SettingsGroup",
       SettingsRow: "SettingsRow",
@@ -151,6 +158,7 @@ function setup(kind: "review" | "launcher" | "page" = "review") {
     decision,
     pushed,
     history,
+    query,
     guard: () => {
       harness.flush();
       return guard;
@@ -207,5 +215,19 @@ test("review page resolves its acknowledgement from authoritative history and ke
   env.history.acknowledgements = [];
   env.harness.render();
   assert.throws(() => env.content(), /Element not found/);
+  env.harness.unmount();
+});
+test("publication polling never shows a loader over a loaded draft", () => {
+  const env = setup();
+  Object.assign(env.query, { isFetching: true });
+  env.harness.render();
+  assert.throws(
+    () =>
+      find(
+        env.harness.flush(),
+        (row) => row.props.accessibilityLabel === "Loading complete skill draft",
+      ),
+    /Element not found/,
+  );
   env.harness.unmount();
 });

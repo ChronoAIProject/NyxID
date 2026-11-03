@@ -12,6 +12,7 @@ import { ComposerConnectionPicker } from "./ComposerConnectionPicker";
 import { transcriptColumnStyle } from "../display/chatLayout";
 import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { assistantDraftKey, assistantDraftStore } from "./assistantDraftStore";
+import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceChatList } from "../../components/workspace/WorkspaceChatList";
 import {
   ChatHeaderFrame,
@@ -34,7 +35,6 @@ import {
   useState,
 } from "react";
 import {
-  ActivityIndicator,
   AccessibilityInfo,
   Alert,
   FlatList,
@@ -1045,7 +1045,11 @@ export function AssistantScreen({
             ListHeaderComponentStyle={styles.transcriptHeader}
             ListEmptyComponent={
               assistant.loading ? (
-                <ActivityIndicator color={colors.primary} />
+                <SkeletonRows
+                  rows={4}
+                  icon={false}
+                  accessibilityLabel="Loading messages"
+                />
               ) : !assistant.sending ? (
                 <View style={styles.welcome}>
                   <Text

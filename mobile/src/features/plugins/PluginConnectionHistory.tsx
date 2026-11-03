@@ -21,6 +21,7 @@ import {
   SettingsGroup,
   SettingsRow,
 } from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
 import {
   ActionButton,
@@ -153,8 +154,10 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
           onClose={() => setFilterOpen(false)}
         >
           {options.isPending && (
-            <ActivityIndicator
-              color={colors.primary}
+            <SkeletonRows
+              rows={4}
+              icon={false}
+              detail={false}
               accessibilityLabel="Loading history filters"
             />
           )}
@@ -172,8 +175,10 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
         </WorkspaceSelectionSheet>
       )}
       {query.isPending && (
-        <ActivityIndicator
-          color={colors.primary}
+        <SkeletonRows
+          rows={4}
+          icon={false}
+          title
           accessibilityLabel="Loading connection history"
         />
       )}

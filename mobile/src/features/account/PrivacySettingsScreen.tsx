@@ -63,10 +63,10 @@ export function PrivacySettingsScreen(
         kind: "error",
       }),
   });
-  // The row names the setting; the switch shows its state. Only loading and
-  // error states need words.
+  // The row names the setting; the switch shows its state. Only an error
+  // needs words; a load disables the switch without placeholder text.
   const accountDetail = analyticsPermission.isFetching
-    ? "Loading permission…"
+    ? undefined
     : analyticsPermission.isError
       ? "Permission unavailable"
       : undefined;

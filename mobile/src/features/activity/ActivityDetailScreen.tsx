@@ -11,7 +11,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { FullScreenLoading } from "../../components/FullScreenLoading";
+import { SkeletonRows } from "../../components/Skeleton";
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
 import { setActiveChallengeId } from "../../lib/notifications/pushNotifications";
 import { ApprovalDecisionPair } from "../../components/ChallengeCard";
@@ -296,10 +296,10 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
 
   if (isLoading) {
     return (
-      <FullScreenLoading
-        title="Loading detail..."
-        subtitle="Fetching challenge information"
-      />
+      <SettingsPage>
+        <SkeletonRows rows={4} icon={false} accessibilityLabel="Loading request" />
+        <SkeletonRows rows={2} icon={false} detail={false} />
+      </SettingsPage>
     );
   }
 

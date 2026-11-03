@@ -192,6 +192,7 @@ function setup({
         (name) => [name, name],
       ),
     ),
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["Notice", "WorkspacePage"].map((name) => [name, name]),
     ),

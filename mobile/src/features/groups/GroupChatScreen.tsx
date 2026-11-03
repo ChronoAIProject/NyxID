@@ -3,6 +3,7 @@ import { transcriptColumnStyle } from "../display/chatLayout";
 import { assistantDraftStore } from "../assistant/assistantDraftStore";
 import { ChatHeaderFrame, ChatIdentity } from "../assistant/ChatIdentityHeader";
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
+import { SkeletonRows } from "../../components/Skeleton";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import { useChatColumn } from "../display/ChatLayoutContext";
 import {
@@ -691,10 +692,7 @@ function GroupChat({
           ListHeaderComponentStyle={styles.historyHeader}
           ListEmptyComponent={
             chat.isPending ? (
-              <ActivityIndicator
-                accessibilityLabel="Loading crew"
-                color={colors.primary}
-              />
+              <SkeletonRows rows={4} accessibilityLabel="Loading crew" />
             ) : group ? (
               <View style={styles.empty}>
                 <AgentAvatarStack agents={group.members} size="lg" />

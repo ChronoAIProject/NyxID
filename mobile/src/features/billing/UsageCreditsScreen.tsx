@@ -6,6 +6,8 @@ import { z } from "zod";
 import { ActionButton, Label, Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { SettingsGroup, SettingsPage, SettingsRow } from "../../components/settings/SettingsList";
 import { SegmentControl } from "../../components/SegmentControl";
+import { SkeletonRows } from "../../components/Skeleton";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { billingApi } from "../../lib/api/billingApi";
@@ -75,6 +77,8 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
     if (!canRefresh.current || getAuthEpoch() !== epoch) return;
     await Promise.allSettled([wallet.refetch(), grants.refetch(), allowances.refetch(), ...(historyOpen.current && hasWallet && !issue ? [usage.refetch()] : [])]);
   }
+  // `fetching` still gates Retry; only a pull shows the spinner.
+  const pull = usePullRefresh(refresh);
   function toggleHistory() {
     if (expanded) void client.cancelQueries({ queryKey: [...root, "usage"] });
     historyOpen.current = !expanded;
@@ -84,12 +88,12 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
   const loaded = wallet.data?.kind === "ready" && wallet.data.data && grants.data?.kind === "ready" && allowances.data?.kind === "ready"
     ? { wallet: wallet.data.data, grants: grants.data.data.grants, allowances: allowances.data.data.allowances } : undefined;
   const historyIssue = expanded ? unavailable([usage]) : undefined;
-  return <SettingsPage refreshing={fetching} onRefresh={() => void refresh()}>
+  return <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
     {issue ? <>
       <Notice tone="error" message={issue} />
       <ActionButton label="Retry" variant="secondary" disabled={fetching} onPress={() => void refresh()} />
     </> : absent ? <Label muted>No billing account yet.</Label> : !loaded ? <>
-      <Label muted>{isConnected ? "Loading…" : "Offline. Connect to load your balance."}</Label>
+      {isConnected ? <SkeletonRows rows={3} icon={false} detail={false} title accessibilityLabel="Loading balance" /> : <Label muted>Offline. Connect to load your balance.</Label>}
       {!isConnected && <ActionButton label="Retry" variant="secondary" onPress={() => void refresh()} />}
     </> : <>
       {!isConnected && <Notice message="Offline. Showing your saved balance." />}
@@ -105,7 +109,7 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
           {services.length === 0 && <SettingsRow label="No usage recorded for this period" />}
           {services.slice(0, serviceLimit).map((service) => <BillingServiceCard key={`${period}:${service.key}`} service={service} />)}
           {services.length > serviceLimit && <SettingsRow tone="action" label="Show More Services" onPress={() => setServiceLimit((limit) => limit + 10)} />}
-        </SettingsGroup> : <Label muted>{isConnected ? "Loading usage…" : "Offline. Connect to load usage."}</Label>}
+        </SettingsGroup> : isConnected ? <SkeletonRows rows={3} icon={false} title accessibilityLabel="Loading usage" /> : <Label muted>Offline. Connect to load usage.</Label>}
       </>}
     </>}
   </SettingsPage>;

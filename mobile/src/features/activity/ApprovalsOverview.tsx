@@ -10,6 +10,7 @@ import {
 import { RefreshCw, ShieldCheck } from "lucide-react-native";
 import { ChallengeCard } from "../../components/ChallengeCard";
 import { GroupedCell } from "../../components/GroupedCell";
+import { SkeletonRows } from "../../components/Skeleton";
 import {
   HistoryCard,
   HistorySectionHeader,
@@ -231,10 +232,9 @@ export function ApprovalsOverview({
                 </Text>
               </GroupedCell>
             ) : section.state.isLoading && !section.data.length ? (
-              <ActivityIndicator
+              <SkeletonRows
+                rows={section.key === "pending" ? 2 : 3}
                 accessibilityLabel={`Loading ${listName(section.key)}`}
-                color={colors.primary}
-                style={styles.loading}
               />
             ) : !section.data.length && !section.state.isError ? (
               <GroupedCell first last inset={false}>
@@ -383,6 +383,5 @@ const createStyles = (c: ThemeColors) =>
       justifyContent: "center",
       marginTop: spacing.xs,
     },
-    loading: { padding: spacing.xxl },
     disabled: { opacity: 0.45 },
   });

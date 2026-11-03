@@ -10,11 +10,9 @@ import {
   useOpenWorkspaceChat,
   useWorkspaceBack,
 } from "../../app/WorkspaceHeader";
-import {
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { agentMachinesApi } from "../../lib/api/agentMachinesApi";
 import { machinePageContent, MachineSwitch } from "./MachinePresentation";
 import {
@@ -79,6 +77,12 @@ export function AgentMachinesScreen({
     if (result.error) throw result.error;
     return result.data?.machines.find((row) => row.node_id === selected);
   }
+  const pull = usePullRefresh(async () => {
+    if (!runtime.active) return;
+    await refresh().catch((cause) => {
+      if (runtime.current()) setNotice(machineError(cause));
+    });
+  });
   if (machine && query.data) {
     return (
       <AgentMachineEditor
@@ -112,17 +116,25 @@ export function AgentMachinesScreen({
     <AgentMachineListPage
       selected={!!selected}
       onBack={navigation.goBack}
-      refreshing={query.isRefetching}
-      onRefresh={() => {
-        if (runtime.active) {
-          void refresh().catch((cause) => {
-            if (runtime.current()) setNotice(machineError(cause));
-          });
-        }
-      }}
+      refreshing={pull.refreshing}
+      onRefresh={pull.onRefresh}
     >
       {notice && <Notice message={notice} />}
-      {query.isPending && <Label muted>Loading agent machine access…</Label>}
+      {query.isPending &&
+        (selected ? (
+          <SkeletonRows
+            rows={5}
+            icon={false}
+            detail={false}
+            accessibilityLabel="Loading agent machine access"
+          />
+        ) : (
+          <SkeletonRows
+            rows={3}
+            title
+            accessibilityLabel="Loading agent machine access"
+          />
+        ))}
       {query.error && (
         <Notice tone="error" message={machineError(query.error)} />
       )}
@@ -237,7 +249,8 @@ export function AgentMachineEditor({
     acknowledgement_id: string;
   }>();
   const [refreshError, setRefreshError] = useState<string>();
-  const [refreshing, setRefreshing] = useState(false);
+  // Guards a reload in flight; the pull spinner itself comes from `pull`.
+  const [reloading, setReloading] = useState(false);
   const dirty = JSON.stringify(caps) !== JSON.stringify(machine.capabilities);
   const blocked = write.busy || write.uncertain || !write.active || unavailable;
   const editable =
@@ -261,7 +274,7 @@ export function AgentMachineEditor({
   });
   async function refresh() {
     if (write.busy || !write.active) return;
-    setRefreshing(true);
+    setReloading(true);
     try {
       const latest = await onRefresh();
       if (!write.current()) return;
@@ -275,20 +288,25 @@ export function AgentMachineEditor({
     } catch (cause) {
       if (write.current()) setRefreshError(machineError(cause));
     } finally {
-      setRefreshing(false);
+      setReloading(false);
     }
   }
   function reviewRefresh() {
-    if (!write.busy && write.active && !refreshing) {
+    if (!write.busy && write.active && !reloading) {
       confirmDiscard(dirty, () => void refresh());
     }
   }
+  const pull = usePullRefresh(async () => {
+    if (write.busy || !write.active || reloading) return;
+    if (dirty) confirmDiscard(dirty, () => void refresh());
+    else await refresh();
+  });
   return (
     <WorkspacePage
       title="Agent machine access"
       showHeading={false}
-      refreshing={refreshing}
-      onRefresh={reviewRefresh}
+      refreshing={pull.refreshing}
+      onRefresh={pull.onRefresh}
       contentStyle={machinePageContent}
     >
       {notice && <Notice message={notice} />}
@@ -501,7 +519,7 @@ export function AgentMachineEditor({
           tone="action"
           label="Reload Access and Recovery Status"
           accessibilityLabel="Reload access and recovery status"
-          disabled={write.busy || !write.active || refreshing}
+          disabled={write.busy || !write.active || reloading}
           onPress={reviewRefresh}
         />
       </SettingsGroup>

@@ -106,6 +106,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     },
     "../../components/ChallengeCard": { ChallengeCard: "ChallengeCard" },
     "../../components/GroupedCell": { GroupedCell: "GroupedCell" },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/settings/SettingsList": {
       SettingsGroup: "SettingsGroup",
       SettingsRow: "SettingsRow",
@@ -272,11 +273,13 @@ test("loading and failed first loads never claim a healthy empty approval inbox"
     pending: list({ isLoading: true }),
     history: list({ isLoading: true }),
   });
-  assert.ok(
-    loading.find(loading.header("pending"), "Loading pending approvals"),
+  assert.equal(
+    loading.find(loading.header("pending"), "Loading pending approvals")?.type,
+    "SkeletonRows",
   );
-  assert.ok(
-    loading.find(loading.header("history"), "Loading approval history"),
+  assert.equal(
+    loading.find(loading.header("history"), "Loading approval history")?.type,
+    "SkeletonRows",
   );
   assert.doesNotMatch(
     textContent(loading.header("pending")),

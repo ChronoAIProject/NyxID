@@ -158,6 +158,10 @@ function setup(
         (name) => [name, name],
       ),
     ),
+    "../../components/Skeleton": {
+      SkeletonCards: "SkeletonCards",
+      SkeletonRows: "SkeletonRows",
+    },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["ActionButton", "Card", "Field", "Label", "Notice", "WorkspacePage"].map(
         (name) => [name, name],

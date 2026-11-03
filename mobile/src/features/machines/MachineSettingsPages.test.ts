@@ -48,6 +48,7 @@ const ui = {
     Notice: "Notice",
     WorkspacePage: "Page",
   },
+  "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
 };
 function render<P>(
   name: string,
@@ -55,7 +56,12 @@ function render<P>(
   props: P,
   mocks: Record<string, unknown>,
 ) {
-  const harness = hookHarness<Element>({ ...ui, ...mocks });
+  const moduleMocks: Record<string, unknown> = { ...ui, ...mocks };
+  const harness = hookHarness<Element>(moduleMocks);
+  // The real pull-refresh hook runs on the harness's React.
+  moduleMocks["../../hooks/usePullRefresh"] ??= harness.load(
+    fileURLToPath(new URL("../../hooks/usePullRefresh.ts", import.meta.url)),
+  );
   const Component = harness.load(file(name))[exported] as (p: P) => Element;
   harness.mount(() => Component(props));
   const all = () => elements(harness.value());
@@ -386,4 +392,71 @@ test("machine detail is label/value groups with policy, activity and desktop as 
   x.row("Machine Activity").props.onPress();
   assert.deepEqual(opened, ["policy", "activity"]);
   assert.ok(x.all().some((n) => n.type === "Desktop"));
+});
+
+function savedLoginList(query: Record<string, unknown>) {
+  const refetched: number[] = [];
+  const x = render(
+    "SavedLogins.tsx",
+    "SavedLogins",
+    { onWeb: () => {}, onMachines: () => {}, onOpen: () => {} },
+    {
+      "react-native": { Alert: {} },
+      "@tanstack/react-query": {
+        useQuery: () => ({
+          ...query,
+          refetch: async () => {
+            refetched.push(1);
+            return {};
+          },
+        }),
+        useQueryClient: () => ({ invalidateQueries: async () => {} }),
+      },
+      "../../app/WorkspaceHeader": { useWorkspaceBack: () => {} },
+      "../../components/SegmentControl": { SegmentControl: "Segments" },
+      "../../lib/api/machinesApi": { machinesApi: {} },
+      "./MachineUI": {
+        machineError: String,
+        machineKeys: (epoch: number) => ["machines", epoch],
+        useMachineRuntime: () => ({ active: true, current: () => true }),
+        useMachineWrite: () => ({}),
+      },
+      "./MachinePresentation": {
+        formatMachineDate: String,
+        machinePageContent: {},
+        machineTabs: [],
+      },
+      "./machineContracts": contracts,
+    },
+  );
+  return { ...x, refetched };
+}
+
+test("saved logins load as a skeleton, and only a pull shows the refresh spinner", async () => {
+  const x = savedLoginList({ isPending: true, isFetching: true });
+  const skeleton = x.all().find((n) => n.type === "SkeletonRows");
+  assert.equal(skeleton?.props.accessibilityLabel, "Loading saved logins");
+  assert.doesNotMatch(x.text(), /Loading/);
+  const page = () => x.all().find((n) => n.type === "Page")!;
+  assert.equal(page().props.refreshing, false);
+
+  // Background refetch of loaded data: no spinner, no skeleton.
+  const loaded = savedLoginList({
+    data: [login],
+    isPending: false,
+    isFetching: true,
+    isRefetching: true,
+  });
+  const loadedPage = () => loaded.all().find((n) => n.type === "Page")!;
+  assert.equal(loadedPage().props.refreshing, false);
+  assert.equal(
+    loaded.all().some((n) => n.type === "SkeletonRows"),
+    false,
+  );
+  loadedPage().props.onRefresh();
+  loaded.harness.flush();
+  assert.equal(loadedPage().props.refreshing, true);
+  await loaded.harness.settle();
+  assert.equal(loadedPage().props.refreshing, false);
+  assert.deepEqual(loaded.refetched, [1]);
 });

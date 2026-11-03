@@ -9,6 +9,7 @@ import {
   Label,
   Notice,
 } from "../../components/workspace/WorkspaceUI";
+import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSelectionField";
 import { collaborationApi } from "../../lib/api/collaborationApi";
 import { agentsApi } from "../../lib/api/agentsApi";
@@ -439,7 +440,12 @@ function SharedNotesEditor({
           editable={editable}
         />
       ) : (
-        <Label muted>Loading notes…</Label>
+        <SkeletonRows
+          rows={2}
+          icon={false}
+          detail={false}
+          accessibilityLabel="Loading notes"
+        />
       )}
       <ActionButton
         compact

@@ -39,6 +39,7 @@ import { groupsApi } from "../../lib/api/groupsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
+import { SkeletonRows } from "../Skeleton";
 import { WorkspaceChatBrowser } from "./WorkspaceChatBrowser";
 import { sidebarSectionTitle } from "./workspaceSidebarStyles";
 import {
@@ -144,7 +145,9 @@ export function WorkspaceChatList({
     refetchInterval: active ? 30_000 : false,
     retry: false,
   });
-  const refreshingAgents = pullRefreshing || agents.isFetching;
+  // Only the person's own refresh spins; the 30s poll and event refetches
+  // update rows silently.
+  const refreshingAgents = pullRefreshing;
   const refreshAgents = async () => {
     if (
       refreshLock.current ||
@@ -339,14 +342,19 @@ export function WorkspaceChatList({
       onPress={() => openGroup(row)}
     />
   );
-  const historyStatus = (
+  // The full browser shows its own first-load skeleton in place of the list.
+  const historyStatus = (showLoading: boolean) => (
     <>
       {agent?.can_use === false ? (
         <DrawerMessage text="View only · chat access isn’t available for this agent." />
       ) : (
         <>
-          {history.isPending ? (
-            <DrawerMessage text="Loading chats…" loading={active} />
+          {showLoading && history.isPending ? (
+            <SkeletonRows
+              rows={3}
+              icon={false}
+              accessibilityLabel="Loading chats"
+            />
           ) : null}
           {history.isError ? (
             <DrawerMessage
@@ -436,7 +444,7 @@ export function WorkspaceChatList({
           <DrawerMessage text="Offline · showing saved chats" />
         ) : null}
         {agents.isPending ? (
-          <DrawerMessage text="Loading agents…" loading={active} />
+          <SkeletonRows rows={3} accessibilityLabel="Loading agents" />
         ) : null}
         {agents.isError ? (
           <DrawerMessage
@@ -527,7 +535,7 @@ export function WorkspaceChatList({
             );
           }}
         >
-          {historyStatus}
+          {historyStatus(true)}
           {currentRow}
           {previewChats.map(chatRow)}
           {threads.bots.map((bot) => {
@@ -686,7 +694,7 @@ export function WorkspaceChatList({
     rows.push(
       <View key="crew-rows">
         {groups.isPending ? (
-          <DrawerMessage text="Loading crews..." loading={active} />
+          <SkeletonRows rows={2} accessibilityLabel="Loading crews" />
         ) : null}
         {groups.isError ? (
           <DrawerMessage
@@ -816,6 +824,19 @@ export function WorkspaceChatList({
           refreshing={refreshingAgents}
           refreshDisabled={!active}
           refreshLabel="Refresh agents"
+          loadingLabel={
+            browser.kind === "agents"
+              ? agents.isPending
+                ? "Loading agents"
+                : undefined
+              : browser.kind === "groups"
+                ? groups.isPending
+                  ? "Loading crews"
+                  : undefined
+                : agent && agent.can_use !== false && history.isPending
+                  ? "Loading chats"
+                  : undefined
+          }
           onClose={() => dismissBrowser()}
           onDismiss={() => finishBrowserDismissal(browserClosing)}
           primaryAction={
@@ -847,13 +868,11 @@ export function WorkspaceChatList({
                   ? "This agent is no longer available."
                   : agent.can_use === false
                     ? "Chat access isn’t available for this agent."
-                    : history.isPending
-                      ? "Loading chats…"
-                      : history.isError && !history.data
-                        ? "Couldn’t load chats. You can retry below."
-                        : agent.status === "destroyed"
-                          ? "No saved chats for this deleted agent."
-                          : "No chats yet. Start your first conversation above."
+                    : history.isError && !history.data
+                      ? "Couldn’t load chats. You can retry below."
+                      : agent.status === "destroyed"
+                        ? "No saved chats for this deleted agent."
+                        : "No chats yet. Start your first conversation above."
           }
           footer={
             browser.kind === "agents" && agents.isError ? (
@@ -868,7 +887,7 @@ export function WorkspaceChatList({
               />
             ) : browser.kind === "chats" ? (
               <>
-                {historyStatus}
+                {historyStatus(false)}
                 {currentRow}
                 {history.hasNextPage ? (
                   <MoreButton
@@ -1216,21 +1235,16 @@ function ChatRow({
 
 function DrawerMessage({
   text,
-  loading,
   retry,
   disabled,
 }: {
   text: string;
-  loading?: boolean;
   retry?: () => void;
   disabled?: boolean;
 }) {
   const { colors } = useTheme();
   return (
     <View style={styles.message}>
-      {loading ? (
-        <ActivityIndicator size="small" color={colors.primary} />
-      ) : null}
       <Text style={[styles.messageText, { color: colors.textMuted }]}>
         {text}
       </Text>

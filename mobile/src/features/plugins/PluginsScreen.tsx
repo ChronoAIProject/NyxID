@@ -17,12 +17,14 @@ import { RefreshCw, Search, X } from "lucide-react-native";
 import type { WorkspaceNavigationProp } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { ServiceIcon } from "../../components/ServiceIcon";
+import { SkeletonRows } from "../../components/Skeleton";
 import { SegmentControl } from "../../components/SegmentControl";
 import {
   SettingsGroup,
   SettingsRow,
 } from "../../components/settings/SettingsList";
 import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { servicesApi } from "../../lib/api/servicesApi";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
@@ -80,12 +82,13 @@ export function PluginsScreen({
   const loadError = connections.error ?? catalog.error;
   const catalogKnown = !!connections.data && !connections.isError;
   const loading = connections.isPending || catalog.isPending;
-  const refreshing = connections.isFetching || catalog.isFetching;
-
-  function refresh() {
-    void connections.refetch();
-    void catalog.refetch();
-  }
+  // Only the user's own pull or Refresh tap shows a spinner; background
+  // refocus and foreground refetches never do.
+  const pull = usePullRefresh(() =>
+    Promise.all([connections.refetch(), catalog.refetch()]),
+  );
+  const refreshing = pull.refreshing;
+  const refresh = pull.onRefresh;
 
   useEffect(() => {
     setTab(initialTab);
@@ -312,12 +315,11 @@ export function PluginsScreen({
             }
             ListEmptyComponent={
               loading ? (
-                <View style={styles.loading}>
-                  <ActivityIndicator
-                    color={colors.primary}
-                    accessibilityLabel="Loading plugins"
-                  />
-                </View>
+                <SkeletonRows
+                  rows={6}
+                  title
+                  accessibilityLabel="Loading plugins"
+                />
               ) : null
             }
           />
@@ -490,7 +492,6 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.sm,
   },
   sectionGap: { height: spacing.huge },
-  loading: { padding: spacing.xxl },
   empty: {
     ...typeScale.small,
     paddingHorizontal: spacing.xxl,

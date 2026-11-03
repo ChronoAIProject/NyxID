@@ -12,6 +12,7 @@ import { Bell, Send } from "lucide-react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { OfflineBanner } from "../../components/OfflineBanner";
+import { SkeletonRows } from "../../components/Skeleton";
 import { TelegramLinkModal } from "../../components/TelegramLinkModal";
 import {
   ToastOverlay,
@@ -75,6 +76,7 @@ export function NotificationSettingsScreen(
   const {
     data: notifSettings,
     isLoading: isNotifLoading,
+    isError: isNotifError,
     refetch: refetchNotifSettings,
   } = useQuery({
     queryKey: ["account", "notificationSettings"],
@@ -336,7 +338,14 @@ export function NotificationSettingsScreen(
         )}
         {isOffline ? (
           <Text style={styles.note}>Requires network connection</Text>
-        ) : isNotifLoading || !notifSettings ? (
+        ) : isNotifLoading || (!notifSettings && !isNotifError) ? (
+          <SkeletonRows
+            rows={2}
+            title
+            accessibilityLabel="Loading notification settings"
+          />
+        ) : !notifSettings ? (
+          // No error UI yet: a failed first load keeps its old placeholder.
           <Text style={styles.note}>Loading...</Text>
         ) : (
           <>

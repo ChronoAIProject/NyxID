@@ -4,6 +4,7 @@ import {
   SettingsGroup,
   SettingsRow,
 } from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
 import { Notice } from "../../components/workspace/WorkspaceUI";
 import { requestJson } from "../../lib/api/http";
 import { desktopEntryParams, desktopMetadataSchema } from "./desktopEntry";
@@ -73,13 +74,22 @@ export function MachineDesktopEntries({
     display === "dev" ? "Developer" : "Secure";
   if (query.error)
     return <Notice tone="error" message={machineError(query.error)} />;
+  if (query.isPending)
+    return (
+      <SkeletonRows
+        rows={1}
+        icon={false}
+        detail={false}
+        title
+        accessibilityLabel="Checking desktop sessions"
+      />
+    );
   return (
     <SettingsGroup
       title="Desktop"
       inset={false}
       footer="Viewing leaves the task running. Desktop availability is checked when opened."
     >
-      {query.isPending && <SettingsRow label="Checking desktop sessions…" />}
       {query.data?.rows.map((row) => (
         <SettingsRow
           key={row.session_id}

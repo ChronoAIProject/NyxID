@@ -210,6 +210,7 @@ function setup({
     },
     "../../components/GrantCard": { GrantCard: "GrantCard" },
     "../../components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../hooks/useNetworkStatus": {
       useNetworkStatus: () => ({
         isConnected: connected,
@@ -547,6 +548,34 @@ test("grant rows resolve brands and uploaded images from already-loaded connecti
     assert.equal(only.props.last, list.props.data.length === 1);
     assert.equal(unknown.props.iconUrl, undefined);
     assert.ok(env.calls.every((call) => call.method !== "getConnections"));
+  } finally {
+    env.unmount();
+  }
+});
+
+test("approval signals refresh silently; only the user's own Refresh tap shows its spinner", async () => {
+  const env = setup();
+  try {
+    const gate = deferred<void>();
+    const query = env.queries.get("pending");
+    const refetch = query.refetch;
+    query.refetch = async (...args: unknown[]) => {
+      await refetch(...args);
+      await gate.promise;
+    };
+    env.harness.render();
+    env.signal();
+    env.harness.flush();
+    assert.ok(env.calls.some((item) => item.method === "refresh:pending"));
+    assert.equal(env.overview().props.refreshing, false);
+    assert.equal(env.overview().props.pulling, false);
+    env.overview().props.onRefresh();
+    env.harness.flush();
+    assert.equal(env.overview().props.refreshing, true);
+    assert.equal(env.overview().props.pulling, false);
+    gate.resolve();
+    await env.harness.settle();
+    assert.equal(env.overview().props.refreshing, false);
   } finally {
     env.unmount();
   }

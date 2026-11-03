@@ -236,6 +236,7 @@ function setup({
       SafeAreaProvider: "SafeAreaProvider",
       SafeAreaView: "SafeAreaView",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["Label", "Notice", "WorkspacePage"].map((name) => [name, name]),
     ),
@@ -880,6 +881,28 @@ test("the latest pinned version is badged and does not offer a redundant latest 
     env.control("Choose exact version").props.onPress();
     assert.equal(env.control("Select version 1.0.0").props.value, "Latest");
     assert.equal(env.calls.filter((call) => call.method === "write").length, 0);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("first loads show skeletons and a background catalog refetch keeps cached results without a loader", () => {
+  const env = setup();
+  try {
+    Object.assign(env.state.get("catalog")!, { isFetching: true });
+    env.harness.render();
+    assert.equal(env.library().props.catalog.loading, false);
+    assert.equal(env.library().props.catalog.items.length, 1);
+    Object.assign(env.state.get("agents")!, { data: undefined, isPending: true });
+    env.harness.render();
+    const skeleton = env
+      .elements()
+      .find((item) => item.props.accessibilityLabel === "Loading agents for skills");
+    assert.equal(skeleton?.type, "SkeletonRows");
+    assert.equal(
+      env.elements().some((item) => item.type === "ActivityIndicator"),
+      false,
+    );
   } finally {
     env.unmount();
   }

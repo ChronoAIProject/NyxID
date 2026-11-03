@@ -3,15 +3,13 @@ import { useQuery } from "@tanstack/react-query";
 import type { ContentScreenProps } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { SegmentControl } from "../../components/SegmentControl";
+import { SkeletonRows } from "../../components/Skeleton";
 import {
   SettingsGroup,
   SettingsRow,
 } from "../../components/settings/SettingsList";
-import {
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { SavedLogins } from "./SavedLogins";
 import { MachineDesktopEntries } from "./MachineDesktopEntries";
 import {
@@ -43,7 +41,6 @@ export function MachinesScreen({
   const selected =
     route.name === "MachineDetail" ? route.params.machineId : undefined;
   const tab = route.name === "Machines" ? route.params?.tab : undefined;
-  const [refreshing, setRefreshing] = useState(false);
   const [handoffError, setHandoffError] = useState<string>();
   // Preserve the web query URL while detail gets real horizontal Back history.
   useLayoutEffect(() => {
@@ -88,15 +85,10 @@ export function MachinesScreen({
       if (runtime.current()) setHandoffError(machineError(cause));
     }
   }
-  async function refresh() {
+  const pull = usePullRefresh(async () => {
     if (!runtime.active || inventory.isFetching) return;
-    setRefreshing(true);
-    try {
-      await inventory.refetch();
-    } finally {
-      setRefreshing(false);
-    }
-  }
+    await inventory.refetch();
+  });
   if (!selected && tab === "logins") {
     return (
       <SavedLogins
@@ -117,8 +109,8 @@ export function MachinesScreen({
     <WorkspacePage
       title={node?.name ?? "Machines"}
       showHeading={false}
-      refreshing={refreshing}
-      onRefresh={() => void refresh()}
+      refreshing={pull.refreshing}
+      onRefresh={pull.onRefresh}
       contentStyle={machinePageContent}
     >
       {!selected && (
@@ -131,7 +123,21 @@ export function MachinesScreen({
         />
       )}
       {handoffError && <Notice tone="error" message={handoffError} />}
-      {inventory.isPending && <Label muted>Loading machines…</Label>}
+      {inventory.isPending &&
+        (selected ? (
+          <SkeletonRows
+            rows={4}
+            icon={false}
+            detail={false}
+            accessibilityLabel="Loading machines"
+          />
+        ) : (
+          <SkeletonRows
+            rows={2}
+            icon={false}
+            accessibilityLabel="Loading machines"
+          />
+        ))}
       {inventory.error && (
         <Notice tone="error" message={machineError(inventory.error)} />
       )}

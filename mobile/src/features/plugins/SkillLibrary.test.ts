@@ -116,6 +116,7 @@ function setup(overrides: Record<string, unknown> = {}) {
       SettingsGroup: "SettingsGroup",
       SettingsRow: "SettingsRow",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": { Notice: "Notice" },
     "../../components/SegmentControl": {
       SegmentControl: renderSegmentControl,
@@ -318,12 +319,15 @@ test("Added rows preserve original identity and exact version in accessibility w
 test("initial loading and unknown state never claim no skills or show a false known count", () => {
   const state = { items: [], known: false, loading: true, onRetry: () => {} };
   const added = setup({ added: state });
-  added.control("Loading added skills");
+  assert.equal(added.control("Loading added skills").type, "SkeletonRows");
   assert.equal(added.hasText("No skills added yet"), false);
   assert.equal(added.hasText("Added · 0"), false);
   assert.equal(added.hasText("0 of 16"), false);
   const discover = setup({ catalog: state });
-  discover.control("Searching skill catalog");
+  assert.equal(
+    discover.control("Searching skill catalog").type,
+    "SkeletonRows",
+  );
   assert.equal(discover.hasText("No skills found"), false);
 });
 
@@ -408,6 +412,8 @@ test("catalog pagination has explicit boundaries, busy state and no Added pagina
     2,
     "cached results remain readable during refresh",
   );
+  assert.equal(busy.hasText("Searching skill catalog"), false);
+  assert.throws(() => busy.control("Searching skill catalog"));
   // Paging belongs to the catalog section only; Added is never paged.
   assert.match(setup({ totalPages: 4 }).text(), /Page 1 \/ 4/);
 });

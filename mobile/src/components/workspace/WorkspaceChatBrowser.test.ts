@@ -22,6 +22,7 @@ type Props = {
   refreshDisabled?: boolean;
   refreshLabel?: string;
   emptyText?: string;
+  loadingLabel?: string;
   footer?: Element;
   primaryAction?: {
     label: string;
@@ -141,6 +142,7 @@ function setup(
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../theme/designTokens": { fonts: {} },
     "./workspaceChatListModel": { searchDrawerItems },
+    "../Skeleton": { SkeletonRows: "SkeletonRows" },
   });
   const { WorkspaceChatBrowser } = harness.load(
     fileURLToPath(new URL("./WorkspaceChatBrowser.tsx", import.meta.url)),
@@ -483,5 +485,15 @@ test("Android completes child dismissal after the hidden state commits without r
   assert.equal(env.counts().dismissed, 1);
   env.harness.render();
   assert.equal(env.counts().dismissed, 1);
+  env.harness.unmount();
+});
+
+test("a pending first load shows a row skeleton instead of the empty text", () => {
+  const env = setup({ items: [], loadingLabel: "Loading chats" });
+  const empty = env.list().props.ListEmptyComponent;
+  assert.equal(empty.type, "SkeletonRows");
+  assert.equal(empty.props.accessibilityLabel, "Loading chats");
+  env.update({ loadingLabel: undefined });
+  assert.match(content(env.list().props.ListEmptyComponent), /No chats yet/);
   env.harness.unmount();
 });

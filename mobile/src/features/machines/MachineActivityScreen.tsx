@@ -6,11 +6,9 @@ import {
   SettingsGroup,
   SettingsRow,
 } from "../../components/settings/SettingsList";
-import {
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { machinesApi } from "../../lib/api/machinesApi";
 import { machineError, machineKeys, useMachineRuntime } from "./MachineUI";
 import { formatMachineDate, machinePageContent } from "./MachinePresentation";
@@ -79,14 +77,15 @@ export function MachineActivityScreen({
         ? "Unattributed"
         : (agents.find((agent) => agent.id === filter)?.label ??
           "Selected agent");
+  const pull = usePullRefresh(() => {
+    if (runtime.active) return query.refetch();
+  });
   return (
     <WorkspacePage
       title="Machine activity"
       showHeading={false}
-      refreshing={query.isRefetching}
-      onRefresh={() => {
-        if (runtime.active) void query.refetch();
-      }}
+      refreshing={pull.refreshing}
+      onRefresh={pull.onRefresh}
       contentStyle={machinePageContent}
     >
       <SettingsGroup
@@ -107,7 +106,14 @@ export function MachineActivityScreen({
           }
         />
       </SettingsGroup>
-      {query.isPending && <Label muted>Loading machine activity…</Label>}
+      {query.isPending && (
+        <SkeletonRows
+          rows={4}
+          icon={false}
+          title
+          accessibilityLabel="Loading machine activity"
+        />
+      )}
       {query.error && (
         <Notice tone="error" message={machineError(query.error)} />
       )}

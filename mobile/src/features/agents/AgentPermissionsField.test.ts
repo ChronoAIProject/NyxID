@@ -122,6 +122,7 @@ function setup(
       SafeAreaProvider: "SafeAreaProvider",
       SafeAreaView: "SafeAreaView",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": {
       ActionButton: "ActionButton",
       Card: "Card",
@@ -505,7 +506,7 @@ test("disabled permissions stay read only and connection loading/errors preserve
   assert.equal(state.checkbox("github").props.disabled, true);
   assert.equal(state.label("Read account information").props.disabled, true);
   assert.equal(state.action().props.disabled, true);
-  assert.ok(state.label("Loading services"));
+  assert.equal(state.label("Loading services").type, "SkeletonRows");
   assert.equal(
     state
       .all()

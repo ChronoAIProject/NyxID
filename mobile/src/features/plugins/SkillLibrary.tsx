@@ -1,5 +1,4 @@
 import {
-  ActivityIndicator,
   Keyboard,
   Pressable,
   StyleSheet,
@@ -11,6 +10,7 @@ import {
   SettingsGroup,
   SettingsRow,
 } from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
 import { Notice } from "../../components/workspace/WorkspaceUI";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
@@ -114,9 +114,10 @@ export function SkillLibrary({
         </>
       )}
       {added.loading && (
-        <ActivityIndicator
+        <SkeletonRows
+          rows={2}
+          title
           accessibilityLabel="Loading added skills"
-          color={colors.primary}
         />
       )}
       {filtered.length ? (
@@ -189,10 +190,11 @@ export function SkillLibrary({
           </SettingsGroup>
         )
       )}
-      {catalog.loading && (
-        <ActivityIndicator
+      {catalog.loading && !catalog.items.length && (
+        <SkeletonRows
+          rows={4}
+          title
           accessibilityLabel="Searching skill catalog"
-          color={colors.primary}
         />
       )}
       {catalog.known && totalPages > 1 && (

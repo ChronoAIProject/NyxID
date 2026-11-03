@@ -67,6 +67,7 @@ function setup() {
     "../../components/ChallengeCard": {
       ApprovalDecisionPair: "ApprovalDecisionPair",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/FullScreenLoading": {
       FullScreenLoading: "FullScreenLoading",
     },

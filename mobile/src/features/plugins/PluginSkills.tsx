@@ -14,6 +14,7 @@ import {
   SettingsGroup,
   SettingsRow,
 } from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
 import {
   Label,
@@ -135,9 +136,10 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
         />
       )}
       {agents.isPending && (
-        <ActivityIndicator
+        <SkeletonRows
+          rows={3}
+          title
           accessibilityLabel="Loading agents for skills"
-          color={colors.primary}
         />
       )}
       {agents.isError && (
@@ -193,7 +195,7 @@ export function PluginSkillPage({
       contentStyle={styles.grouped}
     >
       {agent.isPending && (
-        <ActivityIndicator accessibilityLabel="Loading skill agent" />
+        <SkeletonRows rows={3} title accessibilityLabel="Loading skill agent" />
       )}
       {agent.isError && <Notice tone="error" message={failure(agent.error)} />}
       {agent.data &&
@@ -441,7 +443,9 @@ function AgentSkillsManager({
           catalog={{
             items: waitingForQuery ? [] : (catalog.data?.items ?? []),
             known: !waitingForQuery && Boolean(catalog.data),
-            loading: waitingForQuery || catalog.isPending || catalog.isFetching,
+            // A background refetch keeps the cached results; only a new
+            // search or page (no data yet) shows the result skeleton.
+            loading: waitingForQuery || catalog.isPending,
             error:
               !waitingForQuery && catalog.isError
                 ? failure(catalog.error)
@@ -671,10 +675,12 @@ function AgentSkillsManager({
           )}
           {view === "versions" && detail && (
             <>
-              {versions.isFetching && (
-                <ActivityIndicator
+              {versions.isPending && (
+                <SkeletonRows
+                  rows={4}
+                  icon={false}
+                  title
                   accessibilityLabel="Loading skill versions"
-                  color={colors.primary}
                 />
               )}
               {versions.isError && (
@@ -848,10 +854,11 @@ function AgentSkillsManager({
           )}
           {view === "history" && (
             <>
-              {history.isFetching && (
-                <ActivityIndicator
+              {history.isPending && (
+                <SkeletonRows
+                  rows={4}
+                  title
                   accessibilityLabel="Loading skill history"
-                  color={colors.primary}
                 />
               )}
               {history.isError && (

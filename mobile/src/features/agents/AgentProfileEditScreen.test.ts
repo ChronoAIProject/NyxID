@@ -73,6 +73,10 @@ function setup(
     "../../components/settings/SettingsHeaderButton": {
       SettingsHeaderButton: "SettingsHeaderButton",
     },
+    "../../components/Skeleton": {
+      SkeletonCards: "SkeletonCards",
+      SkeletonRows: "SkeletonRows",
+    },
     "../../components/workspace/WorkspaceUI": {
       Label: "Label",
       Notice: "Notice",

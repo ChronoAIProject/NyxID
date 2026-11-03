@@ -14,6 +14,7 @@ const nodes = (root: Element): Element[] => [
         : [],
     ),
 ];
+const PENDING = Symbol("pending");
 function setup(
   component: string,
   props: Record<string, unknown>,
@@ -72,10 +73,10 @@ function setup(
       },
     },
     "@tanstack/react-query": {
-      useQuery: ({ queryKey }: { queryKey: string[] }) => ({
-        data: values[queryKey.at(-1)!],
-        refetch,
-      }),
+      useQuery: ({ queryKey }: { queryKey: string[] }) =>
+        values[queryKey.at(-1)!] === PENDING
+          ? { isPending: true, refetch }
+          : { data: values[queryKey.at(-1)!], refetch },
       useQueryClient: () => ({
         invalidateQueries: async (filter: unknown) => {
           calls.push(["invalidate", filter]);
@@ -87,6 +88,7 @@ function setup(
         },
       }),
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["ActionButton", "Card", "Field", "Label", "Notice", "Section"].map(
         (name) => [name, name],
@@ -474,4 +476,36 @@ test("organization join confirmation and queued creation retain their originatin
   await env.harness.settle();
   assert.equal(env.calls.length, 0);
   env.harness.unmount();
+});
+
+test("authorizations and memberships load as skeleton groups, not loading rows", () => {
+  const access = setup(
+    "AccountAuthorizations",
+    { accountId: "owner" },
+    { apps: PENDING, bindings: PENDING },
+  );
+  const skeletons = nodes(access.harness.value()).filter(
+    (node) => node.type === "SkeletonRows",
+  );
+  assert.deepEqual(
+    skeletons.map((node) => node.props.accessibilityLabel),
+    ["Loading authorized apps", "Loading broker authorizations"],
+  );
+  assert.equal(
+    nodes(access.harness.value()).some((node) =>
+      /Loading/.test(String(node.props.label)),
+    ),
+    false,
+  );
+  access.harness.unmount();
+  const orgs = setup(
+    "AccountOrganizations",
+    { accountId: "owner", email: "person@example.test" },
+    { owner: PENDING },
+  );
+  const skeleton = nodes(orgs.harness.value()).find(
+    (node) => node.type === "SkeletonRows",
+  );
+  assert.equal(skeleton?.props.accessibilityLabel, "Loading memberships");
+  orgs.harness.unmount();
 });

@@ -4,15 +4,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ContentScreenProps } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { SegmentControl } from "../../components/SegmentControl";
+import { SkeletonRows } from "../../components/Skeleton";
 import {
   SettingsGroup,
   SettingsRow,
 } from "../../components/settings/SettingsList";
-import {
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { machinesApi } from "../../lib/api/machinesApi";
 import {
   machineWebPath,
@@ -76,14 +74,15 @@ export function SavedLogins({
     if (!runtime.current()) return;
     setRefreshError(result.error ? machineError(result.error) : undefined);
   }
+  const pull = usePullRefresh(async () => {
+    if (runtime.active) await refresh();
+  });
   return (
     <WorkspacePage
       title="Saved logins"
       showHeading={false}
-      refreshing={logins.isRefetching}
-      onRefresh={() => {
-        if (runtime.active) void refresh();
-      }}
+      refreshing={pull.refreshing}
+      onRefresh={pull.onRefresh}
       contentStyle={machinePageContent}
     >
       <SegmentControl
@@ -94,7 +93,9 @@ export function SavedLogins({
         }}
       />
       {handoffError && <Notice tone="error" message={handoffError} />}
-      {logins.isPending && <Label muted>Loading saved logins…</Label>}
+      {logins.isPending && (
+        <SkeletonRows rows={3} accessibilityLabel="Loading saved logins" />
+      )}
       {logins.error && (
         <Notice tone="error" message={machineError(logins.error)} />
       )}
@@ -171,6 +172,9 @@ export function SavedLoginScreen({
       setRefreshError(undefined);
     }
   }
+  const pull = usePullRefresh(async () => {
+    if (!write.busy && write.active) await refresh();
+  });
   function remove(target: SavedLogin) {
     void write.run(async (current) => {
       await machinesApi.removeLogin(target, current);
@@ -203,13 +207,18 @@ export function SavedLoginScreen({
     <WorkspacePage
       title={login?.label ?? "Saved login"}
       showHeading={false}
-      refreshing={logins.isRefetching}
-      onRefresh={() => {
-        if (!write.busy && write.active) void refresh();
-      }}
+      refreshing={pull.refreshing}
+      onRefresh={pull.onRefresh}
       contentStyle={machinePageContent}
     >
-      {logins.isPending && <Label muted>Loading saved login…</Label>}
+      {logins.isPending && (
+        <SkeletonRows
+          rows={4}
+          icon={false}
+          detail={false}
+          accessibilityLabel="Loading saved login"
+        />
+      )}
       {logins.error && (
         <Notice tone="error" message={machineError(logins.error)} />
       )}

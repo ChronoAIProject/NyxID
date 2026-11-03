@@ -8,11 +8,8 @@ import {
   SettingsMenuRow,
   SettingsRow,
 } from "../../components/settings/SettingsList";
-import {
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { machinesApi } from "../../lib/api/machinesApi";
 import {
   confirmDiscard,
@@ -60,7 +57,14 @@ export function MachinePolicyScreen({
       showHeading={false}
       contentStyle={machinePageContent}
     >
-      {query.isPending && <Label muted>Loading machine authority…</Label>}
+      {query.isPending && (
+        <SkeletonRows
+          rows={3}
+          icon={false}
+          title
+          accessibilityLabel="Loading machine authority"
+        />
+      )}
       {query.error && (
         <>
           <Notice tone="error" message={machineError(query.error)} />

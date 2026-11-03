@@ -21,6 +21,7 @@ import {
   SettingsRow,
   SettingsTextField,
 } from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
 import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { ApiError } from "../../lib/api/ApiError";
 import { servicesApi } from "../../lib/api/servicesApi";
@@ -444,8 +445,10 @@ export function ServicesScreen({
         {notice && <Notice message={notice} tone="success" />}
         {error && <Notice message={error} tone="error" />}
         {managementTab !== "history" && detail.isPending && (
-          <ActivityIndicator
-            color={colors.primary}
+          <SkeletonRows
+            rows={4}
+            icon={false}
+            title
             accessibilityLabel="Loading connection"
           />
         )}
@@ -826,10 +829,7 @@ export function ServicesScreen({
         contentStyle={styles.grouped}
       >
         {catalog.isPending ? (
-          <ActivityIndicator
-            accessibilityLabel="Loading service"
-            color={colors.primary}
-          />
+          <SkeletonRows rows={1} accessibilityLabel="Loading service" />
         ) : (
           <Notice
             message={
@@ -900,10 +900,7 @@ export function ServicesScreen({
         style={styles.tabs}
       />
       {current.isPending && (
-        <ActivityIndicator
-          accessibilityLabel="Loading services"
-          color={colors.primary}
-        />
+        <SkeletonRows rows={5} title accessibilityLabel="Loading services" />
       )}
       {current.isError && (
         <>

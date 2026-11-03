@@ -176,10 +176,15 @@ export function setupSettingsScreen(
     "../../components/DynamicTypeText": dynamicText,
     "../DynamicTypeText": dynamicText,
     "../../components/ScreenContainer": screenContainer,
+    "../workspace/ScrollEdgeFades": { PageScrollView: "ScrollView" },
     "../ScreenContainer": screenContainer,
     "../../components/settings/SettingsList": settingsList,
     "../../components/SegmentControl": { SegmentControl: renderSegmentControl },
     "../../components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
+    "../../components/Skeleton": {
+      SkeletonRows: "SkeletonRows",
+      SkeletonCards: "SkeletonCards",
+    },
     "../../components/TelegramLinkModal": {
       TelegramLinkModal: "TelegramLinkModal",
     },

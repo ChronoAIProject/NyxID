@@ -222,6 +222,7 @@ function setup(
         scroll: (offset: number) => events.push(["fade-scroll", offset]),
       }),
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
@@ -717,6 +718,12 @@ test("empty primary NyxBot uses home while specialists and contextual drafts kee
   x.harness.render();
   assert.doesNotMatch(welcome(), /NyxBot/);
   assert.match(welcome(), /How can I help\?/);
+  x.assistant.loading = true;
+  x.harness.render();
+  const empty = x.all().find((node) => node.type === "FlatList")!.props
+    .ListEmptyComponent;
+  assert.equal(empty.type, "SkeletonRows");
+  assert.equal(empty.props.accessibilityLabel, "Loading messages");
   x.harness.unmount();
 });
 
