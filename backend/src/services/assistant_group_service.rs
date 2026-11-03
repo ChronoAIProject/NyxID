@@ -649,6 +649,7 @@ pub async fn append_following(
                     agent_name: agent_name.clone(),
                     text: text.clone(),
                     recipient_agent_ids: recipients.clone(),
+                    mentioned_participant_ids: vec![],
                     created_at: now,
                 };
                 db.collection::<GroupMessage>(MESSAGES)
@@ -761,6 +762,7 @@ pub async fn append_with_recipients(
         agent_name: agent.map(|agent| agent.name.clone()),
         text: text.into(),
         recipient_agent_ids: recipients.to_vec(),
+        mentioned_participant_ids: vec![],
         created_at: now,
     };
     db.collection::<GroupMessage>(MESSAGES)
@@ -796,7 +798,7 @@ pub async fn messages(
 }
 
 /// Mention tokens, with the same word-boundary rule as the web composer.
-fn mention_tokens(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn mention_tokens(text: &str) -> impl Iterator<Item = &str> {
     text.match_indices('@').filter_map(|(index, _)| {
         if text[..index]
             .chars()

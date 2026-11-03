@@ -701,6 +701,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
         agent_name: None,
         text: "done".into(),
         recipient_agent_ids: Vec::new(),
+        mentioned_participant_ids: vec![],
         created_at: Utc::now(),
     };
     f.state

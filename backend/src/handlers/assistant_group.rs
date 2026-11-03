@@ -31,6 +31,8 @@ use super::assistant_team::{Pool, Started, start_server_turn, team_pool_limit};
 pub struct GroupMemberResponse {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mention_handle: Option<String>,
     pub(crate) display_name: Option<String>,
     pub(crate) kind: AgentKind,
     pub(crate) destroyed: bool,
@@ -88,6 +90,7 @@ pub struct GroupMessageResponse {
     agent: Option<GroupAgentRef>,
     text: String,
     recipient_agent_ids: Vec<String>,
+    mentioned_participant_ids: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -120,6 +123,7 @@ pub(crate) fn message_response(
         agent,
         text: row.text,
         recipient_agent_ids: row.recipient_agent_ids,
+        mentioned_participant_ids: row.mentioned_participant_ids,
         created_at: row.created_at,
     }
 }
@@ -145,6 +149,7 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
         members: members
             .iter()
             .map(|agent| GroupMemberResponse {
+                mention_handle: None,
                 unavailable_reason: None,
                 id: agent.id.clone(),
                 name: agent.name.clone(),

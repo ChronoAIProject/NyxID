@@ -784,6 +784,7 @@ export const ASSISTANT_GROUP_NAME_MAX = 60;
 
 export const assistantGroupMemberSchema = z.object({
   id: z.string(),
+  mention_handle: z.string().optional(),
   name: z.string(),
   display_name: z.string().nullable().optional(),
   kind: assistantAgentKindSchema,
@@ -797,7 +798,7 @@ export const assistantGroupMemberSchema = z.object({
 });
 export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
 
-export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string() });
+export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string(), handle: z.string().optional() });
 
 export const assistantGroupSchema = z.object({
   collaboration: collaborationGroupSchema.optional(),
@@ -837,6 +838,7 @@ export const assistantGroupMessageSchema = z.object({
     .default(null),
   text: z.string(),
   recipient_agent_ids: z.array(z.string()).optional(),
+  mentioned_participant_ids: z.array(z.string()).optional(),
   created_at: z.string(),
 });
 export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;

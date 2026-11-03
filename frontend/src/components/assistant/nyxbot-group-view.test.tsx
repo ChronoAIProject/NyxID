@@ -67,6 +67,7 @@ vi.mock("@/components/assistant/nyxbot-group-forms", () => ({
 vi.mock("@/components/assistant/upload-composer", () => ({
   UploadComposer: (props: {
     disabled?: boolean;
+    placeholder?: string;
     mentions?: readonly { id: string; name: string; shared?: boolean }[];
     recipients?: ReactNode;
     onContentChange?: (content: string) => void;
@@ -79,6 +80,7 @@ vi.mock("@/components/assistant/upload-composer", () => ({
         {props.recipients}
         <textarea
           aria-label="Message"
+          placeholder={props.placeholder}
           disabled={props.disabled}
           value={text}
           onChange={(event) => {
@@ -492,6 +494,43 @@ describe("collaboration participant composer", () => {
     group = makeGroup([]);
     group.members = [{ ...group.members[1]!, display_name: "Office Agent", unavailable: true, unavailable_reason: "not_shared_with_you", owner_name: "Share Ops" }];
     group.collaboration = { version: 1, creator_user_id: "someone-else", membership_revision: 1, history_disclosure: "Public history", can_manage: false, your_request_ids: [], transfer_to_user_id: null, guest_access: [{ agent_id: RESEARCHER, enabled: false, revision: 1, can_enable: false, can_disable: false, can_request: true, lane: null }], proposals: [], invites: [] };
+  });
+  it("lists people and agents and suppresses sticky agents for a people-only draft", async () => {
+    group.members = [{ ...group.members[0]!, unavailable: false }];
+    group.default_recipient_ids = [RESEARCHER];
+    group.participants = [{ id: "shining", display_name: "Shining", handle: "person-0123456789abcdef" }];
+    render(<QueryClientProvider client={new QueryClient()}><NyxAgentGroupPage groupId={group.id} mock={false} /></QueryClientProvider>);
+    expect(screen.getByPlaceholderText("Message the group — @mention a person or agent")).toBeVisible();
+    expect(shownMentions.map((m) => m.id)).toEqual([RESEARCHER, "shining"]);
+    await type("@person-0123456789abcdef hello");
+    expect(pills()).toEqual([]);
+    await send();
+    expect(post).toHaveBeenLastCalledWith({ text: "@person-0123456789abcdef hello", attachmentIds: [], recipientAgentIds: [] });
+    expect(pills()).toEqual(["Office Agent"]);
+    await type("@person-0123456789abcdef @researcher help");
+    await send();
+    expect(post).toHaveBeenLastCalledWith({ text: "@person-0123456789abcdef @researcher help", attachmentIds: [], recipientAgentIds: [RESEARCHER] });
+  });
+  it("renders current and unknown UUID mentions as chips in every public message role", () => {
+    const member = { id: RESEARCHER, name: "office", display_name: "Office Agent", kind: "specialist" as const, destroyed: false, working: false, mention_handle: "agent-0123456789abcdef" };
+    const unknown = "00000000-0000-4000-8000-000000000099";
+    const message: AssistantGroupMessage = { id: "ids", seq: 1, role: "agent", agent: member, text: `Ask @${RESEARCHER} and @${unknown}.`, created_at: "2026-11-03T00:00:00Z" };
+    const view = render(<GroupMessageRow groupId={group.id} message={message} names={[]} members={[member]} onOpenAgent={() => undefined} />);
+    for (const role of ["agent", "user", "notice"] as const) {
+      view.rerender(<GroupMessageRow groupId={group.id} message={{ ...message, role }} names={[]} members={[member]} onOpenAgent={() => undefined} />);
+      expect(screen.getByText("@Office Agent")).toHaveAttribute("data-group-mention");
+      expect(screen.getByText("@unknown member")).toHaveAttribute("data-group-mention");
+      expect(view.container).not.toHaveTextContent(RESEARCHER);
+      expect(view.container).not.toHaveTextContent(unknown);
+    }
+  });
+  it("renders resolved people chips in human and agent messages", () => {
+    const participants = [{ id: "shining", display_name: "Shining", handle: "person-0123456789abcdef" }];
+    const message: AssistantGroupMessage = { id: "mention", seq: 1, role: "user", agent: null, text: "@person-0123456789abcdef hello", mentioned_participant_ids: ["shining"], created_at: "2026-11-03T00:00:00Z" };
+    const view = render(<GroupMessageRow groupId={group.id} message={message} names={[]} participants={participants} onOpenAgent={() => undefined} />);
+    expect(screen.getByLabelText("Mentioned people")).toHaveTextContent("@Shining");
+    view.rerender(<GroupMessageRow groupId={group.id} message={{ ...message, role: "agent", agent: { id: RESEARCHER, name: "researcher", kind: "specialist" } }} names={[]} participants={participants} onOpenAgent={() => undefined} />);
+    expect(screen.getByLabelText("Mentioned people")).toHaveTextContent("@Shining");
   });
   it("enables people-only chat without any usable agent and retains server display names", async () => {
     render(<QueryClientProvider client={new QueryClient()}><NyxAgentGroupPage groupId={group.id} mock={false} /></QueryClientProvider>);

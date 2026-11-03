@@ -438,6 +438,9 @@ pub fn base_prompt(
             ));
         }
     }
+    if row.collaboration.is_some() {
+        prompt.push_str("\n\nIn this collaboration group, address participants and agents only by their public @handles in the current turn roster, never by account or agent IDs. Only current group members are targets; never use a private roster. Images on the original request may be supplied as image input in any lane; availability notices are authoritative. Never claim to see an image that was not delivered.");
+    }
     if row.guest_turn {
         prompt.push_str(guest_note(row.is_subagent()));
     } else {
@@ -2629,7 +2632,9 @@ pub(crate) async fn begin_owner_turn_in_session(
         super::assistant_upload_retention::settled_in_session(
             db,
             session,
-            user_id,
+            row.collaboration
+                .as_ref()
+                .map_or(user_id, |b| b.original_requester_id.as_str()),
             &id,
             &old.turn_id,
         )
@@ -2846,9 +2851,18 @@ pub(crate) async fn begin_owner_turn_in_session(
                 .await?;
         }
     }
+    // Collaboration notes include up to 16 bounded public participant labels
+    // and eight group agents. Preserve the full roster without widening private notes.
+    let note_limit = if row.collaboration.is_some() {
+        6000
+    } else {
+        1200
+    };
     let note = match (start.note.as_deref(), retry.as_ref()) {
-        (Some(note), Some(retry)) => Some(format!("{}\n\n{}", excerpt(note, 1200), retry.note)),
-        (Some(note), None) => Some(excerpt(note, 1200)),
+        (Some(note), Some(retry)) => {
+            Some(format!("{}\n\n{}", excerpt(note, note_limit), retry.note))
+        }
+        (Some(note), None) => Some(excerpt(note, note_limit)),
         (None, Some(retry)) => Some(retry.note.clone()),
         (None, None) => None,
     };
@@ -3107,7 +3121,11 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
     }
-    if start.guest && (!start.attachment_ids.is_empty() || !start.channel_uploads.is_empty()) {
+    if start.guest
+        && (!start.attachment_ids.is_empty()
+            || !start.channel_uploads.is_empty()
+            || (row.collaboration.is_none() && !start.group_attachments.is_empty()))
+    {
         return Err(AppError::Forbidden("Uploads are owner-only".into()));
     }
     if start.channel_uploads.len() + start.attachment_ids.len() + start.group_attachments.len()
@@ -3147,7 +3165,9 @@ pub(crate) async fn begin_owner_turn_in_session(
     Box::pin(super::assistant_upload_retention::used_in_turn(
         db,
         session,
-        user_id,
+        row.collaboration
+            .as_ref()
+            .map_or(user_id, |b| b.original_requester_id.as_str()),
         &id,
         turn_id,
         &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
@@ -4065,7 +4085,8 @@ async fn finish_turn_inner(
                     .insert_one(message)
                     .session(&mut *session)
                     .await?;
-                Box::pin(super::assistant_upload_retention::settled_in_session(&db,session,&row.user_id,&row.id,&turn_id)).await?;
+                let upload_owner=row.collaboration.as_ref().map_or(row.user_id.as_str(), |b|b.original_requester_id.as_str());
+                Box::pin(super::assistant_upload_retention::settled_in_session(&db,session,upload_owner,&row.id,&turn_id)).await?;
                 collection
                     .replace_one(doc! {"_id": &row.id, "user_id": &row.user_id}, current)
                     .session(&mut *session)
@@ -5721,6 +5742,18 @@ pub async fn recap(
             Some(50),
         )
         .await?;
+    }
+    if let Some(binding) = &row.collaboration {
+        let access = super::collaboration_group_service::identity::load(
+            db,
+            &binding.original_requester_id,
+            &binding.group_id,
+            Some(&binding.request_id),
+        )
+        .await?;
+        for message in &mut owners {
+            message.text = access.public_text(&message.text);
+        }
     }
     let recap = render_recap_with_owner_total(
         history,

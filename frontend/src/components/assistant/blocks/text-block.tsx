@@ -7,6 +7,8 @@ import {
   type CSSProperties,
 } from "react";
 import type { Root } from "mdast";
+import { mentionTokens } from "@/lib/assistant/nyxbot-mentions";
+import type { InlineMention } from "@/lib/assistant/group-mentions";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -70,6 +72,7 @@ const SANITIZE_SCHEMA = {
   attributes: {
     ...defaultSchema.attributes,
     input: [...(defaultSchema.attributes?.input ?? []), "checked"],
+    span: [...(defaultSchema.attributes?.span ?? []), "dataGroupMention", "title"],
     th: [...(defaultSchema.attributes?.th ?? []), "align"],
     td: [...(defaultSchema.attributes?.td ?? []), "align"],
   },
@@ -142,6 +145,32 @@ function remarkSafeModelContent() {
   };
 }
 
+/** Only server-projected group members become inline chips; names remain text. */
+function remarkMentionChips(mentions: readonly InlineMention[]) {
+  return () => (tree: Root) => {
+    type Node = { type: string; value?: string; children?: Node[]; data?: unknown };
+    function visit(node: Node) {
+      if (!node.children || node.type === "link") return;
+      node.children = node.children.flatMap((child) => {
+        if (child.type !== "text" || !child.value) { visit(child); return [child]; }
+        const text = child.value;
+        const nodes: Node[] = [];
+        let start = 0;
+        for (const token of mentionTokens(text)) {
+          const mention = mentions.find((m) => m.handle.toLowerCase() === token.name.toLowerCase());
+          if (!mention) continue;
+          if (token.start > start) nodes.push({ type: "text", value: text.slice(start, token.start) });
+          nodes.push({ type: "emphasis", children: [{ type: "text", value: `@${mention.label}` }], data: { hName: "span", hProperties: { dataGroupMention: "true", title: `@${mention.handle}` } } });
+          start = token.start + token.name.length + 1;
+        }
+        if (start < text.length) nodes.push({ type: "text", value: text.slice(start) });
+        return nodes;
+      });
+    }
+    visit(tree);
+  };
+}
+
 function tableCellStyle(
   style: CSSProperties | undefined,
   align: string | undefined,
@@ -172,6 +201,9 @@ function MarkdownHeadingTwo({ children }: ComponentProps<"h2">) {
 }
 
 const COMPONENTS: Components = {
+  span: ({ node, children, ...props }) => node?.properties.dataGroupMention
+    ? <span title={props.title} data-group-mention className="inline-block rounded-full border border-border bg-muted px-1.5 py-0.5 text-11">{children}</span>
+    : <span {...props}>{children}</span>,
   p: ({ children }) => (
     <p
       className={`${BLOCK} whitespace-pre-wrap leading-[1.65] text-foreground/90`}
@@ -375,14 +407,16 @@ const urlTransform: MarkdownProps["urlTransform"] = (url) =>
  * under one parent and the `first:mt-0` rhythm still resolves across the seam.
  */
 const MarkdownSegment = memo(function MarkdownSegment({
-  text,
+  text, mentions,
 }: {
   readonly text: string;
+  readonly mentions?: readonly InlineMention[];
 }) {
+  const plugins = useMemo(() => mentions?.length ? [...REMARK_PLUGINS!, remarkMentionChips(mentions)] : REMARK_PLUGINS, [mentions]);
   return (
     <ReactMarkdown
       allowedElements={ALLOWED_ELEMENTS}
-      remarkPlugins={REMARK_PLUGINS}
+      remarkPlugins={plugins}
       rehypePlugins={REHYPE_PLUGINS}
       urlTransform={urlTransform}
       components={COMPONENTS}
@@ -395,6 +429,7 @@ const MarkdownSegment = memo(function MarkdownSegment({
 export const TextBlock = memo(function TextBlock({
   text,
   streaming = false,
+  mentions,
 }: {
   readonly text: string;
   /**
@@ -403,6 +438,7 @@ export const TextBlock = memo(function TextBlock({
    * so the turn reads as "still writing" rather than freezing between chunks.
    */
   readonly streaming?: boolean;
+  readonly mentions?: readonly InlineMention[];
 }) {
   const revealed = useSmoothReveal(text, streaming);
   // Everything above the last settled block is frozen and memoized; only the
@@ -419,7 +455,7 @@ export const TextBlock = memo(function TextBlock({
     >
       {prefix ? (
         <>
-          <MarkdownSegment text={prefix} />
+          <MarkdownSegment text={prefix} mentions={mentions} />
           {/* mdast-util-to-hast separates top-level blocks with a newline text
               node. Two parses each produce their own but none at the seam, so
               this restores it and keeps split output byte-identical to a whole
@@ -427,7 +463,7 @@ export const TextBlock = memo(function TextBlock({
           {"\n"}
         </>
       ) : null}
-      <MarkdownSegment text={tail} />
+      <MarkdownSegment text={tail} mentions={mentions} />
       {streaming ? (
         <span
           aria-hidden

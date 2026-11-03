@@ -11,6 +11,7 @@ import { mentionedNames } from "@/lib/assistant/nyxbot-mentions";
 export interface RecipientMember {
   readonly id: string;
   readonly name: string;
+  readonly mention_handle?: string;
   readonly destroyed?: boolean;
   readonly unavailable?: boolean;
 }
@@ -44,9 +45,9 @@ export function mentionedIds(
   const candidates = live(members);
   return mentionedNames(
     text,
-    [...members.map((member) => member.id), ...members.map((member) => member.name)],
+    [...members.map((member) => member.id), ...members.map((member) => member.name), ...members.flatMap((member) => member.mention_handle ? [member.mention_handle] : [])],
   ).flatMap((name) => {
-    const exact = members.find((row) => row.id.toLowerCase() === name.toLowerCase());
+    const exact = members.find((row) => row.id.toLowerCase() === name.toLowerCase() || row.mention_handle?.toLowerCase() === name.toLowerCase());
     const named = members.filter((row) => row.name.toLowerCase() === name.toLowerCase());
     const member = exact ?? (named.length === 1 ? named[0] : undefined);
     return member && candidates.includes(member) ? [member.id] : [];
@@ -55,6 +56,7 @@ export function mentionedIds(
 
 /** Use an exact ID in the draft when a handle is ambiguous, including unavailable namesakes. */
 export function memberMention(member: RecipientMember, members: readonly RecipientMember[]): string {
+  if (member.mention_handle) return member.mention_handle;
   return members.filter((row) => row.name.toLowerCase() === member.name.toLowerCase()).length > 1
     || members.some((row) => row.id.toLowerCase() === member.name.toLowerCase())
     ? member.id : member.name;

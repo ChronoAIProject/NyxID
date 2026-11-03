@@ -88,6 +88,7 @@ mod fixtures {
         GroupMessage {
             collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: false,
             author_user_id: None,
@@ -833,6 +834,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .insert_one(GroupMessage {
             collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: false,
             author_user_id: None,
@@ -934,6 +936,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .insert_one(GroupMessage {
             collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: true,
             author_user_id: None,
