@@ -181,7 +181,7 @@ Validation runs on save and on read, server-side, and is the authority. It check
 
 All under `/api/v1/assistant/crm`. List and read routes accept `?owner_id=`. Write bodies accept `owner_id`.
 
-- `GET /objects`, `GET /objects/{key}`.
+- `GET /objects`, `GET /objects/{key}`. Both responses include `access: "read" | "work" | "schema"` for the acting person so the UI hides controls it cannot use; the server still enforces every level.
 - `POST /objects/{key}/fields` adds a field. `PATCH /objects/{key}/fields/{field_key}` edits label, required, archived and options (additive, reorder, relabel, archive). Both take `expected_schema_revision` and bump `schema_revision`.
 - `POST /query` (table), `POST /aggregate`.
 - `POST /records` `{ object, values, protect? }`. `GET /records/{id}`. `PATCH /records/{id}` `{ expected_revision, values, protect?, unprotect? }`. `POST /records/{id}/archive` and `/restore` `{ expected_revision }`. `POST /records/{id}/move`.
