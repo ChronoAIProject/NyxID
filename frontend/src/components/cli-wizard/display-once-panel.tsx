@@ -14,6 +14,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Check, Copy, Eye, EyeOff, Lock } from "lucide-react"
+import { WizardHeading } from "./wizard-heading"
 
 interface DisplayOnceProps {
   readonly title: string
@@ -44,14 +45,17 @@ export function DisplayOncePanel({
 }: DisplayOnceProps) {
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
-          <Lock className="h-4 w-4" />
-          <span className="text-12 font-medium">Shown once — save it now</span>
-        </div>
-        <h2 className="font-serif text-28 font-normal">{title}</h2>
-        <p className="text-12 text-muted-foreground">{description}</p>
-      </div>
+      <WizardHeading
+        title={title}
+        eyebrow={
+          <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
+            <Lock className="h-4 w-4" />
+            <span className="text-12 font-medium">Shown once — save it now</span>
+          </div>
+        }
+      >
+        {description}
+      </WizardHeading>
 
       <SecretField label="Secret" value={secret} />
       {secondarySecret ? (
@@ -124,18 +128,19 @@ export function RecoveryCodesPanel({
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
-          <Lock className="h-4 w-4" />
-          <span className="text-sm font-medium">Shown once — save them now</span>
-        </div>
-        <h2 className="font-serif text-28 font-normal">Save your recovery codes</h2>
-        <p className="text-sm text-muted-foreground">
-          Each code is single-use and lets you sign in if you lose access to your
-          authenticator. Store them in a password manager or print them. They are{" "}
-          <strong>not</strong> shown again.
-        </p>
-      </div>
+      <WizardHeading
+        title="Save your recovery codes"
+        eyebrow={
+          <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
+            <Lock className="h-4 w-4" />
+            <span className="text-12 font-medium">Shown once — save them now</span>
+          </div>
+        }
+      >
+        Each code is single-use and lets you sign in if you lose access to your
+        authenticator. Store them in a password manager or print them. They are{" "}
+        <strong>not</strong> shown again.
+      </WizardHeading>
 
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between">

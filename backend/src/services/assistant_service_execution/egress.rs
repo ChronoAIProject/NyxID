@@ -12,7 +12,8 @@ struct AttachmentEgress<'a> {
     db: &'a Database,
     service: &'a crate::services::mcp_service::McpToolService,
     endpoint: &'a crate::services::mcp_service::McpToolEndpoint,
-    binding: &'a crate::services::lark_attachment_tool::Binding,
+    // IM adapters need the same live catalog fence, without a private upload binding.
+    binding: Option<&'a crate::services::lark_attachment_tool::Binding>,
 }
 
 enum EgressAuthority<'a> {
@@ -325,7 +326,9 @@ impl<'a> HttpEgressGuard<'a> {
         endpoint: &'a crate::services::mcp_service::McpToolEndpoint,
         binding: Option<&'a crate::services::lark_attachment_tool::Binding>,
     ) -> Option<Self> {
-        let Some(binding) = binding else { return base };
+        if binding.is_none() && crate::services::lark_im_tool::kind(endpoint).is_none() {
+            return base;
+        }
         let mut guard = base.unwrap_or(Self {
             authority: EgressAuthority::AttachmentOnly,
             attachment: None,
@@ -433,13 +436,22 @@ impl<'a> HttpEgressGuard<'a> {
                 }
             }?;
             if let Some(attachment) = &self.attachment {
-                crate::services::lark_attachment_tool::validate_binding(
-                    attachment.db,
-                    attachment.service,
-                    attachment.endpoint,
-                    attachment.binding,
-                )
-                .await?;
+                if let Some(binding) = attachment.binding {
+                    crate::services::lark_attachment_tool::validate_binding(
+                        attachment.db,
+                        attachment.service,
+                        attachment.endpoint,
+                        binding,
+                    )
+                    .await?;
+                } else {
+                    crate::services::lark_attachment_tool::validate_contract(
+                        attachment.db,
+                        attachment.service,
+                        attachment.endpoint,
+                    )
+                    .await?;
+                }
             }
             if let Some(request) = self.model_request {
                 request.dispatched().await?;

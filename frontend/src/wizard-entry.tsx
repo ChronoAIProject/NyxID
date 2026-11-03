@@ -90,6 +90,7 @@ import { UpstreamErrorBanner } from "@/components/cli-wizard/upstream-error-bann
 import { Button } from "@/components/ui/button"
 import { NotFoundPage } from "@/components/shared/not-found-page"
 import { parseAiKeyPrefill } from "@/schemas/cli-wizard"
+import { WizardHeading } from "@/components/cli-wizard/wizard-heading"
 
 declare global {
   interface Window {
@@ -293,7 +294,20 @@ function WizardApp() {
   }
 
   return (
-    <WizardShell context="local" step={step}>
+    <WizardShell
+      context="local"
+      step={step}
+      // Only the service catalog grid needs the wide card; every form,
+      // result and status page uses the connector/consent column.
+      narrow={
+        !(
+          bootstrap.flow === "ai-key" &&
+          stage.phase === "claimed" &&
+          !slugPicked &&
+          !bootstrap.prefill?.reconnect_key_id
+        )
+      }
+    >
       {shouldShowUpstreamBanner(stage.phase, upstreamError) ? (
         <UpstreamErrorBanner
           kind={upstreamError!}
@@ -479,7 +493,8 @@ export function ConfirmDispatcher({
             onSuccess={onSuccess}
             onSlugPicked={onSlugPicked}
           />
-          <CancelLink onCancel={onCancel} />
+          {/* Centred under the action, like the connector page's Decline. */}
+          <CancelLink onCancel={onCancel} centered />
         </div>
       )
     case "service-account-create":
@@ -670,11 +685,10 @@ function AckingPanel({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="font-serif text-28 font-normal">Service added</h2>
-      <p className="text-sm text-muted-foreground">
+      <WizardHeading title="Service added">
         <code className="font-mono text-xs">{result.slug}</code> is now connected. Check
         your terminal for the final summary.
-      </p>
+      </WizardHeading>
       {completeError ? (
         <div className="flex flex-col gap-2">
           <p className="text-sm text-destructive">
@@ -692,12 +706,9 @@ function AckingPanel({
 function DonePanel() {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Done</h2>
-        <p className="text-sm text-muted-foreground">
-          You can close this tab and return to your terminal.
-        </p>
-      </div>
+      <WizardHeading title="Done">
+        You can close this tab and return to your terminal.
+      </WizardHeading>
     </div>
   )
 }
@@ -705,13 +716,10 @@ function DonePanel() {
 function CancelledPanel() {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Cancelled</h2>
-        <p className="text-sm text-muted-foreground">
-          Nothing was created. You can close this tab — your CLI should
-          already be back at the prompt.
-        </p>
-      </div>
+      <WizardHeading title="Cancelled">
+        Nothing was created. You can close this tab — your CLI should
+        already be back at the prompt.
+      </WizardHeading>
     </div>
   )
 }
@@ -731,31 +739,34 @@ function CancelledPanel() {
 function WizardLostPanel() {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Wizard interrupted
-        </h2>
-        <p className="text-sm text-muted-foreground">
+      <WizardHeading title="Wizard interrupted">
+        <p>
           Lost contact with the <code>nyxid</code> CLI. The CLI may have
           finished and exited successfully, or the connection was
           interrupted before the result reached this page.
         </p>
-        <p className="mt-2 text-sm text-muted-foreground">
+        <p className="mt-2">
           Run <code>nyxid status</code> in your terminal to see whether
           the service was created. If it&rsquo;s missing, re-run the
           wizard command.
         </p>
-      </div>
+      </WizardHeading>
     </div>
   )
 }
 
-function CancelLink({ onCancel }: { readonly onCancel: () => void }) {
+function CancelLink({
+  onCancel,
+  centered = false,
+}: {
+  readonly onCancel: () => void
+  readonly centered?: boolean
+}) {
   return (
     <button
       type="button"
       onClick={onCancel}
-      className="self-start text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+      className={`${centered ? "self-center" : "self-start"} text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground`}
     >
       Cancel and return to terminal
     </button>

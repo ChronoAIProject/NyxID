@@ -266,7 +266,10 @@ async fn send_plan(
             initiated: None,
             fence: None,
         },
-        &ImageSendPlan { attachments },
+        &ImageSendPlan {
+            delegated: Vec::new(),
+            attachments,
+        },
     )
     .await
     .unwrap()
@@ -643,7 +646,10 @@ async fn nyxbot_gateway_expired_event_reference_keeps_images_on_relay_and_text_o
         &row,
         row.channel.as_ref().unwrap(),
         "Useful answer",
-        Some(&ImageSendPlan { attachments }),
+        Some(&ImageSendPlan {
+            delegated: Vec::new(),
+            attachments,
+        }),
     )
     .await;
     let requests = server.received_requests().await.unwrap();
@@ -1318,7 +1324,10 @@ async fn nyxbot_unsupported_or_unanchored_images_record_refusals_without_loading
                 initiated: None,
                 fence: None,
             },
-            &ImageSendPlan { attachments },
+            &ImageSendPlan {
+                delegated: Vec::new(),
+                attachments,
+            },
         )
         .await
         .unwrap();
@@ -2350,6 +2359,7 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
             fence: Some(&chat),
         },
         &ImageSendPlan {
+            delegated: Vec::new(),
             attachments: attachments.clone(),
         },
         Some("cancelled"),
@@ -3804,3 +3814,6 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
     );
     assert_eq!(claim(&f).await.items.len(), 2);
 }
+
+#[path = "nyxbot_delegated_image_tests.rs"]
+mod delegated_image_tests;

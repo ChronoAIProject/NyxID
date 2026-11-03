@@ -1226,7 +1226,9 @@ therefore its own audience, and the parent chat is another.
 
 **Explicit posts and automations.** `include_images` (default false) sends the
 calling turn's own tool images (trusted `TurnAttachment` metadata of the exact
-live turn, `chat_tool_image` only, deduplicated, at most 8) before the text,
+live turn, `chat_tool_image` only, deduplicated, at most 8), plus delegated
+references adopted into this turn and authorized for this original destination,
+before the text,
 each behind a turn-fence recheck and its claim; the text follows a final fence
 recheck and nothing further is sent after Stop or replacement. Multi-turn
 automation runs keep `TriggerRun.image_refs` (at most 16, oldest terminal
@@ -2530,3 +2532,84 @@ owner private chats on bots linked to that exact agent with posting available,
 never to another agent's bot, the guest's reply channel or group. Non-setup or
 unknown refusal reasons never claim an owner was notified. Existing channel send journals and uncertain-send barriers apply.
 See `docs/chat/08-nyxagent-engine.md` for diagnostics and readiness semantics.
+
+### Images from an assigned specialist (#1897)
+
+NyxBot can deliver tool images returned by work it assigned to a specialist.
+The source admission transaction creates an internal assignment binding the
+acting person, source agent/conversation/turn, assigning NyxBot conversation and
+turn, recipient reset generation, and original channel destinations (or the
+trigger's configured chat). Neither tool arguments nor model-written attachment
+IDs create this authority. An idle/guest/non-NyxBot caller creates no image grant.
+
+When publication is accepted, the specialist's settled reply and its exact
+result event commit together. Queue-full, identity-conflict, unavailable-recipient
+and invocation-fence refusals never abort source settlement. The saved reply
+retains a metadata-only `delegated_images.publication_refusal` code; logs contain
+only the code and actor/assignment/source/recipient IDs. Database, transport and
+internal errors still abort/retry the transaction normally.
+
+On a publication refusal the existing after-settlement hook attempts the legacy
+plain-text settlement notice, without delegated image authority. It remains
+best-effort: if the queue is still unavailable, no notice is forced through;
+`text_fallback_unavailable` is logged and the specialist's reply remains stored
+and readable. Images are not adopted from a refused result, and no delivery is
+claimed. This does not introduce a separate outbox or retry worker.
+
+The 20-event queue retains its original FIFO eviction: delegated results are
+evictable just like ordinary notices. They get no reserved capacity, so old
+delegated results cannot permanently starve other producers or force all newer
+ordinary notices to compete for a single slot.
+An evicted result grants no images to the receiver; the specialist's saved reply
+is retained. Accepted source questions are never evicted, and a full queue with
+an incoming or queued invocation continuation retains its existing refusal
+behavior. Queues without delegated results retain their previous FIFO behavior.
+
+`wait_for_subagents` and event admission share the same adoption function and
+serialize on the receiving conversation. They adopt references before removing
+only the observed event IDs; they never remove all events for an agent. Wait
+returns the assigned result rather than replacing it with a newer reply from
+that specialist. Event admission binds references to its own receiving turn;
+the original assigning turn remains part of the provenance.
+
+A serde-defaulted `delegated_images.references` projection on the live turn and
+settled assistant reply retains at most 16 source references. It is separate
+from `attachments`: the image bytes, attachment API and source retention remain
+on the specialist's conversation. No bytes are copied and no expiry is renewed.
+Only trusted `chat_tool_image` metadata from the exact assigned, successfully
+settled source turn qualifies; machine screenshots do not. Model text may only
+name references already adopted into that receiver's live work. NyxID selects
+and sends the authorized projection independently of text written by the model.
+
+Adoption and each provider send recheck source existence, live agent use access
+(including organization/group grants), recipient ownership and NyxBot identity,
+Stop/reset state, source retention and the original destination. Existing chat
+send authorization still applies. Revoked membership, deleted/destroyed source,
+failed/stopped source or recipient, recipient reset, and guest receivers refuse
+images. A direct app message clearing the owner's home-thread reply chat also
+prevents an old image being sent there or redirected to a newly selected chat.
+Changing a source thread's later `report_to`, including a direct message or new
+assignment, neither grants its newer images nor revokes an already completed
+assignment. New assignments have distinct source turns and result events.
+
+Stream and late-delivery paths reload the same settled projection; Event
+replies and explicit posts use it too. Trigger runs retain a separate bounded
+`delegated_image_refs` projection (at most 16) for restart-safe delivery to the
+assignment's configured chat; normal run image budgets and uncertainty barriers
+still apply. Telegram group sends share pacing across owned and delegated
+images. Excess references are omitted without extending retention.
+
+Every delegated send calls the existing v1 compatibility gate and v2 claim
+using the **source** owner, conversation, turn and attachment, plus the resolved
+outbound audience. A direct source send and a delegated send to the same audience
+therefore share one claim. Confirmed, in-progress and uncertain attempts never
+resend. Failed authorization is a pre-send omission and does not spend an image
+claim. Metadata-only image delivery counts retain the receiving turn identity;
+no image bytes, captions or secret material enter logs or audit. Delegated-image
+failure notes do not claim that the image appears under the receiving reply in
+the app.
+
+Old rows default to no assignment/references; old replicas ignore these additive
+fields and retain text-only delegated results. Upgrade all replicas for complete
+delivery coverage. Source lifetime and the existing v1/v2 rollout restrictions
+above are unchanged.

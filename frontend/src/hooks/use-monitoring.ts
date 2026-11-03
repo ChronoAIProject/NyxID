@@ -83,9 +83,9 @@ export function useMonitoring(serviceId: string) {
       authorityGuard();
       return result;
     },
-    onSuccess: (_result, input) => {
-      if (input.kind === "save" || input.kind === "clear")
-        void queryClient.invalidateQueries({ queryKey, exact: true });
+    onSuccess: async (_result, input) => {
+      if (input.kind !== "validate")
+        await queryClient.invalidateQueries({ queryKey, exact: true });
     },
   });
   return { query, operation };

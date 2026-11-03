@@ -560,31 +560,6 @@ function DraftedChatComposer({
     };
   }, [flushDraft]);
 
-  useLayoutEffect(() => {
-    const composer = composerRef.current;
-    const controls = controlsRef.current;
-    const textMeasure = textMeasureRef.current;
-    if (
-      !composer ||
-      !controls ||
-      !textMeasure ||
-      typeof ResizeObserver === "undefined"
-    ) {
-      return;
-    }
-
-    let frame = 0;
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => syncComposerLayout());
-    });
-    observer.observe(composer);
-    observer.observe(controls);
-    observer.observe(textMeasure);
-    if (settingsRef.current) observer.observe(settingsRef.current);
-    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
-  }, [syncComposerLayout]);
-
   // Auto-size until the user resizes. A multiline draft then follows the chosen
   // visible height, including empty space; single-line drafts remain compact.
   const syncEditorHeight = useCallback(() => {
@@ -622,6 +597,28 @@ function DraftedChatComposer({
     element.style.overflowY = natural > height ? "scroll" : "hidden";
     setScrollEdges(getScrollEdges(element));
   }, [resizedTextHeight, expanded, maxTextHeight, previewHeight, savedMaxHeight]);
+
+  useLayoutEffect(() => {
+    const composer = composerRef.current;
+    const controls = controlsRef.current;
+    const textMeasure = textMeasureRef.current;
+    if (!composer || !controls || !textMeasure || typeof ResizeObserver === "undefined") return;
+
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        syncComposerLayout();
+        // Text and spacing changes can alter line height without changing width.
+        syncEditorHeight();
+      });
+    });
+    observer.observe(composer);
+    observer.observe(controls);
+    observer.observe(textMeasure);
+    if (settingsRef.current) observer.observe(settingsRef.current);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, [syncComposerLayout, syncEditorHeight]);
 
   useLayoutEffect(() => {
     syncComposerLayout(content);
@@ -1229,7 +1226,7 @@ function DraftedChatComposer({
                   ref={textMeasureRef}
                   data-composer-text-measure
                   aria-hidden
-                  className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
+                  className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-16 leading-relaxed"
                 >
                   {tokenSegments(content, tokens).map((part, index) =>
                     part.token ? (
@@ -1301,7 +1298,7 @@ function DraftedChatComposer({
                             ? (activePlaceholder ?? "Steer active task...")
                             : (placeholder ?? "Message NyxID Assistant...")
                     }
-                    className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+                    className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-16 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
                   />
                   <div
                     aria-hidden
@@ -1367,7 +1364,7 @@ function DraftedChatComposer({
                     <div
                       data-composer-settings
                       ref={settingsRef}
-                      className="min-w-0 max-w-[72px] sm:max-w-[160px]"
+                      className="min-w-0 max-w-[4.5rem] sm:max-w-[10rem]"
                     >
                       {footerControls}
                     </div>
