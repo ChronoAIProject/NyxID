@@ -340,3 +340,56 @@ test("an allowed card resumes the chat as a continuation bound to that card", as
   assert.match(sent[0].text, /what you did and the result\.$/);
   h.unmount();
 });
+
+test("returning home from another page while a chat was selected does not leave the home loading", async () => {
+  let focused = true;
+  let route: string | undefined = A;
+  const h = hookHarness<ReturnType<typeof useAssistant>>({
+    "./useAssistantLiveRefresh": { useAssistantLiveRefresh: () => {} },
+    "react-native": {
+      AppState: {
+        currentState: "active",
+        addEventListener: () => ({ remove() {} }),
+      },
+    },
+    "@react-navigation/native": { useIsFocused: () => focused },
+    "@react-native-community/netinfo": { addEventListener: () => () => {} },
+    "@tanstack/react-query": {
+      useQuery: () => ({
+        data: {
+          agents: [
+            { id: "nyxbot", kind: "nyxbot", status: "idle", can_use: true },
+          ],
+        },
+      }),
+    },
+    "../../lib/api/agentsApi": { agentsApi: {} },
+    "../../lib/api/assistantApi": {
+      assistantApi: {
+        history: async (id: string) => history(id),
+        list: async () => ({ conversations: [], next_cursor: null }),
+        models: async () => [],
+      },
+      streamAssistantTurn: async () => {},
+    },
+  });
+  const hook = h.load(
+    fileURLToPath(new URL("./useAssistant.ts", import.meta.url)),
+  ).useAssistant as typeof useAssistant;
+  h.mount(() => hook(route));
+  await h.settle();
+  assert.equal(h.value().loading, false);
+  // Another workspace page covers the chat.
+  focused = false;
+  h.render();
+  await h.settle();
+  // The drawer's Chat button refocuses the same screen as NyxBot home.
+  focused = true;
+  route = undefined;
+  h.render();
+  await h.settle();
+  await h.settle();
+  assert.equal(h.value().conversationId, undefined);
+  assert.equal(h.value().loading, false);
+  h.unmount();
+});

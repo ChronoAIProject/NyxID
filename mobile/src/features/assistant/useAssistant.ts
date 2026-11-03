@@ -305,7 +305,10 @@ export function useAssistant(
   }, [active, recover]);
 
   useEffect(() => {
-    if (!conversationId || !active) return;
+    // Refocusing can rerun this with the previous chat in the same commit that
+    // openConversation leaves it; loading that stale chat would strand `loading`.
+    if (!conversationId || !active || selected.current !== conversationId)
+      return;
     let current = true;
     const operation = ++reopenSequence.current;
     const localEpoch = epoch.current;
