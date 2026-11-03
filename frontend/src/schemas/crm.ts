@@ -221,17 +221,19 @@ export const crmAggregateQuerySchema = z.object({
 export const crmAggregateResultSchema = z.object({
   points: z.array(
     z.object({
-      key: z.string().nullable(),
+      key: z.union([z.string(), z.boolean(), z.null()]),
       label: z.string(),
-      value: z.number(),
+      value: z.number().nullable(),
       archived: z.boolean(),
     }),
   ),
   unit: z.object({
     format: z.enum(["count", "number", "currency"]),
-    currency: crmCurrencyCodeSchema.optional(),
+    currency: crmCurrencyCodeSchema
+      .nullish()
+      .transform((value) => value ?? undefined),
   }),
-  total: z.number(),
+  total: z.number().nullable(),
   truncated: z.boolean(),
 });
 
@@ -268,11 +270,25 @@ export const crmActivitySchema = z.object({
   kind: z.enum(["created", "updated", "stage_changed", "note"]),
   actor: crmActorSchema,
   summary: z.object({
-    changed_fields: z.array(crmKeySchema).optional(),
-    from: z.string().nullable().optional(),
-    to: z.string().nullable().optional(),
+    changed_fields: z
+      .array(crmKeySchema)
+      .nullish()
+      .transform((value) => value ?? undefined),
+    from: z
+      .string()
+      .nullish()
+      .transform((value) => value ?? undefined),
+    to: z
+      .string()
+      .nullish()
+      .transform((value) => value ?? undefined),
   }),
-  body: z.string().min(1).max(10_000).optional(),
+  body: z
+    .string()
+    .min(1)
+    .max(10_000)
+    .nullish()
+    .transform((value) => value ?? undefined),
   created_at: crmInstantSchema,
 });
 
@@ -420,8 +436,14 @@ export const crmSavedViewSchema = z.object({
   created_by: crmActorSchema,
   created_at: crmInstantSchema,
   updated_at: crmInstantSchema,
-  valid: z.boolean().optional(),
-  errors: z.array(crmValidationIssueSchema).optional(),
+  valid: z
+    .boolean()
+    .nullish()
+    .transform((value) => value ?? undefined),
+  errors: z
+    .array(crmValidationIssueSchema)
+    .nullish()
+    .transform((value) => value ?? undefined),
 });
 
 export const crmSavedViewsResponseSchema = z.object({

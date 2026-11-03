@@ -326,8 +326,12 @@ export function CrmPipelineBoard({
       </p>
     );
   }
-  const countByStage = new Map(
-    counts.data?.points.map((point) => [point.key, point.value]) ?? [],
+  const countByStage = new Map<string, number>(
+    counts.data?.points.flatMap((point) =>
+      typeof point.key === "string" && typeof point.value === "number"
+        ? [[point.key, point.value] as const]
+        : [],
+    ) ?? [],
   );
   for (const pending of Object.values(moves)) {
     countByStage.set(
@@ -344,7 +348,8 @@ export function CrmPipelineBoard({
   );
   const archivedCount = Math.max(
     0,
-    (counts.data?.total ?? liveCount) - liveCount,
+    (typeof counts.data?.total === "number" ? counts.data.total : liveCount) -
+      liveCount,
   );
   const readOnly = object.data?.access === "read";
   return (

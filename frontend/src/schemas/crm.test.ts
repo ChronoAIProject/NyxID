@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  crmActivitiesResponseSchema,
   crmAggregateQuerySchema,
   crmFieldSchema,
   crmAggregateResultSchema,
@@ -133,5 +134,49 @@ describe("CRM schemas", () => {
       archived: true,
     });
     expect(result.truncated).toBe(true);
+  });
+
+  it("preserves boolean groups and absent numeric measurements", () => {
+    const result = crmAggregateResultSchema.parse({
+      points: [
+        { key: true, label: "Yes", value: null, archived: false },
+        { key: false, label: "No", value: 12, archived: false },
+      ],
+      unit: { format: "number", currency: null },
+      total: null,
+      truncated: false,
+    });
+
+    expect(result.points).toEqual([
+      { key: true, label: "Yes", value: null, archived: false },
+      { key: false, label: "No", value: 12, archived: false },
+    ]);
+    expect(result.unit.currency).toBeUndefined();
+    expect(result.total).toBeNull();
+  });
+
+  it("normalizes null activity optionals", () => {
+    const result = crmActivitiesResponseSchema.parse({
+      activities: [
+        {
+          id: "activity-1",
+          record_id: "record-1",
+          object_key: "company",
+          kind: "created",
+          actor: { kind: "human", user_id: "user-1" },
+          summary: { changed_fields: null, from: null, to: null },
+          body: null,
+          created_at: "2026-11-04T00:00:00Z",
+        },
+      ],
+      next_cursor: null,
+    });
+
+    expect(result.activities[0]?.summary).toEqual({
+      changed_fields: undefined,
+      from: undefined,
+      to: undefined,
+    });
+    expect(result.activities[0]?.body).toBeUndefined();
   });
 });
