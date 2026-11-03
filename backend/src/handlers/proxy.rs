@@ -3317,6 +3317,10 @@ async fn resolve_proxy_execution_inner(
         .extensions()
         .get::<super::agent_skills::OrnnSkillRead>()
         .is_some()
+        || request
+            .extensions()
+            .get::<super::agent_skills::OrnnIdentityRead>()
+            .is_some()
         || pre_resolved
             .as_ref()
             .is_some_and(|target| target.require_identity_assertion);
@@ -4006,10 +4010,14 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
-    let assistant_projection =
+    let mut assistant_projection =
         crate::services::assistant_service_execution::HttpProjection::for_machine(
             machine_ingress.as_ref(),
         );
+    assistant_projection.skill_read = request
+        .extensions()
+        .get::<super::agent_skills::OrnnSkillRead>()
+        .is_some();
     if machine_git {
         let git = machine_ingress
             .as_ref()
@@ -4026,10 +4034,14 @@ async fn execute_resolved_proxy_inner<'a>(
 
     // Dedicated skill reads must retain the person's signed Ornn identity and
     // must never dispatch with a shared catalog credential, even after fallback.
-    if request
+    if (request
         .extensions()
         .get::<super::agent_skills::OrnnSkillRead>()
         .is_some()
+        || request
+            .extensions()
+            .get::<super::agent_skills::OrnnIdentityRead>()
+            .is_some())
         && (master_credential
             || proxy_service::uses_server_held_master(&target)
             || catalog_service_slug.as_deref() != Some("ornn-api")

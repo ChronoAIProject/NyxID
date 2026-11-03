@@ -4,6 +4,10 @@ use super::*;
 /// It is deliberately not deserializable from HTTP headers or MCP arguments.
 #[derive(Clone)]
 pub struct Admission {
+    /// Installed only by the server-internal bound Ornn skill reader. It
+    /// bypasses the specialist's ordinary Ornn grant while retaining the
+    /// owner's exact-connection authority fence.
+    pub(super) bound_skill_read: bool,
     pub(super) shared_detached: Option<crate::models::assistant_sharing::SharedExecution>,
     pub(super) shared_permit: Option<crate::services::shared_agent_consent::Permit>,
     pub(super) connection: String,
@@ -160,17 +164,27 @@ impl Admission {
         if let Some(watch) = &self.async_continuation {
             watch.revalidate(db, &self.chat).await?;
         } else if self.job_id.is_none() {
-            personal_authority(
-                db,
-                &self.chat,
-                "assistant.service_egress",
-                Some(connection),
-                !matches!(
-                    self.operation_identity["kind"].as_str(),
-                    Some("raw_inference" | "legacy_inference")
-                ),
-            )
-            .await?;
+            if self.bound_skill_read {
+                super::selection::bound_skill_authority(
+                    db,
+                    &self.chat,
+                    "assistant.skill_read",
+                    Some(connection),
+                )
+                .await?;
+            } else {
+                personal_authority(
+                    db,
+                    &self.chat,
+                    "assistant.service_egress",
+                    Some(connection),
+                    !matches!(
+                        self.operation_identity["kind"].as_str(),
+                        Some("raw_inference" | "legacy_inference")
+                    ),
+                )
+                .await?;
+            }
         }
         // Owning the guard changes its lifetime, never its personal authority.
         // Managed dispatch still requires the original live turn; dispatched work

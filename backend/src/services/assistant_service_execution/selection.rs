@@ -5,7 +5,7 @@ pub fn live_authority<'a>(
     original: &'a acks::ChatAuthority,
     route: &'a str,
 ) -> futures::future::BoxFuture<'a, AppResult<acks::ChatAuthority>> {
-    Box::pin(async move { reload_authority(db, original, route, None, false, true).await })
+    Box::pin(async move { reload_authority(db, original, route, None, false, false, true).await })
 }
 
 /// Personal legacy execution retains the default-off rollout contract. An
@@ -26,9 +26,26 @@ pub(crate) fn personal_authority<'a>(
             connection,
             require_service_grant,
             false,
+            false,
         )
         .await
     })
+}
+
+/// A bound Ornn package read may use the owner's exact connection even when
+/// the specialist key does not carry an ordinary Ornn service grant.  This is
+/// narrower than the model transport exception: it still runs the normal
+/// owner/org authority, key, turn and revocation fences and is only installed
+/// by the server's bound-skill reader.
+pub(crate) fn bound_skill_authority<'a>(
+    db: &'a Database,
+    original: &'a acks::ChatAuthority,
+    route: &'a str,
+    connection: Option<&'a str>,
+) -> futures::future::BoxFuture<'a, AppResult<acks::ChatAuthority>> {
+    Box::pin(
+        async move { reload_authority(db, original, route, connection, false, true, true).await },
+    )
 }
 
 async fn reload_authority(
@@ -37,6 +54,7 @@ async fn reload_authority(
     route: &str,
     connection: Option<&str>,
     require_service_grant: bool,
+    bound_skill_read: bool,
     require_live: bool,
 ) -> AppResult<acks::ChatAuthority> {
     let key =
@@ -53,6 +71,7 @@ async fn reload_authority(
     // scope exception. Explicit grants still use the organization resource
     // boundary; ordinary MCP/native actions and targetless calls never skip it.
     let implicit_model_transport = !require_service_grant
+        && !bound_skill_read
         && !auth.allow_all_services
         && connection
             .is_some_and(|id| !auth.allowed_service_ids.iter().any(|allowed| allowed == id));

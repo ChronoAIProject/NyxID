@@ -259,6 +259,7 @@ impl AsyncContinuation {
             refusal: None,
             automatic: None,
             admission: Some(Admission {
+                bound_skill_read: false,
                 shared_detached: None,
                 shared_permit: self
                     .watch
