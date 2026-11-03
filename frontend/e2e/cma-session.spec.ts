@@ -157,8 +157,10 @@ test("automatically shows running CMA, streams while minimised, restores, and re
   ).toHaveCount(0);
   const main = await page.getByRole("main").boundingBox();
   const bounds = await panel.boundingBox();
-  expect(bounds!.x).toBeGreaterThanOrEqual(main!.x + main!.width - 1);
-  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(1440 - 12);
+  const preview = (await page.getByRole("complementary", { name: "Preview", exact: true }).boundingBox())!;
+  expect(bounds!.x).toBeCloseTo(preview.x + 12, 0);
+  expect(bounds!.x + bounds!.width).toBeCloseTo(main!.x + main!.width, 0);
+  expect((await composerInput(page).boundingBox())!.x + (await composerInput(page).boundingBox())!.width).toBeLessThanOrEqual(preview.x);
   expect(bounds!.y).toBeGreaterThanOrEqual(main!.y);
   expect(bounds!.height).toBeLessThan(480);
   expect(bounds!.y + bounds!.height).toBeLessThan(main!.y + main!.height - 100);
@@ -350,7 +352,7 @@ test("shows simultaneous CMA sessions and minimises each independently", async (
   await expect(composerInput(page)).toBeVisible();
 });
 
-test("keeps the CMA card beside the resizable machine and usable chat", async ({
+test("stacks CMA and machine cards in one resizable preview column", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -373,14 +375,19 @@ test("keeps the CMA card beside the resizable machine and usable chat", async ({
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await sendMessage(page, "Use GitHub");
   await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
-  const machine = page.getByRole("complementary", { name: "Machine" });
-  await expect(machine.getByRole("region", { name: "Live machine desktop" })).toBeVisible();
+  const preview = page.getByRole("complementary", { name: "Preview", exact: true });
+  const machine = preview.getByRole("region", { name: "Live machine desktop" });
+  await expect(machine).toBeVisible();
   const panel = card(page);
   await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
   const machineBounds = (await machine.boundingBox())!;
   const cmaBounds = (await panel.boundingBox())!;
-  expect(cmaBounds.x).toBeGreaterThanOrEqual(machineBounds.x + machineBounds.width);
-  const divider = page.getByRole("separator", { name: "Resize machine column" });
+  expect(cmaBounds.x).toBeCloseTo(machineBounds.x - 12, 0);
+  expect(cmaBounds.width).toBeCloseTo(machineBounds.width + 24, 0);
+  expect(cmaBounds.y).toBeGreaterThan(machineBounds.y + machineBounds.height);
+  await expect(preview.getByRole("complementary", { name: "CMA sessions", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("separator", { name: "Resize preview column" })).toHaveCount(1);
+  const divider = page.getByRole("separator", { name: "Resize preview column" });
   await divider.focus();
   await page.keyboard.press("ArrowLeft");
   await expect(divider).toHaveAttribute("aria-valuenow", "52");
@@ -388,5 +395,13 @@ test("keeps the CMA card beside the resizable machine and usable chat", async ({
   await panel.getByRole("button", { name: "Minimise CMA session" }).click();
   await expect(machine).toBeVisible();
   await expect(composerInput(page)).toBeInViewport({ ratio: 1 });
+  await page.getByRole("button", { name: "Hide machine", exact: true }).click();
+  await expect(machine).toHaveCount(0);
+  await expect(preview).toBeVisible();
+  await expect(panel.getByRole("status")).toHaveText("Working");
+  await expect(divider).toHaveAttribute("aria-valuenow", "52");
+  await page.getByRole("button", { name: "Show machine", exact: true }).click();
+  await expect(machine).toBeVisible();
+  await panel.getByRole("button", { name: "Maximise CMA session" }).click();
   await page.screenshot({ path: "/tmp/nyxid-cma-with-machine.png" });
 });

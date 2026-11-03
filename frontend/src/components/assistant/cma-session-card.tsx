@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   Check,
   ChevronDown,
@@ -38,19 +38,28 @@ const STATUS_LABELS: Record<CmaSessionStatus, string> = {
 };
 
 export function CmaSessionCards() {
-  const ownerId = useAuthStore((state) => state.user?.id);
-  return ownerId ? (
-    <OwnedCmaSessionCards key={ownerId} ownerId={ownerId} />
-  ) : null;
+  return <CmaSessionObserver>{(cards) => cards}</CmaSessionObserver>;
 }
 
-function OwnedCmaSessionCards({ ownerId }: { readonly ownerId: string }) {
+export function CmaSessionObserver({ children }: {
+  readonly children: (cards: ReactNode) => ReactNode;
+}) {
+  const ownerId = useAuthStore((state) => state.user?.id);
+  return ownerId ? (
+    <OwnedCmaSessionCards key={ownerId} ownerId={ownerId}>{children}</OwnedCmaSessionCards>
+  ) : children(null);
+}
+
+function OwnedCmaSessionCards({ ownerId, children }: {
+  readonly ownerId: string;
+  readonly children: (cards: ReactNode) => ReactNode;
+}) {
   const sessions = useActiveCmaSessions(ownerId);
-  if (!sessions.length) return null;
-  return (
+  if (!sessions.length) return children(null);
+  return children(
     <aside
       aria-label="CMA sessions"
-      className="mx-3 my-3 flex max-h-[min(40dvh,50%)] min-h-0 shrink-0 flex-col gap-3 overflow-y-auto lg:order-2 lg:ml-0 lg:mr-4 lg:mt-4 lg:max-h-[calc(100%-32px)] lg:w-[320px] lg:self-start xl:w-[340px]"
+      className="flex min-h-0 shrink-0 flex-col gap-3"
     >
       {sessions.map((session) => (
         <CmaSessionCard
@@ -83,7 +92,7 @@ function CmaSessionCard({
       aria-label={`CMA session: ${state.title}`}
       data-private="true"
       data-ph-no-capture
-      className="flex max-h-[min(440px,40dvh)] min-h-0 shrink-0 flex-col gap-3 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-12 lg:max-h-[480px]"
+      className="flex max-h-[min(440px,40dvh)] min-h-0 shrink-0 flex-col gap-3 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-12 lg:max-h-[480px] lg:rounded-l-2xl lg:rounded-r-none lg:border-0 lg:shadow-sm"
     >
       <div className="flex shrink-0 items-center gap-2">
         <CmaGlyph className="h-4 w-4 text-muted-foreground" />
@@ -98,7 +107,7 @@ function CmaSessionCard({
           aria-expanded={!collapsed}
           aria-controls={detailsId}
           onClick={() => setMinimised(ownerId, key, !collapsed)}
-          className="px-1.5"
+          className="h-7 w-7 shrink-0 px-0"
         >
           {collapsed ? <Maximize2 /> : <Minimize2 />}
         </Button>

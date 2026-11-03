@@ -427,10 +427,12 @@ orphan window. Device-code and token entry keep their existing setup behavior.
 ## Sidebar and history
 
 Active sessions from the person's connected CMA services automatically appear
-as right-hand status cards. They stream public status and recent action summaries
-independently of NyxBot's turn. The bounded, rounded cards follow the machine
-desktop card design and offer minimise/maximise controls; minimised cards keep
-streaming. Inactive sessions disappear after discovery refreshes. On narrow
+as status cards in the shared right-hand preview column, which also hosts
+machine cards. They stream public status and recent
+action summaries independently of NyxBot's turn. The cards use the machine
+card's docked surface and spacing, share the column's width and resize divider,
+and offer minimise/maximise controls; minimised cards keep streaming.
+Inactive sessions disappear after discovery refreshes. On narrow
 screens the cards sit above chat and the composer remains available.
 The **Across chats** label identifies these as a personal CMA account overview;
 the current activity contract does not link them to a NyxID specialist or task.

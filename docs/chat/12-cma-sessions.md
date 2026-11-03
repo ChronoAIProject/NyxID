@@ -1,6 +1,7 @@
 # Automatic CMA session cards (v1)
 
-Running CMA sessions automatically appear as cards on the right of the assistant.
+Running CMA sessions automatically appear as cards in the assistant's shared
+right-hand preview column, alongside machine cards.
 There is no pin, session picker, or toolbar toggle. The cards show the session
 title, current task status, stream connection, and up to 30 public action
 summaries, newest first. Concurrent sessions have separate cards.
@@ -16,9 +17,12 @@ can appear before that refresh. Failed refreshes retain the last known list;
 they do not imply that work has finished. Each scan follows up to 100 pages of
 50 sessions, deduplicates agent IDs, and rejects repeated cursors.
 
-On desktop the bounded, rounded cards use the machine desktop card's border,
-surface, spacing, and minimise control. Below the `lg` breakpoint, they sit above
-chat in a scrolling area whose height shrinks when the keyboard opens; the
+On desktop CMA joins the existing preview-card stack. Machine and CMA cards
+share one scrolling column, its saved width, and its resize divider. The CMA
+card uses the machine card's docked surface, spacing, shadow, and rounded left
+corners; it does not create another column. Below the `lg` breakpoint, cards use
+the machine's inline border and surface and sit above chat in a scrolling area
+whose height shrinks when the keyboard opens; the
 conversation and composer remain available. **Minimise** retains the title,
 task status, stream connection, and latest action. **Maximise** restores the
 action list. Streaming continues in both states, and connection errors and
@@ -182,5 +186,6 @@ actions, and automatic binding to a CMA invocation are subsequent capabilities.
   fixtures, covering automatic appearance, sessions starting after chat opens,
   later streamed updates while minimised, reload, completion cleanup, concurrent
   cards, long activity lists, details disclosure visibility and keyboard
-  operation, and chat use on mobile with the keyboard open.
+  operation, a shared machine/CMA preview stack with one divider, and chat use
+  on mobile with the keyboard open.
   These fixtures do not establish connectivity to a deployed CMA instance.
