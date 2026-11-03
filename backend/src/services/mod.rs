@@ -540,3 +540,5 @@ pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
 
 pub mod monitoring_service;
+
+pub mod assistant_delegated_images;

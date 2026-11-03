@@ -802,6 +802,17 @@ or `ask_every_time`) and optional specialist override. The backend acknowledgeme
 service owns classification and approval; clients cannot bypass policy floors.
 NyxAgent model selection is owner-authenticated, validated against live models,
 and changing an existing thread resets its upstream context.
+Delegated specialist tool images use server-authored assignment edges and a
+separate, bounded `delegated_images.references` projection on the receiving
+turn/reply. Preserve source identity and retention; recheck live source use,
+recipient and destination authority at adoption and before sending. Wait and
+event drain adopt before consuming exact result event IDs. Never treat foreign
+IDs in model text or a mutable `report_to` as image authority. Delegated sends
+reuse source v1/v2 image claims; see `docs/CHANNEL_BOT_RELAY.md` (#1897).
+Delegated publication business refusals must not abort source settlement: save
+the refusal code and attempt the legacy text-only notice after settlement.
+Database/transport errors remain fatal; delegated results follow ordinary FIFO
+eviction, preserving source-question/invocation fences.
 NyxBot image upgrades from release 0.71.0 must read legacy
 `nyxbot_image_deliveries` before every v2 claim, matching owner, conversation,
 turn and NyxBot channel across all destination aliases. Sent items suppress
