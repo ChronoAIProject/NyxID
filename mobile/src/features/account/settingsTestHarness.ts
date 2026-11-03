@@ -33,6 +33,7 @@ const EXPANDED = [
   "SettingsPage",
   "SettingsGroup",
   "SettingsRow",
+  "SettingsMenuRow",
 ];
 
 function renderRows(node: Element, fontScale: number): Element {
@@ -115,6 +116,7 @@ export function setupSettingsScreen(
           "TextInput",
           "RefreshControl",
           "ActivityIndicator",
+          "Modal",
         ].map(
           (name) => [name, name],
         ),

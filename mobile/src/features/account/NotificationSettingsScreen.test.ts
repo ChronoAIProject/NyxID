@@ -56,31 +56,44 @@ test("an unlinked Telegram row opens the link sheet and push offers a 44pt enabl
   env.harness.unmount();
 });
 
-test("approval default is one row with its value that opens a native menu", () => {
+test("approval default is one row with its value that opens an in-app menu", () => {
   const env = setup(true, 1);
   const row = env.row("Request approval for");
-  assert.ok(env.text("Writes only (default)"), "the current mode is the row value");
+  assert.ok(
+    env.text("Writes only (default)"),
+    "the current mode is the row value",
+  );
   assert.ok(elements(row).some((node) => node.type === "ChevronsUpDown"));
-  for (const label of ["All requests", "Off"])
-    assert.equal(
-      env.all().some((node) => [node.props.children].flat().includes(label)),
-      false,
-      `${label} is not spread across the page`,
-    );
+  const items = () =>
+    env.all().filter((node) => node.props.accessibilityRole === "menuitem");
+  assert.equal(items().length, 0, "options are not spread across the page");
   row.props.onPress();
-  const [sheet] = env.sheets;
-  assert.deepEqual(JSON.parse(JSON.stringify(sheet!.options)), [
-    "Writes only (default)",
-    "All requests",
-    "Off",
-    "Cancel",
-  ]);
-  sheet!.pick(3);
-  assert.equal(env.mutations.length, 0, "Cancel changes nothing");
-  sheet!.pick(1);
+  env.harness.flush();
+  assert.deepEqual(
+    items().map((item) => [
+      item.props.accessibilityLabel,
+      item.props.accessibilityState.checked,
+    ]),
+    [
+      ["Writes only (default)", true],
+      ["All requests", false],
+      ["Off", false],
+    ],
+  );
+  items()[1]!.props.onPress();
+  env.harness.flush();
   assert.deepEqual(JSON.parse(JSON.stringify(env.mutations.at(-1))), {
     global_approval_mode: "all",
   });
+  assert.equal(items().length, 0, "choosing closes the menu");
+  env.row("Request approval for").props.onPress();
+  env.harness.flush();
+  env
+    .all()
+    .find((node) => node.props.accessibilityLabel === "Close menu")!
+    .props.onPress();
+  env.harness.flush();
+  assert.equal(items().length, 0, "tapping outside closes it");
   assert.ok(env.text("Per-service and organization policies still apply."));
   env.harness.unmount();
 });

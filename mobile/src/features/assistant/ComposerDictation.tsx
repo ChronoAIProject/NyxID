@@ -2,12 +2,14 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Keyboard,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { Check, Mic, Square, X } from "lucide-react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Check, Globe, Mic, ShieldCheck, Square, X } from "lucide-react-native";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
@@ -31,55 +33,190 @@ export function ComposerDictationButton({
 }) {
   const { colors } = useTheme();
   const held = useRef(false);
+  const [intro, setIntro] = useState(false);
   const busy =
     dictation.phase === "permission" ||
     dictation.phase === "connecting" ||
     dictation.phase === "stopping";
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={
-        dictation.recording ? "Stop dictation" : "Dictate message"
-      }
-      accessibilityHint="Transcribes speech for review before inserting it into your message."
-      accessibilityState={{
-        disabled: !!disabled || busy || dictation.phase === "review",
-        busy,
-      }}
-      disabled={disabled || busy || dictation.phase === "review"}
-      onLongPress={() => {
-        if (!dictation.active) {
-          held.current = true;
-          Keyboard.dismiss();
+    <>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={
+          dictation.recording ? "Stop dictation" : "Dictate message"
+        }
+        accessibilityHint="Transcribes speech for review before inserting it into your message."
+        accessibilityState={{
+          disabled: !!disabled || busy || dictation.phase === "review",
+          busy,
+        }}
+        disabled={disabled || busy || dictation.phase === "review"}
+        onLongPress={() => {
+          if (!dictation.active) {
+            held.current = true;
+            Keyboard.dismiss();
+            void dictation.start();
+          }
+        }}
+        onPressOut={() => {
+          if (held.current) {
+            held.current = false;
+            dictation.stop();
+          }
+        }}
+        onPress={() => {
+          if (dictation.recording) dictation.stop();
+          else {
+            Keyboard.dismiss();
+            // The first tap explains dictation once; a held press is already a
+            // deliberate push-to-talk and starts at once.
+            void introSeen().then((seen) => {
+              if (seen) void dictation.start();
+              else setIntro(true);
+            });
+          }
+        }}
+        style={({ pressed }) => [
+          styles.target,
+          { opacity: disabled || busy ? 0.4 : pressed ? 0.65 : 1 },
+        ]}
+      >
+        {busy ? (
+          <ActivityIndicator size="small" color={colors.textSecondary} />
+        ) : dictation.recording ? (
+          <Square size={17} color={colors.danger} fill={colors.danger} />
+        ) : (
+          <Mic size={21} color={colors.textPrimary} />
+        )}
+      </Pressable>
+      <DictationIntro
+        visible={intro}
+        onClose={() => setIntro(false)}
+        onStart={() => {
+          setIntro(false);
+          void AsyncStorage.setItem(INTRO_KEY, "1").catch(() => {});
           void dictation.start();
-        }
-      }}
-      onPressOut={() => {
-        if (held.current) {
-          held.current = false;
-          dictation.stop();
-        }
-      }}
-      onPress={() => {
-        if (dictation.recording) dictation.stop();
-        else {
-          Keyboard.dismiss();
-          void dictation.start();
-        }
-      }}
-      style={({ pressed }) => [
-        styles.target,
-        { opacity: disabled || busy ? 0.4 : pressed ? 0.65 : 1 },
-      ]}
+        }}
+      />
+    </>
+  );
+}
+
+const INTRO_KEY = "nyxid.dictation_intro_seen";
+async function introSeen() {
+  try {
+    return (await AsyncStorage.getItem(INTRO_KEY)) === "1";
+  } catch {
+    return true;
+  }
+}
+
+/** One-time explanation, in the shape of the iOS feature sheets. */
+function DictationIntro({
+  visible,
+  onClose,
+  onStart,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onStart: () => void;
+}) {
+  const { colors } = useTheme();
+  const rows = [
+    {
+      Icon: ShieldCheck,
+      title: "Microphone access",
+      detail:
+        "iOS asks the first time you start. Recording stops when you tap Finish.",
+    },
+    {
+      Icon: Globe,
+      title: "Speech language",
+      detail: "Detected automatically from what you say.",
+    },
+  ];
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="formSheet"
+      onRequestClose={onClose}
     >
-      {busy ? (
-        <ActivityIndicator size="small" color={colors.textSecondary} />
-      ) : dictation.recording ? (
-        <Square size={17} color={colors.danger} fill={colors.danger} />
-      ) : (
-        <Mic size={21} color={colors.textPrimary} />
-      )}
-    </Pressable>
+      <View style={[styles.intro, { backgroundColor: colors.bg }]}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Close"
+          onPress={onClose}
+          hitSlop={8}
+          style={[styles.introClose, { backgroundColor: colors.navActive }]}
+        >
+          <X size={18} color={colors.textPrimary} />
+        </Pressable>
+        <View style={styles.introHead}>
+          <Mic size={34} color={colors.primary} />
+          <Text
+            accessibilityRole="header"
+            style={[styles.introTitle, { color: colors.textPrimary }]}
+          >
+            Speech to Text
+          </Text>
+          <Text style={[styles.introLead, { color: colors.textSecondary }]}>
+            Speak instead of typing. You review the text before it goes into
+            your message, and nothing is sent on its own.
+          </Text>
+        </View>
+        <View
+          style={[styles.introCard, { backgroundColor: colors.groupedFill }]}
+        >
+          {rows.map(({ Icon, title, detail }, index) => (
+            <View
+              key={title}
+              style={[
+                styles.introRow,
+                index > 0 && {
+                  borderTopWidth: StyleSheet.hairlineWidth,
+                  borderTopColor: colors.borderSoft,
+                },
+              ]}
+            >
+              <Icon size={20} color={colors.textSecondary} />
+              <View style={{ flex: 1, gap: 2 }}>
+                <Text
+                  style={[styles.introRowTitle, { color: colors.textPrimary }]}
+                >
+                  {title}
+                </Text>
+                <Text
+                  style={[
+                    styles.introRowDetail,
+                    { color: colors.textSecondary },
+                  ]}
+                >
+                  {detail}
+                </Text>
+              </View>
+            </View>
+          ))}
+        </View>
+        <View style={{ flex: 1 }} />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Start dictation"
+          onPress={onStart}
+          style={({ pressed }) => [
+            styles.introStart,
+            {
+              backgroundColor: colors.textPrimary,
+              opacity: pressed ? 0.75 : 1,
+            },
+          ]}
+        >
+          <Text style={[styles.introStartLabel, { color: colors.bg }]}>
+            Start Dictation
+          </Text>
+        </Pressable>
+      </View>
+    </Modal>
   );
 }
 
@@ -173,6 +310,7 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
       {dictation.text ? (
         <OverflowScrollView
           style={styles.transcript}
+          contentContainerStyle={styles.transcriptContent}
           fadeColor={colors.composerBg}
         >
           <Text style={[styles.transcriptText, { color: colors.textPrimary }]}>
@@ -186,10 +324,17 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
           </Text>
         </OverflowScrollView>
       ) : phase === "listening" ? (
-        <Text style={[styles.transcriptText, { color: colors.textTertiary }]}>
-          Start speaking…
-        </Text>
-      ) : null}
+        <View style={styles.transcriptContent}>
+          <Text style={[styles.transcriptText, { color: colors.textTertiary }]}>
+            Start speaking…
+          </Text>
+        </View>
+      ) : (
+        <View style={styles.transcriptContent} />
+      )}
+      <View style={styles.meter}>
+        {capturing && <DictationWaveform media={dictation.media} />}
+      </View>
       {dictation.error ? (
         <Label
           accessibilityLiveRegion="polite"
@@ -219,9 +364,6 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
             </View>
           )}
         </Pressable>
-        <View style={styles.meter}>
-          {capturing && <DictationWaveform media={dictation.media} />}
-        </View>
         {phase === "review" ? (
           <PillButton
             label="Insert"
@@ -231,7 +373,7 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
           />
         ) : (
           <PillButton
-            label="Done"
+            label="Finish"
             accessibilityLabel="Finish dictation"
             icon={<Square size={10} color={colors.bg} fill={colors.bg} />}
             busy={phase === "stopping"}
@@ -239,7 +381,13 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
             onPress={dictation.stop}
           />
         )}
+        <View style={styles.target} />
       </View>
+      <Text style={[styles.footnote, { color: colors.textTertiary }]}>
+        {phase === "review"
+          ? "Edit after inserting · Nothing is sent until you tap Send"
+          : "Language detected automatically"}
+      </Text>
     </View>
   );
 }
@@ -330,7 +478,7 @@ function DictationWaveform({ media }: { media: NativeVoiceMedia | null }) {
           style={[
             styles.bar,
             {
-              height: 3 + level * 21,
+              height: 3 + level * 33,
               backgroundColor: colors.textSecondary,
             },
           ]}
@@ -350,7 +498,7 @@ const styles = StyleSheet.create({
   notice: { paddingHorizontal: 12, paddingTop: 8, gap: 6 },
   noticeText: { fontSize: 13 },
   noticeActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  panel: { paddingHorizontal: 12, paddingTop: 10, gap: 8 },
+  panel: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 6, gap: 10 },
   statusRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -360,16 +508,69 @@ const styles = StyleSheet.create({
   liveDot: { width: 8, height: 8, borderRadius: 4 },
   status: { flex: 1, fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
   elapsed: { fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 },
-  transcript: { maxHeight: 168 },
+  // The transcript is the focus: large, readable, and given real height.
+  transcript: { maxHeight: 280 },
+  transcriptContent: { minHeight: 132 },
   transcriptText: {
     fontFamily: fonts.bodyRegular,
-    fontSize: 17,
-    lineHeight: 24,
+    fontSize: 22,
+    lineHeight: 30,
   },
+  footnote: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    lineHeight: 16,
+    textAlign: "center",
+  },
+  intro: {
+    flex: 1,
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 36,
+    gap: 22,
+  },
+  introClose: {
+    alignSelf: "flex-end",
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  introHead: { alignItems: "center", gap: 10, paddingHorizontal: 8 },
+  introTitle: { fontFamily: fonts.displaySemi, fontSize: 26, lineHeight: 32 },
+  introLead: {
+    fontFamily: fonts.bodyRegular,
+    fontSize: 15,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+  introCard: { borderRadius: 14, overflow: "hidden" },
+  introRow: {
+    flexDirection: "row",
+    gap: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    alignItems: "flex-start",
+  },
+  introRowTitle: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 20 },
+  introRowDetail: {
+    fontFamily: fonts.bodyRegular,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  introStart: {
+    minHeight: 52,
+    borderRadius: 26,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  introStartLabel: { fontFamily: fonts.bodySemi, fontSize: 16 },
   controls: {
     flexDirection: "row",
     alignItems: "center",
-    minHeight: 44,
+    justifyContent: "space-between",
+    minHeight: 48,
     marginHorizontal: -8,
   },
   discard: {
@@ -380,7 +581,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  meter: { flex: 1, height: 24, marginHorizontal: 4 },
+  meter: { height: 36 },
   wave: {
     flex: 1,
     flexDirection: "row",
@@ -392,12 +593,12 @@ const styles = StyleSheet.create({
   bar: { width: 3, borderRadius: 1.5 },
   pillTarget: { minHeight: 44, justifyContent: "center", paddingHorizontal: 4 },
   pill: {
-    height: 34,
-    borderRadius: 17,
-    paddingHorizontal: 14,
+    height: 44,
+    borderRadius: 22,
+    paddingHorizontal: 22,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
   },
-  pillLabel: { fontFamily: fonts.bodySemi, fontSize: 14 },
+  pillLabel: { fontFamily: fonts.bodySemi, fontSize: 15 },
 });

@@ -5,8 +5,12 @@ import { hookHarness } from "./assistantHookTestHarness";
 import type { ComposerDictationState } from "./useComposerDictation";
 
 type Element = { type: string; props: Record<string, any> };
-function setup() {
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+function setup({ introSeen = true } = {}) {
   const events: string[] = [];
+  const storage = new Map<string, string>(
+    introSeen ? [["nyxid.dictation_intro_seen", "1"]] : [],
+  );
   const dictation: ComposerDictationState = {
     phase: "idle",
     text: "",
@@ -33,16 +37,30 @@ function setup() {
     },
   };
   const h = hookHarness<Element>({
-    "react/jsx-runtime": Object.fromEntries(
-      ["jsx", "jsxs"].map((key) => [
-        key,
-        (type: string, props: Record<string, any>) => ({ type, props }),
-      ]),
-    ),
+    "react/jsx-runtime": {
+      ...Object.fromEntries(
+        ["jsx", "jsxs"].map((key) => [
+          key,
+          (type: string, props: Record<string, any>) => ({ type, props }),
+        ]),
+      ),
+      Fragment: "Fragment",
+    },
+    "@react-native-async-storage/async-storage": {
+      __esModule: true,
+      default: {
+        getItem: async (key: string) => storage.get(key) ?? null,
+        setItem: async (key: string, value: string) => {
+          storage.set(key, value);
+          events.push("intro-saved");
+        },
+      },
+    },
     "./voice/VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
     "react-native": {
       ActivityIndicator: "ActivityIndicator",
       Keyboard: { dismiss: () => events.push("keyboard") },
+      Modal: "Modal",
       Pressable: "Pressable",
       Text: "Text",
       View: "View",
@@ -50,6 +68,8 @@ function setup() {
     },
     "lucide-react-native": {
       Check: "Check",
+      Globe: "Globe",
+      ShieldCheck: "ShieldCheck",
       Mic: "Mic",
       Square: "Square",
       X: "X",
@@ -83,7 +103,16 @@ function setup() {
       dictation: ComposerDictationState;
     }) => Element | null;
   };
-  return { h, dictation, events, ...components };
+  /** The mic button itself; the button renders beside its intro sheet. */
+  const mic = () =>
+    components
+      .ComposerDictationButton({ dictation })
+      .props.children.find((child: Element) => child.type === "Pressable");
+  const intro = () =>
+    components
+      .ComposerDictationButton({ dictation })
+      .props.children.find((child: Element) => child.type !== "Pressable");
+  return { h, dictation, events, mic, intro, storage, ...components };
 }
 // Expands local function components and Pressable render-prop children so the
 // assertions see the native tree a person would.
@@ -117,7 +146,7 @@ function all(element: Element): Element[] {
 
 test("dictation keeps a labelled 44pt microphone/Stop target with explicit pending states", async () => {
   const x = setup();
-  let button = x.ComposerDictationButton({ dictation: x.dictation });
+  let button = x.mic();
   assert.equal(button.props.accessibilityLabel, "Dictate message");
   assert.deepEqual(
     { ...button.props.style({ pressed: false })[0] },
@@ -128,17 +157,18 @@ test("dictation keeps a labelled 44pt microphone/Stop target with explicit pendi
       justifyContent: "center",
     },
   );
-  await button.props.onPress();
+  button.props.onPress();
+  await tick();
   assert.deepEqual(x.events, ["keyboard", "start"]);
   x.dictation.phase = "listening";
   x.dictation.recording = true;
-  button = x.ComposerDictationButton({ dictation: x.dictation });
+  button = x.mic();
   assert.equal(button.props.accessibilityLabel, "Stop dictation");
   button.props.onPress();
   assert.equal(x.events.at(-1), "stop");
   for (const phase of ["permission", "connecting", "stopping"] as const) {
     x.dictation.phase = phase;
-    button = x.ComposerDictationButton({ dictation: x.dictation });
+    button = x.mic();
     assert.equal(button.props.disabled, true);
     assert.equal(button.props.accessibilityState.busy, true);
   }
@@ -218,7 +248,7 @@ test("review keeps long text scrollable with fades and offers Insert instead of 
   );
   const scroller = tree.find((node) => node.type === "OverflowScrollView")!;
   assert.equal(scroller.props.fadeColor, "#222222");
-  assert.equal(scroller.props.style.maxHeight, 168);
+  assert.equal(scroller.props.style.maxHeight, 280);
   assert.equal(
     tree.some((node) => node.props.accessibilityLabel === "Finish dictation"),
     false,
@@ -252,15 +282,16 @@ test("pending phases keep Discard available while Done waits for capture", () =>
   }
 });
 
-test("the first tap after a released long press starts dictation again", () => {
+test("the first tap after a released long press starts dictation again", async () => {
   const x = setup();
-  const button = x.ComposerDictationButton({ dictation: x.dictation });
+  const button = x.mic();
   button.props.onLongPress();
   button.props.onPressOut();
   assert.deepEqual(x.events, ["keyboard", "start", "stop"]);
   // Native Pressability does not call onPress after onLongPress. This is the
   // next distinct gesture, after capture/review has returned to idle.
   button.props.onPress();
+  await tick();
   assert.deepEqual(x.events, [
     "keyboard",
     "start",
@@ -268,4 +299,42 @@ test("the first tap after a released long press starts dictation again", () => {
     "keyboard",
     "start",
   ]);
+});
+
+test("the first tap explains dictation once; Start begins it and a held press skips the intro", async () => {
+  const x = setup({ introSeen: false });
+  x.h.mount(() => x.ComposerDictationButton({ dictation: x.dictation }));
+  const children = () => x.h.value().props.children as Element[];
+  const mic = () => children().find((child) => child.type === "Pressable")!;
+  const sheet = () =>
+    render(children().find((child) => child.type !== "Pressable")) as Element;
+  const find = (label: string) =>
+    all(sheet()).find((node) => node.props.accessibilityLabel === label)!;
+  assert.equal(sheet().props.visible, false);
+  mic().props.onPress();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["keyboard"], "nothing records before Start");
+  assert.equal(sheet().props.visible, true);
+  find("Close").props.onPress();
+  x.h.flush();
+  assert.equal(sheet().props.visible, false);
+  assert.deepEqual(x.events, ["keyboard"], "closing starts nothing");
+  mic().props.onPress();
+  await x.h.settle();
+  find("Start dictation").props.onPress();
+  await x.h.settle();
+  assert.deepEqual([...x.events].sort(), [
+    "intro-saved",
+    "keyboard",
+    "keyboard",
+    "start",
+  ]);
+  assert.equal(x.storage.get("nyxid.dictation_intro_seen"), "1");
+  const held = setup({ introSeen: false });
+  held.mic().props.onLongPress();
+  assert.deepEqual(
+    held.events,
+    ["keyboard", "start"],
+    "push-to-talk starts at once",
+  );
 });
