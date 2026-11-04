@@ -384,7 +384,10 @@ impl BillingRouteContext {
                 BillingMetric::Bytes => self.request_bytes.saturating_add(response_bytes),
                 BillingMetric::Images | BillingMetric::VoiceSeconds => 0,
                 // Machine runtime is reserved only by dedicated admission.
-                BillingMetric::MachineRunningSeconds => 0,
+                BillingMetric::MachineRunningSeconds
+                | BillingMetric::SandboxCpuMillisSeconds
+                | BillingMetric::SandboxMemoryMibSeconds
+                | BillingMetric::SandboxDiskGibSeconds => 0,
             };
         }
         if self.requested_voice_seconds > 0 {
@@ -401,7 +404,10 @@ impl BillingRouteContext {
             BillingMetric::Images => self.requested_images,
             BillingMetric::VoiceSeconds => self.requested_voice_seconds.max(0),
             // Dedicated Machine admission reserves a finite runtime window.
-            BillingMetric::MachineRunningSeconds => 0,
+            BillingMetric::MachineRunningSeconds
+            | BillingMetric::SandboxCpuMillisSeconds
+            | BillingMetric::SandboxMemoryMibSeconds
+            | BillingMetric::SandboxDiskGibSeconds => 0,
             // Cache quantities are already covered by the input estimate.
             BillingMetric::CacheReadTokens
             | BillingMetric::CacheWriteTokens

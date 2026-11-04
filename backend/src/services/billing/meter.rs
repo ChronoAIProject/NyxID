@@ -991,6 +991,9 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::Images => "platform_images",
         BillingMetric::VoiceSeconds => "platform_voice_seconds",
         BillingMetric::MachineRunningSeconds => "remote_machine_running_seconds",
+        BillingMetric::SandboxCpuMillisSeconds => "cma_sandbox_cpu_millis_seconds",
+        BillingMetric::SandboxMemoryMibSeconds => "cma_sandbox_memory_mib_seconds",
+        BillingMetric::SandboxDiskGibSeconds => "cma_sandbox_disk_gib_seconds",
     }
 }
 
@@ -1006,7 +1009,10 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::Images => usage.images.max(0),
         BillingMetric::VoiceSeconds => usage.voice_seconds.max(0),
         // Machine runtime is measured by its evidence-bound interval path.
-        BillingMetric::MachineRunningSeconds => 0,
+        BillingMetric::MachineRunningSeconds
+        | BillingMetric::SandboxCpuMillisSeconds
+        | BillingMetric::SandboxMemoryMibSeconds
+        | BillingMetric::SandboxDiskGibSeconds => 0,
     }
 }
 
