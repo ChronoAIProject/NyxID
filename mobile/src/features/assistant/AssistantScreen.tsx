@@ -207,9 +207,11 @@ export function AssistantScreen({
   useEffect(() => {
     transcriptOffset.current = 0;
   }, [assistant.conversationId]);
+  const reducedMotion = useReducedMotion();
   const transcriptScroll = useTranscriptScrollFollow(
     transcript,
     assistant.conversationId,
+    { reducedMotion },
   );
   const conversation = assistant.history?.conversation;
   const currentAgent = assistant.agent ?? conversation?.agent;
@@ -577,7 +579,6 @@ export function AssistantScreen({
   }
 
   const pickerDestination = useRef<(() => void) | undefined>(undefined);
-  const reducedMotion = useReducedMotion();
   const pickerScope = `${getAuthEpoch()}:${draftKey}`;
   useEffect(
     () => () => {

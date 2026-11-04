@@ -311,7 +311,9 @@ function GroupChat({
     group?.members ?? [],
   );
   const list = useRef<FlatList<GroupMessage>>(null);
-  const transcriptScroll = useTranscriptScrollFollow(list, groupId);
+  const transcriptScroll = useTranscriptScrollFollow(list, groupId, {
+    reducedMotion,
+  });
   const sendLock = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
