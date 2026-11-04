@@ -2589,6 +2589,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::machine_desktop::contexts),
         )
         .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
+        .route("/nyxagent/cma-sessions", get(handlers::cma_sessions::list))
         .route(
             "/nyxagent/conversations",
             get(handlers::assistant_nyxagent::list),
