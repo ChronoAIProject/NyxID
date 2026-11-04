@@ -326,7 +326,7 @@ async fn collaboration_guest_image_withholding_and_expiry_are_explicit() {
 }
 
 #[tokio::test]
-async fn collaboration_guest_worker_delivers_images_and_emits_capability_or_expiry_notices() {
+async fn collaboration_guest_worker_obeys_image_modality_capability_and_expiry() {
     use axum::{
         Json, Router,
         body::{Body, to_bytes},
@@ -337,7 +337,7 @@ async fn collaboration_guest_worker_delivers_images_and_emits_capability_or_expi
     use std::{sync::Arc, time::Duration};
     use tokio::sync::Mutex;
     use tower::ServiceExt;
-    for mode in ["supported", "unsupported", "expired"] {
+    for mode in ["supported", "text_only", "unsupported", "expired"] {
         let (f, _, _, image, started) = fixture(true).await;
         if mode == "expired" {
             f.state.db.collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME).update_one(doc!{"_id":&image},doc!{"$set":{"bound_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::days(500))}}).await.unwrap();
@@ -347,7 +347,7 @@ async fn collaboration_guest_worker_delivers_images_and_emits_capability_or_expi
         let callback_state = f.state.clone();
         let upstream=Router::new()
             .route("/v1/models",get(||async {Json(json!({"data":[]}))}))
-            .route("/v1/capabilities",get(move ||async move {Json(if mode=="supported" {capabilities()}else{Value::Null})}))
+            .route("/v1/capabilities",get(move ||async move {Json(if matches!(mode,"supported"|"text_only") {capabilities()}else{Value::Null})}))
             .route("/v1/responses",post(move |headers:HeaderMap,Json(body):Json<Value>| {
                 let captures=output.clone();let state=callback_state.clone();
                 async move {
@@ -390,6 +390,23 @@ async fn collaboration_guest_worker_delivers_images_and_emits_capability_or_expi
             .unwrap();
         let row = started.claim.conversation;
         let row_id = row.id.clone();
+        let cache_key = format!("{}:{}", f.state.db.name(), row.user_id);
+        if mode == "text_only" {
+            use svc::assistant_nyxagent_model_cache::{MODELS, ModelInfo};
+            MODELS.lock().await.insert(
+                cache_key.clone(),
+                (
+                    std::time::Instant::now(),
+                    Some(vec![ModelInfo {
+                        id: row.model.clone(),
+                        label: "Text-only model".into(),
+                        available: true,
+                        description: None,
+                        input_modalities: Some(vec!["text".into()]),
+                    }]),
+                ),
+            );
+        }
         let auth = crate::handlers::assistant_team::owner_auth(&row.user_id).unwrap();
         let permit = crate::handlers::assistant_team::acquire(
             &f.state,
@@ -437,11 +454,38 @@ async fn collaboration_guest_worker_delivers_images_and_emits_capability_or_expi
             assert!(
                 body.to_string().contains(if mode == "expired" {
                     "expired per retention policy"
+                } else if mode == "text_only" {
+                    uploads::MODEL_IMAGE_FALLBACK
                 } else {
                     uploads::IMAGE_FALLBACK
                 }),
                 "{mode}: withheld attachment must be explicit"
             );
+            assert!(
+                !body
+                    .to_string()
+                    .contains(&format!("/assistant-attachments/{image}/content"))
+            );
+        }
+        if mode != "expired" {
+            let message = f
+                .state
+                .db
+                .collection::<crate::models::assistant_message::AssistantMessage>(
+                    "assistant_messages",
+                )
+                .find_one(doc! {"conversation_id":&row_id,"attachments.id":&image})
+                .await
+                .unwrap()
+                .unwrap();
+            let attachment = message.attachments.iter().find(|a| a.id == image).unwrap();
+            let (status, reason) = match mode {
+                "supported" => ("sent", None),
+                "text_only" => ("unavailable", Some("model_text_only")),
+                _ => ("unavailable", Some("agent_unsupported")),
+            };
+            assert_eq!(attachment.image_input.as_deref(), Some(status));
+            assert_eq!(attachment.image_input_reason.as_deref(), reason);
         }
         let reply = f
             .state
@@ -452,6 +496,10 @@ async fn collaboration_guest_worker_delivers_images_and_emits_capability_or_expi
             .unwrap()
             .unwrap();
         assert!(reply.error_code.is_none(), "{mode}: {:?}", reply.error_code);
+        svc::assistant_nyxagent_model_cache::MODELS
+            .lock()
+            .await
+            .remove(&cache_key);
         f.state.db.drop().await.unwrap();
     }
 }

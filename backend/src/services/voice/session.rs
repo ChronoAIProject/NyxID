@@ -130,6 +130,7 @@ async fn admit_audio(
     let shared_execution =
         super::shared::admit(db, user, &thread, client_request_id, &preferences).await?;
     let row = VoiceSession {
+        last_work_at: None,
         shared_execution,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user.into(),

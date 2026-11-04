@@ -194,6 +194,10 @@ async fn assistant_steer_concurrent_replicas_and_late_retries_never_duplicate() 
     );
     assert_eq!(a.status(), 200);
     assert_eq!(b.status(), 200);
+    // Concurrent static-capability misses may fetch in parallel. The actual
+    // steering call must still happen once, and later lookups must be cached.
+    let capability_calls = f.capability_calls.load(Ordering::SeqCst);
+    assert!((1..=2).contains(&capability_calls));
     assert_eq!(submit(&f, &row, &id, "Guidance").await.status(), 200);
     assert_eq!(
         submit(&f, &row, &id, "Changed guidance").await.status(),
@@ -215,7 +219,7 @@ async fn assistant_steer_concurrent_replicas_and_late_retries_never_duplicate() 
     .unwrap();
     assert_eq!(submit(&f, &row, &id, "Guidance").await.status(), 200);
     assert_eq!(f.calls.lock().await.len(), 1);
-    assert_eq!(f.capability_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.capability_calls.load(Ordering::SeqCst), capability_calls);
     assert_eq!(
         engine::messages(&f.state.db, OWNER, &row.id, 10, None)
             .await

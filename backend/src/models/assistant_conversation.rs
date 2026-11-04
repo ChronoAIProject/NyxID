@@ -225,6 +225,9 @@ pub struct TurnActivity {
     pub label: String,
     #[serde(default)]
     pub digest: Option<String>,
+    /// Additive semantic retry identity; `digest` retains the legacy exact call.
+    #[serde(default)]
+    pub retry_identity: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(default)]
@@ -251,6 +254,9 @@ pub struct TurnAttachment {
     pub chat_delivery: Option<bool>,
     #[serde(default)]
     pub image_input: Option<String>,
+    /// Bounded image-delivery reason; older readers retain the ordinary status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input_reason: Option<String>,
     /// None preserves legacy automatic inspection. False requests display only.
     #[serde(default)]
     pub image_inspection: Option<bool>,

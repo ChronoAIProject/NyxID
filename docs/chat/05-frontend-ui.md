@@ -426,6 +426,19 @@ orphan window. Device-code and token entry keep their existing setup behavior.
 
 ## Sidebar and history
 
+Active sessions from the person's connected CMA services automatically appear
+as status cards in the shared right-hand preview column, which also hosts
+machine cards. They stream public status and recent
+action summaries independently of NyxBot's turn. The cards use the machine
+card's docked surface and spacing, share the column's width and resize divider,
+and offer minimise/maximise controls; minimised cards keep streaming.
+Inactive sessions disappear after discovery refreshes. On narrow
+screens the cards sit above chat and the composer remains available.
+The **Across chats** label identifies these as a personal CMA account overview;
+the current activity contract does not link them to a NyxID specialist or task.
+See [Automatic CMA session cards](12-cma-sessions.md) for discovery scope, proxy
+connection requirements, event contract, preferences, and recovery.
+
 The sidebar has a primary New chat command, workspace destinations, and a Chats navigation list. The chat list is a semantic `nav`. Each conversation title is a button whose accessible name is the title.
 
 Conversation metadata comes from the fully drained NyxID index. The row displays the server title and preserves newest-first ordering from the backend. The active row remains selected across placeholder alias adoption by using the canonical history ID when available.

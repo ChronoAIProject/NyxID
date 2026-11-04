@@ -1210,6 +1210,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route("/audit-log/count", get(handlers::admin::count_audit_log))
         .route(
             "/telegram-managers/clear",
             post(handlers::telegram_managers::clear),
@@ -2847,6 +2848,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/groups/{id}/agents/{agent}/guest-access",
             put(handlers::collaboration_group::guest_access),
+        )
+        .route(
+            "/nyxagent/groups/{id}/read",
+            post(handlers::collaboration_group::mark_read),
         )
         .route(
             "/nyxagent/groups/{id}/membership",

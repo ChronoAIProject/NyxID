@@ -55,11 +55,68 @@ pub async fn facts(db: &Database, actor: &str, connection: &UserService) -> AppR
         .ok_or_else(|| AppError::NotFound("Connection owner unavailable".into()))
 }
 
+/// A catalog the owner connects with their own account through a hosted link:
+/// an OAuth/device-code/API-key provider or a per-user credential. Provider
+/// rows report `requires_user_credential = false` because the provider
+/// supplies the credential, so the provider check is required.
+pub fn personal_hosted_connect(catalog: &DownstreamService) -> bool {
+    catalog.service_type != "ssh"
+        && (catalog.requires_user_credential || catalog.provider_config_id.is_some())
+}
+
+/// Whether a hosted personal link for `catalog` can actually be completed:
+/// its provider must be active, and an admin-only OAuth/device-code provider
+/// needs its platform client configured. `Err` carries a stable reason code.
+pub async fn hosted_connect_ready(
+    db: &Database,
+    catalog: &DownstreamService,
+) -> AppResult<Result<(), &'static str>> {
+    if catalog.service_type == "ssh" {
+        return Ok(Err("ssh_requires_advanced_setup"));
+    }
+    let Some(provider_id) = catalog.provider_config_id.as_deref() else {
+        // A required provider without provider_config_id cannot supply a
+        // credential. Catalogs collecting their own credential still have a
+        // working hosted API-key form, independent of provider requirements.
+        if !catalog.requires_user_credential
+            && db
+                .collection::<bson::Document>("service_provider_requirements")
+                .find_one(doc! {"service_id": &catalog.id, "required": true})
+                .projection(doc! {"_id": 1})
+                .await?
+                .is_some()
+        {
+            return Ok(Err("provider_requirement_only"));
+        }
+        return Ok(Ok(()));
+    };
+    let Some(provider) = db
+        .collection::<crate::models::provider_config::ProviderConfig>("provider_configs")
+        .find_one(doc! {"_id":provider_id,"is_active":true})
+        .await?
+    else {
+        return Ok(Err("provider_unavailable"));
+    };
+    if !matches!(
+        provider.provider_type.as_str(),
+        "oauth2" | "device_code" | "api_key"
+    ) {
+        return Ok(Err("provider_flow_unsupported"));
+    }
+    if matches!(provider.provider_type.as_str(), "oauth2" | "device_code")
+        && provider.credential_mode == "admin"
+        && !super::user_credentials_service::provider_has_admin_oauth_credentials(&provider)
+    {
+        return Ok(Err("provider_not_configured"));
+    }
+    Ok(Ok(()))
+}
+
 /// Unsupported flows never advertise a link that cannot be completed personally.
 pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -> AppResult<Value> {
     let Some(id) = connection.catalog_service_id.as_deref() else {
         return Ok(
-            json!({"supported":false,"reason":"custom_connection","instructions":"Ask the owner to approve this exact organization operation, or use Plugins → Advanced setup for a personal custom connection."}),
+            json!({"supported":false,"reason":"custom_connection","instructions":"Ask the owner whether to approve this exact organization operation. A custom connection cannot be set up through a hosted link."}),
         );
     };
     let catalog = match resolve_catalog(db, actor, Some(id), None).await {
@@ -71,15 +128,237 @@ pub async fn connect_own(db: &Database, actor: &str, connection: &UserService) -
         }
         Err(error) => return Err(error),
     };
-    if catalog.service_type == "ssh" || !catalog.requires_user_credential {
-        return Ok(
-            json!({"supported":false,"reason":if catalog.service_type == "ssh" {"ssh_requires_advanced_setup"} else {"personal_account_not_supported"},"instructions":"Ask the owner to approve this exact organization operation, or use Plugins → Advanced setup."}),
-        );
+    if let Err(reason) = hosted_connect_ready(db, &catalog).await? {
+        return Ok(json!({"supported":false,"reason":reason,
+            "instructions":format!("{} The current organization operation still requires its exact owner approval.", unavailable_instructions(reason))}));
+    }
+    if !personal_hosted_connect(&catalog) {
+        return Ok(json!({"supported":false,"reason":"no_separate_account",
+            "instructions":unavailable_instructions("no_separate_account")}));
     }
     Ok(
         json!({"supported":true,"catalog_service_id":catalog.id,"service_slug":catalog.slug,
-        "instructions":format!("Offer nyx__connect_service for {} so the owner can connect their own account; or ask whether to use the organization connection. Specialists must ask the owner to connect via NyxBot or Plugins, then grant the specialist. Connecting never grants access automatically.",catalog.slug)}),
+        "instructions":format!("If the owner asks to connect their own account, call nyx__connect_service for {} immediately. Give its hosted link immediately and mention existing connections in one short line; never ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link. Specialists cannot mint links: ask the owner to have NyxBot send one, followed by a separate specialist grant. This offer does not approve the current organization operation.",catalog.slug)}),
     )
+}
+
+/// Stable reasons shared by chat connect results and organization-card offers.
+pub fn unavailable_instructions(reason: &str) -> &'static str {
+    match reason {
+        "provider_requirement_only" => {
+            "NyxID cannot connect another account for this catalog yet: its required sign-in provider is declared only in a requirement and the catalog has no credential form. A platform admin must link the provider to the catalog before hosted setup can work. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
+        }
+        "ssh_requires_advanced_setup" => {
+            "Hosted SSH setup is unsupported; SSH requires a node and advanced configuration. Mention existing connections in one short line; do not substitute a page link."
+        }
+        "provider_flow_unsupported" => {
+            "This provider's sign-in flow is not supported by hosted setup. Mention existing connections in one short line; do not substitute a page link."
+        }
+        "no_separate_account" => {
+            "This service uses a one-step connection and has no separate personal account to add. If the owner asks to connect it, have NyxBot call nyx__connect_service and report connected or already_connected in one short line with existing connection facts. Do not substitute a page link."
+        }
+        _ => {
+            "This service's sign-in is unavailable in NyxID: a platform admin must enable or configure its provider. Mention existing connections in one short line; do not substitute a page link or suggest reusing one instead."
+        }
+    }
+}
+
+pub const CONNECT_PRESENTATION_INSTRUCTIONS: &str = "Give the hosted link immediately and mention existing connections in one short line (ownership, label, enabled/disabled; provider account identity is unknown). Never ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link. A pending link grants no access; NyxID watches for completion.";
+
+pub struct ExistingConnections {
+    pub connections: Vec<Value>,
+    pub truncated: bool,
+}
+impl ExistingConnections {
+    pub fn attach(&self, result: &mut Value) {
+        result["existing_connections"] = json!(self.connections);
+        result["existing_connections_truncated"] = json!(self.truncated);
+    }
+}
+
+/// The legacy collection also contains encrypted credentials. Deserialize only
+/// this inclusion projection so inventory never loads credential material.
+#[derive(serde::Deserialize)]
+struct LegacyConnectionMetadata {
+    #[serde(rename = "_id")]
+    id: String,
+    credential_label: Option<String>,
+    is_active: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Metadata only, bounded before facts and label hydration. The actor's
+/// live membership scopes govern visibility; a specialist is additionally
+/// restricted to its existing grants. No credential material is loaded.
+pub async fn existing_connections(
+    db: &Database,
+    actor: &str,
+    catalog: &DownstreamService,
+    selected: Option<&[String]>,
+) -> AppResult<ExistingConnections> {
+    use super::user_service_service::{self, CredentialSource, ServiceSelection};
+    use futures::TryStreamExt;
+    use std::collections::{HashMap, HashSet};
+    const LIMIT: usize = 10;
+    let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
+    let candidates = user_service_service::list_user_services_with_sources_selected_in_group(
+        db,
+        actor,
+        false,
+        true,
+        &memberships,
+        ServiceSelection {
+            ids: selected,
+            catalog_service_id: Some(&catalog.id),
+        },
+    )
+    .await?;
+    let mut rows: Vec<UserService> = candidates
+        .into_iter()
+        .filter(|entry| {
+            !matches!(&entry.source, CredentialSource::Org { allowed: false, .. })
+                && entry.service.deleted_at.is_none()
+        })
+        .map(|entry| entry.service)
+        .collect();
+    // Older deletes left inactive rows without deleted_at after removing the
+    // endpoint. Retain disabled rows only while their owner-bound endpoint exists.
+    let disabled_endpoints: Vec<_> = rows
+        .iter()
+        .filter(|row| !row.is_active)
+        .map(|row| row.endpoint_id.as_str())
+        .collect();
+    if !disabled_endpoints.is_empty() {
+        let endpoints: Vec<bson::Document> = db
+            .collection::<bson::Document>("user_endpoints")
+            .find(doc! {"_id": {"$in": disabled_endpoints}})
+            .projection(doc! {"_id": 1, "user_id": 1})
+            .await?
+            .try_collect()
+            .await?;
+        let retained: HashSet<_> = endpoints
+            .iter()
+            .filter_map(|entry| Some((entry.get_str("_id").ok()?, entry.get_str("user_id").ok()?)))
+            .collect();
+        rows.retain(|row| {
+            row.is_active || retained.contains(&(row.endpoint_id.as_str(), row.user_id.as_str()))
+        });
+    }
+    // Specialist grants name UserService IDs, so legacy rows cannot be in scope.
+    let legacy = if selected.is_none() {
+        db.collection::<LegacyConnectionMetadata>(
+            crate::models::user_service_connection::COLLECTION_NAME,
+        )
+        .find_one(doc! {"user_id":actor,"service_id":&catalog.id,"is_active":true})
+        .projection(doc! {"_id":1,"credential_label":1,"is_active":1,"created_at":1})
+        .await?
+        .filter(|legacy| {
+            // Startup migration retains the legacy row and marks its unified
+            // copy with this lineage. Independent same-catalog rows stay listed.
+            !rows.iter().any(|row| {
+                row.user_id == actor
+                    && row.source.as_deref() == Some("migration_connection")
+                    && row.source_id.as_deref() == Some(legacy.id.as_str())
+            })
+        })
+    } else {
+        None
+    };
+    rows.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let truncated = rows.len() + usize::from(legacy.is_some()) > LIMIT;
+    rows.truncate(LIMIT);
+    let mut identities: Vec<_> = rows.iter().map(ConnectionIdentity::from).collect();
+    if let Some(legacy) = &legacy {
+        identities.push(ConnectionIdentity {
+            id: &legacy.id,
+            owner_id: actor,
+            catalog_id: Some(&catalog.id),
+        });
+    }
+    let facts = facts_for_identities(db, actor, &identities).await?;
+    let mut labels = HashMap::new();
+    for (collection, ids) in [
+        (
+            "user_endpoints",
+            rows.iter()
+                .map(|r| r.endpoint_id.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "user_api_keys",
+            rows.iter()
+                .filter_map(|r| r.api_key_id.as_deref())
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        if ids.is_empty() {
+            continue;
+        }
+        let entries: Vec<bson::Document> = db
+            .collection::<bson::Document>(collection)
+            .find(doc! {"_id": {"$in": ids}})
+            .projection(doc! {"_id": 1, "user_id": 1, "label": 1})
+            .await?
+            .try_collect()
+            .await?;
+        for entry in entries {
+            if let (Ok(id), Ok(owner), Ok(label)) = (
+                entry.get_str("_id"),
+                entry.get_str("user_id"),
+                entry.get_str("label"),
+            ) {
+                labels.insert(
+                    (id.to_owned(), owner.to_owned()),
+                    label.chars().take(120).collect::<String>(),
+                );
+            }
+        }
+    }
+    let mut connections: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            let mut fact = facts.get(&row.id)?.clone();
+            fact["connection_id"] = json!(row.id);
+            fact["connection_slug"] = json!(row.slug);
+            let label = row
+                .api_key_id
+                .as_ref()
+                .and_then(|id| labels.get(&(id.clone(), row.user_id.clone())))
+                .or_else(|| labels.get(&(row.endpoint_id.clone(), row.user_id.clone())));
+            fact["label"] = json!(label);
+            fact["is_active"] = json!(row.is_active);
+            if let Some(name) = fact["organization_name"].as_str() {
+                fact["organization_name"] = json!(name.chars().take(120).collect::<String>());
+            }
+            Some((row.created_at, row.id.as_str(), fact))
+        })
+        .collect();
+    if let Some(legacy) = &legacy
+        && let Some(mut fact) = facts.get(&legacy.id).cloned()
+    {
+        fact["connection_id"] = json!(legacy.id);
+        fact["connection_slug"] = json!(catalog.slug);
+        fact["label"] = json!(
+            legacy
+                .credential_label
+                .as_ref()
+                .map(|label| label.chars().take(120).collect::<String>())
+        );
+        fact["is_active"] = json!(legacy.is_active);
+        fact["source"] = json!("legacy_connection");
+        connections.push((legacy.created_at, legacy.id.as_str(), fact));
+    }
+    connections.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    connections.truncate(LIMIT);
+    Ok(ExistingConnections {
+        connections: connections.into_iter().map(|(_, _, fact)| fact).collect(),
+        truncated,
+    })
 }
 
 pub async fn org_refusal(
@@ -143,7 +422,7 @@ pub async fn hosted(
     Ok(
         json!({"status":"pending_connection","connect_url":super::connect_link_service::build_connect_url(frontend,&created.raw_token)?,
         "connect_link_id":created.link.id,"expires_at":created.link.expires_at.to_rfc3339(),"service_id":catalog.id,"catalog_service_id":catalog.id,"service_slug":catalog.slug,"scopes":created.link.scopes,
-        "instructions":"Open the hosted link to connect your account, then call nyx__wait_for_connection. A pending link grants no access."}),
+        "instructions":CONNECT_PRESENTATION_INSTRUCTIONS}),
     )
 }
 
@@ -155,13 +434,40 @@ pub async fn facts_for(
     actor: &str,
     connections: &[UserService],
 ) -> AppResult<std::collections::HashMap<String, Value>> {
+    let identities: Vec<_> = connections.iter().map(ConnectionIdentity::from).collect();
+    facts_for_identities(db, actor, &identities).await
+}
+
+struct ConnectionIdentity<'a> {
+    id: &'a str,
+    owner_id: &'a str,
+    catalog_id: Option<&'a str>,
+}
+
+impl<'a> From<&'a UserService> for ConnectionIdentity<'a> {
+    fn from(connection: &'a UserService) -> Self {
+        Self {
+            id: &connection.id,
+            owner_id: &connection.user_id,
+            catalog_id: connection.catalog_service_id.as_deref(),
+        }
+    }
+}
+
+/// Share the same batched owner/catalog reads and wording across unified and
+/// legacy inventory without constructing or reading a credential-bearing row.
+async fn facts_for_identities(
+    db: &Database,
+    actor: &str,
+    connections: &[ConnectionIdentity<'_>],
+) -> AppResult<std::collections::HashMap<String, Value>> {
     use futures::TryStreamExt;
     use std::collections::{BTreeSet, HashMap};
     let mut result = HashMap::new();
     if connections.is_empty() {
         return Ok(result);
     }
-    let owner_ids: BTreeSet<&str> = connections.iter().map(|c| c.user_id.as_str()).collect();
+    let owner_ids: BTreeSet<&str> = connections.iter().map(|c| c.owner_id).collect();
     let owners: HashMap<String, User> = db
         .collection::<User>("users")
         .find(doc! {"_id":{"$in":owner_ids.into_iter().collect::<Vec<_>>()},"is_active":true})
@@ -171,10 +477,7 @@ pub async fn facts_for(
         .into_iter()
         .map(|owner| (owner.id.clone(), owner))
         .collect();
-    let catalog_ids: BTreeSet<&str> = connections
-        .iter()
-        .filter_map(|c| c.catalog_service_id.as_deref())
-        .collect();
+    let catalog_ids: BTreeSet<&str> = connections.iter().filter_map(|c| c.catalog_id).collect();
     let mut catalogs: HashMap<String, DownstreamService> = HashMap::new();
     if !catalog_ids.is_empty() {
         let rows: Vec<DownstreamService> = db
@@ -199,14 +502,11 @@ pub async fn facts_for(
         }
     }
     for connection in connections {
-        let Some(owner) = owners.get(&connection.user_id) else {
+        let Some(owner) = owners.get(connection.owner_id) else {
             continue;
         };
-        let catalog = connection
-            .catalog_service_id
-            .as_deref()
-            .and_then(|id| catalogs.get(id));
-        result.insert(connection.id.clone(), project(actor, owner, catalog));
+        let catalog = connection.catalog_id.and_then(|id| catalogs.get(id));
+        result.insert(connection.id.to_owned(), project(actor, owner, catalog));
     }
     Ok(result)
 }

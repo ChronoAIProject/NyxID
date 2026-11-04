@@ -84,6 +84,15 @@ function statusBadgeVariant(
 }
 
 
+function DiscordGatewayStatus({ state }: { readonly state?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-muted-foreground">
+      {state === "connected" && <Check className="h-3 w-3 text-success" />}
+      {state ? `Gateway ${state}` : "Gateway"}
+    </span>
+  );
+}
+
 function BotRow({
   bot,
   ownerLabel,
@@ -116,7 +125,7 @@ function BotRow({
         </Badge>
       </TableCell>
       <TableCell>
-        {getPlatform(bot.platform).webhookIngestion === false ? <span className="text-xs text-muted-foreground">Polling</span> : bot.webhook_registered ? (
+        {bot.platform === "discord" ? <span className="text-xs"><DiscordGatewayStatus state={bot.gateway_state} /></span> : getPlatform(bot.platform).webhookIngestion === false ? <span className="text-xs text-muted-foreground">Polling</span> : bot.webhook_registered ? (
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
             <Check className="h-3 w-3 text-success" />
             Registered
@@ -188,7 +197,7 @@ function BotCard({
         </Badge>
       </div>
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
-        <span>{getPlatform(bot.platform).webhookIngestion === false ? "Polling" : bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>
+        {bot.platform === "discord" ? <DiscordGatewayStatus state={bot.gateway_state} /> : <span>{getPlatform(bot.platform).webhookIngestion === false ? "Polling" : bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>}
         <span>{formatDate(bot.created_at)}</span>
       </div>
     </div>
@@ -243,7 +252,7 @@ function BotsTable({
                 <TableHead>Label</TableHead>
                 {showOwner && <TableHead>Scope</TableHead>}
                 <TableHead>Status</TableHead>
-                <TableHead>Webhook</TableHead>
+                <TableHead>Ingestion</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead className="w-[60px]">Actions</TableHead>
               </TableRow>

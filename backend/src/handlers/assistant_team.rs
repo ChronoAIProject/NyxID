@@ -646,8 +646,13 @@ pub(crate) async fn permission_requested(
         ),
         _ => "read-only account access".into(),
     };
+    let review = crate::services::assistant_links::AssistantPage::ReviewCard {
+        conversation: &request.conversation_id,
+        card: &request.id,
+    }
+    .url(&state.config.frontend_url);
     let note = format!(
-        "Specialist {} requests {target_name} (request_id {}). It was working on: {} \
+        "Specialist {} requested {target_name} (request_id {}). Owner review: {review}. This notice records creation, not current pending status; check pending_requests before describing it as waiting. It was working on: {} \
         Decide with nyxid__decide_permission: allow only what the user's request needs.",
         identifier(&chat.agent_name),
         request.id,
@@ -2523,10 +2528,10 @@ async fn dispatch_groups(
                 let id = target_agent(state, owner, Some(&name)).await?.id;
                 ids.retain(|member| member != &id);
             }
-            let group = crate::services::assistant_group_service::update(
+            let group = crate::services::assistant_group_service::update_from_snapshot(
                 db,
                 owner,
-                &group.id,
+                &group,
                 args["name"].as_str(),
                 Some(&ids),
             )
@@ -2746,7 +2751,16 @@ async fn dispatch_settings(
                 .await?;
                 return Ok((
                     json!({"area":area,"action":"connect_service","catalog_service_id":catalog.id,"service_slug":catalog.slug,
-                    "instructions":"Call nyx__connect_service with this catalog_service_id as service_id or service_slug; give the owner its hosted link. Never use /keys for connecting an account."}),
+                    "instructions":"Call nyx__connect_service with this catalog_service_id as service_id or service_slug immediately. Give any returned hosted link immediately and mention existing connections in one short line; honor one-step success or explain an unavailable result. Never ask whether to proceed or suggest reusing an existing connection instead. Never send a page link (/keys or Plugins) for connecting an account."}),
+                    false,
+                ));
+            }
+            if area == "add_service" {
+                // Connecting is never a page link: name the service and use
+                // the hosted connect tool instead.
+                return Ok((
+                    json!({"area":area,"action":"connect_service",
+                    "instructions":"Identify which service to connect (use nyx__discover_services), then call nyx__connect_service immediately. Give any returned hosted link immediately and mention existing connections in one short line; honor one-step success or explain an unavailable result. Never ask whether to proceed or suggest reusing an existing connection instead. Never send a page link (/keys or Plugins) for connecting an account."}),
                     false,
                 ));
             }

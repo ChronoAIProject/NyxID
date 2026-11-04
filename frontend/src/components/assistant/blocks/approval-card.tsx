@@ -13,11 +13,6 @@ import {
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import type {
   ApprovalCardContentBlock,
   ApprovalDecision,
@@ -84,7 +79,7 @@ const DECIDED_STYLE: Record<
 > = {
   approved: {
     container: "border-success/30 bg-success/[0.06]",
-    title: "Approved and sent",
+    title: "Approved",
   },
   denied: {
     container: "border-destructive/30 bg-destructive/[0.06]",
@@ -110,7 +105,7 @@ function DecidedIcon({ decision }: { readonly decision: ApprovalDecision }) {
   }
 }
 
-function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
+function DecidedCard({ block, onRequestAgain, disabled }: { readonly block: ApprovalCardContentBlock; readonly onRequestAgain?: () => void; readonly disabled?: boolean }) {
   const decision = block.decision;
   if (decision === null) return null;
   const style = DECIDED_STYLE[decision];
@@ -134,17 +129,12 @@ function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
           Nothing was sent.
         </p>
       )}
-      {decision === "expired" && (
+      {decision === "expired" && onRequestAgain && (
         <div className="mt-3">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button type="button" variant="secondary" size="sm">
-                <RotateCcw />
-                Request again
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Wired in the API pass</TooltipContent>
-          </Tooltip>
+          <Button type="button" variant="secondary" size="sm" disabled={disabled} onClick={onRequestAgain}>
+            <RotateCcw />
+            Ask for a new confirmation
+          </Button>
         </div>
       )}
     </section>
@@ -177,9 +167,13 @@ export function ApprovalCard({
   block,
   disabled = false,
   onDecide,
+  onRequestAgain,
+  reviewPath,
 }: {
   readonly block: ApprovalCardContentBlock;
   readonly disabled?: boolean;
+  readonly onRequestAgain?: () => void;
+  readonly reviewPath?: string;
   readonly onDecide: (approved: boolean) => Promise<void> | void;
 }) {
   const [pendingAction, setPendingAction] = useState<"approve" | "deny" | null>(
@@ -196,6 +190,7 @@ export function ApprovalCard({
   async function decide(approved: boolean) {
     const clickedAt = Date.now();
     if (
+      Date.parse(block.expires_at) <= clickedAt ||
       block.decision !== null ||
       block.decision_submission != null ||
       disabled ||
@@ -218,8 +213,11 @@ export function ApprovalCard({
     }
   }
 
-  if (block.decision !== null) {
-    return <DecidedCard block={block} />;
+  if (block.decision !== null || (!block.decision_submission && Date.parse(block.expires_at) <= now)) {
+    return <div className="space-y-2">
+      <DecidedCard block={{ ...block, decision: block.decision ?? "expired" }} onRequestAgain={onRequestAgain} disabled={disabled} />
+      {reviewPath ? <a className="text-12 underline" href={reviewPath}>Open Approvals</a> : null}
+    </div>;
   }
   if (block.decision_submission) {
     return <SubmittedCard block={block} />;
@@ -265,6 +263,7 @@ export function ApprovalCard({
         </p>
 
         <ScopeRow block={block} />
+        {reviewPath ? <a className="text-12 underline" href={reviewPath}>Open Approvals</a> : null}
 
         {block.approval_mode === "grant" && (
           <p className="mt-2.5 text-11 leading-relaxed text-muted-foreground">

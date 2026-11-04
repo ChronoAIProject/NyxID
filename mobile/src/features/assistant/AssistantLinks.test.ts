@@ -242,12 +242,16 @@ function flowHarness() {
   let terminalStatus = "pending";
   let finished = 0;
   let enabled = true;
+  let catalogUnavailable = false;
   const h = hookHarness<any>({
     "../groups/useGroupRuntime": { useGroupAvailability: () => availability },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../lib/api/servicesApi": {
       servicesApi: {
-        catalogEntry: async () => ({ platform_key: { available: true } }),
+        catalogEntry: async () => {
+          if (catalogUnavailable) throw new Error("Catalog unavailable");
+          return { platform_key: { available: true } };
+        },
       },
     },
     "../../lib/api/connectLinksApi": {
@@ -287,6 +291,9 @@ function flowHarness() {
     writes,
     browsers,
     availability,
+    failCatalog: () => {
+      catalogUnavailable = true;
+    },
     setPreview: (next: typeof value) => {
       value = next;
     },
@@ -310,6 +317,28 @@ function flowHarness() {
     finished: () => finished,
   };
 }
+test("hosted preview supplies credential fields even when catalog metadata fails", async () => {
+  const f = flowHarness();
+  try {
+    const fields = [
+      { name: "app_id", label: "App ID", secret: false },
+      { name: "app_secret", label: "App Secret", secret: true },
+    ];
+    await f.h.settle();
+    f.failCatalog();
+    f.setPreview({
+      ...preview(),
+      connect_method: "api_key",
+      token_exchange_credential_fields: fields,
+    });
+    await f.h.value().reload();
+    await f.h.settle();
+    assert.deepEqual(f.h.value().credentialFields, fields);
+  } finally {
+    f.h.unmount();
+  }
+});
+
 test("real hosted flow fences double approval, unavailable/expired actions, account changes and late completion", async () => {
   const x = flowHarness();
   await x.h.settle();
@@ -672,6 +701,7 @@ test("real native connection card exposes web credential/device/terminal control
     busy: false,
     disabled: false,
     platformAvailable: true,
+    credentialFields: [] as { name: string; label: string; secret: boolean }[],
     usePlatformKey: false,
     device: undefined as any,
     oauth: undefined as any,
@@ -780,6 +810,43 @@ test("real native connection card exposes web credential/device/terminal control
     "",
     "secret leaves local input state after submission",
   );
+  flow.credentialFields = [
+    { name: "app_id", label: "App ID", secret: false },
+    { name: "app_secret", label: "App Secret", secret: true },
+  ];
+  h.render();
+  assert.equal(field("API key"), undefined);
+  assert.equal(field("App ID").props.secureTextEntry, false);
+  assert.equal(field("App Secret").props.secureTextEntry, true);
+  field("App ID").props.onChangeText("cli_app");
+  h.flush();
+  const before = submitted.length;
+  await button("Approve & connect").props.onPress();
+  await h.settle();
+  assert.equal(submitted.length, before, "partial credentials never submit");
+  assert.equal(flow.error, "Enter App Secret.");
+  field("App ID").props.onChangeText("cli_app");
+  field("App Secret").props.onChangeText("bot-secret");
+  h.flush();
+  await button("Approve & connect").props.onPress();
+  await h.settle();
+  assert.equal(
+    submitted.at(-1).credential,
+    JSON.stringify({ app_id: "cli_app", app_secret: "bot-secret" }),
+  );
+  assert.equal(field("App ID").props.value, "");
+  assert.equal(field("App Secret").props.value, "");
+  flow.usePlatformKey = true;
+  h.render();
+  assert.equal(field("App ID"), undefined);
+  await button("Approve connection").props.onPress();
+  await h.settle();
+  assert.deepEqual(
+    submitted.at(-1),
+    { use_platform_key: true },
+    "platform selection does not require the hidden personal credential fields",
+  );
+  flow.usePlatformKey = false;
   flow.device = {
     code: "ABCD",
     url: "https://provider.test/code",

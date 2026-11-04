@@ -73,3 +73,11 @@ it.each([undefined, "sent", "unavailable"] as const)("renders tool image deliver
   if (imageInput === "unavailable") expect(screen.getByRole("status")).toHaveTextContent("The agent couldn't view this image.");
   else expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
+
+
+it.each(["model_text_only", "image_input_unsupported"])("explains %s without machine or size advice", async (imageInputReason) => {
+  render(<ToolImage image={{ id: "photo", endpoint: "/private/photo", contentType: "image/png", label: "photo.png", origin: "user_upload", imageInput: "unavailable", imageInputReason }} />);
+  await screen.findByAltText("Image from photo.png");
+  expect(screen.getByRole("status")).toHaveTextContent("This model can’t view images.");
+  expect(screen.getByRole("status")).not.toHaveTextContent(/machine|smaller/);
+});
