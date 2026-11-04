@@ -682,6 +682,7 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    pub voice_source_request_id: Option<String>,
     pub owner_instruction_source: Option<OwnerInstructionSource>,
     pub media_event_ids: Vec<String>,
     pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
@@ -854,6 +855,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            voice_source_request_id: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
             invocation_id: None,
@@ -2341,6 +2343,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
         super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
     }
+    if let Some(source) = &start.voice_source_request_id {
+        if start.origin != TurnOrigin::Orchestrator || start.guest {
+            return Err(AppError::Forbidden("Invalid delegated Voice source".into()));
+        }
+        Box::pin(super::voice::client_key::fence_request(
+            db, user_id, source, session,
+        ))
+        .await?;
+    }
     let voice_request = if let Some(request_id) = &voice_request_id {
         if start.origin != TurnOrigin::User || start.guest {
             return Err(AppError::Forbidden("Invalid voice turn".into()));
@@ -2370,6 +2381,19 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
     }
+    let had_voice_events = row
+        .pending_events
+        .iter()
+        .any(|event| event.voice_source_request_id.is_some());
+    if had_voice_events {
+        row.pending_events = Box::pin(super::voice::client_key::filter_events_in_session(
+            db,
+            user_id,
+            std::mem::take(&mut row.pending_events),
+            session,
+        ))
+        .await?;
+    }
     if row
         .pending_events
         .iter()
@@ -2395,7 +2419,17 @@ pub(crate) async fn begin_owner_turn_in_session(
     // Every turn drains queued events: an event turn renders them as
     // its message; other turns carry them in their input context.
     if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
-        return Err(AppError::Conflict("No pending events".into()));
+        if !had_voice_events {
+            return Err(AppError::Conflict("No pending events".into()));
+        }
+        collection
+            .update_one(
+                owner_filter(user_id, &id)?,
+                doc! {"$set":{"pending_events":[]}},
+            )
+            .session(&mut *session)
+            .await?;
+        return Ok(OwnerTurnAdmission::Drained);
     }
     // Queued events are the owner's (guests' messages are never
     // queued): a guest turn leaves them for the owner's next turn.
@@ -2405,7 +2439,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if row.collaboration.is_some()
+    let mut events = if row.collaboration.is_some()
         || start.invocation_id.is_some()
         || start.guest
         || start.origin == TurnOrigin::Trigger
@@ -2422,6 +2456,19 @@ pub(crate) async fn begin_owner_turn_in_session(
         ))
         .await?
     };
+    // Keep delayed Voice causes separate from unrelated owner events. Each
+    // event turn inherits one exact source; the rest keep their queue identity.
+    let mut voice_source_request_id = start.voice_source_request_id.clone();
+    if start.origin == TurnOrigin::Event {
+        voice_source_request_id = events
+            .first()
+            .and_then(|event| event.voice_source_request_id.clone());
+        let (selected, deferred): (Vec<_>, Vec<_>) = events
+            .into_iter()
+            .partition(|event| event.voice_source_request_id == voice_source_request_id);
+        events = selected;
+        row.pending_events.extend(deferred);
+    }
     if had_queued_media
         && let Some(fresh) = collection
             .find_one(owner_filter(user_id, &id)?)
@@ -2891,6 +2938,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        voice_source_request_id: voice_source_request_id.clone(),
         business_system_success: false,
         delegated_images: Default::default(),
         timing: Default::default(),

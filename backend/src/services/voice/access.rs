@@ -79,12 +79,9 @@ pub async fn authorize(
                 "This Key has no voice connection for the selected Bot".into(),
             )
         })?;
-    // Opening the call includes a WebSocket. Preserve B1's existing rule that
-    // operation-scoped services cannot open one; no partial-scope bypass.
-    operation(db, auth, &service, "POST", "/voice/sessions", true).await?;
     Ok(service)
 }
-pub async fn operation(
+pub async fn policy(
     db: &Database,
     auth: &AuthUser,
     service: &UserService,
@@ -118,44 +115,5 @@ pub async fn operation(
         &[],
         None,
     )?;
-    approval(db, auth, service, method, path).await
-}
-pub async fn approval(
-    db: &Database,
-    auth: &AuthUser,
-    service: &UserService,
-    method: &str,
-    path: &str,
-) -> AppResult<()> {
-    let operation =
-        crate::services::operation_descriptor::build_http_descriptor(method, path, None);
-    // Approval settings for catalog-backed connections use the catalog ID,
-    // matching /approvals/service-configs and the existing proxy evaluator.
-    // The exact Bot's connection grant has already been checked separately.
-    let approval_service_id = service
-        .catalog_service_id
-        .as_deref()
-        .ok_or_else(|| AppError::ApiKeyScopeForbidden("NyxBot Voice is unavailable".into()))?;
-    let (outcome, _) = crate::services::approval_service::evaluate_for_chat(
-        db,
-        &auth.user_id.to_string(),
-        &service.user_id,
-        approval_service_id,
-        &operation,
-        Some("api_key"),
-        auth.api_key_id.as_deref().unwrap_or_default(),
-        false,
-        service.source.as_deref() == Some(crate::models::user_service::AUTO_PROVISION_SOURCE),
-        None,
-    )
-    .await?;
-    if !matches!(
-        outcome,
-        crate::services::approval_service::ApprovalOutcome::Allowed { .. }
-    ) {
-        return Err(AppError::Forbidden(
-            "NyxBot Voice requires approval under your existing service policy".into(),
-        ));
-    }
     Ok(())
 }

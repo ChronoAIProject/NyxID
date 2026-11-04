@@ -68,6 +68,9 @@ pub struct DeliveryBinding {
     pub group_id: Option<String>,
     pub group_request_id: Option<String>,
     pub voice_request_id: Option<String>,
+    /// Descendant work retains source authority without settling the root request.
+    #[serde(default)]
+    pub voice_source_only: bool,
     pub trigger_run_id: Option<String>,
     /// The causing turn's `ActiveTurn::report_to` snapshot. Trusted only with
     /// `report_provenance == REPORT_PROVENANCE_V1`; legacy rows stored the

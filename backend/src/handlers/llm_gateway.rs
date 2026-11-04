@@ -2541,6 +2541,7 @@ async fn preflight_llm_deny_before_resolution(
     )
     .await?
     .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
+        is_internal_voice: false,
         service_id: service_id.to_string(),
         service_owner_id: approval_owner_user_id.clone(),
         is_auto_connected: false,

@@ -3064,6 +3064,7 @@ async fn preflight_proxy_deny_before_resolution(
         Some(hint)
     } else if let Some(service_id) = catalog_service_id {
         Some(proxy_service::ApprovalResolutionHint {
+            is_internal_voice: false,
             service_id: service_id.to_string(),
             service_owner_id: approval_owner_user_id.clone(),
             is_auto_connected: false,
@@ -3071,6 +3072,7 @@ async fn preflight_proxy_deny_before_resolution(
     } else if let Some(slug) = slug {
         let service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
         Some(proxy_service::ApprovalResolutionHint {
+            is_internal_voice: false,
             service_id: service.id,
             service_owner_id: approval_owner_user_id.clone(),
             is_auto_connected: false,
@@ -3114,21 +3116,25 @@ async fn preflight_proxy_deny_before_resolution(
         }
     }
 
-    let operation = operation_descriptor::build_http_descriptor(method, path, None);
-    let denied = approval_service::evaluate_deny_only(
-        &state.db,
-        &approval_owner_user_id,
-        &hint.service_owner_id,
-        &hint.service_id,
-        &operation,
-        hint.is_auto_connected,
-    )
-    .await?;
-
-    if denied {
-        return Err(AppError::Forbidden(
-            "Operation denied by approval policy".to_string(),
-        ));
+    // This metadata comes from the existing server-owned Bot binding. Exact
+    // Key/service/Bot/operation checks still run before internal execution.
+    // Voice forwarding never enters the generic service-approval evaluator.
+    if !hint.is_internal_voice {
+        let operation = operation_descriptor::build_http_descriptor(method, path, None);
+        let denied = approval_service::evaluate_deny_only(
+            &state.db,
+            &approval_owner_user_id,
+            &hint.service_owner_id,
+            &hint.service_id,
+            &operation,
+            hint.is_auto_connected,
+        )
+        .await?;
+        if denied {
+            return Err(AppError::Forbidden(
+                "Operation denied by approval policy".to_string(),
+            ));
+        }
     }
 
     crate::services::tool_publication_service::gate_unconfigured_public_tool(
@@ -4721,21 +4727,32 @@ async fn execute_resolved_proxy_inner<'a>(
         .as_deref()
         .unwrap_or(&approval_owner_user_id);
     let approval_requester_id = auth_user.approval_requester_id();
-    let (approval_outcome, approval_auto) = box_proxy_future(|| {
-        approval_service::evaluate_for_chat(
-            &state.db,
-            &approval_owner_user_id,
-            service_owner_for_approval,
-            service_id,
-            &operation,
-            auth_user.approval_requester_type(),
-            &approval_requester_id,
-            auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
-            is_auto_connected_for_approval,
-            auth_user.assistant_chat.as_deref(),
-        )
-    })
-    .await?;
+    // Voice forwarding composes the exact Key service grant with the Bot's
+    // existing realtime authority, confirmations and billing. It adds no
+    // service-operation approval gate; other services retain their evaluator.
+    let (approval_outcome, approval_auto) =
+        if target.service.slug == crate::services::voice::access::SERVICE_SLUG {
+            (
+                approval_service::ApprovalOutcome::Allowed { required: false },
+                None,
+            )
+        } else {
+            box_proxy_future(|| {
+                approval_service::evaluate_for_chat(
+                    &state.db,
+                    &approval_owner_user_id,
+                    service_owner_for_approval,
+                    service_id,
+                    &operation,
+                    auth_user.approval_requester_type(),
+                    &approval_requester_id,
+                    auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
+                    is_auto_connected_for_approval,
+                    auth_user.assistant_chat.as_deref(),
+                )
+            })
+            .await?
+        };
 
     *assistant_approval_slot =
         crate::services::assistant_service_execution::HttpApprovalReceipt::new(
@@ -5294,6 +5311,66 @@ async fn execute_resolved_proxy_inner<'a>(
             return Err(error);
         }
     };
+
+    if target.service.slug == crate::services::voice::access::SERVICE_SLUG {
+        let unsupported_voice_ingress = node_route.is_some()
+            || streaming_body.is_some()
+            || scheduled_api_key_id.is_some()
+            || machine_ingress.is_some()
+            || is_pool_attempt;
+        let execution = async {
+            let exact = resolved_user_service_id.as_deref().ok_or_else(|| {
+                AppError::ApiKeyScopeForbidden("Select a bound Voice connection".into())
+            })?;
+            if unsupported_voice_ingress {
+                return Err(AppError::Forbidden(
+                    "Voice requires ordinary internal execution".into(),
+                ));
+            }
+            state.billing.mark_forwarded(&metered).await?;
+            super::assistant_voice::internal::dispatch(
+                state,
+                auth_user,
+                exact,
+                method.as_str(),
+                path,
+                query.as_deref(),
+                body.as_deref().unwrap_or_default(),
+                all_headers,
+                ws_request,
+            )
+            .await
+        }
+        .await;
+        let mut response = match execution {
+            Ok(response) => response,
+            Err(error) => {
+                state.billing.fail(&metered, error.error_key()).await?;
+                request_audit.admission_error(&error);
+                return Err(error);
+            }
+        };
+        use axum::body::HttpBody as _;
+        let usage_bytes = request_body_len.saturating_add(
+            i64::try_from(response.body().size_hint().exact().unwrap_or(0)).unwrap_or(i64::MAX),
+        );
+        apply_agent_attribution_headers(&mut response, auth_user.api_key_id.as_deref(), None);
+        let resale = billing_ctx
+            .resale
+            .as_ref()
+            .and_then(|spec| resale_usage_from_optional_reported(spec.metric, None, usage_bytes));
+        state
+            .billing
+            .settle(
+                &metered,
+                crate::models::service_billing::PlatformUsage::single_request(usage_bytes),
+                resale,
+                None,
+            )
+            .await?;
+        request_audit.response(response.status().as_u16()).await;
+        return Ok(ProxyExecutionPhase::Complete(response));
+    }
 
     let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
         let grant_id = match durable_grant_id.as_deref() {
@@ -13389,6 +13466,60 @@ mod proxy_resolution_integration_tests {
             Some("node")
         );
         assert!(data.get("owner_user_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn non_voice_proxy_deny_preflight_keeps_existing_service_approval() {
+        let db = connect_test_database("proxy_non_voice_approval")
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let service = insert_user_service(
+            &db,
+            &owner,
+            "ordinary-service",
+            "https://ordinary.example.test",
+            None,
+        )
+        .await;
+        crate::services::approval_service::set_service_approval_config(
+            &db,
+            &owner,
+            &service.id,
+            "Ordinary service",
+            None,
+            None,
+            None,
+            Some(&crate::models::service_approval_config::ApprovalEffect::Deny),
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        let error = super::preflight_proxy_deny_before_resolution(
+            &state,
+            &access_token_auth(&owner),
+            Some(&service.id),
+            Some(&service.slug),
+            None,
+            "/write",
+            "POST",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Forbidden(message)
+            if message == "Operation denied by approval policy"));
+        assert_eq!(
+            db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

@@ -167,6 +167,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        voice_source_request_id: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -506,7 +507,8 @@ pub(crate) async fn after_turn(
                 &target,
                 vec![
                     team::event("subagent_settled", note, Some(&agent.id))
-                        .for_invocation(turn.invocation_id.as_deref()),
+                        .for_invocation(turn.invocation_id.as_deref())
+                        .with_voice_source(crate::services::voice::client_key::turn_source(turn)),
                 ],
             )
             .await
@@ -659,7 +661,8 @@ pub(crate) async fn permission_requested(
     );
     // A notice on a NyxBot thread is a root event: unbound.
     let event = team::event("permission_requested", note, Some(&chat.agent_id))
-        .for_invocation(chat.invocation_id.as_deref());
+        .for_invocation(chat.invocation_id.as_deref())
+        .with_voice_source(request.voice_request_id.as_deref());
     match Box::pin(acks::notify_nyxbot_request(&state.db, chat, request, event)).await {
         Ok(Some(target)) => Box::pin(wake(state, &chat.user_id, &target)).await,
         Ok(None) => {}
@@ -716,7 +719,8 @@ pub(crate) async fn permission_decided(
     if request.trigger_run_id.is_none() && request.invocation_id.is_none() {
         let event = crate::models::assistant_acknowledgement::bind_continuation(
             request.routing.as_ref(),
-            team::event("permission_decided", note, None),
+            team::event("permission_decided", note, None)
+                .with_voice_source(request.voice_request_id.as_deref()),
         );
         Box::pin(notify(state, owner, &request.conversation_id, vec![event])).await;
     }
@@ -796,6 +800,7 @@ async fn deliver_skill_notification(
             Some(&agent.id),
         );
         event.id = request.id.clone();
+        event.voice_source_request_id = request.voice_request_id.clone();
         event.invocation_id = request.invocation_id.clone();
         if let Some(target) =
             acks::skill_notifications::enqueue(&state.db, request, &target, &attempt, event).await?
@@ -806,7 +811,7 @@ async fn deliver_skill_notification(
     }
     .await;
     if let Err(error) = &result {
-        let reason = if error.is_forbidden() {
+        let reason = if crate::services::voice::client_key::permanent_authority_failure(error) {
             Some("authority_unavailable")
         } else if matches!(error, AppError::NotFound(_)) {
             Some("source_unavailable")
@@ -915,6 +920,7 @@ fn started_json(started: Started) -> Value {
 }
 
 /// Give a specialist work in its home thread, reporting to `report_to`.
+#[cfg(test)]
 pub(crate) async fn assign(
     state: &AppState,
     owner: &str,
@@ -922,6 +928,27 @@ pub(crate) async fn assign(
     text: &str,
     report_to: Option<&str>,
     invocation_id: Option<&str>,
+) -> AppResult<Started> {
+    Box::pin(assign_from_source(
+        state,
+        owner,
+        agent,
+        text,
+        report_to,
+        invocation_id,
+        None,
+    ))
+    .await
+}
+
+async fn assign_from_source(
+    state: &AppState,
+    owner: &str,
+    agent: &AssistantAgent,
+    text: &str,
+    report_to: Option<&str>,
+    invocation_id: Option<&str>,
+    voice_source: Option<&str>,
 ) -> AppResult<Started> {
     if agent.user_id != owner {
         crate::services::org_agent_service::require_creation_enabled(&state.db, owner).await?;
@@ -942,6 +969,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            voice_source_request_id: voice_source.map(str::to_owned),
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -1655,13 +1683,16 @@ async fn dispatch_specialists(
                 Ok((agent, _)) => {
                     let task = match args["task"].as_str() {
                         Some(task) => started_json(
-                            Box::pin(assign(
+                            Box::pin(assign_from_source(
                                 state,
                                 owner,
                                 &agent,
                                 task,
                                 Some(caller),
                                 chat.invocation_id.as_deref(),
+                                crate::services::voice::client_key::source_for_chat(db, chat)
+                                    .await?
+                                    .as_deref(),
                             ))
                             .await?,
                         ),
@@ -1681,13 +1712,16 @@ async fn dispatch_specialists(
             let agent = team::delegable_specialist(db, owner, text_arg(args, "subagent")).await?;
             (
                 started_json(
-                    Box::pin(assign(
+                    Box::pin(assign_from_source(
                         state,
                         owner,
                         &agent,
                         text_arg(args, "text"),
                         Some(caller),
                         chat.invocation_id.as_deref(),
+                        crate::services::voice::client_key::source_for_chat(db, chat)
+                            .await?
+                            .as_deref(),
                     ))
                     .await?,
                 ),

@@ -136,7 +136,7 @@ const VOICE_OPENAI_PLATFORM_FLAG: FeatureFlagDef = FeatureFlagDef {
 pub const VOICE_AGENT_KEY_FLAG_KEY: &str = "assistant:voice-agent-key";
 const VOICE_AGENT_KEY_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: VOICE_AGENT_KEY_FLAG_KEY,
-    description: "Allow ordinary Agent Keys granted NyxBot Voice to invoke the owner's personal Bots through realtime voice; existing service permissions, approvals and Bot grants apply.",
+    description: "Allow ordinary Agent Keys with an exact Bot Voice service grant to invoke personal Bots through realtime voice, preserving the Bot's existing permissions, tool confirmations and billing.",
     default_enabled: false,
 };
 
@@ -959,6 +959,72 @@ pub async fn resolve_personal_features(
         &membership_roles,
         user_id,
     ))
+}
+
+/// Resolve a code-declared personal flag from one action transaction snapshot.
+/// Reuses the same override precedence as ordinary personal feature discovery.
+pub(crate) async fn personal_flag_enabled_in_session(
+    db: &mongodb::Database,
+    user_id: &str,
+    flag_key: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<bool> {
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership};
+    let definition = FEATURE_FLAGS
+        .iter()
+        .find(|flag| flag.key == flag_key)
+        .ok_or_else(|| AppError::Internal("Unknown code-declared feature flag".into()))?;
+    let mut cursor = db
+        .collection::<OrgMembership>(MEMBERSHIPS)
+        .find(doc! {"member_user_id":user_id,"revoked_at":bson::Bson::Null})
+        .session(&mut *session)
+        .await?;
+    let memberships: Vec<OrgMembership> = cursor.stream(&mut *session).try_collect().await?;
+    for membership in &memberships {
+        db.collection::<bson::Document>(MEMBERSHIPS)
+            .update_one(
+                doc! {"_id":&membership.id},
+                doc! {"$inc":{"voice_authority_fence":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    let mut scopes = vec![bson::Bson::Null];
+    scopes.extend(
+        memberships
+            .iter()
+            .map(|m| bson::Bson::String(m.org_user_id.clone())),
+    );
+    let mut cursor = db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .find(doc! {"flag_key":flag_key,"org_user_id":{"$in":scopes}})
+        .session(&mut *session)
+        .await?;
+    let rows: Vec<FeatureFlagOverride> = cursor.stream(&mut *session).try_collect().await?;
+    for row in &rows {
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$inc":{"voice_authority_fence":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    let (org_rows, platform): (Vec<_>, Vec<_>) =
+        rows.into_iter().partition(|row| row.org_user_id.is_some());
+    let roles = memberships
+        .into_iter()
+        .map(|m| (m.org_user_id, m.role))
+        .collect::<Vec<_>>();
+    Ok(resolve_personal_definitions(
+        std::iter::once((definition.key, definition.default_enabled, None)),
+        &platform,
+        &org_rows,
+        &roles,
+        user_id,
+    )
+    .iter()
+    .any(|key| key == flag_key))
 }
 
 /// Signup has no user or organization yet, so only the global override applies.

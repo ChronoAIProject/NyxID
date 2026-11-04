@@ -14,6 +14,7 @@ mod credential_tests;
 pub mod credentials;
 pub mod diagnostics;
 pub mod dictation;
+pub mod execution;
 pub mod grok;
 pub mod grok_runtime;
 pub mod openai;

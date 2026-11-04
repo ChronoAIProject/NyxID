@@ -7,7 +7,8 @@
   },
   "servers": [
     {
-      "url": "https://nyx-api.chrono-ai.fun/api/v1/assistant/nyxagent"
+      "url": "https://nyxid.invalid/internal/nyxbot-voice",
+      "description": "Internal capability marker; invoke through the current deployment native API or the exact UserService proxy. No HTTP request is sent to this URL."
     }
   ],
   "security": [
@@ -385,7 +386,6 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "agent_id",
           "client_request_id",
           "preferences",
           "sdp_offer"
@@ -405,8 +405,25 @@
           "sdp_offer": {
             "type": "string",
             "maxLength": 65536
+          },
+          "service_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Exact owner-published Voice UserService; determines the Bot. Proxy calls supply their selected connection automatically."
           }
-        }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "service_id"
+            ]
+          },
+          {
+            "required": [
+              "agent_id"
+            ]
+          }
+        ]
       },
       "Control": {
         "type": "object",

@@ -27,29 +27,31 @@ async fn call(
     }
     let cleanup = Some(name) == watch.contract.cancel_operation.as_deref()
         || (watch.state == "cancelling" && name == watch.contract.status_operation);
-    if !cleanup && let Some(request) = &watch.delivery.voice_request_id {
-        if crate::services::voice::client_key::request(&state.db, &watch.user_id, request)
-            .await
-            .is_err()
-        {
-            if let Some(request) = state
-                .db
-                .collection::<crate::models::assistant_voice::VoiceRequest>(
-                    crate::models::assistant_voice::REQUESTS,
-                )
-                .find_one(doc! {"_id":request,"user_id":&watch.user_id})
-                .await?
-            {
-                crate::services::assistant_voice::cancel(
-                    &state.db,
-                    &watch.user_id,
-                    &request.conversation_id,
-                    &request.id,
-                )
-                .await?;
-            }
-            return Err(denied());
+    if !cleanup
+        && let Some(request) = &watch.delivery.voice_request_id
+        && let Err(error) =
+            crate::services::voice::client_key::request(&state.db, &watch.user_id, request).await
+    {
+        if !crate::services::voice::client_key::permanent_authority_failure(&error) {
+            return Err(error);
         }
+        if let Some(request) = state
+            .db
+            .collection::<crate::models::assistant_voice::VoiceRequest>(
+                crate::models::assistant_voice::REQUESTS,
+            )
+            .find_one(doc! {"_id":request,"user_id":&watch.user_id})
+            .await?
+        {
+            crate::services::assistant_voice::cancel(
+                &state.db,
+                &watch.user_id,
+                &request.conversation_id,
+                &request.id,
+            )
+            .await?;
+        }
+        return Err(denied());
     }
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -369,19 +371,15 @@ pub(crate) async fn sweep(state: &AppState) -> crate::errors::AppResult<()> {
 }
 
 async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
-    use crate::errors::AppError;
     for _ in 0..8 {
         let Some(w) = watches::claim(&state.db).await? else {
             break;
         };
         match tokio::time::timeout(Duration::from_secs(45), Box::pin(step(state, &w))).await {
             Ok(Ok(())) => {}
-            Ok(Err(
-                AppError::Forbidden(_)
-                | AppError::Unauthorized(_)
-                | AppError::ApiKeyScopeForbidden(_)
-                | AppError::NotFound(_),
-            )) => {
+            Ok(Err(error))
+                if crate::services::voice::client_key::permanent_authority_failure(&error) =>
+            {
                 watches::ready(&state.db, &w, None, "authority_lost", None).await?;
             }
             _ => watches::defer(&state.db, &w).await?,

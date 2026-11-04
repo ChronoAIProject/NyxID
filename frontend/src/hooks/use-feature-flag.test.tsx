@@ -115,6 +115,7 @@ describe("feature flag catalog", () => {
       MOBILE_MFA: "auth:mobile-mfa",
       AI_ASSISTANT: "experimental:ai-assistant",
       ASSISTANT_VOICE: "assistant:voice",
+      VOICE_AGENT_KEY: "assistant:voice-agent-key",
       VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",
       VOICE_GROK: "assistant:voice-grok",
       VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",

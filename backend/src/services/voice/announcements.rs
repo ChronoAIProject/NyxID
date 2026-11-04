@@ -87,6 +87,8 @@ pub async fn enqueue(
     tx.start_transaction().and_run2(async move |tx| {
         let result:AppResult<Announcement>=Box::pin(async {
             super::client_key::fence_call(&db,&call,tx).await?;
+            super::client_key::call_operation(&db, &call, "POST",
+                &format!("/voice/sessions/{}/announcements", call.id), false, tx).await?;
             let rows=db.collection::<Announcement>(COLLECTION);
             if let Some(old)=rows.find_one(doc!{"_id":&row.id,"user_id":&call.user_id}).session(&mut *tx).await? {
                 if old.text!=row.text {return Err(AppError::Conflict("Speech identity reused with different text".into()));}
@@ -133,6 +135,17 @@ pub async fn claim(db: &Database, call: &VoiceSession) -> AppResult<Option<Annou
     tx.start_transaction().and_run2(async move |tx| {
         let result:AppResult<Option<Announcement>>=Box::pin(async {
             super::client_key::fence_call(&db,&call,tx).await?;
+            let Some(next) = db.collection::<Announcement>(COLLECTION).find_one(
+                doc! {"session_id":&call.id,"user_id":&call.user_id,"state":"queued",
+                    "not_after":{"$gt":bson::DateTime::now()}}).sort(doc! {"created_at":1})
+                .session(&mut *tx).await? else { return Ok(None); };
+            if let Err(error) = super::client_key::call_operation(&db, &call, "POST",
+                &format!("/voice/sessions/{}/announcements",call.id), false, tx).await {
+                if !super::client_key::permanent_authority_failure(&error) { return Err(error); }
+                db.collection::<Announcement>(COLLECTION).update_one(doc! {"_id":&next.id,"state":"queued"},
+                    doc! {"$set":{"state":"cancelled"}}).session(&mut *tx).await?;
+                return Ok(None);
+            }
             let mut fence=super::session::fence(&call);
             fence.extend(doc!{"state":"active","end_requested":false});
             if db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)

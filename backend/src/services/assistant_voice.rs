@@ -1219,9 +1219,27 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                 let root = request.root_request_id.as_deref().unwrap_or(&request.id);
                 let mut family = doc! {"user_id":&user,"conversation_id":&conversation,
                 "$or":[{"_id":root},{"root_request_id":root}]};
-                if request.state == RequestState::Cancelled {
-                    return Ok(());
+                // Descendants retain the same causing request, including after
+                // the root turn has settled. Stop pending descendants and exact
+                // async watches; completed effects remain recorded.
+                let mut cursor = db.collection::<bson::Document>(REQUESTS).find(doc! {"user_id":&user,
+                    "$or":[{"_id":root},{"root_request_id":root}]})
+                    .projection(doc! {"_id":1}).session(&mut *session).await?;
+                let mut source_ids = Vec::new();
+                while cursor.advance(&mut *session).await? {
+                    if let Ok(id) = cursor.deserialize_current()?.get_str("_id") { source_ids.push(id.to_owned()); }
                 }
+                let removed_events = db.collection::<bson::Document>(CONVERSATIONS)
+                    .update_many(doc! {"user_id":&user,"pending_events.voice_source_request_id":{"$in":&source_ids}},
+                        doc! {"$pull":{"pending_events":{"voice_source_request_id":{"$in":&source_ids}}}})
+                    .session(&mut *session).await?.modified_count;
+                let descendants = removed_events + db.collection::<bson::Document>(CONVERSATIONS)
+                    .update_many(doc! {"user_id":&user,"active_turn.voice_source_request_id":{"$in":&source_ids},
+                        "active_turn.stop_requested":false},
+                        doc! {"$set":{"active_turn.stop_requested":true}})
+                    .session(&mut *session).await?.matched_count;
+                super::async_service_operation::cancel_voice_in_session(&db, &user, root, session).await?;
+                if request.state == RequestState::Cancelled { return Ok(()); }
                 family.insert(
                     "state",
                     doc! {"$in":["queued","claimed","awaiting_confirmation"]},
@@ -1230,7 +1248,7 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                     .find_one(family.clone())
                     .session(&mut *session)
                     .await?
-                    .is_none()
+                    .is_none() && descendants == 0
                 {
                     return Ok(());
                 }
@@ -1249,8 +1267,6 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                         doc! {"$set":{"state":"cancelled","terminal_error_code":"cancelled"}},
                     )
                     .session(&mut *session)
-                    .await?;
-                super::async_service_operation::cancel_voice_in_session(&db, &user, root, session)
                     .await?;
                 let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let current = conversations
@@ -1308,6 +1324,7 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
 
 #[derive(serde::Serialize)]
 pub struct VoiceOption {
+    announcements: bool,
     service_id: String,
     connection_id: Option<String>,
     key_source: &'static str,
@@ -1491,6 +1508,10 @@ async fn audio_options(
         {
             if platform_authorized {
                 options.push(VoiceOption {
+                    announcements: !dictation
+                        && voice.protocol
+                            == crate::models::downstream_service::VoiceProtocol::OpenaiLive
+                        && thread.is_none_or(|t| !t.shared_agent_thread),
                     service_id: service.id.clone(),
                     connection_id: None,
                     key_source: "platform",
@@ -1523,6 +1544,10 @@ async fn audio_options(
             }
             for connection in &own_connections {
                 options.push(VoiceOption {
+                    announcements: !dictation
+                        && voice.protocol
+                            == crate::models::downstream_service::VoiceProtocol::OpenaiLive
+                        && thread.is_none_or(|t| !t.shared_agent_thread),
                     service_id: service.id.clone(),
                     connection_id: Some(connection.service.id.clone()),
                     key_source: "own",

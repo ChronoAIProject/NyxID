@@ -36,31 +36,44 @@ silently copied into or substituted for the Bot's authority.
 The native Voice execution POST routes, including announcements, accept a
 `proxy`-scoped Key and do not require account-management `write` scope.
 Every operation checks the exact bound connection's existing service scope,
-catalog operation policy and service approval policy. As with other catalog-backed
-connections, approval settings use the shared catalog ID; the Key must still hold
-the exact Bot connection grant. An approval never grants access to another Bot.
-Existing B1 operation
-scopes still prohibit WebSockets. A policy that needs an approval fails closed;
-this change does not implement a new pending service-approval UI. Browser owner
-confirmation remains the Bot's existing confirmation flow.
+catalog operation policy and Key operation scope. Existing B1 operation scopes
+still prohibit WebSockets. Discovery checks its own read operation and does not
+require the start operation.
+
+Voice forwarding adds no service-operation approval gate, pending request,
+decision, resume or expiry proof. The exact Agent Key grant permits access to the
+selected Bot's existing realtime Voice path; the Bot retains its own tools,
+confirmations, permission checks and billing. Service-operation approvals for
+unrelated catalog services keep their existing behavior. Neither Voice access nor
+a remote speech notification can approve a Bot tool action.
 
 ## Lifecycle
 
 Calls bind the parent Key, exact child credential when used, Bot and service ID.
 Key versions also advance on authentication usage metadata, so call ownership
 compares stable identities and rechecks current permissions. Task transactions
-fence the freshly authorized Key version and bound service version.
+write-fence the authoritative identity records from the transaction snapshot
+before live resolution; concurrent authentication metadata causes a transaction
+retry rather than a permanent permission denial.
 Parent/sibling credentials cannot take over a child's call;
 the browser owner retains control. Admission, runtime and queued work revalidate
 live authority. Revocation ends the call and cancels pending requests. Removing
 the service grant, disabling the connection or revoking the child's login closes
-access. This does not undo already completed effects.
+access. Voice-caused delegated turns and async operations retain their source
+while using their own Bot's tool grants. Confirmed source loss stops pending
+descendants, removes their pending report/decision events, and permits only bounded cleanup of already accepted async effects.
+Temporary storage/readiness failures pause effects and preserve bounded retry.
+Delayed report and decision event turns retain one exact Voice source; events
+from unrelated owner work wait independently. This does not undo already
+completed effects or stop unrelated owner work.
 
 The service connection and its endpoint have a fixed binding and route. Owners
-can disable/delete the service normally. Publishing after removal creates a new
-service ID, requiring a new explicit grant on selected-service Keys. Publication
-is idempotent while the existing connection is active and records its endpoint
-and service in the normal service journal transaction.
+can disable/enable the same service without changing identity or selected-service
+grants. Publishing an existing disabled connection returns that connection;
+it does not enable it. Delete retires the live binding in the ordinary service
+journal transaction; subsequent publication creates a fresh service ID and
+requires a new grant on selected-service Keys. History retains the retired
+identity. Publication is serialized on the existing Bot record.
 
 ## HTTP surface
 
@@ -71,7 +84,7 @@ All paths below are relative to `/api/v1/assistant/nyxagent`.
 | GET, PUT | `/agents/{id}/voice-service` | Human owner reads/creates a connection; never grants a Key |
 | GET | `/voice/agents` | Only Bots with an authorized bound connection, plus saved voice preferences |
 | GET | `/voice/options?conversation_id=...` | Existing provider choices for an authorized Bot |
-| POST | `/voice/sessions` | `{agent_id, client_request_id, preferences, sdp_offer}` |
+| POST | `/voice/sessions` | `{service_id, client_request_id, preferences, sdp_offer}`; legacy `agent_id` must match the service binding |
 | GET | `/voice/sessions/{sid}` | Exact caller's session state |
 | POST | `/voice/sessions/{sid}/control` | Existing control revision/command protocol |
 | POST | `/voice/sessions/{sid}/announcements` | Bounded, idempotent remote speech notification; exact call owner and current grants required |
@@ -87,8 +100,17 @@ management and unrelated assistant routes remain unavailable to ordinary Keys.
 Publish the [catalog template](../examples/nyxbot-voice-service.template.json)
 through the normal catalog admin flow, host the matching
 [OpenAPI contract](../examples/nyxbot-voice.openapi.json), and configure its spec
-URL. Deploy the backend before enabling the flag. No services are provisioned
-automatically and no production publication is performed by this branch.
+URL. The template, OpenAPI server and new endpoint use the same reserved
+`https://nyxid.invalid/internal/nyxbot-voice` capability marker. The native API
+and ordinary UserService proxy execute inside the current deployment; they never
+connect to this URL or forward the device Bearer to another host. Outbound-only
+executors reject this internal capability.
+
+Upgrade **all API replicas and background workers**, then drain every old worker
+before enabling the flag. Older workers ignore the additive source fields and
+cannot enforce device revocation. Mixed-version activation is unsupported.
+No services are provisioned automatically and no production publication is
+performed by this branch.
 
 The board signs in once through Agent Key login, chooses its own restricted Key,
 refreshes its authorized Bots and saves a selection. Changing the local selection
@@ -104,7 +126,7 @@ local parser/SDP tests alone do not establish an end-to-end call.
 `POST /voice/sessions/{sid}/announcements` accepts only `request_id` (UUID) and
 `text` (nonblank, at most 300 UTF-8 bytes without control characters). It requires
 a personal active Live call, exact caller ownership, the bound voice connection,
-operation policy and the existing approval policy. Parent/sibling credentials
+catalog operation policy and Key operation scope. Parent/sibling credentials
 cannot mutate a child's call. Queue admission and dispatch fence current
 Key/child/Bot/service authority with the live call generation and lease.
 
@@ -120,3 +142,18 @@ Snapshots expose only bounded request IDs and stages, not notification contents.
 
 A panel may expose inbound daily and management services independently. Those
 Bot-to-panel grants are separate from the panel Key's access to a Bot's voice.
+
+## Conversation and concurrency contract
+
+Discovery returns each exact Voice `service_id` and the Bot's existing home
+`conversation_id`. Device starts use that home thread; web and other devices
+can see the same private history. This release adds no device-private history or
+implicit cross-Bot resume. The existing live-call unique slot is per person, so
+a device call occupies the same slot as a browser call. Explicit continuation
+requires the same parent and exact child credential; a sibling or parent cannot
+take over. Human owners retain browser controls, including ending a revoked
+device call.
+
+Provider options expose `announcements`. It is true only for personal
+OpenAI Live call options, and false for dictation, shared execution and other
+protocols. Availability and voice support alone do not imply notification support.

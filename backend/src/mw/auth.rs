@@ -1016,7 +1016,13 @@ async fn api_key_auth_user_inner(
             watch,
         )
         .await
-        .map_err(|_| AppError::Unauthorized("Invalid authentication credentials".to_string()))?
+        .map_err(|error| {
+            if crate::services::voice::client_key::permanent_authority_failure(&error) {
+                AppError::Unauthorized("Invalid authentication credentials".to_string())
+            } else {
+                error
+            }
+        })?
         .map(std::sync::Arc::new)
     } else {
         None
@@ -5240,3 +5246,29 @@ mod curation_purpose_regressions {
 #[cfg(test)]
 #[path = "auth_denial_tests.rs"]
 mod denial_tests;
+
+pub(crate) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> AppResult<()> {
+    use crate::{errors::access_denial::CredentialType, mw::auth::AuthMethod};
+    if !matches!(
+        user.auth_method,
+        AuthMethod::Session | AuthMethod::AccessToken
+    ) || user.oauth_client_id.is_some()
+        || user.api_key_id.is_some()
+        || user.acting_client_id.is_some()
+    {
+        let credential = match user.auth_method {
+            AuthMethod::ApiKey => CredentialType::ApiKey,
+            AuthMethod::Delegated => CredentialType::Delegated,
+            AuthMethod::Relay => CredentialType::Relay,
+            AuthMethod::ServiceAccount => CredentialType::ServiceAccount,
+            _ if user.api_key_id.is_some() => CredentialType::ApiKey,
+            _ if user.acting_client_id.is_some() => CredentialType::Delegated,
+            _ => CredentialType::OauthClient,
+        };
+        return Err(AppError::unsupported_credential(
+            "A first-party human account session is required",
+            credential,
+        ));
+    }
+    Ok(())
+}

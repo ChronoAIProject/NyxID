@@ -1259,6 +1259,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            voice_source_request_id: None,
             business_system_success: false,
             delegated_images: Default::default(),
             timing: Default::default(),
@@ -5804,6 +5805,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         group_id: None,
         group_request_id: None,
         voice_request_id: None,
+        voice_source_only: false,
         trigger_run_id: None,
         report_to: Some("nyxa-original-report".into()),
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,

@@ -253,7 +253,9 @@ async fn serve(
                     }
                     Authority::Key => {
                         if let Err(error) = Box::pin(crate::services::voice::client_key::revalidate(&state.db,&call)).await {
-                            crate::services::voice::client_key::end(&state.db,&call).await?;
+                            if crate::services::voice::client_key::permanent_authority_failure(&error) {
+                                crate::services::voice::client_key::end(&state.db,&call).await?;
+                            }
                             return Err(error);
                         }
                     }

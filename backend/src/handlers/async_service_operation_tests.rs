@@ -1399,6 +1399,120 @@ async fn async_voice_lost_device_source_cancels_upstream_without_fetching_result
 }
 
 #[tokio::test]
+async fn async_voice_uncertain_source_read_preserves_work_until_recovery() {
+    let a = AsyncFixture::new().await;
+    let (_, request) = attach_voice(&a).await;
+    a.submit().await;
+    finish(&a, &a.f.row, "submitted").await;
+    // An unusable source read is temporary, not proof of revoked authority.
+    // Corrupt only this isolated fixture row; no server-wide failpoints.
+    let rows =
+        a.f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_voice::REQUESTS);
+    rows.update_one(
+        doc! {"_id":&request.id},
+        doc! {"$set":{"client_key":"unusable-source-record"}},
+    )
+    .await
+    .unwrap();
+    a.calls.lock().unwrap().clear();
+    a.due().await;
+    Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    assert_eq!(a.watch().await.state, "waiting");
+    assert!(
+        a.calls.lock().unwrap().is_empty(),
+        "Uncertain authority permits no provider effect"
+    );
+    assert_ne!(
+        rows.find_one(doc! {"_id":&request.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("state")
+            .unwrap(),
+        "cancelled"
+    );
+    rows.update_one(
+        doc! {"_id":&request.id},
+        doc! {"$set":{"client_key":bson::Bson::Null}},
+    )
+    .await
+    .unwrap();
+    a.due().await;
+    Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    assert!(
+        !a.calls.lock().unwrap().is_empty(),
+        "The same watch resumes when the source read recovers"
+    );
+}
+
+#[tokio::test]
+async fn async_voice_descendant_keeps_source_without_settling_root_and_revokes_exact_work() {
+    let a = AsyncFixture::new().await;
+    let (visible, request) = attach_voice(&a).await;
+    let conversations = a.f.state.db.collection::<bson::Document>(CONVERSATIONS);
+    conversations
+        .update_one(
+            doc! {"_id":&a.f.row.id},
+            doc! {"$set":{
+            "active_turn.voice_request_id":bson::Bson::Null,
+            "active_turn.voice_source_request_id":&request.id}},
+        )
+        .await
+        .unwrap();
+    a.submit().await;
+    let watch = a.watch().await;
+    assert!(watch.delivery.voice_source_only);
+    assert_eq!(
+        watch.delivery.voice_request_id.as_deref(),
+        Some(request.id.as_str())
+    );
+    let mut projected =
+        crate::services::assistant_nyxagent::get(&a.f.state.db, &a.f.owner, &a.f.row.id)
+            .await
+            .unwrap();
+    crate::services::async_service_operation::apply_delivery(&mut projected, &watch);
+    let turn = projected.active_turn.unwrap();
+    assert!(turn.voice_request_id.is_none());
+    assert_eq!(
+        turn.voice_source_request_id.as_deref(),
+        Some(request.id.as_str())
+    );
+    // Keep an unrelated owner turn active on the visible thread.
+    let original = crate::services::assistant_nyxagent::get(&a.f.state.db, &a.f.owner, &a.f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap();
+    let mut unrelated = original.clone();
+    unrelated.voice_request_id = None;
+    unrelated.voice_source_request_id = None;
+    unrelated.turn_id = uuid::Uuid::new_v4().to_string();
+    conversations
+        .update_one(
+            doc! {"_id":&visible.id},
+            doc! {"$set":{"active_turn":bson::to_bson(&unrelated).unwrap()}},
+        )
+        .await
+        .unwrap();
+    crate::services::assistant_voice::cancel(&a.f.state.db, &a.f.owner, &visible.id, &request.id)
+        .await
+        .unwrap();
+    let descendant =
+        crate::services::assistant_nyxagent::get(&a.f.state.db, &a.f.owner, &a.f.row.id)
+            .await
+            .unwrap();
+    assert!(descendant.active_turn.unwrap().stop_requested);
+    let unaffected =
+        crate::services::assistant_nyxagent::get(&a.f.state.db, &a.f.owner, &visible.id)
+            .await
+            .unwrap();
+    assert!(!unaffected.active_turn.unwrap().stop_requested);
+    assert_eq!(a.watch().await.state, "cancelling");
+}
+
+#[tokio::test]
 async fn async_event_delivers_to_original_group_member() {
     let a = AsyncFixture::new().await;
     let group = crate::services::assistant_group_service::create(

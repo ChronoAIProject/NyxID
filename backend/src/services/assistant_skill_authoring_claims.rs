@@ -79,11 +79,20 @@ async fn authority(
     let result = if let Some(card) = card {
         card_authority(db, owner, card).await
     } else {
-        source_authority(db, owner, &claim.api_key_id, &claim.conversation_id).await
+        source_authority(
+            db,
+            owner,
+            &claim.api_key_id,
+            &claim.conversation_id,
+            claim.voice_request_id.as_deref(),
+        )
+        .await
     };
     match result {
         Ok(chat) => Ok(Some(chat)),
-        Err(AppError::NotFound(_) | AppError::Forbidden(_)) => Ok(None),
+        Err(error) if super::super::voice::client_key::permanent_authority_failure(&error) => {
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }
@@ -137,7 +146,12 @@ async fn reuse(
         return Ok(None);
     };
     // Serialize against key replacement, conversation deletion and publication.
-    acks::fence(db, &chat, session).await?;
+    let source = card
+        .as_ref()
+        .map_or(claim.voice_request_id.as_deref(), |card| {
+            card.voice_request_id.as_deref()
+        });
+    acks::fence_origin(db, &chat, source, session).await?;
     touch_proposal(db, &proposal, session).await?;
     Ok(Some(Reservation {
         claim_id: claim_id.into(),
@@ -239,7 +253,7 @@ pub(super) async fn reserve(
                 api_key_id: chat.api_key_id.clone(), turn_id: turn_id.clone(),
                 creation_turn_id: Some(turn_id.clone()),
                 requested_turn_id: if turn.trigger_run_id.is_some() { Some(turn_id.clone()) } else { started_by.map(|m| m.turn_id) },
-                voice_request_id: turn.voice_request_id.clone(), trigger_run_id: turn.trigger_run_id.clone(),
+                voice_request_id: super::super::voice::client_key::turn_source(turn).map(str::to_owned), trigger_run_id: turn.trigger_run_id.clone(),
                 // Recovery re-raises the card with the drafting turn's routing, not a later turn's.
                 routing: Some(super::super::assistant_access_policy::routing_for(chat, &conversation)),
             };
@@ -290,8 +304,8 @@ pub(super) async fn finalize(
             }
             touch_proposal(db, &reservation.proposal, session).await?;
             let claim = &reservation.claim;
-            let chat = source_authority(db, &reservation.proposal.owner_id, &claim.api_key_id, &claim.conversation_id).await?;
-            acks::fence(db, &chat, session).await?;
+            let chat = source_authority(db, &reservation.proposal.owner_id, &claim.api_key_id, &claim.conversation_id, claim.voice_request_id.as_deref()).await?;
+            acks::fence_origin(db, &chat, claim.voice_request_id.as_deref(), session).await?;
             if let Some(card) = latest_card(db, &reservation.proposal, session).await? {
                 if reusable_card(&card)
                     && card.api_key_id == claim.api_key_id && card.conversation_id == claim.conversation_id

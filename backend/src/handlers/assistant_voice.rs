@@ -1,4 +1,5 @@
 mod client_key;
+pub(crate) mod internal;
 pub use client_key::{
     agents, publish_voice_service, service_announcement, service_control, service_start,
     service_status, service_stream, voice_service,
@@ -226,7 +227,7 @@ pub async fn active_session(
         false,
     )
     .await?;
-    crate::services::voice::client_key::authorize(&state.db, &auth, &id).await?;
+    crate::services::voice::client_key::resolve(&state.db, &auth, &id).await?;
     let user = auth.user_id.to_string();
     let mut session =
         crate::services::voice::session::active_for_conversation(&state.db, &user, &id).await?;
@@ -333,7 +334,7 @@ pub async fn control(
         ));
     }
     Ok(Json(
-        crate::services::voice::session::control(
+        crate::services::voice::session::control_for_caller(
             &state.db,
             &auth.user_id.to_string(),
             &id,
@@ -341,6 +342,7 @@ pub async fn control(
             &body.command_id,
             body.expected_revision,
             &body.action,
+            auth.auth_method == crate::mw::auth::AuthMethod::ApiKey,
         )
         .await?
         .into(),
@@ -369,7 +371,7 @@ pub async fn request(
         false,
     )
     .await?;
-    crate::services::voice::client_key::authorize(&state.db, &auth, &id).await?;
+    crate::services::voice::client_key::resolve(&state.db, &auth, &id).await?;
     let user = auth.user_id.to_string();
     let row = voice::get(&state.db, &user, &id, &rid).await?;
     if auth.auth_method == crate::mw::auth::AuthMethod::ApiKey {
@@ -399,7 +401,7 @@ pub async fn cancel(
         false,
     )
     .await?;
-    crate::services::voice::client_key::authorize(&state.db, &auth, &id).await?;
+    crate::services::voice::client_key::resolve(&state.db, &auth, &id).await?;
     let user = auth.user_id.to_string();
     let request = voice::get(&state.db, &user, &id, &rid).await?;
     if auth.auth_method == crate::mw::auth::AuthMethod::ApiKey {
@@ -495,16 +497,22 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 Some(super::assistant_nyxagent::SERVER_TURN_POLICY),permit,Some(&request.id))).await?;
             Ok(())
         }).await;
-        if result
-            .as_ref()
-            .is_err_and(|error| error.is_forbidden() || matches!(error, AppError::NotFound(_)))
-            || request.expires_at <= chrono::Utc::now()
+        if result.as_ref().is_err_and(|error| {
+            crate::services::voice::client_key::permanent_authority_failure(error)
+        }) || request.expires_at <= chrono::Utc::now()
         {
+            voice::cancel(
+                &state.db,
+                &request.user_id,
+                &request.conversation_id,
+                &request.id,
+            )
+            .await?;
             state
                 .db
                 .collection::<crate::models::assistant_voice::VoiceRequest>(REQUESTS)
                 .update_one(
-                    doc! {"_id":&request.id,"state":"queued"},
+                    doc! {"_id":&request.id,"state":"cancelled"},
                     doc! {"$set":{"state":"cancelled", "terminal_error_code":
                         if request.expires_at <= chrono::Utc::now() { "voice_request_expired".to_owned() }
                         else { result.as_ref().err().map(|e|e.error_key().to_owned()).unwrap_or_else(||"cancelled".into()) } }},

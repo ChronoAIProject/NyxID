@@ -18,7 +18,7 @@ pub enum SessionState {
 }
 
 /// Credential identity only. Live Key, child, Bot and service grants authorize use.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoiceClientKey {
     pub key_id: String,
     pub credential_id: Option<String>,
@@ -26,6 +26,12 @@ pub struct VoiceClientKey {
     pub agent_id: String,
     pub service_id: String,
     pub service_version: i64,
+}
+
+impl std::fmt::Debug for VoiceClientKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VoiceClientKey { [REDACTED] }")
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

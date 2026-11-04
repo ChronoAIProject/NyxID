@@ -537,9 +537,14 @@ async fn active(
             },
             _=tick.tick()=>{
                 *call=session::refresh(&state.db,call).await?;
+                if call.end_requested {return Ok("user_ended")};
+                if Utc::now()>=call.deadline {return Ok("time_limit")};
                 if let Err(error) = Box::pin(super::client_key::revalidate(&state.db,call)).await {
-                    super::client_key::end(&state.db,call).await?;
-                    return Err(error);
+                    if super::client_key::permanent_authority_failure(&error) {
+                        super::client_key::end(&state.db,call).await?;
+                        return Err(error);
+                    }
+                    continue;
                 }
                 if let Transport::Grok(grok) = socket { measured_usage(state, call, grok.measured_ms()).await?; }
                 if Utc::now()-last_authority>=Duration::seconds(5) {
@@ -583,7 +588,7 @@ async fn active(
                 Box::pin(admit_delegations(state,call,socket,c)).await?;
                 Box::pin(task_updates(state,call,socket,c)).await?;
                 if !c.transcripts.has_unsealed_user_input() && c.readback.is_none()
-                    && let Some(notification)=super::announcements::claim(&state.db,call).await?
+                    && let Ok(Some(notification))=super::announcements::claim(&state.db,call).await
                 {
                     socket.send(super::announcements::event(&notification)?).await?;
                 }

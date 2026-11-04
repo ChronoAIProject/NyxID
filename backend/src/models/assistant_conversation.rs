@@ -48,6 +48,9 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Original Voice authority for delayed Bot work; never client supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_source_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -93,6 +96,10 @@ pub struct AgentEvent {
 }
 
 impl AgentEvent {
+    pub fn with_voice_source(mut self, source: Option<&str>) -> Self {
+        self.voice_source_request_id = source.map(str::to_owned);
+        self
+    }
     /// Carry the server-proven owner invocation family.
     pub fn for_invocation(mut self, id: Option<&str>) -> Self {
         self.invocation_id = id.map(str::to_owned);
@@ -322,6 +329,9 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Server-owned source for delegated work; does not settle the root request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_source_request_id: Option<String>,
     #[serde(default)]
     pub business_system_success: bool,
     #[serde(default)]

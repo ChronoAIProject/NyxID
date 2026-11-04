@@ -1138,6 +1138,11 @@ pub(crate) fn prepare_node_request(
     extra_outbound_headers: &[(String, String)],
 ) -> AppResult<PreparedNodeRequest> {
     target.require_credential_materialized()?;
+    if target.service.slug == super::voice::access::SERVICE_SLUG {
+        return Err(AppError::Forbidden(
+            "Voice requires internal service execution".into(),
+        ));
+    }
     super::lark_attachment_tool::refuse_reserved_path(path)?;
     let mut node_delegated = delegated.to_vec();
     extend_with_path_credential(&mut node_delegated, target);
@@ -1824,6 +1829,8 @@ pub struct UserServiceResolution {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalResolutionHint {
+    /// Server-owned internal Voice binding; generic approval is not its gate.
+    pub is_internal_voice: bool,
     pub service_id: String,
     pub service_owner_id: String,
     pub is_auto_connected: bool,
@@ -2903,6 +2910,7 @@ async fn legacy_approval_hint(
 ) -> AppResult<Option<ApprovalResolutionHint>> {
     if let Some(service_id) = catalog_service_id {
         return Ok(Some(ApprovalResolutionHint {
+            is_internal_voice: false,
             service_id: service_id.to_string(),
             service_owner_id: actor_user_id.to_string(),
             is_auto_connected: false,
@@ -2912,6 +2920,7 @@ async fn legacy_approval_hint(
     if let Some(slug) = slug {
         let service = resolve_service_by_slug(db, slug).await?;
         return Ok(Some(ApprovalResolutionHint {
+            is_internal_voice: false,
             service_id: service.id,
             service_owner_id: actor_user_id.to_string(),
             is_auto_connected: false,
@@ -2923,6 +2932,8 @@ async fn legacy_approval_hint(
 
 fn approval_hint_from_user_service(user_service: &UserService) -> ApprovalResolutionHint {
     ApprovalResolutionHint {
+        is_internal_voice: user_service.source.as_deref()
+            == Some(super::voice::access::BOUND_SOURCE),
         service_id: user_service
             .catalog_service_id
             .clone()
@@ -3540,6 +3551,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    internal_voice: bool,
     auth_scheme: Option<String>,
     platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     platform_key_configured: bool,
@@ -3574,6 +3586,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        internal_voice: service.slug == super::voice::access::SERVICE_SLUG,
         auth_scheme: service.auth_scheme.clone(),
         platform_key: service.platform_key.clone(),
         platform_key_configured: service.platform_key.is_some(),
@@ -3595,6 +3608,11 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    // The instance keeps its own slug, while the resolved execution target
+    // retains the catalog's internal capability identity for every transport.
+    if authorization.internal_voice {
+        service.slug = super::voice::access::SERVICE_SLUG.into();
+    }
     service.offering_kind = authorization.offering_kind;
     service.auth_scheme = authorization.auth_scheme.clone();
     service.platform_key = authorization.platform_key.clone();
@@ -4532,6 +4550,10 @@ async fn forward_request_with_egress_guard_inner(
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     target.require_credential_materialized()?;
+    if target.service.slug == super::voice::access::SERVICE_SLUG {
+        return Err(AppError::Forbidden("Voice requires internal service execution".into()).into());
+    }
+
     super::lark_attachment_tool::refuse_reserved_path(path)?;
     if super::telnyx_platform_service::contract(&target.service).is_some() {
         let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
@@ -7646,6 +7668,37 @@ mod tests {
                 ("X-Provider-Key".to_string(), "secret".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn voice_internal_capability_refuses_http_and_node_fallback_before_bearer_forwarding() {
+        let vendor = wiremock::MockServer::start().await;
+        let mut target = make_proxy_target(vendor.uri());
+        target.service.slug = super::super::voice::access::SERVICE_SLUG.into();
+        target.service.forward_access_token = true; // Legacy imported catalog.
+        let error = super::forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "/voice/agents",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            Some("isolated-fixture-caller"),
+            &empty_token_cache(),
+            &empty_response_cache(),
+            crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Forbidden(_)));
+        assert!(
+            prepare_node_request(&target, "/voice/agents", None, vec![], &[], &[], None, &[])
+                .is_err()
+        );
+        assert!(vendor.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
