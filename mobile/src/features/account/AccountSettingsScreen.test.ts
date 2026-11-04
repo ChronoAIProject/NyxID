@@ -6,7 +6,11 @@ import { lightColors } from "../../theme/mobileTheme";
 import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
 import type { SegmentControlProps } from "../../components/SegmentControl";
 
-type Element = { type: unknown; props: Record<string, any>; key?: string | number };
+type Element = {
+  type: unknown;
+  props: Record<string, any>;
+  key?: string | number;
+};
 const style = (node: Element) =>
   Object.assign({}, ...[node.props.style].flat(Infinity).filter(Boolean));
 function elements(root: Element): Element[] {
@@ -49,6 +53,7 @@ function setup(connectedTelegram = false, pushDevices = 0) {
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
   let pending = false;
   const mutations: unknown[] = [];
+  const deviceChoices: boolean[] = [];
   const pushes: unknown[][] = [];
   const jsx = (type: unknown, props: Element["props"], key?: number) => ({
     type,
@@ -76,6 +81,8 @@ function setup(connectedTelegram = false, pushDevices = 0) {
     "@tanstack/react-query": {
       useQueryClient: () => ({}),
       useQuery: ({ queryKey }: { queryKey: string[] }) => ({
+        isFetching: false,
+        isError: false,
         data:
           queryKey[1] === "profile"
             ? {
@@ -118,7 +125,11 @@ function setup(connectedTelegram = false, pushDevices = 0) {
     "../../components/ToastOverlay": { ToastOverlay: "ToastOverlay" },
     "../auth/AuthSessionContext": { useAuthSession: () => ({ signOut() {} }) },
     "../../lib/consent": {
-      useMobileConsent: () => ({ accountId: "account", enabled: false }),
+      useMobileConsent: () => ({
+        accountId: "account",
+        enabled: false,
+        setConsent: (value: boolean) => deviceChoices.push(value),
+      }),
     },
     "../../lib/analyticsConsentState": {},
     "../../lib/analyticsRelay": {},
@@ -177,6 +188,7 @@ function setup(connectedTelegram = false, pushDevices = 0) {
     text,
     parent,
     mutations,
+    deviceChoices,
     pushes,
     harness,
     title: () =>
@@ -201,17 +213,40 @@ test("Settings reflows label/value, identity and control rows as Dynamic Type gr
     style(env.parent(env.text("Sign-in Method"))).flexDirection,
     "row",
   );
-  const appearance = () => env.all().find((node) => node.props.accessibilityRole === "tablist" && node.props.accessibilityLabel === "Appearance")!;
+  const appearance = () =>
+    env
+      .all()
+      .find(
+        (node) =>
+          node.props.accessibilityRole === "tablist" &&
+          node.props.accessibilityLabel === "Appearance",
+      )!;
   assert.equal(style(appearance()).flexDirection, "row");
-  assert.equal(env.all().find((node) => node.props.accessibilityLabel === "Light appearance")!.props.accessibilityState.selected, true);
+  assert.equal(
+    env
+      .all()
+      .find((node) => node.props.accessibilityLabel === "Light appearance")!
+      .props.accessibilityState.selected,
+    true,
+  );
   for (const [width, fontScale] of [
     [402, 3.12],
     [320, 1],
   ]) {
     env.resize(width!, fontScale!);
-    assert.equal(style(appearance()).flexDirection, "column", "Appearance follows the screen's large-text layout");
+    assert.equal(
+      style(appearance()).flexDirection,
+      "column",
+      "Appearance follows the screen's large-text layout",
+    );
     for (const label of ["Light appearance", "Dark appearance"]) {
-      assert.ok(elements(appearance()).some((node) => node.props.accessibilityRole === "tab" && node.props.accessibilityLabel === label));
+      assert.ok(
+        elements(appearance()).some(
+          (node) =>
+            node.props.accessibilityRole === "tab" &&
+            node.props.accessibilityLabel === label,
+        ),
+      );
     }
     for (const label of [
       "Sign-in Method",
@@ -248,6 +283,77 @@ test("Settings reflows label/value, identity and control rows as Dynamic Type gr
     style(env.parent(env.text("Sign-in Method"))).flexDirection,
     "row",
   );
+  env.harness.unmount();
+});
+
+test("Usage Analytics shares a left content edge, separates its description and keeps live controls at narrow widths and large text", () => {
+  const env = setup();
+  for (const [width, fontScale] of [
+    [402, 1],
+    [320, 1],
+    [402, 3.12],
+  ]) {
+    env.resize(width!, fontScale!);
+    const title = env.text("Usage Analytics");
+    const card = env.parent(title);
+    const description = env.text(
+      "Optional events require account permission and this device's choice. Security and billing records have separate retention rules.",
+    );
+    assert.equal(env.parent(description), card);
+    assert.equal(style(description).textAlign, "left");
+    assert.ok(
+      style(description).marginTop >= 8,
+      "visible title-to-description spacing",
+    );
+    assert.equal(style(description).maxWidth, "100%");
+    assert.equal(description.props.numberOfLines, undefined);
+    for (const node of [
+      title,
+      description,
+      env.text("Account permission enabled"),
+      env.text("Allow on this device"),
+    ]) {
+      assert.notEqual(style(node).textAlign, "right");
+      assert.equal(style(node).marginLeft, undefined);
+      assert.equal(style(node).paddingLeft, undefined);
+      assert.notEqual(node.props.allowFontScaling, false);
+      assert.equal(node.props.maxFontSizeMultiplier, undefined);
+    }
+    const account = env
+      .all()
+      .find(
+        (node) =>
+          node.props.accessibilityLabel === "Allow account usage analytics",
+      )!;
+    const device = env
+      .all()
+      .find(
+        (node) =>
+          node.props.accessibilityLabel ===
+          "Allow usage analytics on this device",
+      )!;
+    assert.equal(env.parent(env.parent(account)), card);
+    assert.equal(env.parent(env.parent(device)), card);
+    assert.equal(account.props.disabled, false);
+    assert.equal(device.props.disabled, false);
+  }
+  env
+    .all()
+    .find(
+      (node) =>
+        node.props.accessibilityLabel === "Allow account usage analytics",
+    )!
+    .props.onValueChange(false);
+  env
+    .all()
+    .find(
+      (node) =>
+        node.props.accessibilityLabel ===
+        "Allow usage analytics on this device",
+    )!
+    .props.onValueChange(true);
+  assert.deepEqual(env.mutations, [false]);
+  assert.deepEqual(env.deviceChoices, [true]);
   env.harness.unmount();
 });
 

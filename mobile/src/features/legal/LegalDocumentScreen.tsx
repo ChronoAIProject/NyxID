@@ -60,6 +60,12 @@ function resolveDocUrl(docKey: "privacy" | "terms"): string | null {
   return `${baseUrl}/legal/${docKey}.md`;
 }
 
+export function LegalDocumentMarkdown({ content }: { content: string }) {
+  const { colors } = useTheme();
+  const markdownStyles = useMemo(() => createMarkdownStyles(colors), [colors]);
+  return <Markdown style={markdownStyles}>{content}</Markdown>;
+}
+
 export function LegalDocumentScreen({
   title,
   docKey,
@@ -70,7 +76,6 @@ export function LegalDocumentScreen({
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
-  const markdownStyles = useMemo(() => createMarkdownStyles(colors), [colors]);
 
   const url = useMemo(() => resolveDocUrl(docKey), [docKey]);
   const [content, setContent] = useState<string>("");
@@ -153,7 +158,7 @@ export function LegalDocumentScreen({
               ) : null}
             </View>
           ) : content ? (
-            <Markdown style={markdownStyles}>{content}</Markdown>
+            <LegalDocumentMarkdown content={content} />
           ) : (
             <View style={styles.loading}>
               <ActivityIndicator color={colors.textSecondary} />
@@ -199,6 +204,15 @@ const createMarkdownStyles = (c: ThemeColors) => ({
     color: c.textSecondary,
     ...typeScale.caption,
     lineHeight: 20,
+  },
+  blockquote: {
+    // Markdown's default quote surface is light even in Night mode.
+    backgroundColor: c.cardSoft,
+    borderColor: c.border,
+    color: c.textSecondary,
+    marginLeft: 0,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
   },
   heading1: {
     color: c.textPrimary,

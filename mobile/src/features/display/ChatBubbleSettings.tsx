@@ -4,7 +4,6 @@ import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { useTheme } from "../../theme/ThemeContext";
 import { lightBubblePalettes, userBubbleCorners, type LightBubblePalette } from "../../theme/chatAppearance";
 import { fonts } from "../../theme/designTokens";
-import { lightColors } from "../../theme/mobileTheme";
 
 export function ChatBubbleSettings() {
   const { colors, lightBubblePalette, setLightBubblePalette } = useTheme();
@@ -40,12 +39,12 @@ export function ChatBubbleSettings() {
           );
         })}
       </View>
-      <View style={styles.preview}>
-        <Text style={styles.previewLabel}>Chat preview · light</Text>
+      <View style={[styles.preview, { backgroundColor: colors.cardSoft, borderColor: colors.border }]}>
+        <Text style={[styles.previewLabel, { color: colors.textPrimary }]}>Chat preview · light</Text>
         <View style={[styles.bubble, { backgroundColor: selected.background }]}>
           <Text style={{ color: selected.foreground }}>Show me the services I have connected.</Text>
         </View>
-        <Text style={styles.previewText}>You can manage your connected services in Plugins.</Text>
+        <Text style={[styles.previewText, { color: colors.textPrimary }]}>You can manage your connected services in Plugins.</Text>
       </View>
     </View>
   );
@@ -56,8 +55,8 @@ const styles = StyleSheet.create({
   title: { fontFamily: fonts.bodySemi, fontSize: 14 },
   options: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   option: { minHeight: 44, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, flexDirection: "row", alignItems: "center", gap: 8 },
-  preview: { backgroundColor: lightColors.bg, borderColor: lightColors.border, borderWidth: 1, borderRadius: 12, padding: 12, gap: 16 },
-  previewLabel: { color: lightColors.textPrimary, fontFamily: fonts.bodySemi, fontSize: 12 },
-  previewText: { color: lightColors.textPrimary, fontSize: 14 },
+  preview: { borderWidth: 1, borderRadius: 12, padding: 12, gap: 16 },
+  previewLabel: { fontFamily: fonts.bodySemi, fontSize: 12 },
+  previewText: { fontSize: 14 },
   bubble: { ...userBubbleCorners, padding: 12, marginLeft: 24, alignSelf: "flex-end" },
 });
