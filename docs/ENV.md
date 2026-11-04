@@ -852,18 +852,22 @@ serve historical versions. See [the explicit migration API procedure](SECURITY.m
 
 ### CMA Sandbox prepaid admission
 
-`CMA_BILLING_ENABLED` defaults to `false`. Enabling new quotes/windows also
+`CMA_BILLING_ENABLED` defaults to `false`. The independent
+`experimental:cma-sandbox-billing` feature flag also defaults to false and supports
+the existing admin global/per-user overrides. Enabling new quotes/windows also
 requires `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, a configured Lago
 client, exact-accounting readiness, the owner's existing billing rollout and
-subscription entitlement, and synchronized ordinary service prices.
-`CMA_BILLING_SERVICE_ID` selects that catalog service.
+subscription entitlement, and a synchronized effective CMA rate card.
+`CMA_BILLING_SERVICE_ID` selects the catalog identity for entitlements/funding.
 `CMA_BILLING_SERVICE_ACCOUNT_ID` selects one General-purpose producer account;
 its issued token and live account must both allow `billing:sandbox:write`.
 Missing identities fail closed. Neither setting is a credential.
 
 Receipt recovery and evidence finalization remain available to the configured
 producer when new admission is disabled. Keep its authority and the existing
-billing reconciler available to drain admitted liability. No startup seeds,
-price defaults or new wallet are introduced. Upgrade all API readers and billing
-workers before authoring the three Sandbox metrics; old enum readers are unsafe
+billing reconciler available to drain admitted liability. Deployment seeds the
+approved #2151 rates once without enabling billing. Admin Billing Settings can
+publish immutable future rate versions without redeployment. No new wallet is
+introduced. Upgrade all API readers and billing workers before enabling the
+three Sandbox metrics; old enum readers are unsafe
 once those units have been persisted. See [CMA billing](CMA_BILLING.md).

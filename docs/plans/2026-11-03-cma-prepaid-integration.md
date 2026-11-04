@@ -1,5 +1,12 @@
 # CMA allocation billing through NyxID
 
+Implementation update (2026-11-04): the user approved #2151's exact initial rates
+and requested an idempotent deploy-time seed plus immutable, effective-dated
+runtime configuration. This supersedes this original plan's no-seed/service-lane
+price-authoring notes. See [the current contract](../CMA_BILLING.md) for the admin
+API/UI, rate-cutoff behavior, historical price preservation and default-off flags.
+
+
 Implementation scope selected on 2026-11-03: CMA usage must enter NyxID's usage
 ledger and use prepaid controls before paid launch. Prices remain proposals in
 [PR #2151](https://github.com/ChronoAIProject/NyxID/pull/2151); selecting this

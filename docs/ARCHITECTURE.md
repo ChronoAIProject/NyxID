@@ -2269,3 +2269,17 @@ additions to existing collections. The gateway policy is capability negotiated
 at management time, and existing connections reconcile without participant
 OAuth. See [the relay contract](CHANNEL_BOT_RELAY.md) for admission, compatibility
 and the required reader-before-writer rollout.
+
+### CMA prepaid allocation billing
+
+The trusted CMA producer obtains quotes and finite resource reservations, then
+pushes retained allocation evidence to the billing service. `sandbox_rate_cards`
+stores immutable, audited effective-dated prices; a deploy-time seed installs the
+approved first version without enabling billing. Admin writes and admissions
+share a transaction fence. `sandbox_billing_quotes`, `sandbox_billing_windows`,
+`sandbox_billing_cursors` and `sandbox_billing_evidence` retain provider bindings,
+idempotent receipts and ordered evidence checkpoints. All three usage rows and
+funding holds commit atomically. Evidence/cursor finalization is transactional;
+the existing settlement journal and Lago reconciler handle recovery and emission.
+Version-specific provider codes retain the original tariff for delayed usage.
+See [CMA billing](CMA_BILLING.md) for the producer and admin contracts.
